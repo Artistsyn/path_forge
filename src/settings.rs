@@ -121,10 +121,39 @@ impl AtmoType {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub enum LightingPreset {
+    Balanced,
+    GoldenHour,
+    HighNoon,
+    NightNeon,
+}
+
+impl LightingPreset {
+    pub fn all() -> &'static [LightingPreset] {
+        &[Self::Balanced, Self::GoldenHour, Self::HighNoon, Self::NightNeon]
+    }
+
+    pub fn name(&self) -> &'static str {
+        match self {
+            Self::Balanced => "Balanced",
+            Self::GoldenHour => "Golden Hour",
+            Self::HighNoon => "High Noon",
+            Self::NightNeon => "Night Neon",
+        }
+    }
+}
+
+fn default_lighting_preset() -> LightingPreset { LightingPreset::Balanced }
+fn default_atmo_light_influence() -> f32 { 0.35 }
+fn default_atmo_tint_influence() -> f32 { 0.28 }
+
 // ── Settings structs ───────────────────────────────────────────────────────
 #[derive(Clone, Serialize, Deserialize)]
 pub struct SceneSettings {
     pub horizon_y:    u32,     // 80..260 (scales with 576×768 default)
+    #[serde(default = "default_horizon_curve")]
+    pub horizon_curve: f32,    // -1.0..1.0 vertical lens-like world bend
     pub max_hw:       f32,     // 30..176
     pub cam_h:        f32,     // 0.5..4.0
     pub focal_mult:   f32,     // 0.5..2.0
@@ -134,11 +163,27 @@ pub struct SceneSettings {
     pub grass_enabled: bool,
     #[serde(default = "default_grass_color")]
     pub grass_color:  [u8; 3],
+    #[serde(default = "default_grass_density")]
+    pub grass_density: f32,
+    #[serde(default = "default_grass_height")]
+    pub grass_height: f32,
+    #[serde(default = "default_grass_upright")]
+    pub grass_upright: f32,
     #[serde(default = "default_ambient")]
     pub ambient:      f32,     // 0.0..1.0  (floor/wall base brightness scale)
+    #[serde(default = "default_lighting_preset")]
+    pub lighting_preset: LightingPreset,
+    #[serde(default = "default_atmo_light_influence")]
+    pub atmo_light_influence: f32,
+    #[serde(default = "default_atmo_tint_influence")]
+    pub atmo_tint_influence: f32,
 }
 fn default_grass_color() -> [u8; 3] { [28, 90, 18] }
+fn default_grass_density() -> f32 { 1.0 }
+fn default_grass_height() -> f32 { 1.0 }
+fn default_grass_upright() -> f32 { 0.8 }
 fn default_ambient() -> f32 { 1.0 }
+fn default_horizon_curve() -> f32 { 0.0 }
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct FloorSettings {
@@ -193,7 +238,75 @@ pub struct SkySettings {
     pub enabled:  bool,
     pub top:      [u8; 3],   // colour at top of screen
     pub horizon:  [u8; 3],   // colour at horizon
+    #[serde(default)]
+    pub sun_enabled: bool,
+    #[serde(default = "default_sun_pos")]
+    pub sun_pos: [f32; 2],    // normalized x,y in sky area
+    #[serde(default = "default_sun_radius")]
+    pub sun_radius: f32,
+    #[serde(default = "default_sun_color")]
+    pub sun_color: [u8; 3],
+    #[serde(default)]
+    pub moon_enabled: bool,
+    #[serde(default = "default_moon_pos")]
+    pub moon_pos: [f32; 2],
+    #[serde(default = "default_moon_radius")]
+    pub moon_radius: f32,
+    #[serde(default = "default_moon_color")]
+    pub moon_color: [u8; 3],
+    #[serde(default = "default_moon_phase")]
+    pub moon_phase: f32,      // -1..1 (negative=waning, positive=waxing)
+    #[serde(default = "default_moon_alpha")]
+    pub moon_alpha: f32,      // 0..1 moon transparency
+    #[serde(default)]
+    pub moon_texture_enabled: bool,
+    #[serde(default = "default_moon_texture_scale")]
+    pub moon_texture_scale: f32,
+    #[serde(default)]
+    pub stars_enabled: bool,
+    #[serde(default = "default_stars_count")]
+    pub stars_count: u32,
+    #[serde(default)]
+    pub stars_seed: u32,
+    #[serde(default = "default_stars_size")]
+    pub stars_size: f32,
+    #[serde(default = "default_stars_twinkle")]
+    pub stars_twinkle: f32,
+    #[serde(default)]
+    pub clouds_enabled: bool,
+    #[serde(default = "default_cloud_count")]
+    pub cloud_count: u32,
+    #[serde(default)]
+    pub cloud_seed: u32,
+    #[serde(default = "default_cloud_speed")]
+    pub cloud_speed: f32,
+    #[serde(default = "default_cloud_scale")]
+    pub cloud_scale: f32,
+    #[serde(default = "default_cloud_opacity")]
+    pub cloud_opacity: f32,
+    #[serde(default = "default_cloud_tint")]
+    pub cloud_tint: [u8; 3],
+    #[serde(default = "default_cloud_variation")]
+    pub cloud_variation: f32,
 }
+fn default_sun_pos() -> [f32; 2] { [0.78, 0.22] }
+fn default_sun_radius() -> f32 { 0.09 }
+fn default_sun_color() -> [u8; 3] { [255, 235, 180] }
+fn default_moon_pos() -> [f32; 2] { [0.22, 0.25] }
+fn default_moon_radius() -> f32 { 0.07 }
+fn default_moon_color() -> [u8; 3] { [225, 232, 255] }
+fn default_moon_phase() -> f32 { 0.0 }
+fn default_moon_alpha() -> f32 { 0.88 }
+fn default_moon_texture_scale() -> f32 { 1.0 }
+fn default_stars_count() -> u32 { 120 }
+fn default_stars_size() -> f32 { 1.4 }
+fn default_stars_twinkle() -> f32 { 0.5 }
+fn default_cloud_count() -> u32 { 16 }
+fn default_cloud_speed() -> f32 { 0.35 }
+fn default_cloud_scale() -> f32 { 1.0 }
+fn default_cloud_opacity() -> f32 { 0.35 }
+fn default_cloud_tint() -> [u8; 3] { [218, 224, 232] }
+fn default_cloud_variation() -> f32 { 0.55 }
 
 // ── Atmosphere layer (one entry in the Vec) ──────────────────────────────
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -212,11 +325,30 @@ pub struct AtmoLayer {
     #[serde(default = "default_atmo_scale")]
     pub fx_scale:    f32,   // 0.2..3.0 glow/debris/motes scale
     #[serde(default)]
+    pub sprite_path: String,
+    #[serde(default)]
+    pub sprite_pool_paths: String,
+    #[serde(default)]
+    pub sprite_pool_enabled: bool,
+    #[serde(default = "default_sprite_scale")]
+    pub sprite_scale: f32,
+    #[serde(default)]
+    pub sprite_flip_x: bool,
+    #[serde(default)]
+    pub sprite_flip_y: bool,
+    #[serde(default)]
+    pub sprite_rot_deg: f32,
+    #[serde(default)]
+    pub sprite_offset_x: f32,
+    #[serde(default)]
+    pub sprite_offset_y: f32,
+    #[serde(default)]
     pub variation_seed: u32,
 }
 fn default_atmo_jitter() -> f32 { 0.18 }
 fn default_atmo_flicker() -> f32 { 1.0 }
 fn default_atmo_scale() -> f32 { 1.0 }
+fn default_sprite_scale() -> f32 { 1.0 }
 
 impl AtmoLayer {
     pub fn new(t: AtmoType) -> Self {
@@ -231,6 +363,15 @@ impl AtmoLayer {
             placement_jitter: 0.18,
             flicker: 1.0,
             fx_scale: 1.0,
+            sprite_path: String::new(),
+            sprite_pool_paths: String::new(),
+            sprite_pool_enabled: false,
+            sprite_scale: 1.0,
+            sprite_flip_x: false,
+            sprite_flip_y: false,
+            sprite_rot_deg: 0.0,
+            sprite_offset_x: 0.0,
+            sprite_offset_y: 0.0,
             variation_seed: 0,
         }
     }
@@ -287,7 +428,15 @@ pub struct PropInstance {
     pub wx:        f32,   // world-space lateral offset (positive = right)
     pub mirror:    bool,  // also place at -wx
     pub z_spacing: f32,   // world-Z gap between instances (should divide loop_s)
+    #[serde(default = "default_prop_start_wz")]
+    pub start_wz:  f32,   // nearest distance at which props start rendering
+    #[serde(default = "default_prop_end_wz")]
+    pub end_wz:    f32,   // farthest draw distance for props
     pub scale:     f32,   // size multiplier
+    #[serde(default = "default_axis_scale")]
+    pub width_scale: f32,
+    #[serde(default = "default_axis_scale")]
+    pub height_scale: f32,
     pub tint:      [u8; 3],
     /// Random scale variation ± this fraction (0 = uniform, 0.3 = ±30%)
     #[serde(default = "default_scale_var")]
@@ -295,18 +444,79 @@ pub struct PropInstance {
     /// Lateral jitter: random x offset as fraction of focal*wx/wz
     #[serde(default = "default_x_jitter")]
     pub x_jitter:  f32,
+    #[serde(default = "bool_true")]
+    pub x_jitter_enabled: bool,
+    #[serde(default)]
+    pub y_jitter:  f32,
+    #[serde(default)]
+    pub y_jitter_enabled: bool,
+    #[serde(default)]
+    pub width_var: f32,
+    #[serde(default)]
+    pub height_var: f32,
+    /// 0..1 blend between world-space placement and path-edge screen-space following.
+    #[serde(default = "default_path_follow")]
+    pub path_follow: f32,
+    /// Additional screen-space gap from edge when path-follow is active.
+    #[serde(default = "default_edge_gap")]
+    pub edge_gap: f32,
     /// Base sink: how far into the ground the prop base extends (0=float, 1=grounded)
     #[serde(default = "default_y_sink")]
     pub y_sink:    f32,
     /// Blend strength for props emerging from ground
     #[serde(default = "default_ground_blend")]
     pub ground_blend: f32,
+    /// Ground shadow size multiplier
+    #[serde(default = "default_shadow_size")]
+    pub shadow_size: f32,
+    /// Ground shadow cast length multiplier
+    #[serde(default = "default_shadow_length")]
+    pub shadow_length: f32,
+    /// Manual shadow cast direction (-1 left, +1 right)
+    #[serde(default)]
+    pub shadow_dir: f32,
+    /// Blend factor to follow sun/moon direction for cast shadows
+    #[serde(default = "default_shadow_follow_light")]
+    pub shadow_follow_light: f32,
+    /// Final shadow darkness/intensity multiplier
+    #[serde(default = "default_shadow_opacity")]
+    pub shadow_opacity: f32,
+    /// Shadow edge softness (higher = softer penumbra)
+    #[serde(default = "default_shadow_softness")]
+    pub shadow_softness: f32,
+    #[serde(default)]
+    pub sprite_path: String,
+    #[serde(default)]
+    pub sprite_pool_paths: String,
+    #[serde(default)]
+    pub sprite_pool_enabled: bool,
+    #[serde(default = "default_sprite_scale")]
+    pub sprite_scale: f32,
+    #[serde(default)]
+    pub sprite_flip_x: bool,
+    #[serde(default)]
+    pub sprite_flip_y: bool,
+    #[serde(default)]
+    pub sprite_rot_deg: f32,
+    #[serde(default)]
+    pub sprite_offset_x: f32,
+    #[serde(default)]
+    pub sprite_offset_y: f32,
     /// 0..1 mix between selected tree type and other tree silhouettes
     #[serde(default)]
     pub tree_style_mix: f32,
     /// -1..1 tree style distribution bias (negative=dead, positive=pine)
     #[serde(default)]
     pub tree_style_bias: f32,
+    /// Number of lateral tree rows to spawn for tree-like props
+    #[serde(default = "default_tree_row_count")]
+    pub tree_row_count: u32,
+    /// Lateral spacing between extra tree rows
+    #[serde(default = "default_tree_row_spacing")]
+    pub tree_row_spacing: f32,
+    /// Random per-row lateral offset
+    #[serde(default = "default_tree_row_jitter")]
+    pub tree_row_jitter: f32,
     /// Instance randomization seed
     #[serde(default)]
     pub seed:      u32,
@@ -315,14 +525,40 @@ fn default_scale_var() -> f32 { 0.22 }
 fn default_x_jitter()  -> f32 { 0.18 }
 fn default_y_sink()    -> f32 { 0.55 }
 fn default_ground_blend() -> f32 { 0.35 }
+fn default_shadow_size() -> f32 { 1.0 }
+fn default_shadow_length() -> f32 { 1.0 }
+fn default_shadow_follow_light() -> f32 { 0.65 }
+fn default_shadow_opacity() -> f32 { 0.82 }
+fn default_shadow_softness() -> f32 { 1.0 }
+fn default_prop_start_wz() -> f32 { 0.15 }
+fn default_prop_end_wz() -> f32 { 30.0 }
+fn default_axis_scale() -> f32 { 1.0 }
+fn default_path_follow() -> f32 { 0.65 }
+fn default_edge_gap() -> f32 { 0.18 }
+fn default_tree_row_count() -> u32 { 1 }
+fn default_tree_row_spacing() -> f32 { 0.75 }
+fn default_tree_row_jitter() -> f32 { 0.25 }
 
 impl PropInstance {
     pub fn new(t: PropType) -> Self {
         let tint = t.default_tint();
         Self { enabled: true, prop_type: t, wx: 1.4, mirror: true, z_spacing: 4.0,
-               scale: 1.0, tint, scale_var: 0.22, x_jitter: 0.18, y_sink: 0.55,
-               ground_blend: default_ground_blend(),
-               tree_style_mix: 0.25, tree_style_bias: 0.0, seed: 42 }
+                             start_wz: default_prop_start_wz(), end_wz: default_prop_end_wz(),
+                             scale: 1.0, width_scale: 1.0, height_scale: 1.0,
+                             tint, scale_var: 0.22, x_jitter: 0.18, x_jitter_enabled: true,
+                             y_jitter: 0.0, y_jitter_enabled: false, width_var: 0.0, height_var: 0.0,
+               path_follow: default_path_follow(), edge_gap: default_edge_gap(), y_sink: 0.55,
+               ground_blend: default_ground_blend(), shadow_size: default_shadow_size(),
+               shadow_length: default_shadow_length(), shadow_dir: 0.0,
+               shadow_follow_light: default_shadow_follow_light(),
+               shadow_opacity: default_shadow_opacity(), shadow_softness: default_shadow_softness(),
+                             sprite_path: String::new(), sprite_scale: 1.0,
+                             sprite_pool_paths: String::new(), sprite_pool_enabled: false,
+                             sprite_flip_x: false, sprite_flip_y: false, sprite_rot_deg: 0.0,
+                             sprite_offset_x: 0.0, sprite_offset_y: 0.0,
+               tree_style_mix: 0.25, tree_style_bias: 0.0,
+               tree_row_count: default_tree_row_count(), tree_row_spacing: default_tree_row_spacing(),
+               tree_row_jitter: default_tree_row_jitter(), seed: 42 }
     }
 }
 
@@ -361,7 +597,14 @@ impl Default for PostSettings {
 pub struct AnimSettings {
     pub loop_s:    u32,   // 1..8  (keep integer for seamless GIF)
     pub play_speed: f32,  // 0.1..5.0
+    #[serde(default = "default_gif_cycles")]
+    pub gif_cycles: u32,  // extra seamless loop passes for export
+    #[serde(default = "default_seamless_lock")]
+    pub seamless_lock: bool,
 }
+
+fn default_gif_cycles() -> u32 { 1 }
+fn default_seamless_lock() -> bool { true }
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct PathForgeSettings {
@@ -387,10 +630,68 @@ pub mod presets {
 
     // ── Small helpers to keep preset bodies compact ────────────────────────
     fn sky_off(void: [u8;3]) -> SkySettings {
-        SkySettings { enabled: false, top: void, horizon: void }
+        SkySettings {
+            enabled: false,
+            top: void,
+            horizon: void,
+            sun_enabled: false,
+            sun_pos: default_sun_pos(),
+            sun_radius: default_sun_radius(),
+            sun_color: default_sun_color(),
+            moon_enabled: false,
+            moon_pos: default_moon_pos(),
+            moon_radius: default_moon_radius(),
+            moon_color: default_moon_color(),
+            moon_phase: default_moon_phase(),
+            moon_alpha: default_moon_alpha(),
+            moon_texture_enabled: false,
+            moon_texture_scale: default_moon_texture_scale(),
+            stars_enabled: false,
+            stars_count: default_stars_count(),
+            stars_seed: 0,
+            stars_size: default_stars_size(),
+            stars_twinkle: default_stars_twinkle(),
+            clouds_enabled: false,
+            cloud_count: default_cloud_count(),
+            cloud_seed: 0,
+            cloud_speed: default_cloud_speed(),
+            cloud_scale: default_cloud_scale(),
+            cloud_opacity: default_cloud_opacity(),
+            cloud_tint: default_cloud_tint(),
+            cloud_variation: default_cloud_variation(),
+        }
     }
     fn sky_on(top: [u8;3], hor: [u8;3]) -> SkySettings {
-        SkySettings { enabled: true, top, horizon: hor }
+        SkySettings {
+            enabled: true,
+            top,
+            horizon: hor,
+            sun_enabled: true,
+            sun_pos: default_sun_pos(),
+            sun_radius: default_sun_radius(),
+            sun_color: default_sun_color(),
+            moon_enabled: false,
+            moon_pos: default_moon_pos(),
+            moon_radius: default_moon_radius(),
+            moon_color: default_moon_color(),
+            moon_phase: default_moon_phase(),
+            moon_alpha: default_moon_alpha(),
+            moon_texture_enabled: false,
+            moon_texture_scale: default_moon_texture_scale(),
+            stars_enabled: true,
+            stars_count: default_stars_count(),
+            stars_seed: 0,
+            stars_size: default_stars_size(),
+            stars_twinkle: default_stars_twinkle(),
+            clouds_enabled: true,
+            cloud_count: default_cloud_count(),
+            cloud_seed: 0,
+            cloud_speed: default_cloud_speed(),
+            cloud_scale: default_cloud_scale(),
+            cloud_opacity: default_cloud_opacity(),
+            cloud_tint: default_cloud_tint(),
+            cloud_variation: default_cloud_variation(),
+        }
     }
     fn atmo1(t: AtmoType, th: f32, ts: u32, tsc: f32, nm: u32, nd: u32) -> AtmoSettings {
         AtmoSettings { layers: vec![AtmoLayer {
@@ -404,15 +705,39 @@ pub mod presets {
             placement_jitter: default_atmo_jitter(),
             flicker: default_atmo_flicker(),
             fx_scale: default_atmo_scale(),
+            sprite_path: String::new(),
+            sprite_pool_paths: String::new(),
+            sprite_pool_enabled: false,
+            sprite_scale: 1.0,
+            sprite_flip_x: false,
+            sprite_flip_y: false,
+            sprite_rot_deg: 0.0,
+            sprite_offset_x: 0.0,
+            sprite_offset_y: 0.0,
             variation_seed: 0,
         }] }
     }
     fn no_props() -> PropsSettings { PropsSettings { items: vec![] } }
     fn pi(pt: PropType, wx: f32, mirror: bool, zs: f32, sc: f32, seed: u32) -> PropInstance {
         let tint = pt.default_tint();
-        PropInstance { enabled: true, prop_type: pt, wx, mirror, z_spacing: zs, scale: sc, tint,
-                       scale_var: 0.22, x_jitter: 0.18, y_sink: 0.55, ground_blend: default_ground_blend(),
-                       tree_style_mix: 0.25, tree_style_bias: 0.0, seed }
+        PropInstance { enabled: true, prop_type: pt, wx, mirror, z_spacing: zs,
+                       start_wz: default_prop_start_wz(), end_wz: default_prop_end_wz(),
+                       scale: sc, width_scale: 1.0, height_scale: 1.0, tint,
+                       scale_var: 0.22, x_jitter: 0.18, x_jitter_enabled: true,
+                       y_jitter: 0.0, y_jitter_enabled: false, width_var: 0.0, height_var: 0.0,
+                       path_follow: default_path_follow(), edge_gap: default_edge_gap(),
+                       y_sink: 0.55, ground_blend: default_ground_blend(),
+                       shadow_size: default_shadow_size(), shadow_length: default_shadow_length(),
+                       shadow_dir: 0.0, shadow_follow_light: default_shadow_follow_light(),
+                       shadow_opacity: default_shadow_opacity(), shadow_softness: default_shadow_softness(),
+                       sprite_path: String::new(), sprite_pool_paths: String::new(), sprite_pool_enabled: false,
+                       sprite_scale: 1.0,
+                       sprite_flip_x: false, sprite_flip_y: false, sprite_rot_deg: 0.0,
+                       sprite_offset_x: 0.0, sprite_offset_y: 0.0,
+                       tree_style_mix: 0.25, tree_style_bias: 0.0,
+                       tree_row_count: default_tree_row_count(),
+                       tree_row_spacing: default_tree_row_spacing(),
+                       tree_row_jitter: default_tree_row_jitter(), seed }
     }
     fn prop1(pt: PropType, wx: f32, mirror: bool, zs: f32, sc: f32) -> PropsSettings {
         PropsSettings { items: vec![pi(pt, wx, mirror, zs, sc, 42)] }
@@ -431,12 +756,20 @@ pub mod presets {
                        bloom: 0.0, grain: 0.0, saturation: 1.0 }
     }
     fn sc_indoor(hy: u32, hw: f32, ch: f32, fm: f32, pp: f32, vc: [u8;3]) -> SceneSettings {
-        SceneSettings { horizon_y: hy, max_hw: hw, cam_h: ch, focal_mult: fm, path_power: pp,
-                        void_color: vc, grass_enabled: false, grass_color: [28,90,18], ambient: 1.0 }
+        SceneSettings { horizon_y: hy, horizon_curve: default_horizon_curve(), max_hw: hw, cam_h: ch, focal_mult: fm, path_power: pp,
+                        void_color: vc, grass_enabled: false, grass_color: [28,90,18], grass_density: default_grass_density(),
+                        grass_height: default_grass_height(), grass_upright: default_grass_upright(), ambient: 1.0,
+                        lighting_preset: default_lighting_preset(),
+                        atmo_light_influence: default_atmo_light_influence(),
+                        atmo_tint_influence: default_atmo_tint_influence() }
     }
     fn sc_outdoor(hy: u32, hw: f32, ch: f32, fm: f32, pp: f32, vc: [u8;3]) -> SceneSettings {
-        SceneSettings { horizon_y: hy, max_hw: hw, cam_h: ch, focal_mult: fm, path_power: pp,
-                        void_color: vc, grass_enabled: true, grass_color: [28,90,18], ambient: 1.0 }
+        SceneSettings { horizon_y: hy, horizon_curve: default_horizon_curve(), max_hw: hw, cam_h: ch, focal_mult: fm, path_power: pp,
+                        void_color: vc, grass_enabled: true, grass_color: [28,90,18], grass_density: default_grass_density(),
+                        grass_height: default_grass_height(), grass_upright: default_grass_upright(), ambient: 1.0,
+                        lighting_preset: default_lighting_preset(),
+                        atmo_light_influence: default_atmo_light_influence(),
+                        atmo_tint_influence: default_atmo_tint_influence() }
     }
     fn wall(en: bool, lx: f32, br: f32, js: f32, fr: u32, ns: u32, pat: WallPattern, base: [u8;3], mortar: [u8;3]) -> WallSettings {
         WallSettings { enabled: en, top_coverage: default_wall_top_coverage(), l_wx: lx, bright: br, junc_shadow: js, fade_rows: fr,
@@ -454,7 +787,7 @@ pub mod presets {
         atmo:  atmo1(AtmoType::Torch,    2.4, 4, 0.068, 10, 6),
         props: no_props(),
         post:  post(0.55, false, [30,25,20], 0.3),
-        anim:  AnimSettings { loop_s:4, play_speed:1.0 },
+        anim:  AnimSettings { loop_s:4, play_speed:1.0, gif_cycles: 1, seamless_lock: true },
     }}
 
     pub fn stone_crypt() -> PathForgeSettings { PathForgeSettings {
@@ -466,7 +799,7 @@ pub mod presets {
         atmo:  atmo1(AtmoType::Candle,   2.0, 4, 0.050,  6, 4),
         props: no_props(),
         post:  post(0.65, false, [20,18,16], 0.3),
-        anim:  AnimSettings { loop_s:4, play_speed:0.7 },
+        anim:  AnimSettings { loop_s:4, play_speed:0.7, gif_cycles: 1, seamless_lock: true },
     }}
 
     pub fn mossy_sewer() -> PathForgeSettings { PathForgeSettings {
@@ -478,7 +811,7 @@ pub mod presets {
         atmo:  atmo1(AtmoType::Firefly,  2.0, 4, 0.055, 14, 5),
         props: no_props(),
         post:  post(0.30, true, [10,18,8], 0.15),
-        anim:  AnimSettings { loop_s:4, play_speed:0.8 },
+        anim:  AnimSettings { loop_s:4, play_speed:0.8, gif_cycles: 1, seamless_lock: true },
     }}
 
     pub fn forest_path() -> PathForgeSettings { PathForgeSettings {
@@ -490,7 +823,7 @@ pub mod presets {
         atmo:  atmo1(AtmoType::Firefly,  3.0, 4, 0.040, 18, 8),
         props: prop2(PropType::Tree, 1.5, true, 1.0, PropType::Bush, 1.1, true, 0.7, 4),
         post:  post(0.20, true, [10,18,8], 0.35),
-        anim:  AnimSettings { loop_s:4, play_speed:1.2 },
+        anim:  AnimSettings { loop_s:4, play_speed:1.2, gif_cycles: 1, seamless_lock: true },
     }}
 
     pub fn desert_canyon() -> PathForgeSettings { PathForgeSettings {
@@ -502,7 +835,7 @@ pub mod presets {
         atmo:  atmo1(AtmoType::None,     3.2, 6, 0.035,  8, 7),
         props: prop2(PropType::Cactus, 1.4, true, 1.0, PropType::Rock, 1.9, true, 0.8, 6),
         post:  post(0.15, true, [100,80,40], 0.28),
-        anim:  AnimSettings { loop_s:6, play_speed:1.5 },
+        anim:  AnimSettings { loop_s:6, play_speed:1.5, gif_cycles: 1, seamless_lock: true },
     }}
 
     pub fn night_road() -> PathForgeSettings { PathForgeSettings {
@@ -514,7 +847,7 @@ pub mod presets {
         atmo:  atmo1(AtmoType::Lantern,  2.8, 4, 0.060, 12, 3),
         props: no_props(),
         post:  post(0.60, true, [6,6,12], 0.20),
-        anim:  AnimSettings { loop_s:4, play_speed:1.5 },
+        anim:  AnimSettings { loop_s:4, play_speed:1.5, gif_cycles: 1, seamless_lock: true },
     }}
 
     pub fn magic_cavern() -> PathForgeSettings { PathForgeSettings {
@@ -526,7 +859,7 @@ pub mod presets {
         atmo:  atmo1(AtmoType::Magic,    2.3, 4, 0.070, 16, 4),
         props: prop1(PropType::Mushroom, 1.2, true, 4.0, 0.8),
         post:  post(0.50, false, [0,0,8], 0.3),
-        anim:  AnimSettings { loop_s:4, play_speed:0.9 },
+        anim:  AnimSettings { loop_s:4, play_speed:0.9, gif_cycles: 1, seamless_lock: true },
     }}
 
     pub fn ice_dungeon() -> PathForgeSettings { PathForgeSettings {
@@ -538,7 +871,7 @@ pub mod presets {
         atmo:  atmo1(AtmoType::IceWisp,  2.5, 4, 0.065,  8, 3),
         props: no_props(),
         post:  post(0.35, true, [8,12,20], 0.20),
-        anim:  AnimSettings { loop_s:4, play_speed:0.85 },
+        anim:  AnimSettings { loop_s:4, play_speed:0.85, gif_cycles: 1, seamless_lock: true },
     }}
 
     pub fn ruins_path() -> PathForgeSettings { PathForgeSettings {
@@ -550,7 +883,7 @@ pub mod presets {
         atmo:  atmo1(AtmoType::None,     3.0, 4, 0.035,  6, 10),
         props: prop2(PropType::DeadTree, 1.5, true, 1.0, PropType::Rock, 2.2, true, 0.7, 4),
         post:  post(0.20, true, [80,75,65], 0.22),
-        anim:  AnimSettings { loop_s:4, play_speed:1.3 },
+        anim:  AnimSettings { loop_s:4, play_speed:1.3, gif_cycles: 1, seamless_lock: true },
     }}
 
     pub fn dark_street() -> PathForgeSettings { PathForgeSettings {
@@ -562,7 +895,7 @@ pub mod presets {
         atmo:  atmo1(AtmoType::Lantern,  2.8, 4, 0.070, 14, 4),
         props: no_props(),
         post:  post(0.65, true, [8,6,8], 0.18),
-        anim:  AnimSettings { loop_s:4, play_speed:1.2 },
+        anim:  AnimSettings { loop_s:4, play_speed:1.2, gif_cycles: 1, seamless_lock: true },
     }}
 
     pub fn mountain_pass() -> PathForgeSettings { PathForgeSettings {
@@ -574,7 +907,7 @@ pub mod presets {
         atmo:  atmo1(AtmoType::None,     3.0, 6, 0.030,  4, 8),
         props: prop2(PropType::Boulder, 1.8, true, 1.0, PropType::Rock, 2.3, true, 0.65, 6),
         post:  post(0.15, true, [100,105,115], 0.25),
-        anim:  AnimSettings { loop_s:6, play_speed:1.4 },
+        anim:  AnimSettings { loop_s:6, play_speed:1.4, gif_cycles: 1, seamless_lock: true },
     }}
 
     pub fn volcanic_rift() -> PathForgeSettings { PathForgeSettings {
@@ -586,7 +919,7 @@ pub mod presets {
         atmo:  atmo1(AtmoType::GreenFire, 2.2, 4, 0.080, 18, 5),
         props: prop1(PropType::Rock, 1.6, true, 4.0, 0.9),
         post:  post(0.55, false, [30,10,5], 0.3),
-        anim:  AnimSettings { loop_s:4, play_speed:1.1 },
+        anim:  AnimSettings { loop_s:4, play_speed:1.1, gif_cycles: 1, seamless_lock: true },
     }}
 
     pub const ALL: &'static [(&'static str, fn() -> PathForgeSettings)] = &[

@@ -3,6 +3,9 @@ mod tiles;
 mod renderer;
 mod app;
 mod gif_export;
+mod node_lab;
+mod gpu_effects;
+mod gpu_scene;
 
 fn main() -> eframe::Result<()> {
     let native_options = eframe::NativeOptions {

@@ -334,28 +334,68 @@ fn apply_damage_overlay(data: &mut [u8], base: [u8; 3], mortar: [u8; 3], damage:
                 blend_px(data, (xi + 1) % TILE_TEX, yi, crack_col, 0.25 + d * 0.2);
                 blend_px(data, xi, (yi + 1) % TILE_TEX, crack_col, 0.25 + d * 0.2);
             }
+            // Subtle highlight edge gives tiny depth around fracture lines.
+            let hi = [
+                (base[0] as f32 * 1.08).clamp(0.0, 255.0) as u8,
+                (base[1] as f32 * 1.08).clamp(0.0, 255.0) as u8,
+                (base[2] as f32 * 1.08).clamp(0.0, 255.0) as u8,
+            ];
+            if xi > 0 {
+                blend_px(data, xi - 1, yi, hi, 0.06 + d * 0.06);
+            }
             ang += (rng() - 0.5) * (0.24 + d * 0.28);
             x += ang.cos() * (0.9 + d * 0.7);
             y += ang.sin() * (0.9 + d * 0.7);
+
+            if rng() < (0.012 + d * 0.09) {
+                // Occasional micro-branch to break up linear cracks.
+                let mut bx = x;
+                let mut by = y;
+                let mut bang = ang + (rng() - 0.5) * 1.4;
+                let bsteps = (2.0 + rng() * (3.0 + d * 9.0)) as usize;
+                for _ in 0..bsteps {
+                    let bxi = bx.rem_euclid(TILE_TEX as f32) as usize;
+                    let byi = by.rem_euclid(TILE_TEX as f32) as usize;
+                    blend_px(data, bxi, byi, crack_col, 0.22 + d * 0.20);
+                    bang += (rng() - 0.5) * 0.55;
+                    bx += bang.cos() * 0.85;
+                    by += bang.sin() * 0.85;
+                }
+            }
         }
     }
 
     for _ in 0..chip_count {
         let cx = (rng() * TILE_TEX as f32) as usize;
         let cy = (rng() * TILE_TEX as f32) as usize;
-        let rad = (1.0 + rng() * (1.0 + d * 3.2)) as i32;
+        let rx = (1.0 + rng() * (1.0 + d * 3.2)) as i32;
+        let ry = (1.0 + rng() * (0.8 + d * 2.8)) as i32;
         let chip = [
             (base[0] as f32 * (0.82 + rng() * 0.24)).clamp(0.0, 255.0) as u8,
             (base[1] as f32 * (0.82 + rng() * 0.24)).clamp(0.0, 255.0) as u8,
             (base[2] as f32 * (0.82 + rng() * 0.24)).clamp(0.0, 255.0) as u8,
         ];
-        for oy in -rad..=rad {
-            for ox in -rad..=rad {
-                if ox * ox + oy * oy > rad * rad { continue; }
+        for oy in -ry..=ry {
+            for ox in -rx..=rx {
+                let nx = ox as f32 / rx.max(1) as f32;
+                let ny = oy as f32 / ry.max(1) as f32;
+                let edge_noise = (rng() - 0.5) * 0.55;
+                if nx * nx + ny * ny > 1.0 + edge_noise { continue; }
                 let x = (cx as i32 + ox).rem_euclid(TILE_TEX as i32) as usize;
                 let y = (cy as i32 + oy).rem_euclid(TILE_TEX as i32) as usize;
-                let a = 0.12 + d * 0.22;
+                let fall = (1.0 - (nx * nx + ny * ny)).clamp(0.0, 1.0);
+                let a = (0.08 + d * 0.24) * (0.45 + 0.55 * fall);
                 blend_px(data, x, y, chip, a);
+
+                // Tiny dark pit near centre increases perceived material wear.
+                if fall > 0.72 {
+                    let pit = [
+                        (mortar[0] as f32 * 0.72).clamp(0.0, 255.0) as u8,
+                        (mortar[1] as f32 * 0.72).clamp(0.0, 255.0) as u8,
+                        (mortar[2] as f32 * 0.72).clamp(0.0, 255.0) as u8,
+                    ];
+                    blend_px(data, x, y, pit, 0.04 + d * 0.07);
+                }
             }
         }
     }
