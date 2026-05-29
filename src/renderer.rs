@@ -119,7 +119,8 @@ impl PathRenderer {
         let mut row_cx_arr = vec![cx; ch];
         for y in hy..ch {
             let t = (y - hy) as f32 / (ch - hy) as f32;
-            phw_arr[y] = max_hw * (2.0*t - t*t).max(0.0).powf(pw);
+            let width_w = path_width_weight(s.scene.curve_top_weight, s.scene.curve_bottom_weight, t);
+            phw_arr[y] = max_hw * width_w * (2.0*t - t*t).max(0.0).powf(pw);
             row_cx_arr[y] = cx + path_curve_x_shift(s.scene.horizon_curve, max_hw, t);
         }
 
@@ -434,7 +435,8 @@ impl PathRenderer {
                     };
                     let sx_world = cx + focal * (wx_v + jit) / wz;
                     let ty = ((sy_floor - hy as f32) / (ch - hy) as f32).clamp(0.0, 1.0);
-                    let phw2 = max_hw * (2.0 * ty - ty * ty).max(0.0).powf(pw);
+                    let width_w = path_width_weight(s.scene.curve_top_weight, s.scene.curve_bottom_weight, ty);
+                    let phw2 = max_hw * width_w * (2.0 * ty - ty * ty).max(0.0).powf(pw);
                     let sgn = if wx_v >= 0.0 { 1.0 } else { -1.0 };
                     let sx_edge = cx + sgn * (phw2 + prop.edge_gap.max(0.0) * ps_x) + jit * ps_x * 0.85;
                     let follow = prop.path_follow.clamp(0.0, 1.0);
@@ -579,7 +581,8 @@ impl PathRenderer {
                     let sy = hy as f32 + focal * cam_h / wz;
                     if sy <= hy as f32 || sy >= ch as f32 { continue; }
                     let ty   = (sy - hy as f32) / (ch - hy) as f32;
-                    let phw2 = max_hw * (2.0*ty - ty*ty).max(0.0).powf(pw);
+                    let width_w = path_width_weight(s.scene.curve_top_weight, s.scene.curve_bottom_weight, ty);
+                    let phw2 = max_hw * width_w * (2.0*ty - ty*ty).max(0.0).powf(pw);
                     if (sx - cx).abs() > phw2 * 0.88 { continue; }
                     let dsz = (focal * 0.018 * deb_scale / wz).clamp(0.45, 2.1);
                     let chip_seed = inst_hash(layer.variation_seed + i as u32 + 131, n);
@@ -626,7 +629,7 @@ impl PathRenderer {
         let post = &s.post;
 
         // Saturation: adjust before other effects so vignette stays colour-neutral
-        if (post.saturation - 1.0).abs() > 0.02 {
+        if post.saturation_enabled && (post.saturation - 1.0).abs() > 0.02 {
             let sat = post.saturation;
             for i in 0..cw * ch {
                 let pi = i * 4;
@@ -641,7 +644,7 @@ impl PathRenderer {
         }
 
         // Bloom: fast separable Gaussian on bright pixels
-        if post.bloom > 0.01 {
+        if post.bloom_enabled && post.bloom > 0.01 {
             apply_bloom(buf, cw, ch, post.bloom, 200u8, 4);
         }
 
@@ -662,7 +665,7 @@ impl PathRenderer {
         }
 
         // Vignette
-        if post.vignette > 0.005 {
+        if post.vignette_enabled && post.vignette > 0.005 {
             let cx_f = cw as f32 * 0.5;
             let cy_f = ch as f32 * 0.5;
             let max_dsq = cx_f * cx_f + cy_f * cy_f;
@@ -682,7 +685,7 @@ impl PathRenderer {
         }
 
         // Film grain
-        if post.grain > 0.005 {
+        if post.grain_enabled && post.grain > 0.005 {
             let grain_scale = post.grain * 38.0;
             let frame_seed  = (global_t * 997.0) as u32;
             for y in 0..ch {
@@ -773,6 +776,11 @@ fn path_curve_x_shift(curve: f32, max_hw: f32, t: f32) -> f32 {
     let k = curve.clamp(-1.0, 1.0);
     let tt = t.clamp(0.0, 1.0);
     k * max_hw * 0.72 * (tt * tt)
+}
+
+#[inline]
+fn path_width_weight(top_w: f32, bottom_w: f32, t: f32) -> f32 {
+    lerp(top_w.clamp(0.0, 2.0), bottom_w.clamp(0.0, 2.0), t.clamp(0.0, 1.0))
 }
 
 #[inline]

@@ -154,6 +154,10 @@ pub struct SceneSettings {
     pub horizon_y:    u32,     // 80..260 (scales with 576×768 default)
     #[serde(default = "default_horizon_curve")]
     pub horizon_curve: f32,    // -1.0..1.0 vertical lens-like world bend
+    #[serde(default = "default_curve_top_weight")]
+    pub curve_top_weight: f32, // 0.0..2.0 top perspective bend weight
+    #[serde(default = "default_curve_bottom_weight")]
+    pub curve_bottom_weight: f32, // 0.0..2.0 bottom perspective bend weight
     pub max_hw:       f32,     // 30..176
     pub cam_h:        f32,     // 0.5..4.0
     pub focal_mult:   f32,     // 0.5..2.0
@@ -184,6 +188,8 @@ fn default_grass_height() -> f32 { 1.0 }
 fn default_grass_upright() -> f32 { 0.8 }
 fn default_ambient() -> f32 { 1.0 }
 fn default_horizon_curve() -> f32 { 0.0 }
+fn default_curve_top_weight() -> f32 { 1.0 }
+fn default_curve_bottom_weight() -> f32 { 1.0 }
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct FloorSettings {
@@ -570,16 +576,24 @@ pub struct PropsSettings {
 // ── Post-process ───────────────────────────────────────────────────────────
 #[derive(Clone, Serialize, Deserialize)]
 pub struct PostSettings {
+    #[serde(default = "bool_true")]
+    pub vignette_enabled: bool,
     pub vignette:    f32,    // 0.0..1.0
     pub fog_enabled: bool,
     pub fog_color:   [u8; 3],
     pub fog_density: f32,    // 0.0..1.0
+    #[serde(default = "bool_true")]
+    pub bloom_enabled: bool,
     /// Bloom intensity 0=off, 1=full
     #[serde(default)]
     pub bloom:       f32,
+    #[serde(default = "bool_true")]
+    pub grain_enabled: bool,
     /// Film grain intensity 0=off, 1=heavy
     #[serde(default)]
     pub grain:       f32,
+    #[serde(default = "bool_true")]
+    pub saturation_enabled: bool,
     /// Colour saturation: 0=greyscale, 1=normal, 2=vivid
     #[serde(default = "default_saturation")]
     pub saturation:  f32,
@@ -588,8 +602,19 @@ fn default_saturation() -> f32 { 1.0 }
 
 impl Default for PostSettings {
     fn default() -> Self {
-        Self { vignette: 0.0, fog_enabled: false, fog_color: [40, 35, 30], fog_density: 0.3,
-               bloom: 0.0, grain: 0.0, saturation: 1.0 }
+        Self {
+            vignette_enabled: true,
+            vignette: 0.0,
+            fog_enabled: false,
+            fog_color: [40, 35, 30],
+            fog_density: 0.3,
+            bloom_enabled: true,
+            bloom: 0.0,
+            grain_enabled: true,
+            grain: 0.0,
+            saturation_enabled: true,
+            saturation: 1.0,
+        }
     }
 }
 
@@ -752,11 +777,22 @@ pub mod presets {
         ]}
     }
     fn post(v: f32, fog: bool, fc: [u8;3], fd: f32) -> PostSettings {
-        PostSettings { vignette: v, fog_enabled: fog, fog_color: fc, fog_density: fd,
-                       bloom: 0.0, grain: 0.0, saturation: 1.0 }
+        PostSettings {
+            vignette_enabled: true,
+            vignette: v,
+            fog_enabled: fog,
+            fog_color: fc,
+            fog_density: fd,
+            bloom_enabled: true,
+            bloom: 0.0,
+            grain_enabled: true,
+            grain: 0.0,
+            saturation_enabled: true,
+            saturation: 1.0,
+        }
     }
     fn sc_indoor(hy: u32, hw: f32, ch: f32, fm: f32, pp: f32, vc: [u8;3]) -> SceneSettings {
-        SceneSettings { horizon_y: hy, horizon_curve: default_horizon_curve(), max_hw: hw, cam_h: ch, focal_mult: fm, path_power: pp,
+        SceneSettings { horizon_y: hy, horizon_curve: default_horizon_curve(), curve_top_weight: default_curve_top_weight(), curve_bottom_weight: default_curve_bottom_weight(), max_hw: hw, cam_h: ch, focal_mult: fm, path_power: pp,
                         void_color: vc, grass_enabled: false, grass_color: [28,90,18], grass_density: default_grass_density(),
                         grass_height: default_grass_height(), grass_upright: default_grass_upright(), ambient: 1.0,
                         lighting_preset: default_lighting_preset(),
@@ -764,7 +800,7 @@ pub mod presets {
                         atmo_tint_influence: default_atmo_tint_influence() }
     }
     fn sc_outdoor(hy: u32, hw: f32, ch: f32, fm: f32, pp: f32, vc: [u8;3]) -> SceneSettings {
-        SceneSettings { horizon_y: hy, horizon_curve: default_horizon_curve(), max_hw: hw, cam_h: ch, focal_mult: fm, path_power: pp,
+        SceneSettings { horizon_y: hy, horizon_curve: default_horizon_curve(), curve_top_weight: default_curve_top_weight(), curve_bottom_weight: default_curve_bottom_weight(), max_hw: hw, cam_h: ch, focal_mult: fm, path_power: pp,
                         void_color: vc, grass_enabled: true, grass_color: [28,90,18], grass_density: default_grass_density(),
                         grass_height: default_grass_height(), grass_upright: default_grass_upright(), ambient: 1.0,
                         lighting_preset: default_lighting_preset(),

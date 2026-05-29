@@ -89,7 +89,7 @@ fn export_loop_gif_with_layers(
     encoder.set_repeat(gif::Repeat::Infinite)?;
 
     let mut renderer = crate::renderer::PathRenderer::default();
-    let gpu_scene = if gpu_scene_enabled
+    let mut gpu_scene = if gpu_scene_enabled
         && crate::gpu_scene::supports_exact_scene_parity(settings)
         && layers.sky && layers.floor && layers.walls && layers.atmo && layers.props && layers.post {
         GpuSceneRenderer::new().ok()
@@ -105,7 +105,7 @@ fn export_loop_gif_with_layers(
         if smooth_n <= 1 {
             let scroll = i as f32 * frame_step;
             let global_t = scroll / loop_tiles;
-            if let Some(gs) = gpu_scene.as_ref() {
+            if let Some(gs) = gpu_scene.as_mut() {
                 match gs.render_scene_rgba(settings, scroll, global_t) {
                     Ok(scene) => {
                         rgba.copy_from_slice(&scene);
@@ -150,7 +150,7 @@ fn export_loop_gif_with_layers(
                 let phase = ((i as f32) + (sidx as f32 + 0.5) / smooth_n as f32) / n_frames as f32;
                 let scroll = phase * loop_tiles;
                 let global_t = phase;
-                if let Some(gs) = gpu_scene.as_ref() {
+                if let Some(gs) = gpu_scene.as_mut() {
                     match gs.render_scene_rgba(settings, scroll, global_t) {
                         Ok(scene) => {
                             rgba.copy_from_slice(&scene);
@@ -369,6 +369,17 @@ pub fn export_project_gifs_with_progress(
         });
     }
 
+    let mut composite_progress = |f: u32, t: u32| {
+        on_update(ExportUpdate {
+            stage: "composite_layered".to_owned(),
+            message: format!("composite_layered frame {}/{}", f, t),
+            current: f,
+            total: t,
+            done: false,
+            failed: false,
+        });
+    };
+
     match export_composite_layered_gif(
         settings,
         fps,
@@ -378,6 +389,7 @@ pub fn export_project_gifs_with_progress(
         gpu_enabled,
         gpu_settings,
         composite_path.to_string_lossy().as_ref(),
+        Some(&mut composite_progress),
     ) {
         Ok(n) => {
             if frame_count == 0 { frame_count = n; }
@@ -455,6 +467,7 @@ fn export_composite_layered_gif(
     gpu_enabled: bool,
     gpu_settings: GpuEffectSettings,
     path: &str,
+    mut on_progress: Option<&mut dyn FnMut(u32, u32)>,
 ) -> Result<usize, Box<dyn std::error::Error>> {
     let smooth_n = smoothing_samples.max(1);
     let (loop_tiles, n_frames, frame_step, delay_hundredths) =
@@ -467,7 +480,7 @@ fn export_composite_layered_gif(
     encoder.set_repeat(gif::Repeat::Infinite)?;
 
     let mut renderer = crate::renderer::PathRenderer::default();
-    let gpu_scene = if gpu_scene_enabled && crate::gpu_scene::supports_exact_scene_parity(settings) {
+    let mut gpu_scene = if gpu_scene_enabled && crate::gpu_scene::supports_exact_scene_parity(settings) {
         GpuSceneRenderer::new().ok()
     } else {
         None
@@ -477,6 +490,7 @@ fn export_composite_layered_gif(
     let mut composite_rgba = vec![0u8; px_count * 4];
     let mut rgb = vec![0u8; px_count * 3];
     let mut accum = vec![0u32; px_count * 3];
+    let mut rgba_from_accum = vec![0u8; px_count * 4];
 
     let has_sky = layer_has_sky(settings);
     let has_floor = layer_has_floor(settings);
@@ -498,7 +512,7 @@ fn export_composite_layered_gif(
             let scroll = i as f32 * frame_step;
             let global_t = scroll / loop_tiles;
 
-            if let Some(gs) = gpu_scene.as_ref() {
+            if let Some(gs) = gpu_scene.as_mut() {
                 match gs.render_scene_rgba(settings, scroll, global_t) {
                     Ok(mut scene) => {
                         if crate::gpu_scene::has_sprite_instances(settings) {
@@ -511,11 +525,6 @@ fn export_composite_layered_gif(
                             );
                         }
                         composite_rgba.copy_from_slice(&scene);
-                        for (src, dst) in composite_rgba.chunks_exact(4).zip(rgb.chunks_exact_mut(3)) {
-                            dst[0] = src[0];
-                            dst[1] = src[1];
-                            dst[2] = src[2];
-                        }
                         if let Some(gpu_fx) = gpu.as_ref() {
                             if let Ok(processed) = gpu_fx.process_rgba(
                                 &composite_rgba,
@@ -528,6 +537,18 @@ fn export_composite_layered_gif(
                                     dst[1] = src[1];
                                     dst[2] = src[2];
                                 }
+                            } else {
+                                for (src, dst) in composite_rgba.chunks_exact(4).zip(rgb.chunks_exact_mut(3)) {
+                                    dst[0] = src[0];
+                                    dst[1] = src[1];
+                                    dst[2] = src[2];
+                                }
+                            }
+                        } else {
+                            for (src, dst) in composite_rgba.chunks_exact(4).zip(rgb.chunks_exact_mut(3)) {
+                                dst[0] = src[0];
+                                dst[1] = src[1];
+                                dst[2] = src[2];
                             }
                         }
                         let mut frame = gif::Frame::from_rgb(width, height, &rgb);
@@ -548,11 +569,6 @@ fn export_composite_layered_gif(
                 return Err(format!("render panic while exporting composite frame {} to {}", i, path).into());
             }
 
-            for (src, dst) in composite_rgba.chunks_exact(4).zip(rgb.chunks_exact_mut(3)) {
-                dst[0] = src[0];
-                dst[1] = src[1];
-                dst[2] = src[2];
-            }
             if let Some(gpu_fx) = gpu.as_ref() {
                 if let Ok(processed) = gpu_fx.process_rgba(
                     &composite_rgba,
@@ -565,6 +581,18 @@ fn export_composite_layered_gif(
                         dst[1] = src[1];
                         dst[2] = src[2];
                     }
+                } else {
+                    for (src, dst) in composite_rgba.chunks_exact(4).zip(rgb.chunks_exact_mut(3)) {
+                        dst[0] = src[0];
+                        dst[1] = src[1];
+                        dst[2] = src[2];
+                    }
+                }
+            } else {
+                for (src, dst) in composite_rgba.chunks_exact(4).zip(rgb.chunks_exact_mut(3)) {
+                    dst[0] = src[0];
+                    dst[1] = src[1];
+                    dst[2] = src[2];
                 }
             }
         } else {
@@ -574,7 +602,7 @@ fn export_composite_layered_gif(
                 let scroll = phase * loop_tiles;
                 let global_t = phase;
 
-                if let Some(gs) = gpu_scene.as_ref() {
+                if let Some(gs) = gpu_scene.as_mut() {
                     match gs.render_scene_rgba(settings, scroll, global_t) {
                         Ok(mut scene) => {
                             if crate::gpu_scene::has_sprite_instances(settings) {
@@ -614,7 +642,6 @@ fn export_composite_layered_gif(
                 }
             }
             if let Some(gpu_fx) = gpu.as_ref() {
-                let mut rgba_from_accum = vec![0u8; px_count * 4];
                 for p in 0..px_count {
                     let j = p * 3;
                     rgba_from_accum[p * 4] = (accum[j] / smooth_n) as u8;
@@ -648,6 +675,10 @@ fn export_composite_layered_gif(
         let mut frame = gif::Frame::from_rgb(width, height, &rgb);
         frame.delay = delay_hundredths;
         encoder.write_frame(&frame)?;
+
+        if let Some(progress) = on_progress.as_deref_mut() {
+            progress(i + 1, n_frames);
+        }
     }
 
     Ok(n_frames as usize)

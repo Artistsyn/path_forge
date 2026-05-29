@@ -14,10 +14,12 @@ use crate::settings::{
 // ── Background render thread ───────────────────────────────────────────────
 struct RenderRequest {
     frame_id:  u64,
+    view_kind: u8,
     settings:  PathForgeSettings,
     scroll:    f32,
     global_t:  f32,
     gpu_scene_enabled: bool,
+    gpu_scene_force_preview: bool,
     gpu_enabled: bool,
     gpu_effect_mix: f32,
     gpu_saturation: f32,
@@ -27,9 +29,11 @@ struct RenderRequest {
 
 struct RenderResult {
     frame_id: u64,
+    view_kind: u8,
     w: usize,
     h: usize,
     buf: Vec<u8>,
+    backend_status: String,
 }
 
 #[derive(Clone)]
@@ -47,7 +51,6 @@ fn spawn_render_thread() -> (mpsc::Sender<RenderRequest>, mpsc::Receiver<RenderR
             let mut renderer = PathRenderer::default();
             let mut buf: Vec<u8> = Vec::new();
             let mut gpu_scene: Option<crate::gpu_scene::GpuSceneRenderer> = None;
-            let mut gpu_scene_failed = false;
             let mut gpu: Option<crate::gpu_effects::GpuEffects> = None;
             let mut gpu_failed = false;
             while let Ok(req) = req_rx.recv() {
@@ -55,22 +58,28 @@ fn spawn_render_thread() -> (mpsc::Sender<RenderRequest>, mpsc::Receiver<RenderR
                 if buf.len() != frame_len {
                     buf.resize(frame_len, 0);
                 }
-                let allow_gpu_scene = req.gpu_scene_enabled
-                    && crate::gpu_scene::supports_exact_scene_parity(&req.settings);
+                let mut scene_backend = "Scene: CPU (disabled)".to_owned();
+                let mut effects_backend = "FX: CPU (disabled)".to_owned();
+                let allow_gpu_scene = req.gpu_scene_enabled;
                 let result = if allow_gpu_scene {
-                    if gpu_scene.is_none() && !gpu_scene_failed {
-                        match crate::gpu_scene::GpuSceneRenderer::new() {
-                            Ok(g) => gpu_scene = Some(g),
-                            Err(e) => {
-                                gpu_scene_failed = true;
+                    if gpu_scene.is_none() {
+                        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            crate::gpu_scene::GpuSceneRenderer::new()
+                        })) {
+                            Ok(Ok(g)) => gpu_scene = Some(g),
+                            Ok(Err(e)) => {
                                 eprintln!("[pathforge-gpu-scene] init failed, fallback to CPU: {e}");
+                            }
+                            Err(_) => {
+                                eprintln!("[pathforge-gpu-scene] init panicked, fallback to CPU");
                             }
                         }
                     }
-                    if let Some(gs) = gpu_scene.as_ref() {
+                    if let Some(gs) = gpu_scene.as_mut() {
                         match gs.render_scene_rgba(&req.settings, req.scroll, req.global_t) {
                             Ok(scene) => {
                                 buf.copy_from_slice(&scene);
+                                scene_backend = "Scene: GPU".to_owned();
                                 if crate::gpu_scene::has_sprite_instances(&req.settings) {
                                     crate::gpu_scene::composite_sprite_overlay(
                                         &mut buf,
@@ -79,10 +88,12 @@ fn spawn_render_thread() -> (mpsc::Sender<RenderRequest>, mpsc::Receiver<RenderR
                                         &req.settings,
                                         req.scroll,
                                     );
+                                    scene_backend = "Scene: GPU (+CPU sprite overlay)".to_owned();
                                 }
                                 Ok(())
                             }
                             Err(e) => {
+                                scene_backend = "Scene: CPU (GPU render failed)".to_owned();
                                 eprintln!("[pathforge-gpu-scene] render failed, fallback to CPU: {e}");
                                 std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                                     renderer.render(&req.settings, req.scroll, req.global_t, &mut buf);
@@ -90,6 +101,7 @@ fn spawn_render_thread() -> (mpsc::Sender<RenderRequest>, mpsc::Receiver<RenderR
                             }
                         }
                     } else {
+                        scene_backend = "Scene: CPU (GPU unavailable)".to_owned();
                         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                             renderer.render(&req.settings, req.scroll, req.global_t, &mut buf);
                         }))
@@ -103,11 +115,19 @@ fn spawn_render_thread() -> (mpsc::Sender<RenderRequest>, mpsc::Receiver<RenderR
                     Ok(_) => {
                         if req.gpu_enabled {
                             if gpu.is_none() && !gpu_failed {
-                                match crate::gpu_effects::GpuEffects::new() {
-                                    Ok(g) => gpu = Some(g),
-                                    Err(e) => {
+                                match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                                    crate::gpu_effects::GpuEffects::new()
+                                })) {
+                                    Ok(Ok(g)) => gpu = Some(g),
+                                    Ok(Err(e)) => {
                                         gpu_failed = true;
+                                        effects_backend = "FX: CPU (GPU init failed)".to_owned();
                                         eprintln!("[pathforge-gpu] GPU init failed, falling back to CPU: {e}");
+                                    }
+                                    Err(_) => {
+                                        gpu_failed = true;
+                                        effects_backend = "FX: CPU (GPU init panic)".to_owned();
+                                        eprintln!("[pathforge-gpu] GPU init panicked, falling back to CPU");
                                     }
                                 }
                             }
@@ -126,18 +146,25 @@ fn spawn_render_thread() -> (mpsc::Sender<RenderRequest>, mpsc::Receiver<RenderR
                                 ) {
                                     Ok(processed) => {
                                         buf.copy_from_slice(&processed);
+                                        effects_backend = "FX: GPU".to_owned();
                                     }
                                     Err(e) => {
+                                        effects_backend = "FX: CPU (GPU process failed)".to_owned();
                                         eprintln!("[pathforge-gpu] GPU process failed, using CPU frame: {e}");
                                     }
                                 }
+                            } else if gpu_failed {
+                                effects_backend = "FX: CPU (GPU unavailable)".to_owned();
                             }
                         }
+                        let backend_status = format!("{} | {}", scene_backend, effects_backend);
                         if res_tx.send(RenderResult {
                             frame_id: req.frame_id,
+                            view_kind: req.view_kind,
                             w: req.settings.canvas.w(),
                             h: req.settings.canvas.h(),
                             buf: buf.clone(),
+                            backend_status,
                         }).is_err() { break; }
                     }
                     Err(e) => {
@@ -154,9 +181,11 @@ fn spawn_render_thread() -> (mpsc::Sender<RenderRequest>, mpsc::Receiver<RenderR
                         buf.fill(128); // grey error frame
                         if res_tx.send(RenderResult {
                             frame_id: req.frame_id,
+                            view_kind: req.view_kind,
                             w: req.settings.canvas.w(),
                             h: req.settings.canvas.h(),
                             buf: buf.clone(),
+                            backend_status: "Scene: CPU (panic recovery) | FX: CPU (panic recovery)".to_owned(),
                         }).is_err() {
                             eprintln!("[pathforge-renderer] res_tx dead — exiting");
                             break;
@@ -201,6 +230,10 @@ pub struct PathForgeApp {
     preview_w:        usize,
     preview_h:        usize,
     texture:          Option<egui::TextureHandle>,
+    preview_backend_status: String,
+    side_by_side_preview: bool,
+    compare_cpu_result: Option<RenderResult>,
+    compare_gpu_result: Option<RenderResult>,
 
     // --- section open/close state
     open_canvas:  bool,
@@ -224,6 +257,7 @@ pub struct PathForgeApp {
     temporal_smoothing_boost: u32,
     export_individual_layers: bool,
     gpu_scene_preview_enabled: bool,
+    gpu_scene_force_preview: bool,
     gpu_scene_export_enabled: bool,
     gpu_preview_enabled: bool,
     gpu_export_enabled: bool,
@@ -284,10 +318,12 @@ impl Default for PathForgeApp {
         // Kick off the first render immediately
         let _ = render_tx.send(RenderRequest {
             frame_id: 1,
+            view_kind: 0,
             settings:  settings.clone(),
             scroll:    0.0,
             global_t:  0.0,
             gpu_scene_enabled: true,
+            gpu_scene_force_preview: false,
             gpu_enabled: true,
             gpu_effect_mix: 0.55,
             gpu_saturation: 1.08,
@@ -316,6 +352,10 @@ impl Default for PathForgeApp {
             preview_w,
             preview_h,
             texture:        None,
+            preview_backend_status: "Scene: pending | FX: pending".to_owned(),
+            side_by_side_preview: false,
+            compare_cpu_result: None,
+            compare_gpu_result: None,
             open_canvas:    false,
             open_scene:     true,
             open_floor:     true,
@@ -323,7 +363,7 @@ impl Default for PathForgeApp {
             open_sky:       false,
             open_atmo:      false,
             open_props:     false,
-            open_post:      false,
+            open_post:      true,
             open_anim:      false,
             open_node_lab:  false,
             open_atmo_layers: vec![false],
@@ -335,6 +375,7 @@ impl Default for PathForgeApp {
             temporal_smoothing_boost: 2,
             export_individual_layers: false,
             gpu_scene_preview_enabled: true,
+            gpu_scene_force_preview: false,
             gpu_scene_export_enabled: true,
             gpu_preview_enabled: true,
             gpu_export_enabled: true,
@@ -386,6 +427,7 @@ impl eframe::App for PathForgeApp {
 
         // --- collect async GIF export completion
         if self.exporting {
+            ctx.request_repaint_after(std::time::Duration::from_millis(33));
             if let Some(rx) = &self.export_result_rx {
                 loop {
                     match rx.try_recv() {
@@ -440,13 +482,80 @@ impl eframe::App for PathForgeApp {
                     if result.buf.len() != result.w * result.h * 4 {
                         continue;
                     }
-                    self.preview_w = result.w;
-                    self.preview_h = result.h;
-                    self.pixel_buf = result.buf;
-                    self.render_pending = false;
-                    self.render_dispatch_at = None;
-                    self.fps_counter.tick();
-                    got_frame = true;
+                    if self.side_by_side_preview {
+                        match result.view_kind {
+                            1 => {
+                                self.compare_cpu_result = Some(result);
+                                if let Some(cpu) = self.compare_cpu_result.as_ref() {
+                                    self.preview_w = cpu.w;
+                                    self.preview_h = cpu.h;
+                                    self.pixel_buf = cpu.buf.clone();
+                                    self.preview_backend_status = format!(
+                                        "L CPU: {} | R GPU: waiting...",
+                                        cpu.backend_status
+                                    );
+                                    got_frame = true;
+                                }
+                            }
+                            2 => {
+                                self.compare_gpu_result = Some(result);
+                                if let Some(gpu) = self.compare_gpu_result.as_ref() {
+                                    self.preview_w = gpu.w;
+                                    self.preview_h = gpu.h;
+                                    self.pixel_buf = gpu.buf.clone();
+                                    self.preview_backend_status = format!(
+                                        "L CPU: waiting... | R GPU: {}",
+                                        gpu.backend_status
+                                    );
+                                    got_frame = true;
+                                }
+                            }
+                            _ => {
+                                // If a non-compare frame is still in flight (startup/toggle race),
+                                // show it temporarily and force a fresh compare dispatch next.
+                                self.preview_w = result.w;
+                                self.preview_h = result.h;
+                                self.pixel_buf = result.buf;
+                                self.preview_backend_status = format!(
+                                    "Compare warming up... {}",
+                                    result.backend_status
+                                );
+                                self.render_pending = false;
+                                self.dirty = true;
+                                got_frame = true;
+                                continue;
+                            }
+                        }
+
+                        if let (Some(cpu), Some(gpu)) =
+                            (self.compare_cpu_result.as_ref(), self.compare_gpu_result.as_ref())
+                        {
+                            if cpu.frame_id == self.latest_frame_id && gpu.frame_id == self.latest_frame_id {
+                                let (w, h, buf) = Self::compose_side_by_side(cpu, gpu);
+                                self.preview_w = w;
+                                self.preview_h = h;
+                                self.pixel_buf = buf;
+                                self.preview_backend_status = format!(
+                                    "L CPU: {} | R GPU: {}",
+                                    cpu.backend_status,
+                                    gpu.backend_status
+                                );
+                                self.render_pending = false;
+                                self.render_dispatch_at = None;
+                                self.fps_counter.tick();
+                                got_frame = true;
+                            }
+                        }
+                    } else {
+                        self.preview_w = result.w;
+                        self.preview_h = result.h;
+                        self.pixel_buf = result.buf;
+                        self.preview_backend_status = result.backend_status;
+                        self.render_pending = false;
+                        self.render_dispatch_at = None;
+                        self.fps_counter.tick();
+                        got_frame = true;
+                    }
                 }
                 Err(std::sync::mpsc::TryRecvError::Empty) => break,
                 Err(std::sync::mpsc::TryRecvError::Disconnected) => {
@@ -487,6 +596,8 @@ impl eframe::App for PathForgeApp {
                 }
             }
             if can_dispatch {
+                self.latest_frame_id = self.latest_frame_id.wrapping_add(1);
+                let dispatch_frame_id = self.latest_frame_id;
                 let mut render_settings = self.settings.clone();
                 if self.preview_scale < 0.999 {
                     let src_w = self.settings.canvas.w() as f32;
@@ -497,27 +608,75 @@ impl eframe::App for PathForgeApp {
                     render_settings.canvas.base_h = dst_h;
                     render_settings.canvas.landscape = false;
                 }
-                match self.render_tx.send(RenderRequest {
-                    frame_id: self.latest_frame_id,
-                    settings: render_settings,
-                    scroll:   self.scroll,
-                    global_t: self.global_t,
-                    gpu_scene_enabled: self.gpu_scene_preview_enabled,
-                    gpu_enabled: self.gpu_preview_enabled,
-                    gpu_effect_mix: self.gpu_effect_mix,
-                    gpu_saturation: self.gpu_saturation,
-                    gpu_contrast: self.gpu_contrast,
-                    gpu_brightness: self.gpu_brightness,
-                }) {
-                    Ok(()) => {
+                if false && self.side_by_side_preview {
+                    self.compare_cpu_result = None;
+                    self.compare_gpu_result = None;
+
+                    let cpu_req = RenderRequest {
+                        frame_id: dispatch_frame_id,
+                        view_kind: 1,
+                        settings: render_settings.clone(),
+                        scroll: self.scroll,
+                        global_t: self.global_t,
+                        gpu_scene_enabled: false,
+                        gpu_scene_force_preview: false,
+                        gpu_enabled: false,
+                        gpu_effect_mix: self.gpu_effect_mix,
+                        gpu_saturation: self.gpu_saturation,
+                        gpu_contrast: self.gpu_contrast,
+                        gpu_brightness: self.gpu_brightness,
+                    };
+                    let gpu_req = RenderRequest {
+                        frame_id: dispatch_frame_id,
+                        view_kind: 2,
+                        settings: render_settings,
+                        scroll: self.scroll,
+                        global_t: self.global_t,
+                        gpu_scene_enabled: self.gpu_scene_preview_enabled,
+                        gpu_scene_force_preview: self.gpu_scene_force_preview,
+                        gpu_enabled: self.gpu_preview_enabled,
+                        gpu_effect_mix: self.gpu_effect_mix,
+                        gpu_saturation: self.gpu_saturation,
+                        gpu_contrast: self.gpu_contrast,
+                        gpu_brightness: self.gpu_brightness,
+                    };
+
+                    let send_cpu = self.render_tx.send(cpu_req);
+                    let send_gpu = self.render_tx.send(gpu_req);
+                    if send_cpu.is_ok() && send_gpu.is_ok() {
                         self.dirty = false;
                         self.render_pending = true;
                         self.render_dispatch_at = Some(std::time::Instant::now());
                         self.last_preview_dispatch = Some(now);
-                    }
-                    Err(_) => {
-                        eprintln!("[pathforge] render_tx.send failed — respawning thread");
+                    } else {
+                        eprintln!("[pathforge] compare render dispatch failed — respawning thread");
                         self.respawn_render_thread();
+                    }
+                } else {
+                    match self.render_tx.send(RenderRequest {
+                        frame_id: dispatch_frame_id,
+                        view_kind: 0,
+                        settings: render_settings,
+                        scroll:   self.scroll,
+                        global_t: self.global_t,
+                        gpu_scene_enabled: self.gpu_scene_preview_enabled,
+                        gpu_scene_force_preview: self.gpu_scene_force_preview,
+                        gpu_enabled: self.gpu_preview_enabled,
+                        gpu_effect_mix: self.gpu_effect_mix,
+                        gpu_saturation: self.gpu_saturation,
+                        gpu_contrast: self.gpu_contrast,
+                        gpu_brightness: self.gpu_brightness,
+                    }) {
+                        Ok(()) => {
+                            self.dirty = false;
+                            self.render_pending = true;
+                            self.render_dispatch_at = Some(std::time::Instant::now());
+                            self.last_preview_dispatch = Some(now);
+                        }
+                        Err(_) => {
+                            eprintln!("[pathforge] render_tx.send failed — respawning thread");
+                            self.respawn_render_thread();
+                        }
                     }
                 }
             }
@@ -539,8 +698,7 @@ impl eframe::App for PathForgeApp {
 // ── UI sections ────────────────────────────────────────────────────────────
 impl PathForgeApp {
     fn custom_presets_dir() -> PathBuf {
-        std::env::current_dir()
-            .unwrap_or_else(|_| PathBuf::from("."))
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("path_forge_presets")
     }
 
@@ -726,6 +884,27 @@ impl PathForgeApp {
                             .color(Color32::from_rgb(40,36,28)).small());
 
                         ui.separator();
+                        // Side-by-side CPU/GPU compare is intentionally dormant for now.
+                        // It can be re-enabled if we need it again for parity work.
+                        ui.label(RichText::new("COMPARE PAUSED").color(Color32::from_rgb(120, 96, 64)).small());
+
+                        ui.separator();
+                        let backend_col = if self.preview_backend_status.contains("GPU")
+                            && !self.preview_backend_status.contains("CPU (")
+                        {
+                            Color32::from_rgb(90, 180, 90)
+                        } else if self.preview_backend_status.contains("GPU") {
+                            Color32::from_rgb(184, 136, 32)
+                        } else {
+                            Color32::from_rgb(188, 96, 72)
+                        };
+                        ui.label(
+                            RichText::new(&self.preview_backend_status)
+                                .color(backend_col)
+                                .small(),
+                        );
+
+                        ui.separator();
 
                         // Preset selector
                         let label = if self.is_custom {
@@ -879,6 +1058,8 @@ impl PathForgeApp {
                             changed |= knob_f32(ui, "FOV multiplier",   &mut s.focal_mult,0.05, 8.0, 0.05);
                             changed |= knob_f32(ui, "Path curve power", &mut s.path_power,0.05,8.0, 0.05);
                             changed |= knob_f32(ui, "Horizon curve",    &mut s.horizon_curve, -1.0, 1.0, 0.01);
+                            changed |= knob_f32(ui, "Curve top weight", &mut s.curve_top_weight, 0.0, 2.0, 0.01);
+                            changed |= knob_f32(ui, "Curve bottom weight", &mut s.curve_bottom_weight, 0.0, 2.0, 0.01);
                             changed |= colour3(ui,  "Void / sky",       &mut s.void_color);
                             changed |= checkbox(ui, "Grass at edges",   &mut s.grass_enabled);
                             if s.grass_enabled {
@@ -1230,23 +1411,33 @@ impl PathForgeApp {
                         let o = &mut self.open_post;
                         let ch = Self::section(ui, "POST-FX", o, |ui, mut changed| {
                             let p = &mut self.settings.post;
-                            ui.horizontal(|ui| {
-                                ui.label(RichText::new("Vignette").color(Color32::from_rgb(100,80,40)).small());
-                                changed |= knob_f32(ui, "", &mut p.vignette, 0.0, 1.0, 0.01);
-                            });
-                            ui.horizontal(|ui| {
-                                ui.label(RichText::new("Saturation").color(Color32::from_rgb(100,80,40)).small());
-                                changed |= knob_f32(ui, "", &mut p.saturation, 0.0, 2.5, 0.02);
-                            });
-                            ui.horizontal(|ui| {
-                                ui.label(RichText::new("Bloom").color(Color32::from_rgb(100,80,40)).small());
-                                changed |= knob_f32(ui, "", &mut p.bloom, 0.0, 1.0, 0.01);
-                            });
-                            ui.horizontal(|ui| {
-                                ui.label(RichText::new("Film grain").color(Color32::from_rgb(100,80,40)).small());
-                                changed |= knob_f32(ui, "", &mut p.grain, 0.0, 0.5, 0.005);
-                            });
+                            changed |= checkbox(ui, "Vignette", &mut p.vignette_enabled);
+                            if p.vignette_enabled {
+                                changed |= knob_f32(ui, "Vignette amount", &mut p.vignette, 0.0, 1.0, 0.01);
+                            }
+                            changed |= checkbox(ui, "Saturation", &mut p.saturation_enabled);
+                            if p.saturation_enabled {
+                                changed |= knob_f32(ui, "Saturation amount", &mut p.saturation, 0.0, 2.5, 0.02);
+                            }
+                            changed |= checkbox(ui, "Bloom", &mut p.bloom_enabled);
+                            if p.bloom_enabled {
+                                changed |= knob_f32(ui, "Bloom amount", &mut p.bloom, 0.0, 1.0, 0.01);
+                            }
+                            changed |= checkbox(ui, "Film grain", &mut p.grain_enabled);
+                            if p.grain_enabled {
+                                changed |= knob_f32(ui, "Grain amount", &mut p.grain, 0.0, 0.5, 0.005);
+                            }
+                            changed |= checkbox(ui, "Depth fog", &mut p.fog_enabled);
+                            if p.fog_enabled {
+                                changed |= colour3(ui, "Fog colour", &mut p.fog_color);
+                                changed |= knob_f32(ui, "Fog density", &mut p.fog_density, 0.0, 1.0, 0.01);
+                            }
+
+                            ui.separator();
+                            ui.label(RichText::new("GPU PIPELINE").color(Color32::from_rgb(140,112,52)).small().strong());
                             changed |= checkbox(ui, "GPU scene preview (phase 2)", &mut self.gpu_scene_preview_enabled);
+                            // Bypass disabled by default; exact parity gate controls scene GPU use.
+                            // compare mode intentionally disabled by default; keep the code path dormant.
                             changed |= checkbox(ui, "GPU scene export (phase 2)", &mut self.gpu_scene_export_enabled);
                             changed |= checkbox(ui, "GPU preview shading", &mut self.gpu_preview_enabled);
                             changed |= checkbox(ui, "GPU export shading", &mut self.gpu_export_enabled);
@@ -1254,13 +1445,29 @@ impl PathForgeApp {
                             changed |= knob_f32(ui, "GPU saturation", &mut self.gpu_saturation, 0.5, 2.5, 0.01);
                             changed |= knob_f32(ui, "GPU contrast", &mut self.gpu_contrast, 0.5, 3.0, 0.01);
                             changed |= knob_f32(ui, "GPU brightness", &mut self.gpu_brightness, 0.5, 3.0, 0.01);
-                            changed |= checkbox(ui, "Depth fog", &mut p.fog_enabled);
-                            if p.fog_enabled {
-                                changed |= colour3(ui, "Fog colour", &mut p.fog_color);
-                                ui.horizontal(|ui| {
-                                    ui.label(RichText::new("Fog density").color(Color32::from_rgb(100,80,40)).small());
-                                    changed |= knob_f32(ui, "", &mut p.fog_density, 0.0, 1.0, 0.01);
-                                });
+                            ui.separator();
+                            ui.label(RichText::new("SHADER TOGGLES").color(Color32::from_rgb(140,112,52)).small().strong());
+                            changed |= checkbox(ui, "Sky gradient", &mut self.settings.sky.enabled);
+                            changed |= checkbox(ui, "Sun", &mut self.settings.sky.sun_enabled);
+                            changed |= checkbox(ui, "Moon", &mut self.settings.sky.moon_enabled);
+                            changed |= checkbox(ui, "Moon texture", &mut self.settings.sky.moon_texture_enabled);
+                            changed |= checkbox(ui, "Stars", &mut self.settings.sky.stars_enabled);
+                            changed |= checkbox(ui, "Clouds", &mut self.settings.sky.clouds_enabled);
+                            changed |= checkbox(ui, "Walls", &mut self.settings.walls.enabled);
+                            changed |= checkbox(ui, "Grass edges", &mut self.settings.scene.grass_enabled);
+                            let mut atmo_enabled = self.settings.atmo.layers.iter().any(|l| l.enabled);
+                            if checkbox(ui, "Atmosphere layers", &mut atmo_enabled) {
+                                for layer in &mut self.settings.atmo.layers {
+                                    layer.enabled = atmo_enabled;
+                                }
+                                changed = true;
+                            }
+                            let mut props_enabled = self.settings.props.items.iter().any(|p| p.enabled);
+                            if checkbox(ui, "Props", &mut props_enabled) {
+                                for prop in &mut self.settings.props.items {
+                                    prop.enabled = props_enabled;
+                                }
+                                changed = true;
                             }
                             changed
                         });
@@ -1319,16 +1526,20 @@ impl PathForgeApp {
                             self.gif_total_frames = hardlock_frames;
                             changed = true;
                         }
-                        let min_smoothing = min_smoothing_for_speed(
+                        let recommended_smoothing = min_smoothing_for_speed(
                             tiles_per_sec,
                             effective_fps,
                             self.motion_quality_tpf_target,
                         );
-                        if self.gif_smoothing_samples < min_smoothing {
-                            self.gif_smoothing_samples = min_smoothing;
-                            changed = true;
-                        }
-                        changed |= knob_u32(ui, "Smoothing subframes", &mut self.gif_smoothing_samples, min_smoothing, 8);
+                        changed |= knob_u32(ui, "Smoothing subframes", &mut self.gif_smoothing_samples, 1, 8);
+                        ui.label(
+                            RichText::new(format!(
+                                "Recommended smoothing: {} (higher is slower + blurrier motion)",
+                                recommended_smoothing
+                            ))
+                            .color(Color32::from_rgb(130,120,95))
+                            .small(),
+                        );
 
                         changed |= knob_f32(ui, "Preview render scale", &mut self.preview_scale, 0.35, 1.0, 0.01);
                         let est_frames = self.gif_total_frames.max(2);
@@ -1519,8 +1730,8 @@ impl PathForgeApp {
 
                     // Canvas — scale to fill available space while keeping aspect ratio
                     if let Some(tex) = &self.texture {
-                        let cw      = self.settings.canvas.w() as f32;
-                        let ch_f    = self.settings.canvas.h() as f32;
+                        let cw      = self.preview_w as f32;
+                        let ch_f    = self.preview_h as f32;
                         let avail   = ui.available_size();
                         // Reserve ~56px for the playback row + status labels below
                         let scale_x = avail.x / cw;
@@ -1579,6 +1790,29 @@ impl PathForgeApp {
         self.result_rx = new_rx;
         self.render_pending = false;
         self.render_dispatch_at = None;
+        self.compare_cpu_result = None;
+        self.compare_gpu_result = None;
+    }
+
+    fn compose_side_by_side(cpu: &RenderResult, gpu: &RenderResult) -> (usize, usize, Vec<u8>) {
+        let h = cpu.h.min(gpu.h);
+        let w = cpu.w.min(gpu.w);
+        let out_w = w.saturating_mul(2);
+        let mut out = vec![0u8; out_w.saturating_mul(h).saturating_mul(4)];
+
+        for y in 0..h {
+            let row = y * out_w * 4;
+            let cpu_src = y * cpu.w * 4;
+            let gpu_src = y * gpu.w * 4;
+
+            let left_dst = row;
+            let right_dst = row + w * 4;
+
+            out[left_dst..left_dst + w * 4].copy_from_slice(&cpu.buf[cpu_src..cpu_src + w * 4]);
+            out[right_dst..right_dst + w * 4].copy_from_slice(&gpu.buf[gpu_src..gpu_src + w * 4]);
+        }
+
+        (out_w, h, out)
     }
 
     // ── Collapsible section wrapper ───────────────────────────────────────────
@@ -1655,12 +1889,8 @@ impl PathForgeApp {
         settings.anim.seamless_lock = true;
         let fps = self.effective_output_fps();
         let total_frames = hardlock_total_frames(&settings.anim, fps).max(2);
-        let min_smoothing = min_smoothing_for_speed(
-            path_speed_tiles_per_sec(&settings.anim),
-            fps,
-            self.motion_quality_tpf_target,
-        );
-        let smoothing_samples = self.gif_smoothing_samples.max(min_smoothing);
+        // Preview/export parity: force 1 sample so exported motion matches preview sharpness.
+        let smoothing_samples = 1;
         let export_individual_layers = self.export_individual_layers;
         let gpu_scene_enabled = self.gpu_scene_export_enabled;
         let gpu_enabled = self.gpu_export_enabled;
@@ -1773,7 +2003,7 @@ fn knob_f32(ui: &mut egui::Ui, label: &str, val: &mut f32, min: f32, max: f32, s
     ui.add(
         Slider::new(val, min..=max)
             .step_by(step)
-            .show_value(false)
+            .show_value(true)
     );
     *val = val.clamp(min, max);
     ui.add_space(2.0);
@@ -1794,7 +2024,7 @@ fn knob_u32(ui: &mut egui::Ui, label: &str, val: &mut u32, min: u32, max: u32) -
     ui.add(
         Slider::new(val, min..=max)
             .integer()
-            .show_value(false)
+            .show_value(true)
     );
     *val = (*val).clamp(min, max);
     ui.add_space(2.0);
