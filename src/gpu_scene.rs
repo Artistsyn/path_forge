@@ -2617,11 +2617,13 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     var col = params.void_color.rgb;
     var prop_covered = false;
+    var wall_above_covered = false;
 
     // Above-horizon wall band: use the same wall shading model as below horizon.
     if (params.dim.w == 1u && y < horizon) {
         let ws = max(horizon - horizon * clamp(params.wall_data.x, 0.0, 1.0), 0.0);
         if (y >= ws) {
+            wall_above_covered = true;
             let edge = abs(x - cx);
             let dl = max(edge, 0.5);
             let wz_w = focal * params.misc.z / dl;
@@ -2635,7 +2637,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
             let ped = max(edge, 0.0);
             let base = clamp(params.misc.w / max(wz_w, 0.1), 0.0, 1.0)
                 * clamp(0.42 + ped / max(params.wall_data.y, 1.0), 0.0, 1.0);
-            let depth_near = 1.0 - clamp((y - ws) / max(horizon - ws, 1.0), 0.0, 1.0);
+            let depth_near = clamp(1.0 - abs(y - horizon) / max(h - horizon, 1.0), 0.0, 1.0);
             let atmo_boost = params.atmo_scene.z * params.atmo_scene.x * pow(depth_near, 0.65) * 0.85;
             let ambient = clamp(params.misc.y + atmo_boost, 0.08, 2.2);
             let emitter_boost = light_energy * 0.16 * pow(depth_near, 0.60);
@@ -2646,7 +2648,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         }
     }
 
-    if (params.dim.z == 1u && y < horizon) {
+    if (params.dim.z == 1u && y < horizon && !wall_above_covered) {
         let t = clamp(y / max(horizon, 1.0), 0.0, 1.0);
         col = lerp3(params.sky_top.rgb, params.sky_horizon.rgb, t);
 
@@ -2763,7 +2765,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
                 }
             }
         }
-    } else if (y >= horizon + 1.0) {
+    } else if (y >= horizon) {
         let p = max(y - horizon, 1.0);
         let t = clamp((y - horizon) / max(h - horizon, 1.0), 0.0, 1.0);
         let width_w = path_width_weight(t);
