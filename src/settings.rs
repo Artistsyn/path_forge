@@ -122,6 +122,40 @@ impl AtmoType {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub enum AttachmentSurface { Floating, Wall, Floor, Ceiling }
+
+impl AttachmentSurface {
+    pub fn all() -> &'static [AttachmentSurface] {
+        &[Self::Floating, Self::Wall, Self::Floor, Self::Ceiling]
+    }
+    pub fn name(&self) -> &'static str {
+        match self {
+            Self::Floating => "Floating",
+            Self::Wall => "Wall",
+            Self::Floor => "Floor",
+            Self::Ceiling => "Ceiling",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub enum MountSide { Both, Left, Right, Center }
+
+impl MountSide {
+    pub fn all() -> &'static [MountSide] {
+        &[Self::Both, Self::Left, Self::Right, Self::Center]
+    }
+    pub fn name(&self) -> &'static str {
+        match self {
+            Self::Both => "Both",
+            Self::Left => "Left",
+            Self::Right => "Right",
+            Self::Center => "Center",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum LightingPreset {
     Balanced,
     GoldenHour,
@@ -246,16 +280,24 @@ pub struct SkySettings {
     pub horizon:  [u8; 3],   // colour at horizon
     #[serde(default)]
     pub sun_enabled: bool,
+    #[serde(default = "bool_true")]
+    pub sun_emits_light: bool,
     #[serde(default = "default_sun_pos")]
     pub sun_pos: [f32; 2],    // normalized x,y in sky area
+    #[serde(default)]
+    pub sun_z: f32,           // -1..1 horizon depth bias (positive = longer shadows)
     #[serde(default = "default_sun_radius")]
     pub sun_radius: f32,
     #[serde(default = "default_sun_color")]
     pub sun_color: [u8; 3],
     #[serde(default)]
     pub moon_enabled: bool,
+    #[serde(default = "bool_true")]
+    pub moon_emits_light: bool,
     #[serde(default = "default_moon_pos")]
     pub moon_pos: [f32; 2],
+    #[serde(default)]
+    pub moon_z: f32,          // -1..1 horizon depth bias (positive = longer shadows)
     #[serde(default = "default_moon_radius")]
     pub moon_radius: f32,
     #[serde(default = "default_moon_color")]
@@ -313,11 +355,19 @@ fn default_cloud_scale() -> f32 { 1.0 }
 fn default_cloud_opacity() -> f32 { 0.35 }
 fn default_cloud_tint() -> [u8; 3] { [218, 224, 232] }
 fn default_cloud_variation() -> f32 { 0.55 }
+fn default_attachment_wall() -> AttachmentSurface { AttachmentSurface::Wall }
+fn default_attachment_floating() -> AttachmentSurface { AttachmentSurface::Floating }
+fn default_mount_side_both() -> MountSide { MountSide::Both }
+fn default_mount_side_center() -> MountSide { MountSide::Center }
 
 // ── Atmosphere layer (one entry in the Vec) ──────────────────────────────
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AtmoLayer {
     pub enabled:     bool,
+    #[serde(default = "bool_true")]
+    pub emits_light: bool,
+    #[serde(default = "bool_true")]
+    pub casts_shadow: bool,
     pub atmo_type:   AtmoType,
     pub torch_h:     f32,   // 0.3..5.0
     pub torch_spc:   u32,   // 1..8
@@ -330,6 +380,10 @@ pub struct AtmoLayer {
     pub flicker:     f32,   // 0..2 flame pulse amount
     #[serde(default = "default_atmo_scale")]
     pub fx_scale:    f32,   // 0.2..3.0 glow/debris/motes scale
+    #[serde(default = "default_attachment_wall")]
+    pub mount_surface: AttachmentSurface,
+    #[serde(default = "default_mount_side_both")]
+    pub mount_side: MountSide,
     #[serde(default)]
     pub sprite_path: String,
     #[serde(default)]
@@ -360,6 +414,8 @@ impl AtmoLayer {
     pub fn new(t: AtmoType) -> Self {
         Self {
             enabled: true,
+            emits_light: true,
+            casts_shadow: true,
             atmo_type: t,
             torch_h: 2.4,
             torch_spc: 4,
@@ -369,6 +425,8 @@ impl AtmoLayer {
             placement_jitter: 0.18,
             flicker: 1.0,
             fx_scale: 1.0,
+            mount_surface: AttachmentSurface::Wall,
+            mount_side: MountSide::Both,
             sprite_path: String::new(),
             sprite_pool_paths: String::new(),
             sprite_pool_enabled: false,
@@ -430,7 +488,23 @@ impl PropType {
 #[derive(Clone, Serialize, Deserialize)]
 pub struct PropInstance {
     pub enabled:   bool,
+    #[serde(default)]
+    pub emits_light: bool,
+    #[serde(default = "bool_true")]
+    pub casts_shadow: bool,
     pub prop_type: PropType,
+    #[serde(default)]
+    pub pos_x:      f32,
+    #[serde(default)]
+    pub pos_y:      f32,
+    #[serde(default)]
+    pub pos_z:      f32,
+    #[serde(default)]
+    pub pixel_hitbox_enabled: bool,
+    #[serde(default = "default_attachment_floating")]
+    pub mount_surface: AttachmentSurface,
+    #[serde(default = "default_mount_side_center")]
+    pub mount_side: MountSide,
     pub wx:        f32,   // world-space lateral offset (positive = right)
     pub mirror:    bool,  // also place at -wx
     pub z_spacing: f32,   // world-Z gap between instances (should divide loop_s)
@@ -548,7 +622,7 @@ fn default_tree_row_jitter() -> f32 { 0.25 }
 impl PropInstance {
     pub fn new(t: PropType) -> Self {
         let tint = t.default_tint();
-        Self { enabled: true, prop_type: t, wx: 1.4, mirror: true, z_spacing: 4.0,
+        Self { enabled: true, emits_light: false, casts_shadow: true, prop_type: t, pos_x: 0.0, pos_y: 0.0, pos_z: 0.0, pixel_hitbox_enabled: false, mount_surface: AttachmentSurface::Floating, mount_side: MountSide::Center, wx: 1.4, mirror: true, z_spacing: 4.0,
                              start_wz: default_prop_start_wz(), end_wz: default_prop_end_wz(),
                              scale: 1.0, width_scale: 1.0, height_scale: 1.0,
                              tint, scale_var: 0.22, x_jitter: 0.18, x_jitter_enabled: true,
@@ -597,6 +671,10 @@ pub struct PostSettings {
     /// Colour saturation: 0=greyscale, 1=normal, 2=vivid
     #[serde(default = "default_saturation")]
     pub saturation:  f32,
+    #[serde(default = "bool_true")]
+    pub realtime_lighting_enabled: bool,
+    #[serde(default = "bool_true")]
+    pub realtime_shadows_enabled: bool,
 }
 fn default_saturation() -> f32 { 1.0 }
 
@@ -614,6 +692,8 @@ impl Default for PostSettings {
             grain: 0.0,
             saturation_enabled: true,
             saturation: 1.0,
+            realtime_lighting_enabled: true,
+            realtime_shadows_enabled: true,
         }
     }
 }
@@ -660,11 +740,15 @@ pub mod presets {
             top: void,
             horizon: void,
             sun_enabled: false,
+            sun_emits_light: true,
             sun_pos: default_sun_pos(),
+            sun_z: 0.0,
             sun_radius: default_sun_radius(),
             sun_color: default_sun_color(),
             moon_enabled: false,
+            moon_emits_light: true,
             moon_pos: default_moon_pos(),
+            moon_z: 0.0,
             moon_radius: default_moon_radius(),
             moon_color: default_moon_color(),
             moon_phase: default_moon_phase(),
@@ -692,11 +776,15 @@ pub mod presets {
             top,
             horizon: hor,
             sun_enabled: true,
+            sun_emits_light: true,
             sun_pos: default_sun_pos(),
+            sun_z: 0.0,
             sun_radius: default_sun_radius(),
             sun_color: default_sun_color(),
             moon_enabled: false,
+            moon_emits_light: true,
             moon_pos: default_moon_pos(),
+            moon_z: 0.0,
             moon_radius: default_moon_radius(),
             moon_color: default_moon_color(),
             moon_phase: default_moon_phase(),
@@ -721,6 +809,8 @@ pub mod presets {
     fn atmo1(t: AtmoType, th: f32, ts: u32, tsc: f32, nm: u32, nd: u32) -> AtmoSettings {
         AtmoSettings { layers: vec![AtmoLayer {
             enabled: true,
+            emits_light: true,
+            casts_shadow: true,
             atmo_type: t,
             torch_h: th,
             torch_spc: ts,
@@ -730,6 +820,8 @@ pub mod presets {
             placement_jitter: default_atmo_jitter(),
             flicker: default_atmo_flicker(),
             fx_scale: default_atmo_scale(),
+            mount_surface: AttachmentSurface::Wall,
+            mount_side: MountSide::Both,
             sprite_path: String::new(),
             sprite_pool_paths: String::new(),
             sprite_pool_enabled: false,
@@ -745,7 +837,7 @@ pub mod presets {
     fn no_props() -> PropsSettings { PropsSettings { items: vec![] } }
     fn pi(pt: PropType, wx: f32, mirror: bool, zs: f32, sc: f32, seed: u32) -> PropInstance {
         let tint = pt.default_tint();
-        PropInstance { enabled: true, prop_type: pt, wx, mirror, z_spacing: zs,
+        PropInstance { enabled: true, emits_light: false, casts_shadow: true, prop_type: pt, pos_x: 0.0, pos_y: 0.0, pos_z: 0.0, pixel_hitbox_enabled: false, mount_surface: AttachmentSurface::Floating, mount_side: MountSide::Center, wx, mirror, z_spacing: zs,
                        start_wz: default_prop_start_wz(), end_wz: default_prop_end_wz(),
                        scale: sc, width_scale: 1.0, height_scale: 1.0, tint,
                        scale_var: 0.22, x_jitter: 0.18, x_jitter_enabled: true,
@@ -789,6 +881,8 @@ pub mod presets {
             grain: 0.0,
             saturation_enabled: true,
             saturation: 1.0,
+            realtime_lighting_enabled: true,
+            realtime_shadows_enabled: true,
         }
     }
     fn sc_indoor(hy: u32, hw: f32, ch: f32, fm: f32, pp: f32, vc: [u8;3]) -> SceneSettings {

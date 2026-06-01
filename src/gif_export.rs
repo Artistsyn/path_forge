@@ -13,6 +13,30 @@ pub struct ExportUpdate {
     pub failed: bool,
 }
 
+#[derive(Clone, Copy, Debug)]
+pub enum TransitionBlendMode {
+    Linear,
+    Smoothstep,
+    EaseInOutSine,
+    EaseInOutCubic,
+}
+
+fn apply_transition_blend(mode: TransitionBlendMode, t: f32) -> f32 {
+    let t = t.clamp(0.0, 1.0);
+    match mode {
+        TransitionBlendMode::Linear => t,
+        TransitionBlendMode::Smoothstep => t * t * (3.0 - 2.0 * t),
+        TransitionBlendMode::EaseInOutSine => 0.5 - 0.5 * (std::f32::consts::PI * t).cos(),
+        TransitionBlendMode::EaseInOutCubic => {
+            if t < 0.5 {
+                4.0 * t * t * t
+            } else {
+                1.0 - (-2.0 * t + 2.0).powi(3) * 0.5
+            }
+        }
+    }
+}
+
 /// Encode a sequence of RGBA frames as a looping animated GIF.
 /// `delay_ms` — per-frame delay in milliseconds (e.g. 83 ≈ 12 fps).
 pub fn export_gif(
@@ -682,6 +706,173 @@ fn export_composite_layered_gif(
     }
 
     Ok(n_frames as usize)
+}
+
+pub fn export_preset_transition_gif_with_progress(
+    settings_from: &crate::settings::PathForgeSettings,
+    settings_to: &crate::settings::PathForgeSettings,
+    fps: u32,
+    transition_frames: u32,
+    blend_mode: TransitionBlendMode,
+    project_name: &str,
+    gpu_scene_enabled: bool,
+    gpu_enabled: bool,
+    gpu_settings: GpuEffectSettings,
+    mut on_update: impl FnMut(ExportUpdate),
+) -> Result<String, Box<dyn std::error::Error>> {
+    let safe_name = sanitize_project_name(project_name);
+    let project_dir = std::env::current_dir()?
+        .join("exported_gif")
+        .join(safe_name);
+    std::fs::create_dir_all(&project_dir)?;
+
+    let mut to_settings = settings_to.clone();
+    to_settings.canvas = settings_from.canvas.clone();
+
+    let n_frames = transition_frames.clamp(2, 8000);
+    let (_loop_tiles, _ignored_total, frame_step, delay_hundredths) =
+        frame_plan(settings_from, fps, n_frames);
+    let loop_tiles = settings_from.anim.loop_s.max(1) as f32;
+
+    let out_path = project_dir.join("07_preset_transition.gif");
+    let width = settings_from.canvas.w() as u16;
+    let height = settings_from.canvas.h() as u16;
+    let file = std::fs::File::create(&out_path)?;
+    let mut encoder = gif::Encoder::new(file, width, height, &[])?;
+    encoder.set_repeat(gif::Repeat::Infinite)?;
+
+    let mut renderer = crate::renderer::PathRenderer::default();
+    let mut gpu_scene = if gpu_scene_enabled
+        && crate::gpu_scene::supports_exact_scene_parity(settings_from)
+        && crate::gpu_scene::supports_exact_scene_parity(&to_settings)
+    {
+        GpuSceneRenderer::new().ok()
+    } else {
+        None
+    };
+    let gpu = if gpu_enabled { GpuEffects::new().ok() } else { None };
+
+    let px_count = settings_from.canvas.w() * settings_from.canvas.h();
+    let mut rgba_a = vec![0u8; px_count * 4];
+    let mut rgba_b = vec![0u8; px_count * 4];
+    let mut rgba_mix = vec![0u8; px_count * 4];
+    let mut rgb = vec![0u8; px_count * 3];
+
+    on_update(ExportUpdate {
+        stage: "transition".to_owned(),
+        message: "Starting preset transition render".to_owned(),
+        current: 0,
+        total: n_frames,
+        done: false,
+        failed: false,
+    });
+
+    for i in 0..n_frames {
+        let scroll = i as f32 * frame_step;
+        let global_t = scroll / loop_tiles;
+        let linear_t = if n_frames > 1 {
+            i as f32 / (n_frames - 1) as f32
+        } else {
+            1.0
+        };
+        let blend_t = apply_transition_blend(blend_mode, linear_t);
+
+        if let Some(gs) = gpu_scene.as_mut() {
+            let from_scene = gs.render_scene_rgba(settings_from, scroll, global_t)
+                .map_err(|e| format!("gpu scene render failed transition frame {} (from): {}", i, e))?;
+            let to_scene = gs.render_scene_rgba(&to_settings, scroll, global_t)
+                .map_err(|e| format!("gpu scene render failed transition frame {} (to): {}", i, e))?;
+            rgba_a.copy_from_slice(&from_scene);
+            rgba_b.copy_from_slice(&to_scene);
+            if crate::gpu_scene::has_sprite_instances(settings_from) {
+                crate::gpu_scene::composite_sprite_overlay(
+                    &mut rgba_a,
+                    settings_from.canvas.w() as u32,
+                    settings_from.canvas.h() as u32,
+                    settings_from,
+                    scroll,
+                );
+            }
+            if crate::gpu_scene::has_sprite_instances(&to_settings) {
+                crate::gpu_scene::composite_sprite_overlay(
+                    &mut rgba_b,
+                    settings_from.canvas.w() as u32,
+                    settings_from.canvas.h() as u32,
+                    &to_settings,
+                    scroll,
+                );
+            }
+        } else {
+            renderer.render(settings_from, scroll, global_t, &mut rgba_a);
+            renderer.render(&to_settings, scroll, global_t, &mut rgba_b);
+        }
+
+        for p in 0..px_count {
+            let i4 = p * 4;
+            let r = rgba_a[i4] as f32 * (1.0 - blend_t) + rgba_b[i4] as f32 * blend_t;
+            let g = rgba_a[i4 + 1] as f32 * (1.0 - blend_t) + rgba_b[i4 + 1] as f32 * blend_t;
+            let b = rgba_a[i4 + 2] as f32 * (1.0 - blend_t) + rgba_b[i4 + 2] as f32 * blend_t;
+            rgba_mix[i4] = r.clamp(0.0, 255.0) as u8;
+            rgba_mix[i4 + 1] = g.clamp(0.0, 255.0) as u8;
+            rgba_mix[i4 + 2] = b.clamp(0.0, 255.0) as u8;
+            rgba_mix[i4 + 3] = 255;
+        }
+
+        if let Some(gpu_fx) = gpu.as_ref() {
+            if let Ok(processed) = gpu_fx.process_rgba(
+                &rgba_mix,
+                settings_from.canvas.w() as u32,
+                settings_from.canvas.h() as u32,
+                &gpu_settings,
+            ) {
+                for (src, dst) in processed.chunks_exact(4).zip(rgb.chunks_exact_mut(3)) {
+                    dst[0] = src[0];
+                    dst[1] = src[1];
+                    dst[2] = src[2];
+                }
+            } else {
+                for (src, dst) in rgba_mix.chunks_exact(4).zip(rgb.chunks_exact_mut(3)) {
+                    dst[0] = src[0];
+                    dst[1] = src[1];
+                    dst[2] = src[2];
+                }
+            }
+        } else {
+            for (src, dst) in rgba_mix.chunks_exact(4).zip(rgb.chunks_exact_mut(3)) {
+                dst[0] = src[0];
+                dst[1] = src[1];
+                dst[2] = src[2];
+            }
+        }
+
+        let mut frame = gif::Frame::from_rgb(width, height, &rgb);
+        frame.delay = delay_hundredths;
+        encoder.write_frame(&frame)?;
+
+        on_update(ExportUpdate {
+            stage: "transition".to_owned(),
+            message: format!("transition frame {}/{}", i + 1, n_frames),
+            current: i + 1,
+            total: n_frames,
+            done: false,
+            failed: false,
+        });
+    }
+
+    let msg = format!(
+        "Saved transition GIF ({} frames) to {}",
+        n_frames,
+        out_path.display()
+    );
+    on_update(ExportUpdate {
+        stage: "transition".to_owned(),
+        message: msg.clone(),
+        current: n_frames,
+        total: n_frames,
+        done: true,
+        failed: false,
+    });
+    Ok(msg)
 }
 
 fn effective_layer_smoothing(base: u32, layers: RenderLayers) -> u32 {

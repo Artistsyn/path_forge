@@ -1,6 +1,8 @@
 /// Software path renderer — Rust port of the JSX canvas render loop plus
 /// PathForge 2.0 additions (sky gradient, enhanced depth fog).
-use crate::settings::{PathForgeSettings, AtmoType, LightingPreset, PropType, TILE};
+use crate::settings::{
+    AttachmentSurface, AtmoType, MountSide, LightingPreset, PathForgeSettings, PropType, TILE,
+};
 use crate::tiles::{gen_floor_tile, gen_wall_tile, seeded_rng, TileKey};
 use image::ImageReader;
 use std::collections::HashMap;
@@ -90,6 +92,36 @@ impl PathRenderer {
         let (atmo_light_energy, atmo_light_tint) = estimate_atmo_lighting(s);
         let atmo_light_gain = s.scene.atmo_light_influence.clamp(0.0, 2.0);
         let atmo_tint_gain = s.scene.atmo_tint_influence.clamp(0.0, 1.0);
+        let sun_emits = s.sky.sun_enabled && s.sky.sun_emits_light;
+        let moon_emits = s.sky.moon_enabled && s.sky.moon_emits_light;
+        let sun_alt = (1.0 - s.sky.sun_pos[1] - s.sky.sun_z * 0.5).clamp(0.03, 1.5);
+        let moon_alt = (1.0 - s.sky.moon_pos[1] - s.sky.moon_z * 0.5).clamp(0.03, 1.4);
+        let mut dir_acc = 0.0f32;
+        let mut alt_acc = 0.0f32;
+        let mut depth_acc = 0.0f32;
+        let mut w_acc = 0.0f32;
+        if sun_emits {
+            let w = s.sky.sun_radius.max(0.02);
+            dir_acc += (s.sky.sun_pos[0] - 0.5).clamp(-1.0, 1.0) * w;
+            alt_acc += sun_alt * w;
+            depth_acc += s.sky.sun_z.clamp(-1.0, 1.0) * w;
+            w_acc += w;
+        }
+        if moon_emits {
+            let w = s.sky.moon_radius.max(0.02) * 0.7;
+            dir_acc += (s.sky.moon_pos[0] - 0.5).clamp(-1.0, 1.0) * w;
+            alt_acc += moon_alt * w;
+            depth_acc += s.sky.moon_z.clamp(-1.0, 1.0) * w;
+            w_acc += w;
+        }
+        let sky_light_dir = if w_acc > 0.0001 { (dir_acc / w_acc).clamp(-1.0, 1.0) } else { 0.0 };
+        let light_altitude = if w_acc > 0.0001 { (alt_acc / w_acc).clamp(0.03, 1.5) } else { 0.55 };
+        let light_depth_bias = if w_acc > 0.0001 { (depth_acc / w_acc).clamp(-1.0, 1.0) } else { 0.0 };
+        let shadow_len_factor = (1.95 / light_altitude).clamp(0.55, 6.5);
+        let has_emitter_global = sun_emits
+            || moon_emits
+            || s.atmo.layers.iter().any(|l| l.enabled && l.emits_light)
+            || s.props.items.iter().any(|p| p.enabled && p.emits_light);
 
         // ── 1. Fill background with void / sky ─────────────────────────────
         for y in 0..ch {
@@ -221,7 +253,6 @@ impl PathRenderer {
         // ── 4. Walls (lateral perspective) ────────────────────────────────
         let l_wx = s.walls.l_wx;
         if layers.walls && s.walls.enabled {
-        let wall_fade = s.walls.fade_rows.max(1) as usize;
         let top_rows = (hy as f32 * s.walls.top_coverage.clamp(0.0, 1.0)).round() as usize;
         let ws = hy.saturating_sub(top_rows);
 
@@ -263,26 +294,24 @@ impl PathRenderer {
                     buf[pi+2] = (wb * sh + 2.0).min(255.0) as u8;
                     buf[pi+3] = 255;
                 } else {
-                    let fade = ((y - ws) as f32 / wall_fade as f32).clamp(0.0, 1.0);
                     let ped = (dc - phw).max(0.0);
                     let base = (s.walls.bright / wz_w.max(0.1)).min(1.0)
                         * (0.42 + ped / s.walls.junc_shadow.max(1.0)).min(1.0);
                     let depth_far = (1.0 - ((y.saturating_sub(hy)) as f32 / (ch - hy) as f32)).clamp(0.0, 1.0);
-                    let atmo_boost = atmo_light_energy * atmo_light_gain * depth_far.powf(0.65) * 0.65;
-                    let mut sh = (base * (s.scene.ambient * light_profile.ambient_mult + atmo_boost).clamp(0.06, 2.1))
+                    let atmo_boost = atmo_light_energy * atmo_light_gain * depth_far.powf(0.65) * 0.85;
+                    let mut sh = (base * (s.scene.ambient * light_profile.ambient_mult + atmo_boost).clamp(0.08, 2.2))
                         .powf(light_profile.contrast_pow)
-                        .clamp(0.0, 1.6);
-                    sh *= 0.35 + 0.65 * fade;
-                    sh = sh.max(0.02);
+                        .clamp(0.0, 1.7);
+                    sh = sh.max(0.04);
                     if sh < 0.005 { continue; }
-                    // Keep wall hue consistent above horizon; only fade light contribution.
-                    let tint_a = (atmo_light_energy * atmo_tint_gain * depth_far * 0.16).clamp(0.0, 0.30);
+                    // Keep wall hue and brightness model consistent above/below horizon.
+                    let tint_a = (atmo_light_energy * atmo_tint_gain * depth_far * 0.20).clamp(0.0, 0.35);
                     let wr = lerp(wr, atmo_light_tint[0], tint_a);
                     let wg = lerp(wg, atmo_light_tint[1], tint_a);
                     let wb = lerp(wb, atmo_light_tint[2], tint_a);
-                    buf[pi]   = (wr * sh + 1.0).min(255.0) as u8;
-                    buf[pi+1] = (wg * sh + 1.0).min(255.0) as u8;
-                    buf[pi+2] = (wb * sh + 1.0).min(255.0) as u8;
+                    buf[pi]   = (wr * sh + 2.0).min(255.0) as u8;
+                    buf[pi+1] = (wg * sh + 2.0).min(255.0) as u8;
+                    buf[pi+2] = (wb * sh + 2.0).min(255.0) as u8;
                     buf[pi+3] = 255;
                 }
             }
@@ -308,17 +337,108 @@ impl PathRenderer {
                     if wz < min_wz || wz > max_wz { continue; }
                     let fr = focal * layer.torch_scale * fx_scale / wz;
                     if fr < 0.5 { continue; }
-                    for &sgn in &[-1.0f32, 1.0] {
-                        let side_i = if sgn > 0.0 { 1 } else { 0 };
+                    let side_list: &[(f32, u32)] = match layer.mount_side {
+                        MountSide::Both => &[(-1.0, 0), (1.0, 1)],
+                        MountSide::Left => &[(-1.0, 0)],
+                        MountSide::Right => &[(1.0, 1)],
+                        MountSide::Center => &[(0.0, 2)],
+                    };
+                    for &(sgn, side_i) in side_list {
                         let jx = (inst_hash_f(layer.variation_seed + 17 + side_i, n) * 2.0 - 1.0) * jitter;
                         let jy = (inst_hash_f(layer.variation_seed + 23 + side_i, n) * 2.0 - 1.0) * jitter;
                         let path_cx = path_center_for_wz(cx, hy, ch, max_hw, focal, cam_h, s.scene.horizon_curve, wz);
-                        let sx = path_cx + focal * sgn * (l_wx + jx * 0.45) / wz;
-                        let sy = hy as f32 + focal * (cam_h - layer.torch_h + jy * 0.35) / wz;
+                        let (sx, sy) = match layer.mount_surface {
+                            AttachmentSurface::Wall => {
+                                let x_off = if sgn.abs() > 0.01 {
+                                    sgn * (l_wx + jx * 0.45)
+                                } else {
+                                    jx * 0.25
+                                };
+                                (
+                                    path_cx + focal * x_off / wz,
+                                    hy as f32 + focal * (cam_h - layer.torch_h + jy * 0.35) / wz,
+                                )
+                            }
+                            AttachmentSurface::Floor => {
+                                let x_off = if sgn.abs() > 0.01 {
+                                    sgn * (l_wx * 0.62 + jx * 0.35)
+                                } else {
+                                    jx * 0.25
+                                };
+                                let floor_sy = hy as f32 + focal * cam_h / wz;
+                                (
+                                    path_cx + focal * x_off / wz,
+                                    floor_sy - focal * layer.torch_h.max(0.0) * 0.35 / wz + jy * 0.25,
+                                )
+                            }
+                            AttachmentSurface::Ceiling => {
+                                let x_off = if sgn.abs() > 0.01 {
+                                    sgn * (l_wx * 0.9 + jx * 0.35)
+                                } else {
+                                    jx * 0.2
+                                };
+                                (
+                                    path_cx + focal * x_off / wz,
+                                    hy as f32 - focal * layer.torch_h.max(0.0) * 0.9 / wz + jy * 0.2,
+                                )
+                            }
+                            AttachmentSurface::Floating => {
+                                let x_off = if sgn.abs() > 0.01 {
+                                    sgn * (l_wx * 0.45 + jx * 0.35)
+                                } else {
+                                    jx * 0.2
+                                };
+                                (
+                                    path_cx + focal * x_off / wz,
+                                    hy as f32 + focal * (cam_h - layer.torch_h + jy * 0.35) / wz,
+                                )
+                            }
+                        };
                         if sx < -50.0 || sx > cw as f32 + 50.0 { continue; }
                         if sy < -50.0 || sy > ch as f32 + 50.0 { continue; }
 
-                        draw_light_fixture(buf, cw, ch, sx, sy, fr, &layer.atmo_type, sgn);
+                        if s.post.realtime_lighting_enabled && layer.emits_light {
+                            let light_cx = if matches!(layer.atmo_type, AtmoType::Torch | AtmoType::Lantern) {
+                                sx - sgn * fr * 0.10
+                            } else {
+                                sx
+                            };
+                            let light_scale = match layer.atmo_type {
+                                AtmoType::Torch | AtmoType::Lantern => 1.28,
+                                AtmoType::Candle => 1.02,
+                                AtmoType::Firefly => 0.82,
+                                AtmoType::Magic | AtmoType::GreenFire | AtmoType::IceWisp => 1.12,
+                                AtmoType::None => 1.0,
+                            };
+                            draw_local_surface_light(
+                                buf,
+                                cw,
+                                ch,
+                                light_cx,
+                                sy,
+                                fr * light_scale,
+                                glow_col,
+                                light_altitude,
+                            );
+                        }
+
+                        if s.post.realtime_shadows_enabled && has_emitter_global && layer.casts_shadow {
+                            draw_fixture_mount_shadow(
+                                buf,
+                                cw,
+                                ch,
+                                sx,
+                                sy,
+                                fr,
+                                -sky_light_dir,
+                                shadow_len_factor,
+                                light_depth_bias,
+                                hy as f32,
+                            );
+                        }
+
+                        let draw_side = if sgn < 0.0 { -1.0 } else { 1.0 };
+                        draw_light_fixture(buf, cw, ch, sx, sy, fr, &layer.atmo_type, draw_side);
 
                         if let Some(sprite_path) = pick_sprite_path(
                             &layer.sprite_path,
@@ -349,7 +469,8 @@ impl PathRenderer {
 
                         // Glow disc (additive)
                         let gl_r = (fr * 3.8).max(3.0);
-                        draw_glow_additive(buf, cw, ch, sx, sy, gl_r, glow_col, 0.75);
+                        let gl_peak = if s.post.realtime_lighting_enabled { 0.92 } else { 0.75 };
+                        draw_glow_additive(buf, cw, ch, sx, sy, gl_r, glow_col, gl_peak);
 
                         if let Some(flame_cols) = flames {
                             // Flame flicker
@@ -372,14 +493,7 @@ impl PathRenderer {
         }
 
         // ── 5.5 Props (back-to-front, continuous modular placement) ──────
-        let sky_light_dir = if s.sky.sun_enabled {
-            (s.sky.sun_pos[0] - 0.5).clamp(-1.0, 1.0)
-        } else if s.sky.moon_enabled {
-            (s.sky.moon_pos[0] - 0.5).clamp(-1.0, 1.0)
-        } else {
-            0.0
-        };
-        let auto_light_dir = lerp(sky_light_dir, 0.0, (atmo_light_gain * 0.35).clamp(0.0, 1.0));
+        let auto_light_dir = sky_light_dir;
         if layers.props {
         for prop in s.props.items.iter().filter(|p| p.enabled) {
             let min_wz = prop.start_wz.max(0.01);
@@ -388,7 +502,7 @@ impl PathRenderer {
             let n_lo = ((scroll + min_wz) / spc).ceil() as i32;
             let n_hi = ((scroll + max_wz) / spc).floor() as i32;
             for n in (n_lo..=n_hi).rev() { // back-to-front
-                let wz = n as f32 * spc - scroll;
+                let wz = n as f32 * spc - scroll + prop.pos_z;
                 if wz < min_wz || wz > max_wz { continue; }
 
                 // Seam-safe randomization key: keep per-instance style/tint/variation periodic
@@ -406,7 +520,7 @@ impl PathRenderer {
                 if ps < 0.8 { continue; }
 
                 // y_sink: shift base downward so props appear grounded
-                let sy_floor = hy as f32 + focal * cam_h / wz;
+                let sy_floor = hy as f32 + focal * (cam_h - prop.pos_y) / wz;
                 let sink = prop.y_sink.clamp(0.0, 6.0);
                 let jy = if prop.y_jitter_enabled {
                     (inst_hash_f(prop.seed + 7, n_seed) * 2.0 - 1.0) * prop.y_jitter
@@ -433,7 +547,7 @@ impl PathRenderer {
                     } else {
                         0.0
                     };
-                    let sx_world = cx + focal * (wx_v + jit) / wz;
+                    let sx_world = cx + focal * (wx_v + prop.pos_x + jit) / wz;
                     let ty = ((sy_floor - hy as f32) / (ch - hy) as f32).clamp(0.0, 1.0);
                     let width_w = path_width_weight(s.scene.curve_top_weight, s.scene.curve_bottom_weight, ty);
                     let phw2 = max_hw * width_w * (2.0 * ty - ty * ty).max(0.0).powf(pw);
@@ -533,10 +647,21 @@ impl PathRenderer {
                                 PropType::Mushroom => draw_mushroom(buf, cw, ch, sx, sy_base, ps_x, ps_y, tint),
                             }
                         }
+                        let tree_shadow_mode = match draw_type {
+                            PropType::Tree => 1,
+                            PropType::PineTree => 2,
+                            PropType::DeadTree => 3,
+                            _ => 0,
+                        };
+                        let treeish = tree_shadow_mode != 0;
+                        let root_blend = (prop.ground_blend.clamp(0.0, 1.0) * (0.24 + sink * 0.20)).clamp(0.0, 1.0);
+                        if treeish && root_blend > 0.01 {
+                            draw_root_contact_blend(buf, cw, ch, sx, sy_floor, ps, root_blend, hy as f32);
+                        }
                         let embed = (prop.ground_blend.clamp(0.0, 1.0) * (0.35 + sink * 0.2)).clamp(0.0, 1.0);
-                        if embed > 0.01 {
+                        if embed > 0.01 && prop.casts_shadow && has_emitter_global {
                             let cast_dir = (prop.shadow_dir - auto_light_dir * prop.shadow_follow_light.clamp(0.0, 1.0)).clamp(-2.0, 2.0);
-                            let shadow_len = (prop.shadow_length * light_profile.shadow_len_mult).clamp(0.2, 6.0);
+                            let shadow_len = (prop.shadow_length * light_profile.shadow_len_mult * shadow_len_factor).clamp(0.2, 8.5);
                             let shadow_embed = (embed * light_profile.shadow_darken_mult).clamp(0.0, 1.0);
                             draw_ground_embed(
                                 buf,
@@ -551,6 +676,10 @@ impl PathRenderer {
                                 cast_dir,
                                 prop.shadow_softness,
                                 prop.shadow_opacity,
+                                prop.pixel_hitbox_enabled,
+                                tree_shadow_mode,
+                                light_depth_bias,
+                                hy as f32,
                             );
                         }
                     }
@@ -645,7 +774,9 @@ impl PathRenderer {
 
         // Bloom: fast separable Gaussian on bright pixels
         if post.bloom_enabled && post.bloom > 0.01 {
-            apply_bloom(buf, cw, ch, post.bloom, 200u8, 4);
+            let thr = (165.0 - post.bloom.clamp(0.0, 2.0) * 42.0).clamp(112.0, 190.0) as u8;
+            let rad = (4.0 + post.bloom.clamp(0.0, 2.0) * 3.5).round() as i32;
+            apply_bloom(buf, cw, ch, post.bloom, thr, rad.clamp(3, 10));
         }
 
         // Depth fog
@@ -870,7 +1001,7 @@ fn estimate_atmo_lighting(s: &PathForgeSettings) -> (f32, [f32; 3]) {
     let mut tint = [0.0f32, 0.0f32, 0.0f32];
     let mut tw = 0.0f32;
 
-    for layer in s.atmo.layers.iter().filter(|l| l.enabled && l.atmo_type != AtmoType::None) {
+    for layer in s.atmo.layers.iter().filter(|l| l.enabled && l.emits_light && l.atmo_type != AtmoType::None) {
         let density = (1.0 / layer.torch_spc.max(1) as f32).sqrt().clamp(0.08, 1.0);
         let source = (layer.torch_scale * 7.0 + layer.fx_scale * 0.2 + layer.n_motes as f32 * 0.004)
             .clamp(0.0, 3.0);
@@ -1095,18 +1226,30 @@ fn draw_ground_embed(
     shadow_dir: f32,
     shadow_softness: f32,
     shadow_opacity: f32,
+    pixel_hitbox: bool,
+    tree_shadow_mode: u8,
+    light_depth_bias: f32,
+    ground_top_y: f32,
 ) {
     let a = amount.clamp(0.0, 1.0);
     let opacity = shadow_opacity.clamp(0.05, 2.5);
     let sh_size = shadow_size.clamp(0.2, 5.0);
-    let sh_len = shadow_length.clamp(0.2, 6.0);
+    let sh_len = shadow_length.clamp(0.2, 10.0);
     let sh_soft = shadow_softness.clamp(0.3, 3.0);
     let cast = shadow_dir.clamp(-2.0, 2.0);
     let cast_x = cast * ps * 0.65 * sh_len;
-    let cast_y = ps * 0.10 * sh_len;
+    let depth_sign = if light_depth_bias >= 0.0 { 1.0 } else { -1.0 };
+    let depth_mag = light_depth_bias.abs().clamp(0.0, 1.0);
+    let y_cast_mag = if depth_sign > 0.0 {
+        0.25 + depth_mag * 0.95
+    } else {
+        0.10 + depth_mag * 0.38
+    };
+    let cast_y = depth_sign * ps * y_cast_mag * sh_len;
+    let spread = 1.0 + cast.abs() * 0.22 + depth_mag * 0.42 + (sh_len / 10.0) * 0.22;
 
-    let r0x = (ps * 1.9 * sh_size * (0.9 + 0.22 * sh_soft)).max(0.6);
-    let r0y = (ps * 0.42 * sh_size * (0.8 + 0.36 * sh_soft)).max(0.4);
+    let r0x = (ps * 1.9 * sh_size * (0.9 + 0.22 * sh_soft) * spread).max(0.6);
+    let r0y = (ps * 0.42 * sh_size * (0.8 + 0.36 * sh_soft) * (0.94 + depth_mag * 0.20)).max(0.4);
     let r1x = r0x * (1.45 + 0.95 * sh_len);
     let r1y = r0y * (1.05 + 0.12 * sh_len);
     let y0 = sy_floor + ps * 0.05;
@@ -1126,17 +1269,286 @@ fn draw_ground_embed(
 
     let x0 = ((sx + cast_x * 0.5) as i32 - r1x as i32 - 2).clamp(0, w as i32) as usize;
     let x1 = ((sx + cast_x * 0.5) as i32 + r1x as i32 + 2).clamp(0, w as i32) as usize;
-    let y_start = y0.max(0.0) as usize;
-    let y_end = (y0 + ps * (1.1 + 0.45 * sh_len) + cast_y).min(h as f32) as usize;
+    let y_a = y0;
+    let y_b = y0 + ps * (1.1 + 0.45 * sh_len) + cast_y;
+    let y_start = y_a.min(y_b).max(ground_top_y).max(0.0) as usize;
+    let y_end = y_a.max(y_b).min(h as f32) as usize;
+    if y_end <= y_start {
+        return;
+    }
     for y in y_start..y_end {
         let t = ((y as f32 - y0) / (ps * 1.1).max(0.1)).clamp(0.0, 1.0);
-        let blend = (1.0 - t).powf(1.0 / sh_soft.max(0.1)) * a * opacity * 0.42;
+        let blend_base = (1.0 - t).powf(1.0 / sh_soft.max(0.1)) * a * opacity * 0.42;
         for x in x0..x1 {
+            let blend = if pixel_hitbox {
+                let cell = (ps * 0.18).max(1.0);
+                let qx = ((x as f32 - (sx + cast_x * 0.75)) / cell + 0.5).floor();
+                let qy = ((y as f32 - (y0 + cast_y * 0.75 + ps * 0.10)) / cell + 0.5).floor();
+                let d = (qx * qx + qy * qy).sqrt();
+                let m = (1.0 - d / ((r1x / cell) * 0.95).max(1.0)).clamp(0.0, 1.0);
+                blend_base.max(m * a * opacity * 0.40)
+            } else {
+                blend_base
+            };
             let pi = (y * w + x) * 4;
             buf[pi] = (buf[pi] as f32 * (1.0 - blend)) as u8;
             buf[pi + 1] = (buf[pi + 1] as f32 * (1.0 - blend)) as u8;
             buf[pi + 2] = (buf[pi + 2] as f32 * (1.0 - blend)) as u8;
         }
+    }
+
+    // Extra narrow penumbra for tree trunks so trees cast a readable stem shadow,
+    // not only a canopy blob.
+    if tree_shadow_mode != 0 {
+        let trunk_w = (ps * (0.33 + depth_mag * 0.08 + cast.abs() * 0.04) * sh_size).max(0.85);
+        let trunk_h = (ps * 1.15).max(1.4);
+        let tx0 = sx + cast_x * 0.05;
+        let ty0 = sy_floor + ps * 0.01;
+        let tx1 = sx + cast_x * (0.68 + depth_mag * 0.08);
+        let ty1 = sy_floor + cast_y * (0.58 + depth_mag * 0.08) + ps * 0.08;
+        let steps = (3.0 + sh_len * 2.8).round().clamp(4.0, 28.0) as usize;
+        for i in 0..steps {
+            let t = i as f32 / steps.max(1) as f32;
+            let tx = tx0 + (tx1 - tx0) * t;
+            let ty = ty0 + (ty1 - ty0) * t;
+            let widen = 1.0 + t * (0.12 + depth_mag * 0.10 + cast.abs() * 0.04);
+            let rx = trunk_w * widen;
+            let ry = (trunk_w * 0.50 + trunk_h * 0.08) * (0.96 + t * 0.18);
+            draw_ellipse_dark(buf, w, h, tx, ty, rx.max(0.55), ry.max(0.35));
+        }
+        let canopy_cx = sx + cast_x * (0.88 + depth_mag * 0.05);
+        let canopy_cy = sy_floor + cast_y * (0.72 + depth_mag * 0.06) - ps * 0.06;
+        match tree_shadow_mode {
+            1 => {
+                let canopy_rx = (ps * (1.05 + 0.22 * sh_size + 0.16 * cast.abs())).max(0.9);
+                let canopy_ry = (ps * (0.72 + 0.10 * sh_size)).max(0.58);
+                draw_ellipse_dark(buf, w, h, canopy_cx, canopy_cy, canopy_rx, canopy_ry);
+                draw_ellipse_dark(buf, w, h, canopy_cx + cast_x * 0.10, canopy_cy - canopy_ry * 0.10, canopy_rx * 0.82, canopy_ry * 0.86);
+            }
+            2 => {
+                let base_rx = (ps * (0.86 + 0.12 * sh_size + 0.08 * cast.abs())).max(0.72);
+                let base_ry = (ps * (0.58 + 0.08 * sh_size)).max(0.50);
+                draw_ellipse_dark(buf, w, h, canopy_cx, canopy_cy + base_ry * 0.18, base_rx, base_ry);
+                draw_ellipse_dark(buf, w, h, canopy_cx + cast_x * 0.06, canopy_cy - base_ry * 0.42, base_rx * 0.70, base_ry * 0.78);
+                draw_ellipse_dark(buf, w, h, canopy_cx + cast_x * 0.12, canopy_cy - base_ry * 0.92, base_rx * 0.46, base_ry * 0.60);
+            }
+            3 => {
+                let dead_rx = (ps * (0.42 + 0.07 * cast.abs())).max(0.55);
+                let dead_ry = (ps * 0.34).max(0.40);
+                draw_ellipse_dark(buf, w, h, canopy_cx + cast_x * 0.10, canopy_cy - dead_ry * 0.25, dead_rx, dead_ry);
+            }
+            _ => {}
+        }
+    }
+}
+
+fn draw_root_contact_blend(
+    buf: &mut [u8],
+    w: usize,
+    h: usize,
+    sx: f32,
+    sy_floor: f32,
+    ps: f32,
+    amount: f32,
+    ground_top_y: f32,
+) {
+    let a = amount.clamp(0.0, 1.0);
+    if a < 0.01 {
+        return;
+    }
+    let cx = sx;
+    let cy = (sy_floor + ps * 0.04).max(ground_top_y);
+    let rx = (ps * (0.40 + a * 0.22)).max(0.75);
+    let ry = (ps * (0.12 + a * 0.10)).max(0.45);
+    draw_ellipse_dark(buf, w, h, cx, cy, rx, ry);
+    draw_ellipse_dark(buf, w, h, cx - rx * 0.55, cy + ry * 0.28, rx * 0.52, ry * 0.72);
+    draw_ellipse_dark(buf, w, h, cx + rx * 0.55, cy + ry * 0.28, rx * 0.52, ry * 0.72);
+
+    // Smooth contour refinement for pixel-outline hitboxes: keep the silhouette crisp without
+    // falling back to blocky cells.
+    let x0 = (cx - rx * 1.15).floor().max(0.0) as usize;
+    let x1 = (cx + rx * 1.15).ceil().min(w as f32 - 1.0) as usize;
+    let y0 = (cy - ry * 0.95).floor().max(ground_top_y).max(0.0) as usize;
+    let y1 = (cy + ry * 1.45).ceil().min(h as f32 - 1.0) as usize;
+    for y in y0..=y1 {
+        for x in x0..=x1 {
+            let dx = (x as f32 - cx) / rx.max(0.001);
+            let dy = (y as f32 - cy) / ry.max(0.001);
+            let d2 = dx * dx + dy * dy;
+            if d2 >= 1.0 {
+                continue;
+            }
+            let blend = (1.0 - d2).powf(1.65) * (0.07 + a * 0.12);
+            let pi = (y * w + x) * 4;
+            buf[pi] = (buf[pi] as f32 * (1.0 - blend)) as u8;
+            buf[pi + 1] = (buf[pi + 1] as f32 * (1.0 - blend)) as u8;
+            buf[pi + 2] = (buf[pi + 2] as f32 * (1.0 - blend)) as u8;
+        }
+    }
+}
+
+fn draw_local_surface_light(
+    buf: &mut [u8],
+    w: usize,
+    h: usize,
+    sx: f32,
+    sy: f32,
+    fr: f32,
+    glow_col: [u8; 3],
+    light_altitude: f32,
+) {
+    let alt = light_altitude.clamp(0.05, 1.5);
+    let rx = (fr * (3.15 + (1.0 - alt).clamp(0.0, 1.0) * 2.05)).max(6.0);
+    let ry = (fr * (1.72 + alt.clamp(0.0, 1.0) * 1.5)).max(4.0);
+    let x0 = (sx - rx - 2.0).floor().max(0.0) as usize;
+    let x1 = (sx + rx + 2.0).ceil().min(w as f32 - 1.0) as usize;
+    let y0 = (sy - ry - 2.0).floor().max(0.0) as usize;
+    let y1 = (sy + ry + 2.0).ceil().min(h as f32 - 1.0) as usize;
+    for y in y0..=y1 {
+        for x in x0..=x1 {
+            let dx = (x as f32 - sx) / rx.max(0.001);
+            let dy = (y as f32 - sy) / ry.max(0.001);
+            let d2 = dx * dx + dy * dy;
+            if d2 >= 1.0 {
+                continue;
+            }
+            let falloff = 1.0 / (1.0 + d2 * 3.4);
+            let a = (1.0 - d2).powf(1.45) * 0.34 * falloff;
+            let pi = (y * w + x) * 4;
+            buf[pi] = (buf[pi] as f32 + glow_col[0] as f32 * a).clamp(0.0, 255.0) as u8;
+            buf[pi + 1] = (buf[pi + 1] as f32 + glow_col[1] as f32 * a).clamp(0.0, 255.0) as u8;
+            buf[pi + 2] = (buf[pi + 2] as f32 + glow_col[2] as f32 * a).clamp(0.0, 255.0) as u8;
+        }
+    }
+
+    // Broad wall pool so wall-mounted torches read as lighting the surface, not just glowing in air.
+    let wx = sx;
+    let wy = sy + fr * 0.06;
+    let wrx = (fr * 2.25).max(6.0);
+    let wry = (fr * 1.04).max(3.0);
+    let wx0 = (wx - wrx - 2.0).floor().max(0.0) as usize;
+    let wx1 = (wx + wrx + 2.0).ceil().min(w as f32 - 1.0) as usize;
+    let wy0 = (wy - wry - 2.0).floor().max(0.0) as usize;
+    let wy1 = (wy + wry + 2.0).ceil().min(h as f32 - 1.0) as usize;
+    for y in wy0..=wy1 {
+        for x in wx0..=wx1 {
+            let dx = (x as f32 - wx) / wrx.max(0.001);
+            let dy = (y as f32 - wy) / wry.max(0.001);
+            let d2 = dx * dx + dy * dy;
+            if d2 >= 1.0 {
+                continue;
+            }
+            let a = (1.0 - d2).powf(1.35) * 0.18;
+            let pi = (y * w + x) * 4;
+            buf[pi] = (buf[pi] as f32 + glow_col[0] as f32 * a).clamp(0.0, 255.0) as u8;
+            buf[pi + 1] = (buf[pi + 1] as f32 + glow_col[1] as f32 * a).clamp(0.0, 255.0) as u8;
+            buf[pi + 2] = (buf[pi + 2] as f32 + glow_col[2] as f32 * a).clamp(0.0, 255.0) as u8;
+        }
+    }
+
+    // Bright near-source hotspot that blends into normal lighting and then dissipates.
+    let hx = sx;
+    let hy = sy + fr * 0.05;
+    let hrx = (fr * 0.95).max(1.0);
+    let hry = (fr * 0.75).max(0.8);
+    let hx0 = (hx - hrx - 1.0).floor().max(0.0) as usize;
+    let hx1 = (hx + hrx + 1.0).ceil().min(w as f32 - 1.0) as usize;
+    let hy0 = (hy - hry - 1.0).floor().max(0.0) as usize;
+    let hy1 = (hy + hry + 1.0).ceil().min(h as f32 - 1.0) as usize;
+    for y in hy0..=hy1 {
+        for x in hx0..=hx1 {
+            let dx = (x as f32 - hx) / hrx.max(0.001);
+            let dy = (y as f32 - hy) / hry.max(0.001);
+            let d2 = dx * dx + dy * dy;
+            if d2 >= 1.0 {
+                continue;
+            }
+            let a = (1.0 - d2).powf(1.15) * 0.56;
+            let pi = (y * w + x) * 4;
+            buf[pi] = (buf[pi] as f32 + glow_col[0] as f32 * a).clamp(0.0, 255.0) as u8;
+            buf[pi + 1] = (buf[pi + 1] as f32 + glow_col[1] as f32 * a).clamp(0.0, 255.0) as u8;
+            buf[pi + 2] = (buf[pi + 2] as f32 + glow_col[2] as f32 * a).clamp(0.0, 255.0) as u8;
+        }
+    }
+
+    // Secondary downward lobe for stronger near-wall/floor light pooling.
+    let py = sy + fr * (0.52 + (1.0 - alt).clamp(0.0, 1.0) * 0.34);
+    let prx = (rx * 1.16).max(6.0);
+    let pry = (ry * 0.88).max(3.0);
+    let px0 = (sx - prx - 2.0).floor().max(0.0) as usize;
+    let px1 = (sx + prx + 2.0).ceil().min(w as f32 - 1.0) as usize;
+    let py0 = (py - pry - 2.0).floor().max(0.0) as usize;
+    let py1 = (py + pry + 2.0).ceil().min(h as f32 - 1.0) as usize;
+    for y in py0..=py1 {
+        for x in px0..=px1 {
+            let dx = (x as f32 - sx) / prx.max(0.001);
+            let dy = (y as f32 - py) / pry.max(0.001);
+            let d2 = dx * dx + dy * dy;
+            if d2 >= 1.0 {
+                continue;
+            }
+            let a = (1.0 - d2).powf(1.38) * 0.32;
+            let pi = (y * w + x) * 4;
+            buf[pi] = (buf[pi] as f32 + glow_col[0] as f32 * a).clamp(0.0, 255.0) as u8;
+            buf[pi + 1] = (buf[pi + 1] as f32 + glow_col[1] as f32 * a).clamp(0.0, 255.0) as u8;
+            buf[pi + 2] = (buf[pi + 2] as f32 + glow_col[2] as f32 * a).clamp(0.0, 255.0) as u8;
+        }
+    }
+
+    // Upper-wall lobe so wall extension above fixtures stays lit in tall-wall scenes.
+    let uy = sy - fr * (0.62 + (1.0 - alt).clamp(0.0, 1.0) * 0.18);
+    let urx = (rx * 0.92).max(4.0);
+    let ury = (ry * 0.66).max(2.4);
+    let ux0 = (sx - urx - 2.0).floor().max(0.0) as usize;
+    let ux1 = (sx + urx + 2.0).ceil().min(w as f32 - 1.0) as usize;
+    let uy0 = (uy - ury - 2.0).floor().max(0.0) as usize;
+    let uy1 = (uy + ury + 2.0).ceil().min(h as f32 - 1.0) as usize;
+    for y in uy0..=uy1 {
+        for x in ux0..=ux1 {
+            let dx = (x as f32 - sx) / urx.max(0.001);
+            let dy = (y as f32 - uy) / ury.max(0.001);
+            let d2 = dx * dx + dy * dy;
+            if d2 >= 1.0 {
+                continue;
+            }
+            let a = (1.0 - d2).powf(1.44) * 0.20;
+            let pi = (y * w + x) * 4;
+            buf[pi] = (buf[pi] as f32 + glow_col[0] as f32 * a).clamp(0.0, 255.0) as u8;
+            buf[pi + 1] = (buf[pi + 1] as f32 + glow_col[1] as f32 * a).clamp(0.0, 255.0) as u8;
+            buf[pi + 2] = (buf[pi + 2] as f32 + glow_col[2] as f32 * a).clamp(0.0, 255.0) as u8;
+        }
+    }
+}
+
+fn draw_fixture_mount_shadow(
+    buf: &mut [u8],
+    w: usize,
+    h: usize,
+    sx: f32,
+    sy: f32,
+    fr: f32,
+    light_dir: f32,
+    shadow_len_factor: f32,
+    light_depth_bias: f32,
+    ground_top_y: f32,
+) {
+    let cast_x = light_dir.clamp(-1.5, 1.5) * fr * 1.35 * shadow_len_factor.clamp(0.4, 6.5);
+    let depth_sign = if light_depth_bias >= 0.0 { 1.0 } else { -1.0 };
+    let depth_mag = light_depth_bias.abs().clamp(0.0, 1.0);
+    let cast_y = depth_sign
+        * fr
+        * (0.12 + depth_mag * 0.55)
+        * shadow_len_factor.clamp(0.4, 6.5);
+    let rx = (fr * 0.90).max(1.1);
+    let ry = (fr * 0.30).max(0.9);
+    for i in 0..4 {
+        let t = i as f32 / 3.0;
+        let cx = sx + cast_x * (0.3 + t * 0.9);
+        let cy = sy + fr * 0.24 + cast_y * (0.2 + t * 0.9);
+        if cy < ground_top_y {
+            continue;
+        }
+        draw_ellipse_dark(buf, w, h, cx, cy, rx * (1.0 - t * 0.35), ry * (1.0 - t * 0.22));
     }
 }
 
@@ -1159,17 +1571,37 @@ fn draw_light_fixture(
         AtmoType::Torch | AtmoType::GreenFire | AtmoType::Magic | AtmoType::IceWisp => {
             let stem_h = (fr * 1.6).max(2.0);
             let cup_w = (fr * 0.7).max(1.0);
-            fill_rect_any(buf, w, h, sx - sign * fr * 0.70, sy + fr * 0.10, sx, sy + fr * 0.18, dark_metal);
-            fill_rect_any(buf, w, h, sx - cup_w * 0.35, sy + fr * 0.12, sx + cup_w * 0.35, sy + fr * 0.24, metal);
-            fill_rect_any(buf, w, h, sx - cup_w * 0.15, sy + fr * 0.24, sx + cup_w * 0.15, sy + fr * 0.24 + stem_h, post);
+            let mx = sx - sign * fr * 0.10;
+            fill_rect_any(buf, w, h, sx - sign * fr * 0.32, sy + fr * 0.12, sx - sign * fr * 0.08, sy + fr * 0.18, dark_metal);
+            fill_rect_any(buf, w, h, mx - cup_w * 0.28, sy + fr * 0.12, mx + cup_w * 0.28, sy + fr * 0.24, metal);
+            fill_rect_any(buf, w, h, mx - cup_w * 0.13, sy + fr * 0.24, mx + cup_w * 0.13, sy + fr * 0.24 + stem_h, post);
+            let flame_cx = mx + sign * fr * 0.01;
+            let flame_cy = sy + fr * 0.03;
+            fill_ellipse(buf, w, h, flame_cx, flame_cy + fr * 0.08, fr * 0.30, fr * 0.46, [245, 178, 88]);
+            fill_ellipse(buf, w, h, flame_cx, flame_cy - fr * 0.02, fr * 0.18, fr * 0.28, [255, 226, 160]);
+            fill_ellipse(buf, w, h, flame_cx, flame_cy - fr * 0.11, fr * 0.09, fr * 0.14, [255, 244, 218]);
         }
         AtmoType::Lantern => {
-            let lx = sx;
-            let ly = sy + fr * 0.2;
-            fill_rect_any(buf, w, h, lx - sign * fr * 0.70, ly - fr * 0.25, lx, ly - fr * 0.18, dark_metal);
-            draw_line_px(buf, w, h, lx - sign * fr * 0.28, ly - fr * 0.18, lx - sign * fr * 0.08, ly + fr * 0.02, metal);
-            fill_rect_any(buf, w, h, lx - fr * 0.20, ly + fr * 0.02, lx + fr * 0.20, ly + fr * 0.45, dark_metal);
-            fill_ellipse(buf, w, h, lx, ly + fr * 0.27, fr * 0.14, fr * 0.15, warm);
+            let ly = sy + fr * 0.12;
+            let bar_left = sx - sign * fr * 0.58;
+            let bar_right = sx - sign * fr * 0.22;
+            let hook_x = (bar_left + bar_right) * 0.5;
+            let lx = hook_x;
+            // Wall arm and support.
+            fill_rect_any(buf, w, h, bar_left - sign * fr * 0.12, ly - fr * 0.30, bar_left - sign * fr * 0.02, ly - fr * 0.06, dark_metal);
+            fill_rect_any(buf, w, h, bar_left, ly - fr * 0.24, bar_right, ly - fr * 0.16, dark_metal);
+            draw_line_px(buf, w, h, bar_right - sign * fr * 0.05, ly - fr * 0.20, bar_right, ly - fr * 0.06, metal);
+            draw_line_px(buf, w, h, bar_left - sign * fr * 0.02, ly - fr * 0.24, hook_x, ly - fr * 0.04, metal);
+            // Hanging point + chain.
+            fill_ellipse(buf, w, h, hook_x, ly - fr * 0.02, fr * 0.05, fr * 0.03, metal);
+            fill_rect_any(buf, w, h, hook_x - fr * 0.012, ly - fr * 0.20, hook_x + fr * 0.012, ly - fr * 0.02, metal);
+            fill_rect_any(buf, w, h, hook_x - fr * 0.018, ly - fr * 0.01, hook_x + fr * 0.018, ly + fr * 0.22, metal);
+            // Lantern cap/frame/glass/body.
+            fill_rect_any(buf, w, h, lx - fr * 0.18, ly + fr * 0.16, lx + fr * 0.18, ly + fr * 0.24, dark_metal);
+            fill_rect_any(buf, w, h, lx - fr * 0.24, ly + fr * 0.24, lx + fr * 0.24, ly + fr * 0.78, dark_metal);
+            fill_rect_any(buf, w, h, lx - fr * 0.14, ly + fr * 0.30, lx + fr * 0.14, ly + fr * 0.70, [192, 146, 82]);
+            fill_rect_any(buf, w, h, lx - fr * 0.18, ly + fr * 0.78, lx + fr * 0.18, ly + fr * 0.86, dark_metal);
+            fill_ellipse(buf, w, h, lx, ly + fr * 0.52, fr * 0.12, fr * 0.21, warm);
         }
         AtmoType::Candle => {
             let cx = sx;

@@ -34,11 +34,14 @@ struct SceneParams {
     feature_counts: [u32; 4],
     prop_core: [[f32; 4]; 8],
     prop_geom: [[f32; 4]; 8],
+    prop_pos: [[f32; 4]; 8],
     prop_tint: [[f32; 4]; 8],
     prop_misc: [[f32; 4]; 8],
     prop_rows: [[f32; 4]; 8],
     prop_var: [[f32; 4]; 8],
     prop_var2: [[f32; 4]; 8],
+    prop_shadow_profile0: [[f32; 4]; 8],
+    prop_shadow_profile1: [[f32; 4]; 8],
     atmo_core: [[f32; 4]; 4],
     atmo_glow: [[f32; 4]; 4],
     grass_data:  [f32; 4],   // [density, height, upright, enabled(0/1)]
@@ -118,7 +121,7 @@ fn estimate_atmo_lighting(settings: &crate::settings::PathForgeSettings) -> (f32
         .atmo
         .layers
         .iter()
-        .filter(|l| l.enabled && !matches!(l.atmo_type, crate::settings::AtmoType::None))
+        .filter(|l| l.enabled && l.emits_light && !matches!(l.atmo_type, crate::settings::AtmoType::None))
     {
         let density = (1.0 / layer.torch_spc.max(1) as f32).sqrt().clamp(0.08, 1.0);
         let source =
@@ -210,6 +213,288 @@ fn load_sprite_rgba(path: &str) -> Option<(u32, u32, Vec<u8>)> {
     result
 }
 
+fn darken_pixel(buf: &mut [u8], width: u32, height: u32, x: i32, y: i32, amount: f32) {
+    if x < 0 || y < 0 || x >= width as i32 || y >= height as i32 {
+        return;
+    }
+    let idx = ((y as u32 * width + x as u32) * 4) as usize;
+    if idx + 2 >= buf.len() {
+        return;
+    }
+    let a = amount.clamp(0.0, 1.0);
+    buf[idx] = (buf[idx] as f32 * (1.0 - a)) as u8;
+    buf[idx + 1] = (buf[idx + 1] as f32 * (1.0 - a)) as u8;
+    buf[idx + 2] = (buf[idx + 2] as f32 * (1.0 - a)) as u8;
+}
+
+fn smoothstep(edge0: f32, edge1: f32, x: f32) -> f32 {
+    let d = (edge1 - edge0).abs().max(0.0001);
+    let t = ((x - edge0) / d).clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
+}
+
+fn sprite_alpha_metrics(iw: u32, ih: u32, pixels: &[u8]) -> Option<(f32, f32, f32, f32)> {
+    if iw == 0 || ih == 0 {
+        return None;
+    }
+    let mut min_x = iw;
+    let mut max_x = 0u32;
+    let mut min_y = ih;
+    let mut max_y = 0u32;
+    let mut any = false;
+    let mut top_w_sum = 0.0f32;
+    let mut top_w_n = 0.0f32;
+    let mut bot_w_sum = 0.0f32;
+    let mut bot_w_n = 0.0f32;
+
+    for y in 0..ih {
+        let mut row_min = iw;
+        let mut row_max = 0u32;
+        let mut row_any = false;
+        for x in 0..iw {
+            let si = ((y * iw + x) * 4 + 3) as usize;
+            if si >= pixels.len() || pixels[si] < 24 {
+                continue;
+            }
+            any = true;
+            row_any = true;
+            min_x = min_x.min(x);
+            max_x = max_x.max(x);
+            min_y = min_y.min(y);
+            max_y = max_y.max(y);
+            row_min = row_min.min(x);
+            row_max = row_max.max(x);
+        }
+        if !row_any {
+            continue;
+        }
+        let row_w = (row_max - row_min + 1) as f32 / iw.max(1) as f32;
+        let yn = y as f32 / ih.max(1) as f32;
+        if yn < 0.35 {
+            top_w_sum += row_w;
+            top_w_n += 1.0;
+        }
+        if yn > 0.65 {
+            bot_w_sum += row_w;
+            bot_w_n += 1.0;
+        }
+    }
+
+    if !any {
+        return None;
+    }
+
+    let bbox_w = (max_x - min_x + 1) as f32 / iw.max(1) as f32;
+    let bbox_h = (max_y - min_y + 1) as f32 / ih.max(1) as f32;
+    let top_w = if top_w_n > 0.0 { top_w_sum / top_w_n } else { bbox_w };
+    let bot_w = if bot_w_n > 0.0 { bot_w_sum / bot_w_n } else { bbox_w };
+    Some((bbox_w, bbox_h, top_w, bot_w))
+}
+
+fn sprite_shadow_profile_adjusted(
+    base0: [f32; 4],
+    base1: [f32; 4],
+    iw: u32,
+    ih: u32,
+    pixels: &[u8],
+) -> ([f32; 4], [f32; 4]) {
+    let mut p0 = base0;
+    let mut p1 = base1;
+    let Some((bbox_w, bbox_h, top_w, bot_w)) = sprite_alpha_metrics(iw, ih, pixels) else {
+        return (p0, p1);
+    };
+
+    let top_ratio = (top_w / bbox_w.max(0.01)).clamp(0.25, 1.8);
+    let bot_ratio = (bot_w / bbox_w.max(0.01)).clamp(0.25, 1.8);
+
+    p0[0] *= (0.80 + bbox_h * 0.55).clamp(0.45, 1.6);
+    p0[1] *= (0.75 + top_ratio * 0.35).clamp(0.55, 1.8);
+    p0[2] *= (0.65 + (top_ratio * 0.65 + bot_ratio * 0.20)).clamp(0.45, 2.1);
+    p0[3] *= (0.80 + top_ratio * 0.22).clamp(0.50, 1.8);
+
+    p1[0] *= (0.86 + top_ratio * 0.24).clamp(0.55, 1.9);
+    p1[1] *= (0.90 + (1.0 - bot_ratio.clamp(0.3, 1.2)) * 0.16).clamp(0.55, 1.4);
+    p1[2] *= (0.86 + bot_ratio * 0.16).clamp(0.55, 1.8);
+    (p0, p1)
+}
+
+fn draw_sprite_projected_shadow(
+    buf: &mut [u8],
+    width: u32,
+    height: u32,
+    iw: u32,
+    ih: u32,
+    pixels: &[u8],
+    left: i32,
+    full_w: f32,
+    sy_floor: f32,
+    cast_x: f32,
+    cast_y: f32,
+    strength: f32,
+    ps: f32,
+    profile0: [f32; 4],
+    profile1: [f32; 4],
+    pixel_hitbox: bool,
+) {
+    if iw == 0 || ih == 0 {
+        return;
+    }
+    let cast_len = (cast_x * cast_x + cast_y * cast_y).sqrt().max(0.001);
+    let steps = if ih > 96 { 12 } else { 9 };
+    for i in 0..steps {
+        let z = i as f32 / (steps - 1).max(1) as f32;
+        let syf = ((1.0 - z) * (ih.saturating_sub(1)) as f32)
+            .clamp(0.0, ih.saturating_sub(1) as f32);
+        let sy = syf as u32;
+        let mut min_x: Option<u32> = None;
+        let mut max_x: Option<u32> = None;
+        for sx in 0..iw {
+            let si = ((sy * iw + sx) * 4 + 3) as usize;
+            if si >= pixels.len() || pixels[si] < 24 {
+                continue;
+            }
+            min_x = Some(min_x.map_or(sx, |v| v.min(sx)));
+            max_x = Some(max_x.map_or(sx, |v| v.max(sx)));
+        }
+        let (Some(min_x), Some(max_x)) = (min_x, max_x) else { continue; };
+
+        let y_shadow = sy_floor + cast_y * z;
+        let x_l = left as f32 + (min_x as f32 / (iw - 1).max(1) as f32) * full_w + cast_x * z;
+        let x_r = left as f32 + (max_x as f32 / (iw - 1).max(1) as f32) * full_w + cast_x * z;
+        let side_base = profile0[1].max(0.2);
+        let side_gain = profile0[2].max(0.1);
+        let side_inflate = ps * 0.08 * (side_base + side_gain * z);
+        let alpha = strength * (0.10 + z * 0.36);
+        let hitbox_scale = if pixel_hitbox { 1.0 } else { 0.82 };
+        let thickness = (0.35 + ps * 0.018 * (1.0 + z * 1.7) * hitbox_scale).clamp(0.5, 4.6);
+        let yy0 = (y_shadow - thickness).floor() as i32;
+        let yy1 = (y_shadow + thickness).ceil() as i32;
+        let xx0 = (x_l - side_inflate).floor() as i32;
+        let xx1 = (x_r + side_inflate).ceil() as i32;
+        for yy in yy0..=yy1 {
+            for xx in xx0..=xx1 {
+                darken_pixel(buf, width, height, xx, yy, alpha);
+            }
+        }
+    }
+
+    let overhead_near = (ps * profile0[3].max(0.05)).max(0.1);
+    let overhead_far = (ps * profile1[0].max(profile0[3] + 0.2)).max(overhead_near + 0.1);
+    let overhead_w = 1.0 - smoothstep(overhead_near, overhead_far, cast_len);
+    if overhead_w > 0.001 {
+        let (bbox_w, _bbox_h, top_w, bot_w) = sprite_alpha_metrics(iw, ih, pixels)
+            .unwrap_or((0.8, 0.8, 0.8, 0.7));
+        let footprint_w = (ps * (0.48 + bbox_w * 0.9 + top_w * 0.35)).max(0.8);
+        let footprint_h = (ps * (0.22 + bot_w * 0.45)).max(0.6);
+        let cy = sy_floor + ps * 0.06;
+        let x0 = (left as f32 - footprint_w).floor().max(0.0) as i32;
+        let x1 = (left as f32 + full_w + footprint_w)
+            .ceil()
+            .min(width as f32 - 1.0) as i32;
+        let y0 = (cy - footprint_h - 2.0).floor().max(0.0) as i32;
+        let y1 = (cy + footprint_h + 2.0)
+            .ceil()
+            .min(height as f32 - 1.0) as i32;
+        let cx = left as f32 + full_w * 0.5;
+        let base_alpha = strength * overhead_w * 0.58;
+        for y in y0..=y1 {
+            for x in x0..=x1 {
+                let dx = (x as f32 - cx) / footprint_w.max(0.001);
+                let dy = (y as f32 - cy) / footprint_h.max(0.001);
+                let d2 = dx * dx + dy * dy;
+                if d2 >= 1.0 {
+                    continue;
+                }
+                let a = (1.0 - d2).powf(1.35) * base_alpha;
+                darken_pixel(buf, width, height, x, y, a);
+            }
+        }
+    }
+}
+
+fn add_light_pixel(buf: &mut [u8], width: u32, height: u32, x: i32, y: i32, rgb: [u8; 3], a: f32) {
+    if x < 0 || y < 0 || x >= width as i32 || y >= height as i32 {
+        return;
+    }
+    let idx = ((y as u32 * width + x as u32) * 4) as usize;
+    if idx + 2 >= buf.len() {
+        return;
+    }
+    let aa = a.clamp(0.0, 1.0);
+    buf[idx] = (buf[idx] as f32 + rgb[0] as f32 * aa).clamp(0.0, 255.0) as u8;
+    buf[idx + 1] = (buf[idx + 1] as f32 + rgb[1] as f32 * aa).clamp(0.0, 255.0) as u8;
+    buf[idx + 2] = (buf[idx + 2] as f32 + rgb[2] as f32 * aa).clamp(0.0, 255.0) as u8;
+}
+
+fn draw_surface_hotspot(
+    buf: &mut [u8],
+    width: u32,
+    height: u32,
+    cx: f32,
+    cy: f32,
+    rx: f32,
+    ry: f32,
+    rgb: [u8; 3],
+    peak: f32,
+) {
+    let x0 = (cx - rx - 2.0).floor().max(0.0) as i32;
+    let x1 = (cx + rx + 2.0).ceil().min(width as f32 - 1.0) as i32;
+    let y0 = (cy - ry - 2.0).floor().max(0.0) as i32;
+    let y1 = (cy + ry + 2.0).ceil().min(height as f32 - 1.0) as i32;
+    for y in y0..=y1 {
+        for x in x0..=x1 {
+            let dx = (x as f32 - cx) / rx.max(0.001);
+            let dy = (y as f32 - cy) / ry.max(0.001);
+            let d2 = dx * dx + dy * dy;
+            if d2 >= 1.0 {
+                continue;
+            }
+            let a = (1.0 - d2).powf(1.35) * peak * (1.0 / (1.0 + d2 * 2.4));
+            add_light_pixel(buf, width, height, x, y, rgb, a);
+        }
+    }
+}
+
+fn draw_mount_shadow(
+    buf: &mut [u8],
+    width: u32,
+    height: u32,
+    sx: f32,
+    sy: f32,
+    ps: f32,
+    shadow_dir: f32,
+    light_depth_bias: f32,
+    shadow_factor: f32,
+) {
+    let cast_x = shadow_dir.clamp(-1.5, 1.5) * ps * 0.9 * shadow_factor.clamp(0.4, 3.5);
+    let depth_sign = if light_depth_bias >= 0.0 { 1.0 } else { -1.0 };
+    let depth_mag = light_depth_bias.abs().clamp(0.0, 1.0);
+    let cast_y = depth_sign * ps * (0.08 + depth_mag * 0.10) * shadow_factor.clamp(0.4, 3.5);
+    for i in 0..4 {
+        let t = i as f32 / 3.0;
+        let cx = sx + cast_x * (0.35 + t * 0.85);
+        let cy = sy + ps * 0.2 + cast_y * (0.2 + t * 0.9);
+        let rx = (ps * (0.32 - t * 0.08)).max(0.8);
+        let ry = (ps * (0.12 - t * 0.03)).max(0.6);
+        let x0 = (cx - rx).floor() as i32;
+        let x1 = (cx + rx).ceil() as i32;
+        let y0 = (cy - ry).floor() as i32;
+        let y1 = (cy + ry).ceil() as i32;
+        for y in y0..=y1 {
+            for x in x0..=x1 {
+                let dx = (x as f32 - cx) / rx.max(0.001);
+                let dy = (y as f32 - cy) / ry.max(0.001);
+                let d2 = dx * dx + dy * dy;
+                if d2 >= 1.0 {
+                    continue;
+                }
+                let a = (1.0 - d2).powf(1.4) * (0.22 - t * 0.05);
+                darken_pixel(buf, width, height, x, y, a);
+            }
+        }
+    }
+}
+
 /// CPU sprite overlay: renders sprite-backed prop/atmo instances on top of a GPU scene buffer.
 /// Call this after render_scene_rgba when has_sprite_instances() is true.
 pub fn composite_sprite_overlay(
@@ -232,6 +517,39 @@ pub fn composite_sprite_overlay(
     let path_power = settings.scene.path_power.max(0.05);
     let cx = w * 0.5;
     let curve = settings.scene.horizon_curve.clamp(-1.0, 1.0);
+    let rt_shadows = settings.post.realtime_shadows_enabled;
+    let sun_emit = settings.sky.sun_enabled && settings.sky.sun_emits_light;
+    let moon_emit = settings.sky.moon_enabled && settings.sky.moon_emits_light;
+    let atmo_emit = settings.atmo.layers.iter().any(|l| l.enabled && l.emits_light);
+    let prop_emit = settings.props.items.iter().any(|p| p.enabled && p.emits_light);
+    let has_emitter = sun_emit || moon_emit || atmo_emit || prop_emit;
+    let mut light_dir = 0.0f32;
+    let mut light_alt = 0.55f32;
+    let mut dir_acc = 0.0f32;
+    let mut alt_acc = 0.0f32;
+    let mut depth_acc = 0.0f32;
+    let mut w_acc = 0.0f32;
+    let mut light_depth = 0.0f32;
+    if sun_emit {
+        let w = settings.sky.sun_radius.max(0.02);
+        dir_acc += (settings.sky.sun_pos[0] - 0.5).clamp(-1.0, 1.0) * w;
+        alt_acc += (1.0 - settings.sky.sun_pos[1] - settings.sky.sun_z * 0.5).clamp(0.03, 1.5) * w;
+        depth_acc += settings.sky.sun_z.clamp(-1.0, 1.0) * w;
+        w_acc += w;
+    }
+    if moon_emit {
+        let w = settings.sky.moon_radius.max(0.02) * 0.7;
+        dir_acc += (settings.sky.moon_pos[0] - 0.5).clamp(-1.0, 1.0) * w;
+        alt_acc += (1.0 - settings.sky.moon_pos[1] - settings.sky.moon_z * 0.5).clamp(0.03, 1.4) * w;
+        depth_acc += settings.sky.moon_z.clamp(-1.0, 1.0) * w;
+        w_acc += w;
+    }
+    if w_acc > 0.0001 {
+        light_dir = (dir_acc / w_acc).clamp(-1.0, 1.0);
+        light_alt = (alt_acc / w_acc).clamp(0.03, 1.5);
+        light_depth = (depth_acc / w_acc).clamp(-1.0, 1.0);
+    }
+    let light_shadow_dir = -light_dir;
 
     // Sprite-backed props
     for p in settings.props.items.iter().filter(|p| p.enabled) {
@@ -255,11 +573,26 @@ pub fn composite_sprite_overlay(
         let Some(path) = effective_path else { continue; };
         let Some((iw, ih, pixels)) = load_sprite_rgba(&path) else { continue; };
         if iw == 0 || ih == 0 { continue; }
+        let tcode = prop_type_code(&p.prop_type);
+        let (base0, base1) = prop_shadow_profile_defaults(tcode);
+        let (shadow_profile0, shadow_profile1) =
+            sprite_shadow_profile_adjusted(base0, base1, iw, ih, &pixels);
 
         let spc = p.z_spacing.max(0.1);
         let wz_near = p.start_wz.max(0.01);
         let wz_far = p.end_wz.max(wz_near + 0.01);
         let ss = p.sprite_scale.max(0.01);
+        let shadow_follow_light = p.shadow_follow_light.clamp(0.0, 1.0);
+        let manual_shadow_dir = p.shadow_dir.clamp(-2.0, 2.0);
+        let final_shadow_dir = if manual_shadow_dir.abs() > 0.001 {
+            manual_shadow_dir * (1.0 - shadow_follow_light) + light_shadow_dir * shadow_follow_light
+        } else {
+            light_shadow_dir
+        };
+        let shadow_size = p.shadow_size.clamp(0.2, 4.0);
+        let shadow_softness = p.shadow_softness.clamp(0.3, 3.0);
+        let shadow_opacity = p.shadow_opacity.clamp(0.1, 1.5);
+        let shadow_length = p.shadow_length.clamp(0.2, 5.0);
 
         let n_min = (scroll + wz_near) / spc;
         let n_max = (scroll + wz_far) / spc;
@@ -267,13 +600,13 @@ pub fn composite_sprite_overlay(
         let n_end = n_max.ceil() as i32 + 1;
 
         for n in n_start..=n_end {
-            let wz = n as f32 * spc - scroll;
+            let wz = n as f32 * spc - scroll + p.pos_z;
             if wz < wz_near || wz > wz_far || wz < 0.001 { continue; }
 
             let ps = focal * p.scale * ss / wz;
             if ps < 1.0 { continue; }
 
-            let sy_floor = horizon + focal * cam_h / wz;
+            let sy_floor = horizon + focal * (cam_h - p.pos_y) / wz;
             let fy = sy_floor - horizon;
             let path_t = (fy / (h - horizon).max(1.0)).clamp(0.0, 1.0);
             let width_w = path_width_weight(settings.scene.curve_top_weight, settings.scene.curve_bottom_weight, path_t);
@@ -289,7 +622,7 @@ pub fn composite_sprite_overlay(
 
             let mirrors: &[f32] = if p.mirror { &[-1.0, 1.0] } else { &[1.0] };
             for &sgn in mirrors {
-                let sx_world = row_cx2 + focal * p.wx * sgn / wz;
+                let sx_world = row_cx2 + focal * (p.wx * sgn + p.pos_x) / wz;
                 let sx_edge = row_cx2 + sgn * (row_phw + p.edge_gap * ps);
                 let sx = sx_world * (1.0 - p.path_follow) + sx_edge * p.path_follow;
 
@@ -305,6 +638,36 @@ pub fn composite_sprite_overlay(
 
                 let full_w = (right - left).max(1) as f32;
                 let full_h = (bot - top).max(1) as f32;
+
+                if rt_shadows && has_emitter && p.casts_shadow {
+                    let cast_len = (0.45 + (1.0 - light_alt).clamp(0.0, 1.2) * 1.95).clamp(0.35, 3.2);
+                    let effective_ps = ps * shadow_size;
+                    let cast_x = final_shadow_dir * effective_ps * cast_len * shadow_length;
+                    let depth_sign = if light_depth >= 0.0 { 1.0 } else { -1.0 };
+                    let depth_mag = light_depth.abs().clamp(0.0, 1.0);
+                    let cast_y = depth_sign * effective_ps * (0.06 + depth_mag * 0.08) * cast_len;
+                    let shadow_strength = (0.08 + shadow_opacity * 0.32)
+                        * p.ground_blend.clamp(0.0, 1.0)
+                        * (1.1 / shadow_softness.max(0.35));
+                    draw_sprite_projected_shadow(
+                        buf,
+                        width,
+                        height,
+                        iw,
+                        ih,
+                        &pixels,
+                        left,
+                        full_w,
+                        sy_floor,
+                        cast_x,
+                        cast_y,
+                        if p.pixel_hitbox_enabled { shadow_strength } else { shadow_strength * 0.78 },
+                        effective_ps,
+                        shadow_profile0,
+                        shadow_profile1,
+                        p.pixel_hitbox_enabled,
+                    );
+                }
 
                 for dy in y0..=y1 {
                     for dx in x0..=x1 {
@@ -387,12 +750,79 @@ pub fn composite_sprite_overlay(
             let sprite_w = sprite_h * (iw as f32 / ih as f32);
             let side_x = row_phw + settings.walls.l_wx * 0.42;
 
-            for &sgn in &[-1.0f32, 1.0] {
-                let sx = row_cx2 + sgn * side_x;
+            let side_list: &[(f32, u32)] = match l.mount_side {
+                crate::settings::MountSide::Both => &[(-1.0, 0), (1.0, 1)],
+                crate::settings::MountSide::Left => &[(-1.0, 0)],
+                crate::settings::MountSide::Right => &[(1.0, 1)],
+                crate::settings::MountSide::Center => &[(0.0, 2)],
+            };
+
+            for &(sgn, _side_i) in side_list {
+                let (sx, sy_mount) = match l.mount_surface {
+                    crate::settings::AttachmentSurface::Wall => {
+                        let sx = if sgn.abs() > 0.01 { row_cx2 + sgn * side_x } else { row_cx2 };
+                        (sx, sy)
+                    }
+                    crate::settings::AttachmentSurface::Floor => {
+                        let sx = if sgn.abs() > 0.01 { row_cx2 + sgn * side_x * 0.62 } else { row_cx2 };
+                        let floor_sy = horizon + focal * cam_h / wz;
+                        (sx, floor_sy - focal * torch_h.max(0.0) * 0.35 / wz)
+                    }
+                    crate::settings::AttachmentSurface::Ceiling => {
+                        let sx = if sgn.abs() > 0.01 { row_cx2 + sgn * side_x * 0.9 } else { row_cx2 };
+                        (sx, horizon - focal * torch_h.max(0.0) * 0.9 / wz)
+                    }
+                    crate::settings::AttachmentSurface::Floating => {
+                        let sx = if sgn.abs() > 0.01 { row_cx2 + sgn * side_x * 0.45 } else { row_cx2 };
+                        (sx, sy)
+                    }
+                };
+                if settings.post.realtime_lighting_enabled && l.emits_light {
+                    let glow_rgb = l.atmo_type.glow_color().unwrap_or([220, 180, 110]);
+                    let light_scale = match l.atmo_type {
+                        crate::settings::AtmoType::Torch | crate::settings::AtmoType::Lantern => 1.28,
+                        crate::settings::AtmoType::Candle => 1.02,
+                        crate::settings::AtmoType::Firefly => 0.82,
+                        crate::settings::AtmoType::Magic
+                        | crate::settings::AtmoType::GreenFire
+                        | crate::settings::AtmoType::IceWisp => 1.12,
+                        crate::settings::AtmoType::None => 1.0,
+                    };
+                    let hotspot_rx =
+                        (ps * light_scale * (1.8 + (1.0 - light_alt).clamp(0.0, 1.0) * 1.2)).max(2.0);
+                    let hotspot_ry =
+                        (ps * light_scale * (0.9 + light_alt.clamp(0.0, 1.0) * 0.95)).max(1.2);
+                    draw_surface_hotspot(
+                        buf,
+                        width,
+                        height,
+                        sx,
+                        sy_mount + ps * 0.18,
+                        hotspot_rx,
+                        hotspot_ry,
+                        glow_rgb,
+                        0.48,
+                    );
+                    draw_surface_hotspot(
+                        buf,
+                        width,
+                        height,
+                        sx,
+                        sy_mount + ps * 0.44,
+                        hotspot_rx * 1.24,
+                        hotspot_ry * 0.92,
+                        glow_rgb,
+                        0.26,
+                    );
+                }
+                if settings.post.realtime_shadows_enabled && has_emitter && l.casts_shadow {
+                    let shadow_factor = (1.95 / light_alt.max(0.03)).clamp(0.55, 6.5);
+                    draw_mount_shadow(buf, width, height, sx, sy_mount, ps, light_shadow_dir, light_depth, shadow_factor);
+                }
                 let left = (sx - sprite_w * 0.5) as i32;
                 let right = (sx + sprite_w * 0.5) as i32;
-                let top = (sy - sprite_h * 0.5) as i32;
-                let bot = (sy + sprite_h * 0.5) as i32;
+                let top = (sy_mount - sprite_h * 0.5) as i32;
+                let bot = (sy_mount + sprite_h * 0.5) as i32;
 
                 let x0 = left.max(0) as u32;
                 let x1 = right.min(width as i32 - 1).max(0) as u32;
@@ -437,6 +867,35 @@ fn prop_type_code(t: &crate::settings::PropType) -> f32 {
         crate::settings::PropType::DeadTree => 6.0,
         crate::settings::PropType::Mushroom => 7.0,
     }
+}
+
+fn prop_shadow_profile_defaults(tcode: f32) -> ([f32; 4], [f32; 4]) {
+    if tcode < 0.5 {
+        // Broadleaf tree
+        return ([6.4, 2.2, 2.4, 0.34], [1.58, 0.20, 0.82, 0.0]);
+    }
+    if tcode < 1.5 {
+        // Pine tree
+        return ([4.8, 2.1, 2.2, 0.30], [1.45, 0.18, 0.80, 0.0]);
+    }
+    if tcode < 2.5 {
+        // Bush
+        return ([3.9, 2.0, 2.0, 0.30], [1.40, 0.16, 0.78, 0.0]);
+    }
+    if tcode < 4.5 {
+        // Rock / boulder
+        return ([2.4, 1.9, 1.8, 0.26], [1.20, 0.12, 0.74, 0.0]);
+    }
+    if tcode < 5.5 {
+        // Cactus
+        return ([5.0, 1.7, 2.1, 0.28], [1.36, 0.14, 0.80, 0.0]);
+    }
+    if tcode < 6.5 {
+        // Dead tree
+        return ([8.4, 1.9, 2.7, 0.32], [1.70, 0.22, 0.88, 0.0]);
+    }
+    // Mushroom / fallback
+    ([3.1, 1.8, 1.9, 0.26], [1.18, 0.12, 0.70, 0.0])
 }
 
 fn atmo_type_code(t: &crate::settings::AtmoType) -> f32 {
@@ -802,13 +1261,20 @@ impl GpuSceneRenderer {
 
         let mut prop_core = [[0.0f32; 4]; 8];
         let mut prop_geom = [[0.0f32; 4]; 8];
+        let mut prop_pos = [[0.0f32; 4]; 8];
         let mut prop_tint = [[0.0f32; 4]; 8];
         let mut prop_misc = [[0.0f32; 4]; 8];
         let mut prop_rows = [[0.0f32; 4]; 8];
         let mut prop_var = [[0.0f32; 4]; 8];
         let mut prop_var2 = [[0.0f32; 4]; 8];
+        let mut prop_shadow_profile0 = [[0.0f32; 4]; 8];
+        let mut prop_shadow_profile1 = [[0.0f32; 4]; 8];
         let mut prop_count = 0u32;
+        let mut prop_emitter_present = false;
         for p in settings.props.items.iter().filter(|p| p.enabled).take(8) {
+            if p.emits_light {
+                prop_emitter_present = true;
+            }
             // Sprite-backed props are handled by the CPU overlay after GPU render;
             // leave the slot as zero (disabled) so the GPU skips them.
             let is_sprite = !p.sprite_path.trim().is_empty()
@@ -818,9 +1284,11 @@ impl GpuSceneRenderer {
                 continue;
             }
             let i = prop_count as usize;
+            let prop_tcode = prop_type_code(&p.prop_type);
+            let (profile0, profile1) = prop_shadow_profile_defaults(prop_tcode);
             prop_core[i] = [
                 1.0,
-                prop_type_code(&p.prop_type),
+                prop_tcode,
                 if p.mirror { 1.0 } else { 0.0 },
                 p.z_spacing.max(0.1),
             ];
@@ -835,6 +1303,12 @@ impl GpuSceneRenderer {
                 p.tint[1] as f32 / 255.0,
                 p.tint[2] as f32 / 255.0,
                 p.path_follow.clamp(0.0, 1.0),
+            ];
+            prop_pos[i] = [
+                p.pos_x.clamp(-32.0, 32.0),
+                p.pos_y.clamp(-24.0, 24.0),
+                p.pos_z.clamp(-48.0, 48.0),
+                if p.pixel_hitbox_enabled { 1.0 } else { 0.0 },
             ];
             prop_misc[i] = [
                 p.edge_gap.max(0.0),
@@ -859,14 +1333,19 @@ impl GpuSceneRenderer {
                 p.width_var.max(0.0),
                 p.height_var.max(0.0),
                 (if p.x_jitter_enabled { 1.0 } else { 0.0 })
-                    + (if p.y_jitter_enabled { 2.0 } else { 0.0 }),
+                    + (if p.y_jitter_enabled { 2.0 } else { 0.0 })
+                    + (if p.emits_light { 4.0 } else { 0.0 })
+                    + (if p.casts_shadow { 8.0 } else { 0.0 }),
             ];
+            prop_shadow_profile0[i] = profile0;
+            prop_shadow_profile1[i] = profile1;
             prop_count += 1;
         }
 
         let mut atmo_core = [[0.0f32; 4]; 4];
         let mut atmo_glow = [[0.0f32; 4]; 4];
         let mut atmo_count = 0u32;
+        let mut atmo_emitter_present = false;
         for l in settings
             .atmo
             .layers
@@ -875,11 +1354,30 @@ impl GpuSceneRenderer {
             .take(4)
         {
             let i = atmo_count as usize;
+            if l.emits_light {
+                atmo_emitter_present = true;
+            }
+            let mount_surface = match l.mount_surface {
+                crate::settings::AttachmentSurface::Floating => 0.0,
+                crate::settings::AttachmentSurface::Wall => 1.0,
+                crate::settings::AttachmentSurface::Floor => 2.0,
+                crate::settings::AttachmentSurface::Ceiling => 3.0,
+            };
+            let mount_side = match l.mount_side {
+                crate::settings::MountSide::Both => 0.0,
+                crate::settings::MountSide::Left => 1.0,
+                crate::settings::MountSide::Right => 2.0,
+                crate::settings::MountSide::Center => 3.0,
+            };
+            let mount_pack = mount_surface
+                + mount_side * 10.0
+                + if l.emits_light { 100.0 } else { 0.0 }
+                + if l.casts_shadow { 200.0 } else { 0.0 };
             atmo_core[i] = [
-                1.0,
                 atmo_type_code(&l.atmo_type),
                 l.torch_h,
                 l.torch_spc.max(1) as f32,
+                mount_pack,
             ];
             let glow = l.atmo_type.glow_color().unwrap_or([220, 180, 110]);
             atmo_glow[i] = [
@@ -892,6 +1390,47 @@ impl GpuSceneRenderer {
         }
 
         let (atmo_energy, atmo_tint_rgb) = estimate_atmo_lighting(settings);
+        let sun_emits = settings.sky.sun_enabled && settings.sky.sun_emits_light;
+        let moon_emits = settings.sky.moon_enabled && settings.sky.moon_emits_light;
+        let mut light_dir_acc = 0.0f32;
+        let mut light_alt_acc = 0.0f32;
+        let mut light_depth_acc = 0.0f32;
+        let mut light_weight = 0.0f32;
+        let sun_alt = (1.0 - settings.sky.sun_pos[1] - settings.sky.sun_z * 0.5).clamp(0.03, 1.5);
+        let moon_alt = (1.0 - settings.sky.moon_pos[1] - settings.sky.moon_z * 0.5).clamp(0.03, 1.4);
+        if sun_emits {
+            let w = settings.sky.sun_radius.max(0.02);
+            light_dir_acc += (settings.sky.sun_pos[0] - 0.5).clamp(-1.0, 1.0) * w;
+            light_alt_acc += sun_alt * w;
+            light_depth_acc += settings.sky.sun_z.clamp(-1.0, 1.0) * w;
+            light_weight += w;
+        }
+        if moon_emits {
+            let w = settings.sky.moon_radius.max(0.02) * 0.7;
+            light_dir_acc += (settings.sky.moon_pos[0] - 0.5).clamp(-1.0, 1.0) * w;
+            light_alt_acc += moon_alt * w;
+            light_depth_acc += settings.sky.moon_z.clamp(-1.0, 1.0) * w;
+            light_weight += w;
+        }
+        let dominant_light_dir = if light_weight > 0.0001 {
+            (light_dir_acc / light_weight).clamp(-1.0, 1.0)
+        } else {
+            0.0
+        };
+        let light_altitude = if light_weight > 0.0001 {
+            (light_alt_acc / light_weight).clamp(0.03, 1.5)
+        } else {
+            0.55
+        };
+        let light_depth_bias = if light_weight > 0.0001 {
+            (light_depth_acc / light_weight).clamp(-1.0, 1.0)
+        } else {
+            0.0
+        };
+        let shadow_len_factor = (1.95 / light_altitude).clamp(0.55, 6.5);
+        let sky_light_energy = (if sun_emits { 0.75 } else { 0.0 }) + (if moon_emits { 0.45 } else { 0.0 });
+        let emitter_energy = (sky_light_energy + atmo_energy * 0.55).clamp(0.0, 2.5);
+        let has_any_emitter = sun_emits || moon_emits || atmo_emitter_present || prop_emitter_present;
 
         let params = SceneParams {
             dim: [
@@ -920,14 +1459,24 @@ impl GpuSceneRenderer {
                 settings.sky.sun_radius,
                 if settings.sky.sun_enabled { 1.0 } else { 0.0 },
             ],
-            sun_color: to_rgba_f32(settings.sky.sun_color),
+            sun_color: [
+                settings.sky.sun_color[0] as f32 / 255.0,
+                settings.sky.sun_color[1] as f32 / 255.0,
+                settings.sky.sun_color[2] as f32 / 255.0,
+                settings.sky.sun_z,
+            ],
             moon_data: [
                 settings.sky.moon_pos[0],
                 settings.sky.moon_pos[1],
                 settings.sky.moon_radius,
                 settings.sky.moon_alpha.clamp(0.0, 2.0),
             ],
-            moon_color: to_rgba_f32(settings.sky.moon_color),
+            moon_color: [
+                settings.sky.moon_color[0] as f32 / 255.0,
+                settings.sky.moon_color[1] as f32 / 255.0,
+                settings.sky.moon_color[2] as f32 / 255.0,
+                settings.sky.moon_z,
+            ],
             misc: [
                 crate::settings::TILE as f32,
                 settings.scene.ambient.clamp(0.0, 2.0),
@@ -938,7 +1487,7 @@ impl GpuSceneRenderer {
                 settings.walls.top_coverage.clamp(0.0, 1.0),
                 settings.walls.junc_shadow.max(1.0),
                 settings.walls.fade_rows.max(1) as f32,
-                0.0,
+                if settings.post.realtime_shadows_enabled { 1.0 } else { 0.0 },
             ],
             floor_data: [
                 settings.floor.depth_fade.clamp(0.05, 30.0),
@@ -974,21 +1523,26 @@ impl GpuSceneRenderer {
                 settings.sky.moon_phase.clamp(-1.0, 1.0),
                 settings.sky.moon_texture_scale.clamp(0.2, 4.0),
                 settings.sky.cloud_variation.clamp(0.0, 1.0),
-                0.0,
+                light_depth_bias,
             ],
             atmo_scene: [
                 settings.scene.atmo_light_influence.clamp(0.0, 2.0),
                 settings.scene.atmo_tint_influence.clamp(0.0, 1.0),
                 atmo_energy,
-                0.0,
+                if settings.post.realtime_lighting_enabled { 1.0 } else { 0.0 },
             ],
             atmo_tint: [
                 atmo_tint_rgb[0] / 255.0,
                 atmo_tint_rgb[1] / 255.0,
                 atmo_tint_rgb[2] / 255.0,
-                0.0,
+                dominant_light_dir,
             ],
-            loop_data: [settings.anim.loop_s.max(1) as f32, 0.0, 0.0, 0.0],
+            loop_data: [
+                settings.anim.loop_s.max(1) as f32,
+                emitter_energy,
+                if has_any_emitter { 1.0 } else { 0.0 },
+                shadow_len_factor,
+            ],
             tex_data: [
                 settings.floor.tex_scale.max(0.05),
                 settings.walls.tex_scale.max(0.05),
@@ -1004,11 +1558,14 @@ impl GpuSceneRenderer {
             feature_counts: [prop_count, atmo_count, 0, 0],
             prop_core,
             prop_geom,
+            prop_pos,
             prop_tint,
             prop_misc,
             prop_rows,
             prop_var,
             prop_var2,
+            prop_shadow_profile0,
+            prop_shadow_profile1,
             atmo_core,
             atmo_glow,
             grass_data: [
@@ -1257,11 +1814,14 @@ struct Params {
     feature_counts: vec4<u32>,
     prop_core: array<vec4<f32>, 8>,
     prop_geom: array<vec4<f32>, 8>,
+    prop_pos: array<vec4<f32>, 8>,
     prop_tint: array<vec4<f32>, 8>,
     prop_misc: array<vec4<f32>, 8>,
     prop_rows: array<vec4<f32>, 8>,
     prop_var: array<vec4<f32>, 8>,
     prop_var2: array<vec4<f32>, 8>,
+    prop_shadow_profile0: array<vec4<f32>, 8>,
+    prop_shadow_profile1: array<vec4<f32>, 8>,
     atmo_core: array<vec4<f32>, 4>,
     atmo_glow: array<vec4<f32>, 4>,
     grass_data:  vec4<f32>,
@@ -1397,6 +1957,15 @@ fn shape_line(p: vec2<f32>, a: vec2<f32>, b: vec2<f32>) -> f32 {
     return select(0.0, 1.0, distance(p, q) <= 0.6);
 }
 
+fn shape_capsule(p: vec2<f32>, a: vec2<f32>, b: vec2<f32>, r: f32) -> f32 {
+    let ab = b - a;
+    let ap = p - a;
+    let den = max(dot(ab, ab), 0.001);
+    let t = clamp(dot(ap, ab) / den, 0.0, 1.0);
+    let q = a + ab * t;
+    return select(0.0, 1.0, distance(p, q) <= max(r, 0.1));
+}
+
 fn darker(c: vec3<f32>, f: f32) -> vec3<f32> {
     return c * max(f, 0.0);
 }
@@ -1494,18 +2063,293 @@ fn paint(base: vec3<f32>, paint_col: vec3<f32>, m: f32) -> vec3<f32> {
     return select(base, paint_col, m > 0.5);
 }
 
+// Top-down footprint of the imagined 3D tree, used when light is overhead.
+// When light_dir≈0 and light_depth_bias≈0 the shadow collapses to this shape.
+fn tree_topdown_footprint(pxy: vec2<f32>, sx: f32, sy_floor: f32, ps_x: f32, ps_y: f32, tree_shadow_mode: f32) -> f32 {
+    if (tree_shadow_mode < 1.5) {
+        // Round canopy only: overhead blob should be canopy-dominant.
+        let c0 = shape_ellipse(pxy, vec2<f32>(sx, sy_floor + ps_y * 0.12), ps_x * 2.58, ps_x * 1.88);
+        let c1 = shape_ellipse(pxy, vec2<f32>(sx - ps_x * 0.10, sy_floor + ps_y * 0.10), ps_x * 2.02, ps_x * 1.50);
+        let c2 = shape_ellipse(pxy, vec2<f32>(sx + ps_x * 0.10, sy_floor + ps_y * 0.10), ps_x * 1.62, ps_x * 1.20);
+        return clamp(max(c0, max(c1, c2)), 0.0, 1.0);
+    } else if (tree_shadow_mode < 2.5) {
+        // Pine canopy only: cone tiers compressed in top-down view.
+        let t0 = shape_ellipse(pxy, vec2<f32>(sx, sy_floor + ps_y * 0.10), ps_x * 2.22, ps_x * 1.64);
+        let t1 = shape_ellipse(pxy, vec2<f32>(sx, sy_floor + ps_y * 0.08), ps_x * 1.55, ps_x * 1.15);
+        let t2 = shape_ellipse(pxy, vec2<f32>(sx, sy_floor + ps_y * 0.06), ps_x * 0.95, ps_x * 0.72);
+        return clamp(max(t0, max(t1, t2)), 0.0, 1.0);
+    } else {
+        // Dead canopy is sparse; use subtle branch spread only.
+        let b0 = shape_ellipse(pxy, vec2<f32>(sx, sy_floor + ps_y * 0.07), ps_x * 0.92, ps_x * 0.66);
+        let arm_l = shape_capsule(pxy, vec2<f32>(sx, sy_floor + ps_y * 0.06), vec2<f32>(sx - ps_x * 1.00, sy_floor + ps_y * 0.07), max(ps_x * 0.11, 0.18));
+        let arm_r = shape_capsule(pxy, vec2<f32>(sx, sy_floor + ps_y * 0.06), vec2<f32>(sx + ps_x * 0.98, sy_floor + ps_y * 0.07), max(ps_x * 0.10, 0.17));
+        return clamp(max(b0, max(arm_l, arm_r)), 0.0, 1.0);
+    }
+}
+
+fn tree_object_mask_local(local: vec2<f32>, ps_x: f32, ps_y: f32, tree_shadow_mode: f32) -> f32 {
+    var trunk_h = ps_y * 3.0;
+    var trunk_w = max(ps_x * 0.55, 0.55);
+    if (tree_shadow_mode < 1.5) {
+        trunk_h = ps_y * 4.35;
+        trunk_w = max(ps_x * 0.62, 0.60);
+    } else if (tree_shadow_mode < 2.5) {
+        trunk_h = ps_y * 2.45;
+        trunk_w = max(ps_x * 0.54, 0.56);
+    } else {
+        trunk_h = ps_y * 3.25;
+        trunk_w = max(ps_x * 0.48, 0.50);
+    }
+
+    var m = shape_rect(local, vec2<f32>(0.0, -trunk_h * 0.5), trunk_w * 0.5, trunk_h * 0.5);
+
+    if (tree_shadow_mode < 1.5) {
+        let cy_b = -trunk_h;
+        let c0 = shape_ellipse(local, vec2<f32>(0.0, cy_b - ps_y * 0.55), ps_x * 2.95, ps_y * 2.25);
+        let c1 = shape_ellipse(local, vec2<f32>(-ps_x * 0.30, cy_b - ps_y * 1.72), ps_x * 2.20, ps_y * 1.95);
+        let c2 = shape_ellipse(local, vec2<f32>( ps_x * 0.28, cy_b - ps_y * 1.65), ps_x * 2.05, ps_y * 1.80);
+        let c3 = shape_ellipse(local, vec2<f32>(0.0, cy_b - ps_y * 2.95), ps_x * 1.65, ps_y * 1.45);
+        m = max(m, max(c0, max(c1, max(c2, c3))));
+    } else if (tree_shadow_mode < 2.5) {
+        let base_y = -trunk_h;
+        let p0 = shape_triangle(local, 0.0, base_y - 2.4 * ps_y, 3.6 * ps_x, 2.4 * ps_y);
+        let p1 = shape_triangle(local, 0.0, base_y - 1.4 * ps_y - 2.2 * ps_y, 3.0 * ps_x, 2.2 * ps_y);
+        let p2 = shape_triangle(local, 0.0, base_y - 2.7 * ps_y - 2.0 * ps_y, 2.4 * ps_x, 2.0 * ps_y);
+        let p3 = shape_triangle(local, 0.0, base_y - 4.1 * ps_y, 1.8 * ps_x, 1.6 * ps_y);
+        m = max(m, max(p0, max(p1, max(p2, p3))));
+    } else {
+        let branch0 = shape_capsule(local, vec2<f32>(0.0, -trunk_h * 0.72), vec2<f32>(-ps_x * 1.05, -trunk_h * 1.28), max(ps_x * 0.15, 0.22));
+        let branch1 = shape_capsule(local, vec2<f32>(0.0, -trunk_h * 0.64), vec2<f32>( ps_x * 1.00, -trunk_h * 1.12), max(ps_x * 0.13, 0.20));
+        let branch2 = shape_capsule(local, vec2<f32>(0.0, -trunk_h * 0.46), vec2<f32>(-ps_x * 0.78, -trunk_h * 0.88), max(ps_x * 0.12, 0.18));
+        m = max(m, max(branch0, max(branch1, branch2)));
+    }
+
+    return clamp(m, 0.0, 1.0);
+}
+
+fn tree_trunk_mask_local(local: vec2<f32>, ps_x: f32, ps_y: f32, tree_shadow_mode: f32) -> f32 {
+    var trunk_h = ps_y * 3.0;
+    var trunk_w = max(ps_x * 0.55, 0.55);
+    if (tree_shadow_mode < 1.5) {
+        trunk_h = ps_y * 4.35;
+        trunk_w = max(ps_x * 0.62, 0.60);
+    } else if (tree_shadow_mode < 2.5) {
+        trunk_h = ps_y * 2.45;
+        trunk_w = max(ps_x * 0.54, 0.56);
+    } else {
+        trunk_h = ps_y * 3.25;
+        trunk_w = max(ps_x * 0.48, 0.50);
+    }
+    return clamp(
+        shape_rect(local, vec2<f32>(0.0, -trunk_h * 0.5), trunk_w * 0.5, trunk_h * 0.5),
+        0.0,
+        1.0,
+    );
+}
+
+fn shadow_tree_mode_from_tcode(tcode: f32, profile_tree_mode: f32) -> f32 {
+    if (profile_tree_mode > 0.5) {
+        return profile_tree_mode;
+    }
+    if (tcode < 0.5) {
+        return 1.0;
+    } else if (tcode < 1.5) {
+        return 2.0;
+    } else if (tcode >= 6.0 && tcode < 6.5) {
+        return 3.0;
+    }
+    return 0.0;
+}
+
+fn prop_object_mask_local(local: vec2<f32>, ps_x: f32, ps_y: f32, tcode: f32, tree_shadow_mode: f32) -> f32 {
+    if (tree_shadow_mode > 0.5) {
+        return tree_object_mask_local(local, ps_x, ps_y, tree_shadow_mode);
+    }
+
+    if (tcode < 2.5) {
+        // Rounded shrub
+        let c0 = shape_ellipse(local, vec2<f32>(-ps_x * 0.35, -ps_y * 1.20), ps_x * 1.70, ps_y * 1.20);
+        let c1 = shape_ellipse(local, vec2<f32>( ps_x * 0.32, -ps_y * 1.08), ps_x * 1.45, ps_y * 1.05);
+        let c2 = shape_ellipse(local, vec2<f32>(0.0, -ps_y * 1.72), ps_x * 1.20, ps_y * 0.95);
+        return clamp(max(c0, max(c1, c2)), 0.0, 1.0);
+    }
+
+    if (tcode < 4.5) {
+        // Rock/boulder silhouette
+        let r0 = shape_ellipse(local, vec2<f32>(0.0, -ps_y * 0.85), ps_x * 1.95, ps_y * 1.25);
+        let r1 = shape_ellipse(local, vec2<f32>(-ps_x * 0.30, -ps_y * 1.05), ps_x * 1.35, ps_y * 0.98);
+        return clamp(max(r0, r1), 0.0, 1.0);
+    }
+
+    if (tcode < 5.5) {
+        // Cactus: trunk + side arms
+        let stem = shape_rect(local, vec2<f32>(0.0, -ps_y * 2.10), ps_x * 0.62, ps_y * 2.10);
+        let arm_l = shape_capsule(local, vec2<f32>(-ps_x * 0.62, -ps_y * 1.55), vec2<f32>(-ps_x * 1.58, -ps_y * 1.15), max(ps_x * 0.18, 0.24));
+        let arm_r = shape_capsule(local, vec2<f32>( ps_x * 0.60, -ps_y * 1.30), vec2<f32>( ps_x * 1.45, -ps_y * 1.05), max(ps_x * 0.17, 0.22));
+        return clamp(max(stem, max(arm_l, arm_r)), 0.0, 1.0);
+    }
+
+    // Mushroom / generic cap
+    let stem = shape_rect(local, vec2<f32>(0.0, -ps_y * 1.00), ps_x * 0.34, ps_y * 1.00);
+    let cap = shape_ellipse(local, vec2<f32>(0.0, -ps_y * 2.05), ps_x * 1.72, ps_y * 1.02);
+    return clamp(max(stem, cap), 0.0, 1.0);
+}
+
+fn prop_topdown_footprint(pxy: vec2<f32>, sx: f32, sy_floor: f32, ps_x: f32, ps_y: f32, tcode: f32, tree_shadow_mode: f32) -> f32 {
+    if (tree_shadow_mode > 0.5) {
+        return tree_topdown_footprint(pxy, sx, sy_floor, ps_x, ps_y, tree_shadow_mode);
+    }
+
+    if (tcode < 2.5) {
+        let e0 = shape_ellipse(pxy, vec2<f32>(sx, sy_floor + ps_y * 0.08), ps_x * 1.68, ps_x * 1.26);
+        let e1 = shape_ellipse(pxy, vec2<f32>(sx, sy_floor + ps_y * 0.06), ps_x * 1.18, ps_x * 0.88);
+        return clamp(max(e0, e1), 0.0, 1.0);
+    }
+    if (tcode < 4.5) {
+        return clamp(shape_ellipse(pxy, vec2<f32>(sx, sy_floor + ps_y * 0.08), ps_x * 1.48, ps_x * 1.02), 0.0, 1.0);
+    }
+    if (tcode < 5.5) {
+        let stem = shape_ellipse(pxy, vec2<f32>(sx, sy_floor + ps_y * 0.06), ps_x * 0.58, ps_x * 0.44);
+        let arm_l = shape_capsule(pxy, vec2<f32>(sx - ps_x * 0.45, sy_floor + ps_y * 0.07), vec2<f32>(sx - ps_x * 1.30, sy_floor + ps_y * 0.07), max(ps_x * 0.14, 0.20));
+        let arm_r = shape_capsule(pxy, vec2<f32>(sx + ps_x * 0.45, sy_floor + ps_y * 0.07), vec2<f32>(sx + ps_x * 1.20, sy_floor + ps_y * 0.07), max(ps_x * 0.13, 0.19));
+        return clamp(max(stem, max(arm_l, arm_r)), 0.0, 1.0);
+    }
+    let cap = shape_ellipse(pxy, vec2<f32>(sx, sy_floor + ps_y * 0.08), ps_x * 1.18, ps_x * 0.90);
+    let stem = shape_ellipse(pxy, vec2<f32>(sx, sy_floor + ps_y * 0.06), ps_x * 0.38, ps_x * 0.30);
+    return clamp(max(cap, stem), 0.0, 1.0);
+}
+
+fn prop_shadow_height(ps_y: f32, tcode: f32, tree_shadow_mode: f32, shadow_profile0: vec4<f32>) -> f32 {
+    if (shadow_profile0.x > 0.01) {
+        return ps_y * max(shadow_profile0.x, 0.5);
+    }
+    if (tree_shadow_mode > 0.5) {
+        return ps_y * select(select(6.4, 8.4, tree_shadow_mode < 1.5), 4.8, tree_shadow_mode < 2.5);
+    }
+    if (tcode < 2.5) {
+        return ps_y * 3.9;
+    }
+    if (tcode < 4.5) {
+        return ps_y * 2.4;
+    }
+    if (tcode < 5.5) {
+        return ps_y * 5.0;
+    }
+    return ps_y * 3.1;
+}
+
 fn prop_ground_shadow_strength(
     pxy: vec2<f32>,
+    horizon: f32,
     sx: f32,
     sy_floor: f32,
     ps_x: f32,
     ps_y: f32,
+    light_dir: f32,
+    light_depth_bias: f32,
+    shadow_len: f32,
+    pixel_hitbox: bool,
+    shadow_tcode: f32,
+    shadow_profile0: vec4<f32>,
+    shadow_profile1: vec4<f32>,
 ) -> f32 {
-    let rx = max(ps_x * 2.1, 0.7);
-    let ry = max(ps_y * 0.58, 0.45);
-    let m0 = shape_ellipse(pxy, vec2<f32>(sx, sy_floor + ps_y * 0.08), rx, ry);
-    let m1 = shape_ellipse(pxy, vec2<f32>(sx + ps_x * 0.35, sy_floor + ps_y * 0.12), rx * 1.35, ry * 1.05);
-    return clamp(m0 * 0.70 + m1 * 0.45, 0.0, 1.0);
+    if (pxy.y < horizon) {
+        return 0.0;
+    }
+    let shift_x = light_dir * ps_x * shadow_len;
+    let depth_sign = select(-1.0, 1.0, light_depth_bias >= 0.0);
+    let depth_mag = clamp(abs(light_depth_bias), 0.0, 1.0);
+    let y_mag = 0.18 + depth_mag * 0.52;
+    let shift_y = depth_sign * ps_y * shadow_len * y_mag;
+    let tree_shadow_mode = shadow_tree_mode_from_tcode(shadow_tcode, shadow_profile1.w);
+    let cast_y_bias = depth_sign * ps_y * (0.06 + depth_mag * 0.05);
+    let cast_vec = vec2<f32>(shift_x * (0.90 + shadow_len * 0.08), shift_y * (0.90 + shadow_len * 0.08) + cast_y_bias);
+    let cast_len = max(length(cast_vec), 0.001);
+    let cast_dir = cast_vec / cast_len;
+    let cast_perp = vec2<f32>(-cast_dir.y, cast_dir.x);
+    let rel = pxy - vec2<f32>(sx, sy_floor);
+    let along = dot(rel, cast_dir);
+    let perp = abs(dot(rel, cast_perp));
+
+    // Strict one-direction casting; this avoids dual/opposite shadow stacks.
+    let forward_start = max(shadow_profile1.y, 0.01);
+    let forward_end = max(shadow_profile1.z, forward_start + 0.01);
+    let forward_mask = smoothstep(-ps_x * forward_start, ps_x * forward_end, along);
+    let along_n = clamp(along / cast_len, 0.0, 1.0);
+    let side_width_base = max(shadow_profile0.y, 0.2);
+    let side_width_gain = max(shadow_profile0.z, 0.1);
+    let side_width = max(ps_x * (side_width_base + along_n * side_width_gain), 0.001);
+    let side_mask = clamp(1.0 - perp / side_width, 0.0, 1.0);
+
+    // One projector core for trees + generic sprites.
+    let obj_h = prop_shadow_height(ps_y, shadow_tcode, tree_shadow_mode, shadow_profile0);
+    var projected = 0.0;
+    for (var i: i32 = 0; i < 9; i = i + 1) {
+        let z = f32(i) / 8.0;
+        let source_pos = pxy - cast_vec * z;
+        let ground_local_y = source_pos.y - sy_floor;
+        let mirrored_local_y = -z * obj_h - ground_local_y * 0.20;
+        let generic_local_y = -z * obj_h + ground_local_y * 0.20;
+        let local = vec2<f32>(
+            source_pos.x - sx,
+            select(generic_local_y, mirrored_local_y, tree_shadow_mode > 0.5),
+        );
+        let obj = prop_object_mask_local(local, ps_x, ps_y, shadow_tcode, tree_shadow_mode);
+        let z_align = 1.0 - abs(z - along_n) * 1.85;
+        let z_weight = clamp(z_align, 0.0, 1.0) * (0.64 + z * 0.36);
+        projected = max(projected, obj * z_weight);
+    }
+    projected *= side_mask * forward_mask;
+
+    // Ground connection near the base to prevent detached silhouettes.
+    let base_link = shape_capsule(
+        pxy,
+        vec2<f32>(sx, sy_floor + ps_y * 0.03),
+        vec2<f32>(sx + cast_vec.x * 0.34, sy_floor + cast_vec.y * 0.34 + ps_y * 0.03),
+        max(ps_x * 0.32, 0.48),
+    );
+    let directional_shadow = max(projected, base_link * forward_mask * smoothstep(0.12, 0.85, along_n));
+
+    // Overhead blend from top-down footprint into directional cast.
+    let footprint = prop_topdown_footprint(pxy, sx, sy_floor, ps_x, ps_y, shadow_tcode, tree_shadow_mode);
+    let overhead_near = max(shadow_profile0.w, 0.05);
+    let overhead_far = max(shadow_profile1.x, overhead_near + 0.2);
+    let overhead_w = 1.0 - smoothstep(ps_x * overhead_near, ps_x * overhead_far, cast_len);
+    var shaped = clamp(max(directional_shadow, footprint * overhead_w), 0.0, 1.0);
+
+    if (!pixel_hitbox) {
+        return shaped;
+    }
+    if (tree_shadow_mode > 0.5) {
+        return clamp(smoothstep(0.18, 0.86, shaped), 0.0, 1.0);
+    }
+    return clamp(smoothstep(0.15, 0.88, shaped), 0.0, 1.0);
+}
+
+fn prop_root_contact_strength(
+    pxy: vec2<f32>,
+    horizon: f32,
+    sx: f32,
+    sy_floor: f32,
+    ps_x: f32,
+    ps_y: f32,
+    amount: f32,
+    treeish: bool,
+) -> f32 {
+    if (!treeish || pxy.y < horizon) {
+        return 0.0;
+    }
+    let a = clamp(amount, 0.0, 1.0);
+    if (a <= 0.001) {
+        return 0.0;
+    }
+    let cy = sy_floor + ps_y * 0.04;
+    let rx = max(ps_x * (0.78 + a * 0.36), 0.7);
+    let ry = max(ps_y * (0.24 + a * 0.24), 0.45);
+    let core = shape_ellipse(pxy, vec2<f32>(sx, cy), rx, ry);
+    let lobe_l = shape_ellipse(pxy, vec2<f32>(sx - rx * 0.55, cy + ry * 0.20), rx * 0.52, ry * 0.74);
+    let lobe_r = shape_ellipse(pxy, vec2<f32>(sx + rx * 0.55, cy + ry * 0.20), rx * 0.52, ry * 0.74);
+    return clamp((core * 0.78 + max(lobe_l, lobe_r) * 0.62) * (0.60 + a * 0.32), 0.0, 1.0);
 }
 
 fn prop_draw(
@@ -1656,9 +2500,10 @@ fn atmo_fixture_draw(
     if (tcode < 1.5 || (tcode >= 4.0 && tcode < 5.5) || tcode >= 6.5) {
         let stem_h = max(fr * 1.6, 2.0);
         let cup_w = max(fr * 0.7, 1.0);
-        col = paint(col, dark_metal, shape_rect(pxy, vec2<f32>(sx - sgn * fr * 0.35, sy + fr * 0.14), abs(fr * 0.35), fr * 0.04));
-        col = paint(col, metal, shape_rect(pxy, vec2<f32>(sx, sy + fr * 0.18), cup_w * 0.35, fr * 0.06));
-        col = paint(col, post, shape_rect(pxy, vec2<f32>(sx, sy + fr * 0.24 + stem_h * 0.5), cup_w * 0.15, stem_h * 0.5));
+        let mx = sx - sgn * fr * 0.10;
+        col = paint(col, dark_metal, shape_rect(pxy, vec2<f32>(sx - sgn * fr * 0.20, sy + fr * 0.15), abs(fr * 0.12), fr * 0.03));
+        col = paint(col, metal, shape_rect(pxy, vec2<f32>(mx, sy + fr * 0.18), cup_w * 0.28, fr * 0.06));
+        col = paint(col, post, shape_rect(pxy, vec2<f32>(mx, sy + fr * 0.24 + stem_h * 0.5), cup_w * 0.13, stem_h * 0.5));
         // Flame body, matching the CPU elongated additive flame profile.
         let flame_col = select(
             warm,
@@ -1670,24 +2515,56 @@ fn atmo_fixture_draw(
             vec3<f32>(154.0 / 255.0, 238.0 / 255.0, 255.0 / 255.0),
             tcode >= 6.5,
         );
-        let flame_a = flame_strength(pxy, sx, sy + fr * 0.02, fr * 1.1, 0.0);
-        col = lerp3(col, mix(flame_col, flame_col2, 0.45), clamp(flame_a * 0.82, 0.0, 0.88));
-        col = lerp3(col, flame_col2, clamp(flame_a * 0.54, 0.0, 0.72));
+        let flame_cx = mx;
+        let flame_cy = sy - fr * 0.01;
+        let flame_outer = shape_ellipse(pxy, vec2<f32>(flame_cx, flame_cy + fr * 0.07), fr * 0.22, fr * 0.43);
+        let flame_mid = shape_ellipse(pxy, vec2<f32>(flame_cx, flame_cy - fr * 0.04), fr * 0.14, fr * 0.26);
+        let flame_tip = shape_ellipse(pxy, vec2<f32>(flame_cx, flame_cy - fr * 0.16), fr * 0.07, fr * 0.12);
+        let flame_core = shape_ellipse(pxy, vec2<f32>(flame_cx, flame_cy - fr * 0.11), fr * 0.045, fr * 0.088);
+        let flame_a = max(flame_strength(pxy, flame_cx, flame_cy, fr * 1.1, 0.0), flame_outer * 0.60);
+        col = lerp3(col, dark_metal, clamp(flame_outer * 0.30, 0.0, 0.22));
+        col = lerp3(col, mix(flame_col, flame_col2, 0.42), clamp(flame_a * 0.78 + flame_mid * 0.22, 0.0, 0.88));
+        col = lerp3(col, flame_col2, clamp(flame_a * 0.48 + flame_tip * 0.34, 0.0, 0.74));
+        col = lerp3(col, vec3<f32>(1.0, 0.98, 0.86), clamp(flame_core * 0.86 + flame_tip * 0.28, 0.0, 0.92));
+        let pool_a = glow_strength(distance(pxy, vec2<f32>(mx, sy + fr * 0.14)), fr * 1.46, 0.84);
+        col = lerp3(col, mix(flame_col, flame_col2, 0.30), clamp(pool_a * 0.20, 0.0, 0.28));
         return col;
     }
 
     // Lantern
     if (tcode < 2.5) {
-        let ly = sy + fr * 0.2;
-        col = paint(col, dark_metal, shape_rect(pxy, vec2<f32>(sx - sgn * fr * 0.35, ly - fr * 0.215), abs(fr * 0.35), fr * 0.035));
-        col = paint(col, metal, shape_line(pxy, vec2<f32>(sx - sgn * fr * 0.28, ly - fr * 0.18), vec2<f32>(sx - sgn * fr * 0.08, ly + fr * 0.02)));
-        col = paint(col, dark_metal, shape_rect(pxy, vec2<f32>(sx, ly + fr * 0.235), fr * 0.20, fr * 0.215));
-        col = paint(col, warm, shape_ellipse(pxy, vec2<f32>(sx, ly + fr * 0.27), fr * 0.14, fr * 0.15));
+        let ly = sy + fr * 0.12;
+        let bar_left = sx - sgn * fr * 0.58;
+        let bar_right = sx - sgn * fr * 0.22;
+        let hook_x = (bar_left + bar_right) * 0.5;
+        let lx = hook_x;
+        let fx = sx - sgn * fr * 0.10;
+        col = paint(col, dark_metal, shape_rect(pxy, vec2<f32>(bar_left - sgn * fr * 0.07, ly - fr * 0.18), fr * 0.05, fr * 0.12));
+        col = paint(col, dark_metal, shape_rect(pxy, vec2<f32>((bar_left + bar_right) * 0.5, ly - fr * 0.20), abs(bar_right - bar_left) * 0.5, fr * 0.040));
+        col = paint(col, metal, shape_line(pxy, vec2<f32>(bar_right - sgn * fr * 0.05, ly - fr * 0.20), vec2<f32>(bar_right, ly - fr * 0.06)));
+        col = paint(col, metal, shape_line(pxy, vec2<f32>(bar_left - sgn * fr * 0.02, ly - fr * 0.24), vec2<f32>(hook_x, ly - fr * 0.04)));
+        col = paint(col, metal, shape_ellipse(pxy, vec2<f32>(hook_x, ly - fr * 0.02), fr * 0.05, fr * 0.03));
+        col = paint(col, metal, shape_rect(pxy, vec2<f32>(hook_x, ly - fr * 0.11), fr * 0.014, fr * 0.09));
+        col = paint(col, metal, shape_rect(pxy, vec2<f32>(hook_x, ly + fr * 0.10), fr * 0.02, fr * 0.12));
+        col = paint(col, dark_metal, shape_rect(pxy, vec2<f32>(lx, ly + fr * 0.20), fr * 0.18, fr * 0.04));
+        col = paint(col, dark_metal, shape_rect(pxy, vec2<f32>(lx, ly + fr * 0.51), fr * 0.24, fr * 0.27));
+        col = paint(col, vec3<f32>(192.0 / 255.0, 146.0 / 255.0, 82.0 / 255.0), shape_rect(pxy, vec2<f32>(lx, ly + fr * 0.50), fr * 0.14, fr * 0.20));
+        col = paint(col, dark_metal, shape_rect(pxy, vec2<f32>(lx, ly + fr * 0.82), fr * 0.18, fr * 0.04));
+        col = paint(col, warm, shape_ellipse(pxy, vec2<f32>(lx, ly + fr * 0.52), fr * 0.12, fr * 0.21));
+        col = lerp3(col, warm, clamp(glow_strength(distance(pxy, vec2<f32>(fx, ly + fr * 0.20)), fr * 1.70, 0.85) * 0.34, 0.0, 0.38));
+        return col;
+    }
+
+    // Firefly: tiny bioluminescent mote near mount, no heavy fixture body.
+    if (tcode < 3.5) {
+        let core = vec3<f32>(112.0 / 255.0, 238.0 / 255.0, 94.0 / 255.0);
+        col = paint(col, core, shape_ellipse(pxy, vec2<f32>(sx, sy + fr * 0.12), fr * 0.08, fr * 0.12));
+        col = lerp3(col, core, clamp(glow_strength(distance(pxy, vec2<f32>(sx, sy + fr * 0.16)), fr * 1.25, 0.82), 0.0, 0.5));
         return col;
     }
 
     // Candle
-    if (tcode < 6.5) {
+    if (tcode >= 5.5 && tcode < 6.5) {
         let cy = sy + fr * 0.28;
         col = paint(col, dark_metal, shape_rect(pxy, vec2<f32>(sx, cy + fr * 0.11), fr * 0.16, fr * 0.05));
         col = paint(col, vec3<f32>(224.0 / 255.0, 212.0 / 255.0, 185.0 / 255.0), shape_rect(pxy, vec2<f32>(sx, cy - fr * 0.065), fr * 0.06, fr * 0.115));
@@ -1730,11 +2607,18 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let focal_mult = params.scene0.z;
     let path_power = max(params.scene0.w, 0.05);
     let focal = (h - horizon) * focal_mult;
+    let rt_lighting = params.atmo_scene.w > 0.5;
+    let rt_shadows = params.wall_data.w > 0.5;
+    let has_emitter = params.loop_data.z > 0.5;
+    let light_energy = select(0.0, clamp(params.loop_data.y, 0.0, 2.5), rt_lighting && has_emitter);
+    let light_dir = clamp(params.atmo_tint.w, -1.0, 1.0);
+    let shadow_dir = -light_dir;
+    let shadow_len = (0.90 + light_energy * 0.35) * clamp(params.loop_data.w, 0.55, 6.5);
 
     var col = params.void_color.rgb;
     var prop_covered = false;
 
-    // Above-horizon wall band: fade only the wall light contribution, keep wall hue stable.
+    // Above-horizon wall band: use the same wall shading model as below horizon.
     if (params.dim.w == 1u && y < horizon) {
         let ws = max(horizon - horizon * clamp(params.wall_data.x, 0.0, 1.0), 0.0);
         if (y >= ws) {
@@ -1751,10 +2635,14 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
             let ped = max(edge, 0.0);
             let base = clamp(params.misc.w / max(wz_w, 0.1), 0.0, 1.0)
                 * clamp(0.42 + ped / max(params.wall_data.y, 1.0), 0.0, 1.0);
-            let fade = clamp((y - ws) / max(params.wall_data.z, 1.0), 0.0, 1.0);
-            var bright = clamp(base, 0.02, 1.2);
-            bright = max(bright * (0.35 + 0.65 * fade), 0.02);
-            col = base_col * bright;
+            let depth_near = 1.0 - clamp((y - ws) / max(horizon - ws, 1.0), 0.0, 1.0);
+            let atmo_boost = params.atmo_scene.z * params.atmo_scene.x * pow(depth_near, 0.65) * 0.85;
+            let ambient = clamp(params.misc.y + atmo_boost, 0.08, 2.2);
+            let emitter_boost = light_energy * 0.16 * pow(depth_near, 0.60);
+            let bright = clamp(base * (ambient + emitter_boost), 0.04, 1.7);
+            let tint_a = clamp(params.atmo_scene.z * params.atmo_scene.y * depth_near * 0.20, 0.0, 0.35);
+            let base_t = lerp3(base_col, params.atmo_tint.rgb, tint_a);
+            col = base_t * bright;
         }
     }
 
@@ -1827,16 +2715,18 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
             }
         }
 
-        if (params.sun_data.w > 0.5) {
+        let sun_vis = smoothstep(0.0, 0.08, params.sun_color.w);
+        if (params.sun_data.w > 0.5 && sun_vis > 0.001) {
             let sun_cx = params.sun_data.x * w;
             let sun_cy = params.sun_data.y * horizon;
             let sun_r = max(params.sun_data.z * horizon, 1.0);
             let d = distance(vec2<f32>(x, y), vec2<f32>(sun_cx, sun_cy));
             let glow = clamp(1.0 - d / (sun_r * 2.3), 0.0, 1.0);
-            col = col + params.sun_color.rgb * glow * 0.35;
+            col = col + params.sun_color.rgb * glow * 0.35 * sun_vis;
         }
 
-        let moon_alpha = clamp(params.moon_data.w, 0.0, 2.0);
+        let moon_vis = smoothstep(0.0, 0.08, params.moon_color.w);
+        let moon_alpha = clamp(params.moon_data.w, 0.0, 2.0) * moon_vis;
         if (moon_alpha > 0.01) {
             let moon_cx = params.moon_data.x * w;
             let moon_cy = params.moon_data.y * horizon;
@@ -1904,8 +2794,9 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
             let edge_shade = ds * ((1.0 - clamp(params.floor_data.y, 0.0, 1.0)) + clamp(params.floor_data.y, 0.0, 1.0) * es);
             let depth = clamp(1.0 - t, 0.0, 1.0);
             let atmo_boost = params.atmo_scene.z * params.atmo_scene.x * pow(depth, 0.7);
+            let emitter_boost = light_energy * 0.20 * pow(depth, 0.65);
             let ambient = clamp(params.misc.y + atmo_boost, 0.08, 2.4);
-            let shade = clamp(edge_shade * ambient, 0.03, 2.2);
+            let shade = clamp(edge_shade * (ambient + emitter_boost), 0.03, 2.2);
             let tint_a = clamp(params.atmo_scene.z * params.atmo_scene.y * depth * 0.30, 0.0, 0.45);
             let base_t = lerp3(base, params.atmo_tint.rgb, tint_a);
             col = base_t * shade;
@@ -1924,8 +2815,9 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
                 * clamp(0.42 + ped / max(params.wall_data.y, 1.0), 0.0, 1.0);
             let depth = clamp(1.0 - t, 0.0, 1.0);
             let atmo_boost = params.atmo_scene.z * params.atmo_scene.x * pow(depth, 0.65) * 0.85;
+            let emitter_boost = light_energy * 0.16 * pow(depth, 0.60);
             let ambient = clamp(params.misc.y + atmo_boost, 0.08, 2.2);
-            let bright = clamp(base_bright * ambient, 0.04, 1.7);
+            let bright = clamp(base_bright * (ambient + emitter_boost), 0.04, 1.7);
             let tint_a = clamp(params.atmo_scene.z * params.atmo_scene.y * depth * 0.20, 0.0, 0.35);
             let base_t = lerp3(base, params.atmo_tint.rgb, tint_a);
             col = base_t * bright;
@@ -1939,6 +2831,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
             let mirror = pc.z > 0.5;
             let spc = max(pc.w, 0.1);
             let pg = params.prop_geom[pi];
+            let ppos = params.prop_pos[pi];
             let wx = pg.x;
             let wz_min = pg.y;
             let wz_max = pg.z;
@@ -1954,8 +2847,12 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
             let row_spacing = max(prow.y, 0.75);
             let pvar = params.prop_var[pi];
             let pvar2 = params.prop_var2[pi];
-            let x_jitter_enabled = pvar2.w >= 1.0;
-            let y_jitter_enabled = pvar2.w >= 2.0;
+            let pflags = i32(round(pvar2.w));
+            let x_jitter_enabled = (pflags & 1) != 0;
+            let y_jitter_enabled = (pflags & 2) != 0;
+            let emits_light = (pflags & 4) != 0;
+            let casts_shadow = (pflags & 8) != 0;
+            let pixel_hitbox = ppos.w > 0.5;
             let row_jitter = max(prow.z, 0.0) + select(0.0, pvar.w * 0.35, x_jitter_enabled);
             let n_lo = i32(ceil((params.time_scroll.x + wz_min) / spc));
             let n_hi = i32(floor((params.time_scroll.x + wz_max) / spc));
@@ -1969,7 +2866,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
                     vec3<f32>(1.0, 1.0, 1.0),
                 );
 
-                let wz_i = n * spc - params.time_scroll.x;
+                let wz_i = n * spc - params.time_scroll.x + ppos.z;
                 if (wz_i < wz_min || wz_i > wz_max) { continue; }
                 let sv = hash2(vec2<f32>(seed, f32(n_seed)));
                 let sc_v = sc * (1.0 + (sv * 2.0 - 1.0) * max(pvar.z, 0.0));
@@ -1980,7 +2877,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
                 let ps = (ps_x + ps_y) * 0.5;
                 if (ps < 0.8) { continue; }
                 let y_sink = clamp(prow.w, 0.0, 6.0);
-                let sy_floor = horizon + focal * cam_h / max(wz_i, 0.001);
+                let sy_floor = horizon + focal * (cam_h - ppos.y) / max(wz_i, 0.001);
                 let yjit = select(
                     0.0,
                     (hash2(vec2<f32>(seed + 7.0, f32(n_seed))) * 2.0 - 1.0) * pvar2.x,
@@ -2026,12 +2923,37 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
                         let row_abs = max(base_abs + row_offset + row_jit, 0.0);
                         let row_wx = sgn * row_abs;
                         let row_edge_px = sgn * (row_abs - base_abs) * pos_scale;
-                        let sx_world = row_cx2 + focal * (row_wx + jit) / max(wz_i, 0.001);
+                        let sx_world = row_cx2 + focal * (row_wx + ppos.x + jit) / max(wz_i, 0.001);
                         let sx_edge = row_cx2 + sgn * edge_inner_px + row_edge_px + jit * pos_scale * 0.85;
                         let sx = mix(sx_world, sx_edge, follow);
-                        let shadow = prop_ground_shadow_strength(vec2<f32>(x, y), sx, sy_floor, ps_x, ps_y);
-                        if (shadow > 0.0) {
-                            col = lerp3(col, vec3<f32>(12.0 / 255.0, 10.0 / 255.0, 8.0 / 255.0), shadow * 0.38);
+                        var tree_shadow_mode = 0.0;
+                        if (draw_tcode < 0.5) {
+                            tree_shadow_mode = 1.0;
+                        } else if (draw_tcode < 1.5) {
+                            tree_shadow_mode = 2.0;
+                        } else if (draw_tcode >= 6.0 && draw_tcode < 6.5) {
+                            tree_shadow_mode = 3.0;
+                        }
+                        let treeish = tree_shadow_mode > 0.5;
+                        if (casts_shadow && rt_shadows && has_emitter) {
+                            let shadow = prop_ground_shadow_strength(
+                                vec2<f32>(x, y),
+                                horizon,
+                                sx,
+                                sy_floor,
+                                ps_x,
+                                ps_y,
+                                shadow_dir,
+                                params.moon_misc.w,
+                                shadow_len,
+                                pixel_hitbox,
+                                draw_tcode,
+                                params.prop_shadow_profile0[pi],
+                                params.prop_shadow_profile1[pi],
+                            );
+                            if (shadow > 0.0) {
+                                col = lerp3(col, vec3<f32>(12.0 / 255.0, 10.0 / 255.0, 8.0 / 255.0), shadow * 0.46);
+                            }
                         }
                         let rock_var = hash2(vec2<f32>(
                             seed + 101.0,
@@ -2039,6 +2961,23 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
                         ));
                         let col_before = col;
                         col = prop_draw(vec2<f32>(x, y), col, tint, draw_tcode, sx, sy_base, ps_x, ps_y, rock_var);
+                        let root_contact = prop_root_contact_strength(
+                            vec2<f32>(x, y),
+                            horizon,
+                            sx,
+                            sy_floor,
+                            ps_x,
+                            ps_y,
+                            clamp(0.22 + y_sink * 0.12, 0.0, 1.0),
+                            treeish,
+                        );
+                        if (root_contact > 0.0) {
+                            col = lerp3(col, vec3<f32>(14.0 / 255.0, 12.0 / 255.0, 9.0 / 255.0), root_contact * 0.26);
+                        }
+                        if (emits_light && rt_lighting) {
+                            let glow = glow_strength(distance(vec2<f32>(x, y), vec2<f32>(sx, sy_base - ps_y * 1.2)), ps_y * 2.6, 0.42);
+                            col = col + tint * glow * 0.14;
+                        }
                         if (any(abs(col - col_before) > vec3<f32>(0.0005, 0.0005, 0.0005))) {
                             prop_covered = true;
                         }
@@ -2057,6 +2996,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
             let mirror = pc.z > 0.5;
             let spc = max(pc.w, 0.1);
             let pg = params.prop_geom[pi];
+            let ppos = params.prop_pos[pi];
             let wz_min = pg.y;
             let wz_max = pg.z;
             let sc = pg.w;
@@ -2071,8 +3011,12 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
             let row_spacing = max(prow.y, 0.75);
             let pvar = params.prop_var[pi];
             let pvar2 = params.prop_var2[pi];
-            let x_jitter_enabled = pvar2.w >= 1.0;
-            let y_jitter_enabled = pvar2.w >= 2.0;
+            let pflags = i32(round(pvar2.w));
+            let x_jitter_enabled = (pflags & 1) != 0;
+            let y_jitter_enabled = (pflags & 2) != 0;
+            let emits_light = (pflags & 4) != 0;
+            let casts_shadow = (pflags & 8) != 0;
+            let pixel_hitbox = ppos.w > 0.5;
             let row_jitter = max(prow.z, 0.0) + select(0.0, pvar.w * 0.35, x_jitter_enabled);
             let n_lo = i32(ceil((params.time_scroll.x + wz_min) / spc));
             let n_hi = i32(floor((params.time_scroll.x + wz_max) / spc));
@@ -2086,7 +3030,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
                     vec3<f32>(1.0, 1.0, 1.0),
                 );
 
-                let wz_i = n * spc - params.time_scroll.x;
+                let wz_i = n * spc - params.time_scroll.x + ppos.z;
                 if (wz_i < wz_min || wz_i > wz_max) { continue; }
                 let sv = hash2(vec2<f32>(seed, f32(n_seed)));
                 let sc_v = sc * (1.0 + (sv * 2.0 - 1.0) * max(pvar.z, 0.0));
@@ -2097,7 +3041,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
                 let ps = (ps_x + ps_y) * 0.5;
                 if (ps < 0.8) { continue; }
                 let y_sink = clamp(prow.w, 0.0, 6.0);
-                let sy_floor = horizon + focal * cam_h / max(wz_i, 0.001);
+                let sy_floor = horizon + focal * (cam_h - ppos.y) / max(wz_i, 0.001);
                 let yjit = select(
                     0.0,
                     (hash2(vec2<f32>(seed + 7.0, f32(n_seed))) * 2.0 - 1.0) * pvar2.x,
@@ -2143,12 +3087,37 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
                         let row_abs = max(base_abs + row_offset + row_jit, 0.0);
                         let row_wx = sgn * row_abs;
                         let row_edge_px = sgn * (row_abs - base_abs) * pos_scale;
-                        let sx_world = row_cx2 + focal * (row_wx + jit) / max(wz_i, 0.001);
+                        let sx_world = row_cx2 + focal * (row_wx + ppos.x + jit) / max(wz_i, 0.001);
                         let sx_edge = row_cx2 + sgn * edge_inner_px + row_edge_px + jit * pos_scale * 0.85;
                         let sx = mix(sx_world, sx_edge, follow);
-                        let shadow = prop_ground_shadow_strength(vec2<f32>(x, y), sx, sy_floor, ps_x, ps_y);
-                        if (shadow > 0.0) {
-                            col = lerp3(col, vec3<f32>(12.0 / 255.0, 10.0 / 255.0, 8.0 / 255.0), shadow * 0.38);
+                        var tree_shadow_mode = 0.0;
+                        if (draw_tcode < 0.5) {
+                            tree_shadow_mode = 1.0;
+                        } else if (draw_tcode < 1.5) {
+                            tree_shadow_mode = 2.0;
+                        } else if (draw_tcode >= 6.0 && draw_tcode < 6.5) {
+                            tree_shadow_mode = 3.0;
+                        }
+                        let treeish = tree_shadow_mode > 0.5;
+                        if (casts_shadow && rt_shadows && has_emitter) {
+                            let shadow = prop_ground_shadow_strength(
+                                vec2<f32>(x, y),
+                                horizon,
+                                sx,
+                                sy_floor,
+                                ps_x,
+                                ps_y,
+                                shadow_dir,
+                                params.moon_misc.w,
+                                shadow_len,
+                                pixel_hitbox,
+                                draw_tcode,
+                                params.prop_shadow_profile0[pi],
+                                params.prop_shadow_profile1[pi],
+                            );
+                            if (shadow > 0.0) {
+                                col = lerp3(col, vec3<f32>(12.0 / 255.0, 10.0 / 255.0, 8.0 / 255.0), shadow * 0.46);
+                            }
                         }
                         let rock_var = hash2(vec2<f32>(
                             seed + 101.0,
@@ -2156,6 +3125,23 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
                         ));
                         let col_before = col;
                         col = prop_draw(vec2<f32>(x, y), col, tint, draw_tcode, sx, sy_base, ps_x, ps_y, rock_var);
+                        let root_contact = prop_root_contact_strength(
+                            vec2<f32>(x, y),
+                            horizon,
+                            sx,
+                            sy_floor,
+                            ps_x,
+                            ps_y,
+                            clamp(0.22 + y_sink * 0.12, 0.0, 1.0),
+                            treeish,
+                        );
+                        if (root_contact > 0.0) {
+                            col = lerp3(col, vec3<f32>(14.0 / 255.0, 12.0 / 255.0, 9.0 / 255.0), root_contact * 0.26);
+                        }
+                        if (emits_light && rt_lighting) {
+                            let glow = glow_strength(distance(vec2<f32>(x, y), vec2<f32>(sx, sy_base - ps_y * 1.2)), ps_y * 2.6, 0.42);
+                            col = col + tint * glow * 0.14;
+                        }
                         if (any(abs(col - col_before) > vec3<f32>(0.0005, 0.0005, 0.0005))) {
                             prop_covered = true;
                         }
@@ -2169,9 +3155,18 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let d_seed = cam_h * focal / max(abs(y - horizon), 1.0);
     for (var ai: i32 = 0; ai < i32(min(params.feature_counts.y, 4u)); ai = ai + 1) {
         let ac = params.atmo_core[ai];
-        if (ac.x < 0.5) { continue; }
-        let torch_h = ac.z;
-        let spc = max(ac.w, 1.0);
+        let tcode = ac.x;
+        if (tcode < 0.5) { continue; }
+        let torch_h = ac.y;
+        let spc = max(ac.z, 1.0);
+        let emit_pack = floor(ac.w / 100.0);
+        let emits = (emit_pack - 2.0 * floor(emit_pack * 0.5)) >= 0.5;
+        let casts_shadow = floor(ac.w / 200.0) >= 0.5;
+        let mount_pack = ac.w
+            - select(0.0, 100.0, emits)
+            - select(0.0, 200.0, casts_shadow);
+        let mount_surface = i32(floor(mount_pack)) % 10;
+        let mount_side = i32(floor(mount_pack / 10.0));
         let n_lo = i32(ceil((params.time_scroll.x + 0.12) / spc));
         let n_hi = i32(floor((params.time_scroll.x + 24.0) / spc));
         for (var n_i: i32 = n_lo; n_i <= n_hi; n_i = n_i + 1) {
@@ -2179,22 +3174,83 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
             let wz_i = n * spc - params.time_scroll.x;
             let fr = focal * params.atmo_glow[ai].w / max(wz_i, 0.001);
             if (fr < 0.45) { continue; }
-            let sy = horizon + focal * (cam_h - torch_h) / max(wz_i, 0.001);
-            let path_t = clamp((sy - horizon) / max(h - horizon, 1.0), 0.0, 1.0);
+            let sy_wall = horizon + focal * (cam_h - torch_h) / max(wz_i, 0.001);
+            let sy_floor = horizon + focal * cam_h / max(wz_i, 0.001);
+            let sy = select(
+                select(
+                    select(sy_wall, sy_floor - focal * max(torch_h, 0.0) * 0.35 / max(wz_i, 0.001), mount_surface == 2),
+                    horizon - focal * max(torch_h, 0.0) * 0.9 / max(wz_i, 0.001),
+                    mount_surface == 3,
+                ),
+                sy_wall,
+                mount_surface == 1,
+            );
+            let path_t = clamp((sy_floor - horizon) / max(h - horizon, 1.0), 0.0, 1.0);
             let row_cx2 = cx + path_curve_shift(curve, max_hw, path_t);
             let side_off = focal * params.misc.z / max(wz_i, 0.001);
-            let sxl = row_cx2 - side_off;
-            let sxr = row_cx2 + side_off;
-            col = atmo_fixture_draw(vec2<f32>(x, y), col, ac.y, sxl, sy, fr, -1.0);
-            col = atmo_fixture_draw(vec2<f32>(x, y), col, ac.y, sxr, sy, fr, 1.0);
+            let attach_mul = select(select(select(0.45, 0.62, mount_surface == 2), 0.9, mount_surface == 3), 1.0, mount_surface == 1);
+            let sxl = row_cx2 - side_off * attach_mul;
+            let sxr = row_cx2 + side_off * attach_mul;
+            let sxc = row_cx2;
+            let draw_center = mount_side == 3 || (mount_surface != 1 && mount_side == 0);
+            let draw_left = mount_side == 1 || mount_side == 0;
+            let draw_right = mount_side == 2 || mount_side == 0;
+            if (draw_left) {
+                col = atmo_fixture_draw(vec2<f32>(x, y), col, tcode, sxl, sy, fr, -1.0);
+            }
+            if (draw_right) {
+                col = atmo_fixture_draw(vec2<f32>(x, y), col, tcode, sxr, sy, fr, 1.0);
+            }
+            if (draw_center) {
+                col = atmo_fixture_draw(vec2<f32>(x, y), col, tcode, sxc, sy, fr, 1.0);
+            }
             let gcol = params.atmo_glow[ai].rgb;
             let pxy = vec2<f32>(x, y);
-            let gl = glow_strength(distance(pxy, vec2<f32>(sxl, sy)), fr * 3.0, 0.62);
-            let gr = glow_strength(distance(pxy, vec2<f32>(sxr, sy)), fr * 3.0, 0.62);
-            let fl = flame_strength(pxy, sxl, sy + fr * 0.02, fr * 1.1, 0.0);
-            let frg = flame_strength(pxy, sxr, sy + fr * 0.02, fr * 1.1, 0.0);
-            col = col + gcol * (gl + gr) * 0.18;
-            col = col + gcol * (fl + frg) * 0.12;
+            let torch_like = (tcode < 1.5) || (tcode >= 4.0 && tcode < 5.5) || (tcode >= 6.5);
+            let flame_rad = fr * select(3.0, 1.95, torch_like);
+            let flame_peak = select(0.62, 0.78, torch_like);
+            let gl = select(0.0, glow_strength(distance(pxy, vec2<f32>(sxl, sy)), flame_rad, flame_peak), draw_left);
+            let gr = select(0.0, glow_strength(distance(pxy, vec2<f32>(sxr, sy)), flame_rad, flame_peak), draw_right);
+            let gc = select(0.0, glow_strength(distance(pxy, vec2<f32>(sxc, sy)), flame_rad, flame_peak), draw_center);
+            let fl = select(0.0, flame_strength(pxy, sxl, sy + fr * 0.02, fr * 1.1, 0.0), draw_left);
+            let frg = select(0.0, flame_strength(pxy, sxr, sy + fr * 0.02, fr * 1.1, 0.0), draw_right);
+            let fc = select(0.0, flame_strength(pxy, sxc, sy + fr * 0.02, fr * 1.1, 0.0), draw_center);
+            if (emits && rt_lighting) {
+                let surf_l = select(0.0, glow_strength(distance(pxy, vec2<f32>(sxl, sy + fr * 0.30)), fr * select(2.35, 1.50, torch_like), select(0.68, 0.80, torch_like)), draw_left);
+                let surf_r = select(0.0, glow_strength(distance(pxy, vec2<f32>(sxr, sy + fr * 0.30)), fr * select(2.35, 1.50, torch_like), select(0.68, 0.80, torch_like)), draw_right);
+                let surf_c = select(0.0, glow_strength(distance(pxy, vec2<f32>(sxc, sy + fr * 0.30)), fr * select(2.35, 1.50, torch_like), select(0.68, 0.80, torch_like)), draw_center);
+                let mount_l = select(0.0, glow_strength(distance(pxy, vec2<f32>(sxl, sy + fr * 0.60)), fr * select(1.45, 1.05, torch_like), select(0.76, 0.84, torch_like)), draw_left);
+                let mount_r = select(0.0, glow_strength(distance(pxy, vec2<f32>(sxr, sy + fr * 0.60)), fr * select(1.45, 1.05, torch_like), select(0.76, 0.84, torch_like)), draw_right);
+                let mount_c = select(0.0, glow_strength(distance(pxy, vec2<f32>(sxc, sy + fr * 0.60)), fr * select(1.45, 1.05, torch_like), select(0.76, 0.84, torch_like)), draw_center);
+                let top_l = select(0.0, glow_strength(distance(pxy, vec2<f32>(sxl, sy - fr * 0.36)), fr * 1.55, 0.70), draw_left);
+                let top_r = select(0.0, glow_strength(distance(pxy, vec2<f32>(sxr, sy - fr * 0.36)), fr * 1.55, 0.70), draw_right);
+                let top_c = select(0.0, glow_strength(distance(pxy, vec2<f32>(sxc, sy - fr * 0.36)), fr * 1.55, 0.70), draw_center);
+                let hot_l = select(0.0, glow_strength(distance(pxy, vec2<f32>(sxl, sy + fr * 0.00)), fr * 0.54, 0.92), draw_left);
+                let hot_r = select(0.0, glow_strength(distance(pxy, vec2<f32>(sxr, sy + fr * 0.00)), fr * 0.54, 0.92), draw_right);
+                let hot_c = select(0.0, glow_strength(distance(pxy, vec2<f32>(sxc, sy + fr * 0.00)), fr * 0.54, 0.92), draw_center);
+                let att_l = select(0.0, 1.0 / (1.0 + pow(distance(pxy, vec2<f32>(sxl, sy)) / max(fr * 2.3, 0.001), 2.0) * 3.2), draw_left);
+                let att_r = select(0.0, 1.0 / (1.0 + pow(distance(pxy, vec2<f32>(sxr, sy)) / max(fr * 2.3, 0.001), 2.0) * 3.2), draw_right);
+                let att_c = select(0.0, 1.0 / (1.0 + pow(distance(pxy, vec2<f32>(sxc, sy)) / max(fr * 2.3, 0.001), 2.0) * 3.2), draw_center);
+                col = col + gcol * (gl * att_l + gr * att_r + gc * att_c) * select(0.24, 0.13, torch_like);
+                col = col + gcol * (fl * att_l + frg * att_r + fc * att_c) * 0.14;
+                col = col + gcol * (surf_l * att_l + surf_r * att_r + surf_c * att_c) * select(0.34, 0.23, torch_like);
+                col = col + gcol * (mount_l * att_l + mount_r * att_r + mount_c * att_c) * select(0.28, 0.18, torch_like);
+                col = col + gcol * (top_l * att_l + top_r * att_r + top_c * att_c) * select(0.20, 0.14, torch_like);
+                col = col + gcol * (hot_l * att_l + hot_r * att_r + hot_c * att_c) * select(0.30, 0.46, torch_like);
+            }
+            if (rt_shadows && has_emitter && casts_shadow) {
+                let slf = clamp(params.loop_data.w, 0.55, 6.5);
+                let lox = shadow_dir * fr * 0.86 * slf;
+                let loy = fr * 0.20 * slf;
+                let shl = select(0.0, glow_strength(distance(pxy, vec2<f32>(sxl + lox, sy + loy)), fr * 0.66, 0.78), draw_left);
+                let shr = select(0.0, glow_strength(distance(pxy, vec2<f32>(sxr + lox, sy + loy)), fr * 0.66, 0.78), draw_right);
+                let shc = select(0.0, glow_strength(distance(pxy, vec2<f32>(sxc + lox, sy + loy)), fr * 0.66, 0.78), draw_center);
+                let tail_l = select(0.0, glow_strength(distance(pxy, vec2<f32>(sxl + lox * 1.35, sy + loy * 1.25)), fr * 0.92, 0.78), draw_left);
+                let tail_r = select(0.0, glow_strength(distance(pxy, vec2<f32>(sxr + lox * 1.35, sy + loy * 1.25)), fr * 0.92, 0.78), draw_right);
+                let tail_c = select(0.0, glow_strength(distance(pxy, vec2<f32>(sxc + lox * 1.35, sy + loy * 1.25)), fr * 0.92, 0.78), draw_center);
+                let sh = clamp((shl + shr + shc) * 0.22 + (tail_l + tail_r + tail_c) * 0.10, 0.0, 0.42);
+                col = lerp3(col, vec3<f32>(12.0 / 255.0, 10.0 / 255.0, 8.0 / 255.0), sh);
+            }
         }
     }
 
@@ -2253,11 +3309,16 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         let luma = dot(col, vec3<f32>(0.2126, 0.7152, 0.0722));
         col = lerp3(vec3<f32>(luma, luma, luma), col, sat);
     }
-    // Bloom (luminance threshold self-brighten — single-pass approximation)
+    // Bloom (single-pass bright response with emitter-aware lift)
     let bloom = params.post_data.z;
     if (params.post_flags.z > 0u && bloom > 0.001) {
-        let bl = max(dot(col, vec3<f32>(0.2126, 0.7152, 0.0722)) - 0.65, 0.0);
-        col = col + col * bl * bloom * 0.5;
+        let lum = dot(col, vec3<f32>(0.2126, 0.7152, 0.0722));
+        let thr = mix(0.62, 0.42, clamp(bloom, 0.0, 1.0));
+        let bright = clamp((lum - thr) / max(1.0 - thr, 0.001), 0.0, 1.0);
+        let soft_knee = bright * bright * (3.0 - 2.0 * bright);
+        let emitter_lift = 1.0 + light_energy * 0.35;
+        let gain = bloom * (0.65 + lum * 0.55) * emitter_lift;
+        col = col + col * soft_knee * gain;
     }
     // Fog toward horizon
     if (params.post_flags.x > 0u) {

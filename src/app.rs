@@ -7,8 +7,8 @@ use std::sync::mpsc;
 use crate::node_lab::NodeLabState;
 use crate::renderer::PathRenderer;
 use crate::settings::{
-    presets, AnimSettings, AtmoLayer, AtmoType, FloorPattern, LightingPreset, PathForgeSettings,
-    PropInstance, PropType, WallPattern,
+    presets, AnimSettings, AtmoLayer, AtmoType, AttachmentSurface, FloorPattern, LightingPreset,
+    MountSide, PathForgeSettings, PropInstance, PropType, WallPattern,
 };
 
 // ── Background render thread ───────────────────────────────────────────────
@@ -212,6 +212,8 @@ pub struct PathForgeApp {
     custom_presets: Vec<CustomPreset>,
     preset_name_input: String,
     preset_status: String,
+    history: Vec<PathForgeSettings>,
+    history_cursor: usize,
 
     // --- animation state
     playing:      bool,
@@ -266,6 +268,11 @@ pub struct PathForgeApp {
     gpu_contrast: f32,
     gpu_brightness: f32,
     gif_project_name: String,
+    export_transition_gif: bool,
+    transition_frames: u32,
+    transition_to_custom: bool,
+    transition_target_idx: usize,
+    transition_blend_mode: crate::gif_export::TransitionBlendMode,
     exporting:    bool,
     export_msg:   String,
     export_result_rx: Option<mpsc::Receiver<crate::gif_export::ExportUpdate>>,
@@ -331,13 +338,15 @@ impl Default for PathForgeApp {
             gpu_brightness: 1.02,
         });
         Self {
-            settings,
+            settings: settings.clone(),
             preset_idx:     0,
             is_custom:      false,
             active_custom_idx: None,
             custom_presets: Self::load_custom_presets(),
             preset_name_input: String::new(),
             preset_status: String::new(),
+            history: vec![settings.clone()],
+            history_cursor: 0,
             playing:        false,
             scroll:         0.0,
             global_t:       0.0,
@@ -384,6 +393,11 @@ impl Default for PathForgeApp {
             gpu_contrast: 1.08,
             gpu_brightness: 1.02,
             gif_project_name: String::new(),
+            export_transition_gif: false,
+            transition_frames: 48,
+            transition_to_custom: false,
+            transition_target_idx: 0,
+            transition_blend_mode: crate::gif_export::TransitionBlendMode::Linear,
             exporting:      false,
             export_msg:     String::new(),
             export_result_rx: None,
@@ -683,10 +697,24 @@ impl eframe::App for PathForgeApp {
         }
 
         // --- UI layout
+        let settings_before_ui = self.settings.clone();
         self.top_bar(ctx);
         self.right_panel(ctx);
         self.central_panel(ctx);
         self.node_lab.ui(ctx);
+        self.record_history_if_changed(&settings_before_ui);
+
+        let undo_pressed = ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::Z) && !i.modifiers.shift);
+        let redo_pressed = ctx.input(|i| {
+            i.modifiers.command
+                && (i.key_pressed(egui::Key::Y) || (i.modifiers.shift && i.key_pressed(egui::Key::Z)))
+        });
+        if undo_pressed {
+            self.undo();
+        }
+        if redo_pressed {
+            self.redo();
+        }
 
         // Keep the event loop alive whenever there is live work to do
         if self.playing || self.render_pending {
@@ -697,6 +725,64 @@ impl eframe::App for PathForgeApp {
 
 // ── UI sections ────────────────────────────────────────────────────────────
 impl PathForgeApp {
+    fn settings_equal(a: &PathForgeSettings, b: &PathForgeSettings) -> bool {
+        match (serde_json::to_vec(a), serde_json::to_vec(b)) {
+            (Ok(va), Ok(vb)) => va == vb,
+            _ => false,
+        }
+    }
+
+    fn record_history_if_changed(&mut self, before: &PathForgeSettings) {
+        if Self::settings_equal(before, &self.settings) {
+            return;
+        }
+        if self.history_cursor + 1 < self.history.len() {
+            self.history.truncate(self.history_cursor + 1);
+        }
+        self.history.push(self.settings.clone());
+        self.history_cursor = self.history.len().saturating_sub(1);
+        self.redraw_after_history_change();
+    }
+
+    fn undo(&mut self) {
+        if self.history_cursor == 0 {
+            return;
+        }
+        self.history_cursor -= 1;
+        if let Some(state) = self.history.get(self.history_cursor).cloned() {
+            self.settings = state;
+            self.is_custom = true;
+            self.redraw_after_history_change();
+        }
+    }
+
+    fn redo(&mut self) {
+        if self.history_cursor + 1 >= self.history.len() {
+            return;
+        }
+        self.history_cursor += 1;
+        if let Some(state) = self.history.get(self.history_cursor).cloned() {
+            self.settings = state;
+            self.is_custom = true;
+            self.redraw_after_history_change();
+        }
+    }
+
+    fn redraw_after_history_change(&mut self) {
+        self.dirty = true;
+        self.scroll = 0.0;
+        self.canvas_w_input = self.settings.canvas.base_w.to_string();
+        self.canvas_h_input = self.settings.canvas.base_h.to_string();
+    }
+
+    fn transition_target_settings(&self) -> Option<PathForgeSettings> {
+        if self.transition_to_custom {
+            self.custom_presets.get(self.transition_target_idx).map(|p| p.settings.clone())
+        } else {
+            presets::ALL.get(self.transition_target_idx).map(|(_, maker)| maker())
+        }
+    }
+
     fn custom_presets_dir() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("path_forge_presets")
@@ -903,6 +989,17 @@ impl PathForgeApp {
                                 .color(backend_col)
                                 .small(),
                         );
+
+                        ui.separator();
+
+                        let can_undo = self.history_cursor > 0;
+                        let can_redo = self.history_cursor + 1 < self.history.len();
+                        if ui.add_enabled(can_undo, egui::Button::new(RichText::new("Undo").small())).clicked() {
+                            self.undo();
+                        }
+                        if ui.add_enabled(can_redo, egui::Button::new(RichText::new("Redo").small())).clicked() {
+                            self.redo();
+                        }
 
                         ui.separator();
 
@@ -1159,15 +1256,19 @@ impl PathForgeApp {
                         }
                         changed |= checkbox(ui, "Enable sun", &mut s.sun_enabled);
                         if s.sun_enabled {
+                            changed |= checkbox(ui, "Sun emits light", &mut s.sun_emits_light);
                             changed |= knob_f32(ui, "Sun X", &mut s.sun_pos[0], -1.0, 2.0, 0.01);
                             changed |= knob_f32(ui, "Sun Y", &mut s.sun_pos[1], -1.0, 2.0, 0.01);
+                            changed |= knob_f32(ui, "Sun Z depth", &mut s.sun_z, -1.0, 1.0, 0.01);
                             changed |= knob_f32(ui, "Sun radius", &mut s.sun_radius, 0.01, 1.0, 0.005);
                             changed |= colour3(ui, "Sun colour", &mut s.sun_color);
                         }
                         changed |= checkbox(ui, "Enable moon", &mut s.moon_enabled);
                         if s.moon_enabled {
+                            changed |= checkbox(ui, "Moon emits light", &mut s.moon_emits_light);
                             changed |= knob_f32(ui, "Moon X", &mut s.moon_pos[0], -1.0, 2.0, 0.01);
                             changed |= knob_f32(ui, "Moon Y", &mut s.moon_pos[1], -1.0, 2.0, 0.01);
+                            changed |= knob_f32(ui, "Moon Z depth", &mut s.moon_z, -1.0, 1.0, 0.01);
                             changed |= knob_f32(ui, "Moon radius", &mut s.moon_radius, 0.01, 1.0, 0.005);
                             changed |= knob_f32(ui, "Moon phase", &mut s.moon_phase, -1.0, 1.0, 0.01);
                             changed |= knob_f32(ui, "Moon alpha", &mut s.moon_alpha, 0.0, 2.0, 0.01);
@@ -1213,7 +1314,11 @@ impl PathForgeApp {
                                         if ui.small_button("✕").clicked() { to_remove = Some(i); }
                                     });
                                     if olen[i] {
+                                        changed |= checkbox(ui, "emits light", &mut layer.emits_light);
+                                        changed |= checkbox(ui, "casts shadow", &mut layer.casts_shadow);
                                         changed |= pick_atmo(ui, &mut layer.atmo_type);
+                                        changed |= pick_attachment_surface(ui, "Attachment", &mut layer.mount_surface);
+                                        changed |= pick_mount_side(ui, "Mount side", &mut layer.mount_side);
                                         changed |= knob_f32(ui, "Light height",  &mut layer.torch_h,     -4.0,  20.0,  0.1);
                                         changed |= knob_u32(ui, "Light spacing", &mut layer.torch_spc,   1,    256);
                                         changed |= knob_f32(ui, "Light size",    &mut layer.torch_scale, 0.001, 2.5, 0.005);
@@ -1293,7 +1398,15 @@ impl PathForgeApp {
                                         if ui.small_button("✕").clicked() { to_remove = Some(i); }
                                     });
                                     if olen[i] {
+                                        changed |= checkbox(ui, "emits light", &mut item.emits_light);
+                                        changed |= checkbox(ui, "casts shadow", &mut item.casts_shadow);
+                                        changed |= checkbox(ui, "pixel outline hitbox", &mut item.pixel_hitbox_enabled);
                                         changed |= pick_prop_type(ui, &mut item.prop_type);
+                                        changed |= pick_attachment_surface(ui, "Attachment", &mut item.mount_surface);
+                                        changed |= pick_mount_side(ui, "Mount side", &mut item.mount_side);
+                                        changed |= knob_f32(ui, "Position X", &mut item.pos_x, -12.0, 12.0, 0.05);
+                                        changed |= knob_f32(ui, "Position Y", &mut item.pos_y, -8.0, 8.0, 0.05);
+                                        changed |= knob_f32(ui, "Position Z", &mut item.pos_z, -12.0, 12.0, 0.05);
                                         changed |= knob_f32(ui, "Side offset (wx)", &mut item.wx,        0.01, 12.0, 0.1);
                                         changed |= checkbox(ui, "Mirror",           &mut item.mirror);
                                         changed |= knob_f32(ui, "Start distance",   &mut item.start_wz,  0.01, 32.0, 0.05);
@@ -1432,13 +1545,15 @@ impl PathForgeApp {
                                 changed |= colour3(ui, "Fog colour", &mut p.fog_color);
                                 changed |= knob_f32(ui, "Fog density", &mut p.fog_density, 0.0, 1.0, 0.01);
                             }
+                            changed |= checkbox(ui, "Real-time lighting", &mut p.realtime_lighting_enabled);
+                            changed |= checkbox(ui, "Real-time shadows", &mut p.realtime_shadows_enabled);
 
                             ui.separator();
                             ui.label(RichText::new("GPU PIPELINE").color(Color32::from_rgb(140,112,52)).small().strong());
-                            changed |= checkbox(ui, "GPU scene preview (phase 2)", &mut self.gpu_scene_preview_enabled);
+                            changed |= checkbox(ui, "Mega shader preview", &mut self.gpu_scene_preview_enabled);
                             // Bypass disabled by default; exact parity gate controls scene GPU use.
                             // compare mode intentionally disabled by default; keep the code path dormant.
-                            changed |= checkbox(ui, "GPU scene export (phase 2)", &mut self.gpu_scene_export_enabled);
+                            changed |= checkbox(ui, "Mega shader export", &mut self.gpu_scene_export_enabled);
                             changed |= checkbox(ui, "GPU preview shading", &mut self.gpu_preview_enabled);
                             changed |= checkbox(ui, "GPU export shading", &mut self.gpu_export_enabled);
                             changed |= knob_f32(ui, "GPU shader mix", &mut self.gpu_effect_mix, 0.0, 1.0, 0.01);
@@ -1449,7 +1564,9 @@ impl PathForgeApp {
                             ui.label(RichText::new("SHADER TOGGLES").color(Color32::from_rgb(140,112,52)).small().strong());
                             changed |= checkbox(ui, "Sky gradient", &mut self.settings.sky.enabled);
                             changed |= checkbox(ui, "Sun", &mut self.settings.sky.sun_enabled);
+                            changed |= checkbox(ui, "Sun emits light", &mut self.settings.sky.sun_emits_light);
                             changed |= checkbox(ui, "Moon", &mut self.settings.sky.moon_enabled);
+                            changed |= checkbox(ui, "Moon emits light", &mut self.settings.sky.moon_emits_light);
                             changed |= checkbox(ui, "Moon texture", &mut self.settings.sky.moon_texture_enabled);
                             changed |= checkbox(ui, "Stars", &mut self.settings.sky.stars_enabled);
                             changed |= checkbox(ui, "Clouds", &mut self.settings.sky.clouds_enabled);
@@ -1680,6 +1797,76 @@ impl PathForgeApp {
                     if checkbox(ui, "Export individual layer GIFs (slower)", &mut self.export_individual_layers) {
                         self.is_custom = true;
                     }
+                    if checkbox(ui, "Export preset transition GIF", &mut self.export_transition_gif) {
+                        self.is_custom = true;
+                    }
+                    if self.export_transition_gif {
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new("Target type").color(Color32::from_rgb(100,80,40)).small());
+                            if ui.selectable_label(!self.transition_to_custom, "Built-in").clicked() {
+                                self.transition_to_custom = false;
+                                self.transition_target_idx = self.transition_target_idx.min(presets::ALL.len().saturating_sub(1));
+                            }
+                            if ui.selectable_label(self.transition_to_custom, "Custom").clicked() {
+                                self.transition_to_custom = true;
+                                self.transition_target_idx = self.transition_target_idx.min(self.custom_presets.len().saturating_sub(1));
+                            }
+                        });
+                        let target_text = if self.transition_to_custom {
+                            self.custom_presets
+                                .get(self.transition_target_idx)
+                                .map(|p| p.name.clone())
+                                .unwrap_or_else(|| "No custom presets".to_owned())
+                        } else {
+                            presets::ALL
+                                .get(self.transition_target_idx)
+                                .map(|p| p.0.to_owned())
+                                .unwrap_or_else(|| "No built-in presets".to_owned())
+                        };
+                        egui::ComboBox::from_id_salt("transition_target_preset")
+                            .selected_text(RichText::new(target_text).small())
+                            .show_ui(ui, |ui| {
+                                if self.transition_to_custom {
+                                    if self.custom_presets.is_empty() {
+                                        ui.label(RichText::new("No custom presets available").small());
+                                    }
+                                    for (i, cp) in self.custom_presets.iter().enumerate() {
+                                        if ui.selectable_label(self.transition_target_idx == i, &cp.name).clicked() {
+                                            self.transition_target_idx = i;
+                                        }
+                                    }
+                                } else {
+                                    for (i, (name, _)) in presets::ALL.iter().enumerate() {
+                                        if ui.selectable_label(self.transition_target_idx == i, *name).clicked() {
+                                            self.transition_target_idx = i;
+                                        }
+                                    }
+                                }
+                            });
+                        let _ = knob_u32(ui, "Transition frames", &mut self.transition_frames, 8, 240);
+                        let blend_label = match self.transition_blend_mode {
+                            crate::gif_export::TransitionBlendMode::Linear => "Linear",
+                            crate::gif_export::TransitionBlendMode::Smoothstep => "Smoothstep",
+                            crate::gif_export::TransitionBlendMode::EaseInOutSine => "EaseInOutSine",
+                            crate::gif_export::TransitionBlendMode::EaseInOutCubic => "EaseInOutCubic",
+                        };
+                        egui::ComboBox::from_id_salt("transition_blend_mode")
+                            .selected_text(RichText::new(blend_label).small())
+                            .show_ui(ui, |ui| {
+                                if ui.selectable_label(matches!(self.transition_blend_mode, crate::gif_export::TransitionBlendMode::Linear), "Linear").clicked() {
+                                    self.transition_blend_mode = crate::gif_export::TransitionBlendMode::Linear;
+                                }
+                                if ui.selectable_label(matches!(self.transition_blend_mode, crate::gif_export::TransitionBlendMode::Smoothstep), "Smoothstep").clicked() {
+                                    self.transition_blend_mode = crate::gif_export::TransitionBlendMode::Smoothstep;
+                                }
+                                if ui.selectable_label(matches!(self.transition_blend_mode, crate::gif_export::TransitionBlendMode::EaseInOutSine), "EaseInOutSine").clicked() {
+                                    self.transition_blend_mode = crate::gif_export::TransitionBlendMode::EaseInOutSine;
+                                }
+                                if ui.selectable_label(matches!(self.transition_blend_mode, crate::gif_export::TransitionBlendMode::EaseInOutCubic), "EaseInOutCubic").clicked() {
+                                    self.transition_blend_mode = crate::gif_export::TransitionBlendMode::EaseInOutCubic;
+                                }
+                            });
+                    }
                     if ui.button(RichText::new("▶ EXPORT GIF")
                             .color(Color32::from_rgb(200,144,32)).small())
                         .clicked() && !self.exporting
@@ -1876,7 +2063,10 @@ impl PathForgeApp {
 
     // ── GIF export ─────────────────────────────────────────────────────────
     fn do_export(&mut self) {
-        use crate::gif_export::{export_project_gifs_with_progress, ExportUpdate};
+        use crate::gif_export::{
+            export_preset_transition_gif_with_progress, export_project_gifs_with_progress,
+            ExportUpdate,
+        };
 
         if self.gif_project_name.trim().is_empty() {
             self.export_msg = "Export requires a project name".to_owned();
@@ -1901,6 +2091,10 @@ impl PathForgeApp {
             effect_mix: self.gpu_effect_mix,
         };
         let project_name = self.gif_project_name.trim().to_owned();
+        let transition_enabled = self.export_transition_gif;
+        let transition_frames = self.transition_frames.max(2);
+        let transition_blend_mode = self.transition_blend_mode;
+        let transition_target = self.transition_target_settings();
         let (tx, rx) = mpsc::channel::<ExportUpdate>();
         self.export_result_rx = Some(rx);
         self.exporting = true;
@@ -1908,23 +2102,55 @@ impl PathForgeApp {
         self.export_stage = "init".to_owned();
         self.export_last_update = Some(std::time::Instant::now());
         self.export_stall_notified = false;
-        self.export_msg = "Exporting layer GIFs and composite...".to_owned();
+        self.export_msg = if transition_enabled {
+            "Exporting preset transition GIF...".to_owned()
+        } else {
+            "Exporting layer GIFs and composite...".to_owned()
+        };
+
+        if transition_enabled && transition_target.is_none() {
+            self.exporting = false;
+            self.export_result_rx = None;
+            self.export_msg = "Transition export requires a valid target preset".to_owned();
+            return;
+        }
 
         match std::thread::Builder::new().name("pathforge-gif-export".into()).spawn(move || {
-            let result = export_project_gifs_with_progress(
-                &settings,
-                fps,
-                total_frames,
-                smoothing_samples,
-                &project_name,
-                export_individual_layers,
-                gpu_scene_enabled,
-                gpu_enabled,
-                gpu_settings,
-                |update| {
-                    let _ = tx.send(update);
-                },
-            );
+            let result = if transition_enabled {
+                if let Some(target) = transition_target {
+                    export_preset_transition_gif_with_progress(
+                        &settings,
+                        &target,
+                        fps,
+                        transition_frames,
+                        transition_blend_mode,
+                        &project_name,
+                        gpu_scene_enabled,
+                        gpu_enabled,
+                        gpu_settings,
+                        |update| {
+                            let _ = tx.send(update);
+                        },
+                    )
+                } else {
+                    Err("missing transition target preset".into())
+                }
+            } else {
+                export_project_gifs_with_progress(
+                    &settings,
+                    fps,
+                    total_frames,
+                    smoothing_samples,
+                    &project_name,
+                    export_individual_layers,
+                    gpu_scene_enabled,
+                    gpu_enabled,
+                    gpu_settings,
+                    |update| {
+                        let _ = tx.send(update);
+                    },
+                )
+            };
             if let Err(e) = result {
                 let _ = tx.send(ExportUpdate {
                     stage: "export".to_owned(),
@@ -2116,6 +2342,38 @@ fn pick_prop_type(ui: &mut egui::Ui, pt: &mut PropType) -> bool {
         });
     ui.add_space(4.0);
     *pt != before
+}
+
+fn pick_attachment_surface(ui: &mut egui::Ui, label: &str, surface: &mut AttachmentSurface) -> bool {
+    let before = surface.clone();
+    ui.horizontal(|ui| {
+        ui.label(RichText::new(label).color(Color32::from_rgb(100,90,68)).small());
+    });
+    egui::ComboBox::from_id_salt(("attachment_surface", label))
+        .selected_text(RichText::new(surface.name()).small())
+        .show_ui(ui, |ui| {
+            for v in AttachmentSurface::all() {
+                ui.selectable_value(surface, v.clone(), RichText::new(v.name()).small());
+            }
+        });
+    ui.add_space(4.0);
+    *surface != before
+}
+
+fn pick_mount_side(ui: &mut egui::Ui, label: &str, side: &mut MountSide) -> bool {
+    let before = side.clone();
+    ui.horizontal(|ui| {
+        ui.label(RichText::new(label).color(Color32::from_rgb(100,90,68)).small());
+    });
+    egui::ComboBox::from_id_salt(("mount_side", label))
+        .selected_text(RichText::new(side.name()).small())
+        .show_ui(ui, |ui| {
+            for v in MountSide::all() {
+                ui.selectable_value(side, v.clone(), RichText::new(v.name()).small());
+            }
+        });
+    ui.add_space(4.0);
+    *side != before
 }
 
 fn pick_lighting_preset(ui: &mut egui::Ui, preset: &mut LightingPreset) -> bool {
