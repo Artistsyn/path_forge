@@ -1,0 +1,13 @@
+[package]
+name = "path_forge_runtime"
+version = "0.1.0"
+edition = "2021"
+description = "PathForge for games: render a PathForge scene every frame, from Rust or through a C ABI"
+
+[lib]
+crate-type = ["rlib", "cdylib", "staticlib"]
+
+[dependencies]
+path_forge = { path = "..", default-features = false }
+serde_json = "1"
+

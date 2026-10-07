@@ -23,11 +23,10 @@ pub fn seeded_rng(seed: u32) -> impl FnMut() -> f32 {
 }
 
 // ── Tile building helpers ──────────────────────────────────────────────────
+/// Writes wrap around the tile edges, so every pattern tiles seamlessly.
 fn set_px(data: &mut [u8], x: usize, y: usize, c: [u8; 3]) {
-    if x < TILE_TEX && y < TILE_TEX {
-        let i = (y * TILE_TEX + x) * 3;
-        data[i] = c[0]; data[i+1] = c[1]; data[i+2] = c[2];
-    }
+    let i = ((y % TILE_TEX) * TILE_TEX + x % TILE_TEX) * 3;
+    data[i] = c[0]; data[i+1] = c[1]; data[i+2] = c[2];
 }
 fn row(data: &mut [u8], y: usize, c: [u8; 3]) {
     for x in 0..TILE_TEX { set_px(data, x, y, c); }
@@ -139,7 +138,7 @@ pub fn gen_tile(pattern: &str, base: [u8; 3], mortar: [u8; 3], noise: u32, damag
             }
         }
         "Brick" => {
-            let brick_w = (TILE_TEX / 5).max(20);
+            let brick_w = TILE_TEX / 4; // must divide TILE_TEX so rows tile
             let brick_h = (TILE_TEX / 12).max(10);
             let mortar_w = (TILE_TEX / 96).max(1);
             for y in 0..TILE_TEX {
@@ -152,7 +151,7 @@ pub fn gen_tile(pattern: &str, base: [u8; 3], mortar: [u8; 3], noise: u32, damag
                 let off = if row_idx % 2 == 0 { 0 } else { brick_w / 2 };
                 for x in 0..TILE_TEX {
                     let xs = x + off;
-                    let col_idx = xs / brick_w;
+                    let col_idx = (xs / brick_w) % (TILE_TEX / brick_w);
                     let x_in = xs % brick_w;
                     if x_in < mortar_w {
                         set_px(&mut data, x, y, mortar);
@@ -173,8 +172,8 @@ pub fn gen_tile(pattern: &str, base: [u8; 3], mortar: [u8; 3], noise: u32, damag
             }
         }
         "Stone Block" => {
-            let bw = (TILE_TEX / 6).max(24);
-            let bh = (TILE_TEX / 5).max(24);
+            let bw = TILE_TEX / 4; // both must divide TILE_TEX so blocks tile
+            let bh = TILE_TEX / 6;
             let mw = (TILE_TEX / 96).max(1);
             for y in 0..TILE_TEX {
                 let ry = y % bh;
@@ -222,43 +221,126 @@ pub fn gen_tile(pattern: &str, base: [u8; 3], mortar: [u8; 3], noise: u32, damag
                 for s in 0..steps {
                     let nx = (x as i32 + (dx * s as f32 / steps as f32) as i32)
                         .rem_euclid(TILE_TEX as i32) as usize;
-                    let ny = (y + s).min(TILE_TEX - 1);
+                    let ny = (y + s) % TILE_TEX;
                     set_px(&mut data, nx, ny, mortar);
                     x = nx;
                 }
             }
         }
         "Sand" => {
-            for y in (0..TILE_TEX).step_by(sw(3)) {
+            // Wind ripples: wavy rows whose period divides the tile.
+            let step = TILE_TEX / 12;
+            for r in 0..12 {
                 for x in 0..TILE_TEX {
-                    if (x * 7 + y * 3) % 13 < 2 { set_px(&mut data, x, y, mortar); }
+                    let wave = ((x as f32 / TILE_TEX as f32 * std::f32::consts::TAU * 3.0 + r as f32 * 1.7).sin() * 3.0) as i32;
+                    let y = (r * step) as i32 + wave;
+                    if (x * 7 + r * 5) % 16 < 11 { set_px(&mut data, x, y.rem_euclid(TILE_TEX as i32) as usize, mortar); }
                 }
             }
         }
         "Dirt" => {
+            // Clods and pebbles: darker soil patches, a few lighter stones.
             let mut rng = seeded_rng(seed + 30);
-            let count = 40 * TILE_TEX * TILE_TEX / (BASE_TILE * BASE_TILE);
-            for _ in 0..count {
-                let x = (rng() * TILE_TEX as f32) as usize;
-                let y = (rng() * TILE_TEX as f32) as usize;
-                let w = sw(1 + (rng() * 3.0) as usize);
-                fill(&mut data, x, y, w, 1, mortar);
+            for _ in 0..260 {
+                let (cx, cy) = (rng() * TILE_TEX as f32, rng() * TILE_TEX as f32);
+                let r = 1.5 + rng() * 5.0;
+                let pebble = rng() < 0.3;
+                let c = if pebble { tint(base, 18 + (rng() * 14.0) as i32) } else { mortar };
+                let ri = r.ceil() as i32;
+                for oy in -ri..=ri { for ox in -ri..=ri {
+                    let squash = if pebble { 1.0 } else { 1.8 };
+                    if (ox * ox) as f32 + (oy as f32 * squash).powi(2) > r * r { continue; }
+                    let x = (cx as i32 + ox).rem_euclid(TILE_TEX as i32) as usize;
+                    let y = (cy as i32 + oy).rem_euclid(TILE_TEX as i32) as usize;
+                    if pebble { set_px(&mut data, x, y, c); } else { blend_px(&mut data, x, y, c, 0.55); }
+                }}
             }
         }
         "Grass" => {
             let mut rng = seeded_rng(seed + 40);
-            let mut x = 0;
-            while x < TILE_TEX {
-                if rng() > 0.4 {
-                    let h = sw(2 + (rng() * 6.0) as usize);
-                    let blade = [
-                        (base[0] as i32 + 10).clamp(0, 255) as u8,
-                        (base[1] as i32 + 28).clamp(0, 255) as u8,
-                        base[2],
-                    ];
-                    fill(&mut data, x, TILE_TEX - h, sw(1), h, blade);
+            // Scattered blades, lighter and darker, anywhere in the tile.
+            for _ in 0..900 {
+                let x = (rng() * TILE_TEX as f32) as usize;
+                let y = (rng() * TILE_TEX as f32) as usize;
+                let h = 3 + (rng() * 9.0) as usize;
+                let lift = (rng() * 36.0) as i32 - 12;
+                let blade = [
+                    (base[0] as i32 + lift / 3).clamp(0, 255) as u8,
+                    (base[1] as i32 + lift).clamp(0, 255) as u8,
+                    (base[2] as i32 + lift / 4).clamp(0, 255) as u8,
+                ];
+                let c = if rng() < 0.25 { mortar } else { blade };
+                fill(&mut data, x, y, 2, h, c);
+            }
+        }
+        "Planks" => {
+            // Boards laid across the walk (their length runs along u), a dark gap between them,
+            // grain streaks along each board, and butt joints with nail heads at random places.
+            let mut rng = seeded_rng(seed + 60);
+            let n = 8usize;
+            let bh = TILE_TEX / n;
+            let gap = (bh / 10).max(2);
+            for b in 0..n {
+                let y0 = b * bh;
+                let c = tint(base, (rng() * 28.0 - 14.0) as i32);
+                let (phase, freq, wobble) = (rng() * std::f32::consts::TAU, 1.0 + (rng() * 3.0).floor(), 0.5 + rng() * 0.8);
+                let joint = (rng() * TILE_TEX as f32) as usize;
+                for y in y0..y0 + bh {
+                    let t = (y - y0) as f32 / bh as f32;
+                    for x in 0..TILE_TEX {
+                        let wave = (x as f32 / TILE_TEX as f32 * std::f32::consts::TAU * freq + phase).sin() * wobble;
+                        let grain = ((t * 7.0 + wave) * std::f32::consts::PI).sin();
+                        let mut col = if grain > 0.86 { tint(c, -14) } else if grain < -0.93 { tint(c, 8) } else { c };
+                        // Boards darken toward their edges, where dirt collects.
+                        let edge = (y - y0).min(y0 + bh - 1 - y);
+                        if edge < gap + 2 { col = tint(col, -10); }
+                        set_px(&mut data, x, y, col);
+                    }
                 }
-                x += sw(2);
+                for y in y0..y0 + gap { row(&mut data, y, mortar); }
+                for y in y0 + gap..y0 + bh {
+                    for dx in 0..2 { set_px(&mut data, (joint + dx) % TILE_TEX, y, mortar); }
+                }
+                for (ox, oy) in [(TILE_TEX - 5, bh / 3), (TILE_TEX - 5, bh * 2 / 3), (4, bh / 3), (4, bh * 2 / 3)] {
+                    let (x, y) = ((joint + ox) % TILE_TEX, y0 + oy);
+                    fill(&mut data, x, y, 2, 2, tint(mortar, -6));
+                }
+            }
+        }
+        "Water" => {
+            // Still water: broad soft mottling (silt, depth) with a few darker weed patches; most of
+            // what water shows is reflection, so the colour stays quiet.
+            let mut rng = seeded_rng(seed + 70);
+            for _ in 0..60 {
+                let (cx, cy, r) = (rng() * TILE_TEX as f32, rng() * TILE_TEX as f32, 8.0 + rng() * 26.0);
+                let dark = rng() < 0.35;
+                let c = if dark { mortar } else { tint(base, (rng() * 10.0 - 4.0) as i32) };
+                let ri = r.ceil() as i32;
+                for oy in -ri..=ri { for ox in -ri..=ri {
+                    let q = ((ox * ox + oy * oy) as f32).sqrt() / r;
+                    if q >= 1.0 { continue; }
+                    let x = (cx as i32 + ox).rem_euclid(TILE_TEX as i32) as usize;
+                    let y = (cy as i32 + oy).rem_euclid(TILE_TEX as i32) as usize;
+                    blend_px(&mut data, x, y, c, (1.0 - q * q) * if dark { 0.35 } else { 0.25 });
+                }}
+            }
+        }
+        "Ice" => {
+            // Clear ice: a pale base with long hairline cracks and trapped bubbles.
+            let mut rng = seeded_rng(seed + 80);
+            for _ in 0..14 {
+                let (mut x, mut y) = (rng() * TILE_TEX as f32, rng() * TILE_TEX as f32);
+                let mut ang = rng() * std::f32::consts::TAU;
+                for _ in 0..(40 + (rng() * 80.0) as usize) {
+                    set_px(&mut data, (x as i32).rem_euclid(TILE_TEX as i32) as usize, (y as i32).rem_euclid(TILE_TEX as i32) as usize, mortar);
+                    ang += (rng() - 0.5) * 0.5;
+                    x += ang.cos();
+                    y += ang.sin();
+                }
+            }
+            for _ in 0..90 {
+                let (x, y) = ((rng() * TILE_TEX as f32) as usize, (rng() * TILE_TEX as f32) as usize);
+                fill(&mut data, x, y, 2, 2, tint(base, 22));
             }
         }
         "Hedge" => {
@@ -275,9 +357,9 @@ pub fn gen_tile(pattern: &str, base: [u8; 3], mortar: [u8; 3], noise: u32, damag
                         ];
                         fill(&mut data, x, y, sw(2), sw(2), dab);
                     }
-                    x += sw(3);
+                    x += TILE_TEX / 12;
                 }
-                y += sw(3);
+                y += TILE_TEX / 12;
             }
         }
         _ => {}
@@ -409,4 +491,30 @@ pub struct TileKey {
     pub mortar:  [u8; 3],
     pub noise:   u32,
     pub seed:    u32,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Crossing a tile edge must look like crossing a line inside the tile: grid patterns put a
+    /// mortar line there, noisy patterns nothing special. A cut-off pattern or a clamped row makes
+    /// the edge the strongest line in the tile by a clear margin.
+    #[test]
+    fn every_pattern_tiles_seamlessly() {
+        for name in ["Cobblestone", "Brick", "Stone Block", "Bark", "Rock Face", "Sand", "Dirt", "Grass", "Hedge"] {
+            for damage in [0.0, 0.7] {
+            let t = gen_tile(name, [120, 100, 80], [40, 30, 20], 0, damage, 3);
+            let px = |x: usize, y: usize| { let i = ((y % TILE_TEX) * TILE_TEX + x % TILE_TEX) * 3; [t[i] as f32, t[i + 1] as f32, t[i + 2] as f32] };
+            let d = |a: [f32; 3], b: [f32; 3]| (a[0] - b[0]).abs() + (a[1] - b[1]).abs() + (a[2] - b[2]).abs();
+            let col = |j: usize| (0..TILE_TEX).map(|k| d(px(j, k), px(j + 1, k))).sum::<f32>() / TILE_TEX as f32;
+            let row = |j: usize| (0..TILE_TEX).map(|k| d(px(k, j), px(k, j + 1))).sum::<f32>() / TILE_TEX as f32;
+            let max_col = (0..TILE_TEX - 1).map(col).fold(0.0, f32::max);
+            let max_row = (0..TILE_TEX - 1).map(row).fold(0.0, f32::max);
+            let (seam_x, seam_y) = (col(TILE_TEX - 1), row(TILE_TEX - 1));
+            assert!(seam_x <= max_col * 1.15 + 1.0 && seam_y <= max_row * 1.15 + 1.0,
+                "{name} damage {damage}: seam x {seam_x:.1} (strongest inner {max_col:.1}), seam y {seam_y:.1} (strongest inner {max_row:.1})");
+            }
+        }
+    }
 }

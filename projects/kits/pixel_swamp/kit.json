@@ -1,0 +1,99 @@
+{
+  "name": "pixel_swamp",
+  "description": "Swamp props generated with PixelLab and imported with pf_import_sprite.",
+  "props": {
+    "cattails": {
+      "description": "A clump of cattail reeds (PixelLab).",
+      "sprite": {
+        "path": "",
+        "pool": [
+          "cattails/cattails_1.png"
+        ],
+        "flip_x": false,
+        "pixelated": true
+      },
+      "shape": [],
+      "kind": "Rock",
+      "tint": null,
+      "height": 1.6,
+      "anchor": "Ground",
+      "glow": 0.0,
+      "glow_from": 0.0,
+      "light": {
+        "enabled": false,
+        "color": [
+          255,
+          190,
+          110
+        ],
+        "intensity": 0.8,
+        "radius": 4.0,
+        "at": 0.8,
+        "flicker": 0.0
+      },
+      "trim": true
+    },
+    "lantern_pole": {
+      "description": "A crooked wooden pole with a hanging iron lantern (PixelLab).",
+      "sprite": {
+        "path": "",
+        "pool": [
+          "lantern_pole/lantern_pole_1.png"
+        ],
+        "flip_x": false,
+        "pixelated": true
+      },
+      "shape": [],
+      "kind": "Rock",
+      "tint": null,
+      "height": 2.6,
+      "anchor": "Ground",
+      "glow": 1.6,
+      "glow_from": 0.7,
+      "light": {
+        "enabled": true,
+        "color": [
+          255,
+          180,
+          100
+        ],
+        "intensity": 0.9,
+        "radius": 6.0,
+        "at": 0.62,
+        "flicker": 0.5
+      },
+      "trim": true
+    },
+    "stump": {
+      "description": "An old mossy tree stump (PixelLab).",
+      "sprite": {
+        "path": "",
+        "pool": [
+          "stump/stump_1.png"
+        ],
+        "flip_x": false,
+        "pixelated": true
+      },
+      "shape": [],
+      "kind": "Rock",
+      "tint": null,
+      "height": 0.9,
+      "anchor": "Ground",
+      "glow": 0.0,
+      "glow_from": 0.0,
+      "light": {
+        "enabled": false,
+        "color": [
+          255,
+          190,
+          110
+        ],
+        "intensity": 0.8,
+        "radius": 4.0,
+        "at": 0.8,
+        "flicker": 0.0
+      },
+      "trim": true
+    }
+  }
+}

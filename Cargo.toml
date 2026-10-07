@@ -4,18 +4,45 @@ version = "0.1.0"
 edition = "2021"
 description = "Path / corridor environment GIF creator — PathForge 2.0 (Rust port of PathForgeLive.jsx)"
 
+[workspace]
+members = [".", "runtime"]
+# `cargo build` at the top builds PathForge; `cargo build -p path_forge_runtime` the game library.
+default-members = ["."]
+
 [[bin]]
 name = "path_forge"
 path = "src/main.rs"
+required-features = ["studio"]
+
+[[bin]]
+name = "pf"
+path = "src/bin/pf.rs"
+required-features = ["studio"]
+
+[[bin]]
+name = "pf_mcp"
+path = "src/bin/pf_mcp.rs"
+
+[features]
+# The studio (egui) and the GPU renderers of the 2.0 app. A game embedding the runtime builds
+# without them: `path_forge = { path = "...", default-features = false }`.
+default = ["studio"]
+studio = ["dep:eframe", "dep:egui", "dep:rfd", "gpu"]
+gpu = ["dep:wgpu", "dep:pollster", "dep:bytemuck"]
 
 [dependencies]
-eframe     = { version = "0.29", features = ["wgpu"] }
-egui       = "0.29"
+eframe = { version = "0.29", features = ["wgpu"], optional = true }
+egui = { version = "0.29", optional = true }
 image      = { version = "0.25", default-features = false, features = ["png"] }
 gif        = "0.13"
 serde      = { version = "1", features = ["derive"] }
-serde_json = "1"
-rfd        = "0.14"
-wgpu       = "22.1"
-pollster   = "0.3"
-bytemuck   = { version = "1.16", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+rfd = { version = "0.14", optional = true }
+wgpu = { version = "22.1", optional = true }
+pollster = { version = "0.3", optional = true }
+bytemuck = { version = "1.16", features = ["derive"], optional = true }
+rayon = "1"
+png = "0.18"
+schemars = "1"
+base64 = "0.22"
+webp-animation = "0.10"
