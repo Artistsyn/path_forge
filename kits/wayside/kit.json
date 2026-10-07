@@ -1,0 +1,933 @@
+{
+ "name": "Wayside",
+ "description": "Things beside a road or in a corridor, drawn from shapes: lamps that light the way, glowing mushrooms, a signpost, fences, barrels and crates. Use as \"@wayside#<name>\".",
+ "props": {
+  "lantern_post": {
+   "description": "A wooden post with a lantern on an arm; lights the path warmly.",
+   "shape": [
+    {
+     "shape": {
+      "Rect": {
+       "min": [
+        -0.14,
+        0
+       ],
+       "max": [
+        0.14,
+        0.16
+       ]
+      }
+     },
+     "color": [
+      48,
+      40,
+      34
+     ],
+     "shade": 0.5
+    },
+    {
+     "shape": {
+      "Rect": {
+       "min": [
+        -0.055,
+        0
+       ],
+       "max": [
+        0.055,
+        2.02
+       ]
+      }
+     },
+     "color": [
+      64,
+      48,
+      34
+     ],
+     "shade": 0.7
+    },
+    {
+     "shape": {
+      "Rect": {
+       "min": [
+        -0.04,
+        1.95
+       ],
+       "max": [
+        0.34,
+        2.02
+       ]
+      }
+     },
+     "color": [
+      56,
+      42,
+      30
+     ],
+     "shade": 0.5
+    },
+    {
+     "shape": {
+      "Line": {
+       "from": [
+        0.27,
+        1.98
+       ],
+       "to": [
+        0.27,
+        1.86
+       ],
+       "width": 0.02
+      }
+     },
+     "color": [
+      40,
+      36,
+      32
+     ],
+     "shade": 0.3
+    },
+    {
+     "shape": {
+      "Poly": {
+       "points": [
+        [
+         0.15000000000000002,
+         1.77
+        ],
+        [
+         0.39,
+         1.77
+        ],
+        [
+         0.27,
+         1.8599999999999999
+        ]
+       ]
+      }
+     },
+     "color": [
+      50,
+      44,
+      38
+     ],
+     "shade": 0.4
+    },
+    {
+     "shape": {
+      "Rect": {
+       "min": [
+        0.17,
+        1.47
+       ],
+       "max": [
+        0.37,
+        1.77
+       ]
+      }
+     },
+     "color": [
+      46,
+      40,
+      34
+     ],
+     "shade": 0.4
+    },
+    {
+     "shape": {
+      "Rect": {
+       "min": [
+        0.195,
+        1.5
+       ],
+       "max": [
+        0.34500000000000003,
+        1.74
+       ]
+      }
+     },
+     "color": [
+      255,
+      196,
+      110
+     ],
+     "shade": 0.0,
+     "glow": 2.6
+    },
+    {
+     "shape": {
+      "Line": {
+       "from": [
+        0.27,
+        1.5
+       ],
+       "to": [
+        0.27,
+        1.74
+       ],
+       "width": 0.015
+      }
+     },
+     "color": [
+      46,
+      40,
+      34
+     ],
+     "shade": 0.3
+    },
+    {
+     "shape": {
+      "Rect": {
+       "min": [
+        0.16000000000000003,
+        1.43
+       ],
+       "max": [
+        0.38,
+        1.48
+       ]
+      }
+     },
+     "color": [
+      50,
+      44,
+      38
+     ],
+     "shade": 0.4
+    }
+   ],
+   "light": {
+    "enabled": true,
+    "color": [
+     255,
+     184,
+     110
+    ],
+    "intensity": 0.9,
+    "radius": 6.0,
+    "at": 0.78,
+    "flicker": 0.5
+   }
+  },
+  "hanging_lantern": {
+   "description": "A lantern on a chain, hung from the ceiling or wall tops.",
+   "anchor": "Ceiling",
+   "shape": [
+    {
+     "shape": {
+      "Line": {
+       "from": [
+        0,
+        1.1
+       ],
+       "to": [
+        0,
+        0.45
+       ],
+       "width": 0.025
+      }
+     },
+     "color": [
+      44,
+      40,
+      36
+     ],
+     "shade": 0.3
+    },
+    {
+     "shape": {
+      "Poly": {
+       "points": [
+        [
+         -0.12,
+         0.34
+        ],
+        [
+         0.12,
+         0.34
+        ],
+        [
+         0,
+         0.43
+        ]
+       ]
+      }
+     },
+     "color": [
+      50,
+      44,
+      38
+     ],
+     "shade": 0.4
+    },
+    {
+     "shape": {
+      "Rect": {
+       "min": [
+        -0.1,
+        0.04
+       ],
+       "max": [
+        0.1,
+        0.34
+       ]
+      }
+     },
+     "color": [
+      46,
+      40,
+      34
+     ],
+     "shade": 0.4
+    },
+    {
+     "shape": {
+      "Rect": {
+       "min": [
+        -0.075,
+        0.07
+       ],
+       "max": [
+        0.075,
+        0.31
+       ]
+      }
+     },
+     "color": [
+      255,
+      196,
+      110
+     ],
+     "shade": 0.0,
+     "glow": 2.6
+    },
+    {
+     "shape": {
+      "Line": {
+       "from": [
+        0,
+        0.07
+       ],
+       "to": [
+        0,
+        0.31
+       ],
+       "width": 0.015
+      }
+     },
+     "color": [
+      46,
+      40,
+      34
+     ],
+     "shade": 0.3
+    },
+    {
+     "shape": {
+      "Rect": {
+       "min": [
+        -0.11,
+        0.0
+       ],
+       "max": [
+        0.11,
+        0.05
+       ]
+      }
+     },
+     "color": [
+      50,
+      44,
+      38
+     ],
+     "shade": 0.4
+    }
+   ],
+   "light": {
+    "enabled": true,
+    "color": [
+     255,
+     184,
+     110
+    ],
+    "intensity": 0.8,
+    "radius": 5.0,
+    "at": 0.2,
+    "flicker": 0.6
+   }
+  },
+  "glowcaps": {
+   "description": "A cluster of glowing mushrooms that light the ground around them.",
+   "shape": [
+    {
+     "shape": {
+      "Rect": {
+       "min": [
+        -0.13,
+        0
+       ],
+       "max": [
+        -0.095,
+        0.22
+       ]
+      }
+     },
+     "color": [
+      206,
+      216,
+      196
+     ],
+     "shade": 0.6
+    },
+    {
+     "shape": {
+      "Rect": {
+       "min": [
+        0.03,
+        0
+       ],
+       "max": [
+        0.07,
+        0.32
+       ]
+      }
+     },
+     "color": [
+      206,
+      216,
+      196
+     ],
+     "shade": 0.6
+    },
+    {
+     "shape": {
+      "Rect": {
+       "min": [
+        0.15,
+        0
+       ],
+       "max": [
+        0.18,
+        0.15
+       ]
+      }
+     },
+     "color": [
+      206,
+      216,
+      196
+     ],
+     "shade": 0.6
+    },
+    {
+     "shape": {
+      "Ellipse": {
+       "center": [
+        -0.112,
+        0.23
+       ],
+       "radius": [
+        0.1,
+        0.06
+       ]
+      }
+     },
+     "color": [
+      70,
+      226,
+      206
+     ],
+     "shade": 0.5,
+     "glow": 1.3
+    },
+    {
+     "shape": {
+      "Ellipse": {
+       "center": [
+        0.05,
+        0.33
+       ],
+       "radius": [
+        0.13,
+        0.08
+       ]
+      }
+     },
+     "color": [
+      80,
+      236,
+      214
+     ],
+     "shade": 0.5,
+     "glow": 1.4
+    },
+    {
+     "shape": {
+      "Ellipse": {
+       "center": [
+        0.165,
+        0.16
+       ],
+       "radius": [
+        0.07,
+        0.045
+       ]
+      }
+     },
+     "color": [
+      70,
+      226,
+      206
+     ],
+     "shade": 0.5,
+     "glow": 1.2
+    }
+   ],
+   "light": {
+    "enabled": true,
+    "color": [
+     90,
+     240,
+     220
+    ],
+    "intensity": 0.45,
+    "radius": 2.5,
+    "at": 0.6
+   }
+  },
+  "signpost": {
+   "description": "A post with two arrow boards pointing different ways.",
+   "shape": [
+    {
+     "shape": {
+      "Rect": {
+       "min": [
+        -0.05,
+        0
+       ],
+       "max": [
+        0.05,
+        2.0
+       ]
+      }
+     },
+     "color": [
+      96,
+      72,
+      48
+     ],
+     "shade": 0.6
+    },
+    {
+     "shape": {
+      "Poly": {
+       "points": [
+        [
+         -0.08,
+         2.0
+        ],
+        [
+         0.08,
+         2.0
+        ],
+        [
+         0,
+         2.09
+        ]
+       ]
+      }
+     },
+     "color": [
+      86,
+      64,
+      42
+     ],
+     "shade": 0.4
+    },
+    {
+     "shape": {
+      "Poly": {
+       "points": [
+        [
+         -0.06,
+         1.62
+        ],
+        [
+         0.56,
+         1.62
+        ],
+        [
+         0.69,
+         1.72
+        ],
+        [
+         0.56,
+         1.82
+        ],
+        [
+         -0.06,
+         1.82
+        ]
+       ]
+      }
+     },
+     "color": [
+      146,
+      112,
+      72
+     ],
+     "shade": 0.3
+    },
+    {
+     "shape": {
+      "Poly": {
+       "points": [
+        [
+         0.06,
+         1.25
+        ],
+        [
+         -0.5,
+         1.25
+        ],
+        [
+         -0.63,
+         1.35
+        ],
+        [
+         -0.5,
+         1.45
+        ],
+        [
+         0.06,
+         1.45
+        ]
+       ]
+      }
+     },
+     "color": [
+      132,
+      100,
+      64
+     ],
+     "shade": 0.3
+    }
+   ]
+  },
+  "fence": {
+   "description": "A 2.4 m length of post-and-rail fence.",
+   "shape": [
+    {
+     "shape": {
+      "Rect": {
+       "min": [
+        -1.2,
+        0.34
+       ],
+       "max": [
+        1.2,
+        0.43
+       ]
+      }
+     },
+     "color": [
+      112,
+      86,
+      58
+     ],
+     "shade": 0.3
+    },
+    {
+     "shape": {
+      "Rect": {
+       "min": [
+        -1.2,
+        0.71
+       ],
+       "max": [
+        1.2,
+        0.8
+       ]
+      }
+     },
+     "color": [
+      112,
+      86,
+      58
+     ],
+     "shade": 0.3
+    },
+    {
+     "shape": {
+      "Rect": {
+       "min": [
+        -1.17,
+        0
+       ],
+       "max": [
+        -1.07,
+        1.0
+       ]
+      }
+     },
+     "color": [
+      90,
+      68,
+      46
+     ],
+     "shade": 0.6
+    },
+    {
+     "shape": {
+      "Rect": {
+       "min": [
+        -0.05,
+        0
+       ],
+       "max": [
+        0.05,
+        1.0
+       ]
+      }
+     },
+     "color": [
+      90,
+      68,
+      46
+     ],
+     "shade": 0.6
+    },
+    {
+     "shape": {
+      "Rect": {
+       "min": [
+        1.07,
+        0
+       ],
+       "max": [
+        1.17,
+        1.0
+       ]
+      }
+     },
+     "color": [
+      90,
+      68,
+      46
+     ],
+     "shade": 0.6
+    }
+   ]
+  },
+  "barrel": {
+   "description": "A banded wooden barrel.",
+   "shape": [
+    {
+     "shape": {
+      "Rect": {
+       "min": [
+        -0.27,
+        0
+       ],
+       "max": [
+        0.27,
+        0.9
+       ]
+      }
+     },
+     "color": [
+      118,
+      78,
+      42
+     ],
+     "shade": 0.6
+    },
+    {
+     "shape": {
+      "Ellipse": {
+       "center": [
+        0,
+        0.45
+       ],
+       "radius": [
+        0.32,
+        0.44
+       ]
+      }
+     },
+     "color": [
+      118,
+      78,
+      42
+     ],
+     "shade": 0.7
+    },
+    {
+     "shape": {
+      "Rect": {
+       "min": [
+        -0.31,
+        0.16
+       ],
+       "max": [
+        0.31,
+        0.21
+       ]
+      }
+     },
+     "color": [
+      64,
+      58,
+      52
+     ],
+     "shade": 0.6
+    },
+    {
+     "shape": {
+      "Rect": {
+       "min": [
+        -0.31,
+        0.69
+       ],
+       "max": [
+        0.31,
+        0.74
+       ]
+      }
+     },
+     "color": [
+      64,
+      58,
+      52
+     ],
+     "shade": 0.6
+    }
+   ]
+  },
+  "crate": {
+   "description": "A braced wooden crate.",
+   "shape": [
+    {
+     "shape": {
+      "Rect": {
+       "min": [
+        -0.4,
+        0
+       ],
+       "max": [
+        0.4,
+        0.8
+       ]
+      }
+     },
+     "color": [
+      138,
+      100,
+      58
+     ],
+     "shade": 0.4
+    },
+    {
+     "shape": {
+      "Line": {
+       "from": [
+        -0.35,
+        0.05
+       ],
+       "to": [
+        0.35,
+        0.75
+       ],
+       "width": 0.07
+      }
+     },
+     "color": [
+      108,
+      76,
+      42
+     ],
+     "shade": 0.3
+    },
+    {
+     "shape": {
+      "Rect": {
+       "min": [
+        -0.4,
+        0
+       ],
+       "max": [
+        0.4,
+        0.07
+       ]
+      }
+     },
+     "color": [
+      100,
+      72,
+      40
+     ],
+     "shade": 0.4
+    },
+    {
+     "shape": {
+      "Rect": {
+       "min": [
+        -0.4,
+        0.73
+       ],
+       "max": [
+        0.4,
+        0.8
+       ]
+      }
+     },
+     "color": [
+      100,
+      72,
+      40
+     ],
+     "shade": 0.4
+    },
+    {
+     "shape": {
+      "Rect": {
+       "min": [
+        -0.4,
+        0
+       ],
+       "max": [
+        -0.33,
+        0.8
+       ]
+      }
+     },
+     "color": [
+      100,
+      72,
+      40
+     ],
+     "shade": 0.4
+    },
+    {
+     "shape": {
+      "Rect": {
+       "min": [
+        0.33,
+        0
+       ],
+       "max": [
+        0.4,
+        0.8
+       ]
+      }
+     },
+     "color": [
+      100,
+      72,
+      40
+     ],
+     "shade": 0.4
+    }
+   ]
+  }
+ }
+}
