@@ -117,6 +117,10 @@ impl PaletteLut {
 
     #[inline]
     pub fn nearest(&self, c: [f32; 3]) -> Rgb { self.colors[self.index(c) as usize] }
+
+    /// The lookup table and its bits per channel, for the GPU.
+    #[cfg(feature = "gpu")]
+    pub(crate) fn table(&self) -> (u32, &[u8]) { (self.bits, &self.lut) }
 }
 
 /// Ordered dither threshold in -0.5..0.5 for pixel (x, y).

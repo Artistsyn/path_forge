@@ -13,6 +13,8 @@ fn main() -> eframe::Result<()> {
     let open = args.iter().enumerate().find(|(i, a)| !a.starts_with("--") && (*i == 0 || args[i - 1] != "--section")).map(|(_, a)| std::path::PathBuf::from(a));
     let native_options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default().with_title("PathForge").with_inner_size([1320.0, 860.0]).with_min_inner_size([960.0, 600.0]),
+        // The GPU renderer draws with the window's own wgpu device, so the window must use wgpu.
+        renderer: eframe::Renderer::Wgpu,
         ..Default::default()
     };
     eframe::run_native("PathForge", native_options, Box::new(move |cc| Ok(Box::new(path_forge::studio::Studio::new(cc, open, section)))))

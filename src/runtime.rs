@@ -82,6 +82,16 @@ impl Runtime {
         Runtime { scene, base_dir, renderer: WorldRenderer::default(), rgba: Vec::new(), distance: 0.0, time: 0.0, active: None, journey: None }
     }
 
+    /// Draw frames on the GPU, on a device the game hands over (with wgpu 25, the same one it
+    /// draws with), or on the process's own when `None`. Frames match the CPU's within the
+    /// renderer's parity gate; leave this off for frames that must match an export bit for bit.
+    #[cfg(feature = "gpu")]
+    pub fn use_gpu(&mut self, device: Option<std::sync::Arc<crate::world::gpu::GpuContext>>) -> Result<(), String> {
+        let ctx = device.or_else(crate::world::gpu::shared).ok_or("no GPU adapter")?;
+        self.renderer.set_gpu(Some(std::sync::Arc::new(crate::world::gpu::Gpu::new(ctx)?)));
+        Ok(())
+    }
+
     /// A journey file: the walk begins at its start stop.
     pub fn from_journey(path: impl AsRef<Path>) -> Result<Runtime, String> {
         let path = path.as_ref();

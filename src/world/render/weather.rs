@@ -8,6 +8,7 @@
 //! a loop leads into the first, and when the walk stops (an encounter) the weather keeps moving.
 
 use super::*;
+use super::splat::{dot, streak};
 
 /// What the weather is doing in one world this frame, worked out once.
 #[derive(Clone, Copy, Debug, Default)]
@@ -25,9 +26,9 @@ pub(super) struct Wx {
     pub wet: f32,
     pub puddles: f32,
     pub snow: f32,
-    track: f32,
+    pub track: f32,
     /// How hard rain is falling on the puddles (their rings).
-    rings: f32,
+    pub rings: f32,
     /// How much of the sky the haze of a heavy fall or a sandstorm hides (0..1).
     pub veil: f32,
     /// Strength of cloud shadows, and how far they drift sideways in one loop (metres).
@@ -59,7 +60,7 @@ pub(super) fn sway_factor(kind: PropKind) -> f32 {
     }
 }
 
-fn lum(c: [f32; 3]) -> f32 { 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2] }
+pub(super) fn lum(c: [f32; 3]) -> f32 { 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2] }
 
 /// Smooth value noise over the ground, 0..1: free across the path, periodic along it (the cell
 /// is snapped to divide the loop), so it scrolls with the world and repeats with the loop.
@@ -270,49 +271,6 @@ pub(super) fn cloud_shade(ctx: &Ctx, x: f32, d: f32) -> f32 {
     1.0 - wx.clouds * 0.85 * smoothstep(0.4, 0.58, n)
 }
 
-/// A soft streak from (x0, y0) to (x1, y1), brighter toward its head, behind whatever is nearer
-/// than `z`.
-#[allow(clippy::too_many_arguments)]
-fn streak(gbuf: &[GPixel], hdr: &mut [[f32; 3]], w: usize, h: usize, z: f32, (x0, y0): (f32, f32), (x1, y1): (f32, f32), col: [f32; 3], alpha: f32, width: f32) {
-    let (dx, dy) = (x1 - x0, y1 - y0);
-    let steps = dx.abs().max(dy.abs()).ceil().max(1.0) as i64;
-    let half = (width * 0.5).max(0.5);
-    let reach = half.ceil() as i64;
-    for s in 0..=steps {
-        let t = s as f32 / steps as f32;
-        let (px, py) = (x0 + dx * t, y0 + dy * t);
-        let yi = py.floor() as i64;
-        if yi < 0 || yi >= h as i64 { continue; }
-        let k = alpha * (0.35 + 0.65 * t);
-        for ox in -reach..=reach + 1 {
-            let xi = px.floor() as i64 + ox;
-            if xi < 0 || xi >= w as i64 { continue; }
-            let cover = (half + 0.5 - (xi as f32 + 0.5 - px).abs()).clamp(0.0, 1.0);
-            if cover <= 0.0 { continue; }
-            let i = yi as usize * w + xi as usize;
-            if z >= gbuf[i].depth { continue; }
-            hdr[i] = mix3(hdr[i], col, k * cover);
-        }
-    }
-}
-
-/// A soft round dot of radius `r` pixels.
-#[allow(clippy::too_many_arguments)]
-fn dot(gbuf: &[GPixel], hdr: &mut [[f32; 3]], w: usize, h: usize, z: f32, (sx, sy): (f32, f32), r: f32, col: [f32; 3], alpha: f32) {
-    let ri = r.ceil() as i64 + 1;
-    for oy in -ri..=ri {
-        for ox in -ri..=ri {
-            let (xi, yi) = (sx.floor() as i64 + ox, sy.floor() as i64 + oy);
-            if xi < 0 || yi < 0 || xi >= w as i64 || yi >= h as i64 { continue; }
-            let i = yi as usize * w + xi as usize;
-            if z >= gbuf[i].depth { continue; }
-            let dd = ((xi as f32 + 0.5 - sx).powi(2) + (yi as f32 + 0.5 - sy).powi(2)).sqrt() / (r + 0.5);
-            if dd >= 1.0 { continue; }
-            hdr[i] = mix3(hdr[i], col, alpha * (1.0 - dd));
-        }
-    }
-}
-
 /// The light at a point in the air: every lamp near the camera, the ambient and sky alone farther
 /// off (where the fog has most of it anyway).
 fn air_light(ctx: &Ctx, x: f32, y: f32, d: f32) -> [f32; 3] { air_light_among(ctx, x, y, d, None) }
@@ -330,9 +288,8 @@ fn spread(ctx: &Ctx, range: f32) -> f32 {
 /// A splash where a drop lands at (x, d), `age` 0..1 through it: a ring spreading on the ground
 /// and a few droplets thrown up.
 #[allow(clippy::too_many_arguments)]
-fn splash(ctx: &Ctx, gbuf: &[GPixel], hdr: &mut [[f32; 3]], x: f32, d: f32, age: f32, col: [f32; 3], size: f32, seed: u32, key: i64) {
+fn splash(ctx: &Ctx, out: &mut Vec<Splat>, gate: Option<(i64, i64, f32)>, x: f32, d: f32, age: f32, col: [f32; 3], size: f32, seed: u32, key: i64) {
     let v = &ctx.view;
-    let (w, h) = (v.width, v.height);
     let r = size * (0.015 + 0.07 * age);
     let fade = (1.0 - age) * 0.55;
     let c = v.to_cam(x, 0.0, d);
@@ -341,19 +298,19 @@ fn splash(ctx: &Ctx, gbuf: &[GPixel], hdr: &mut [[f32; 3]], x: f32, d: f32, age:
     for k in 0..per {
         let th = TAU * k as f32 / per as f32;
         let p = v.to_cam(x + r * th.cos(), 0.004, d + r * th.sin());
-        if let Some(s) = v.project(p) { dot(gbuf, hdr, w, h, p[2] - 0.02, (s[0], s[1]), 0.5, col, fade); }
+        if let Some(s) = v.project(p) { dot(out, p[2] - 0.02, (s[0], s[1]), 0.5, col, fade); out.last_mut().unwrap().gate = gate; }
     }
     for k in 0..3 {
         let th = TAU * hf(seed ^ 0x77, key * 4 + k);
         let up = size * 0.05 * (std::f32::consts::PI * age).sin() * (0.6 + 0.4 * hf(seed ^ 0x78, key * 4 + k));
         let p = v.to_cam(x + 0.8 * r * th.cos(), up, d + 0.8 * r * th.sin());
-        if let Some(s) = v.project(p) { dot(gbuf, hdr, w, h, p[2] - 0.02, (s[0], s[1]), 0.6, col, fade * 1.2); }
+        if let Some(s) = v.project(p) { dot(out, p[2] - 0.02, (s[0], s[1]), 0.6, col, fade * 1.2); out.last_mut().unwrap().gate = gate; }
     }
 }
 
 /// Rain, snow, sleet or hail falling everywhere the sky is open, splashes where it lands, and
 /// far curtains of rain.
-pub(super) fn draw_precip(ctx: &Ctx, gbuf: &[GPixel], hdr: &mut [[f32; 3]]) {
+pub(super) fn draw_precip(ctx: &Ctx, out: &mut Vec<Splat>) {
     let p = &ctx.scene.weather.precipitation;
     if !p.enabled || !ctx.wx.open || p.intensity <= 0.0 { return; }
     let v = &ctx.view;
@@ -421,18 +378,18 @@ pub(super) fn draw_precip(ctx: &Ctx, gbuf: &[GPixel], hdr: &mut [[f32; 3]]) {
                         let Some([ex, ey]) = v.project(v.to_cam(x - wind * dt, y + speed * dt, d)) else { continue };
                         let col = seen(mul3(light, [0.62, 0.66, 0.74]));
                         let near = smoothstep(0.3, 2.0, c0[2]);
-                        streak(gbuf, hdr, w, h, c0[2], (ex, ey), (sx, sy), col, (0.18 + 0.22 * i) * (0.35 + 0.65 * near) * fade, (pxm * 0.0025 * size).max(0.7));
+                        streak(out, c0[2], (ex, ey), (sx, sy), col, (0.18 + 0.22 * i) * (0.35 + 0.65 * near) * fade, (pxm * 0.0025 * size).max(0.7));
                     }
                     Fall::Hail => {
                         let Some([ex, ey]) = v.project(v.to_cam(x - wind * 0.012, y + speed * 0.012, d)) else { continue };
                         let col = seen(mul3(light, [0.9, 0.92, 0.95]));
-                        streak(gbuf, hdr, w, h, c0[2], (ex, ey), (sx, sy), col, 0.5 * fade, (pxm * 0.007 * size).max(0.7));
-                        dot(gbuf, hdr, w, h, c0[2], (sx, sy), (pxm * 0.0045 * size).max(0.5), col, 0.95 * fade);
+                        streak(out, c0[2], (ex, ey), (sx, sy), col, 0.5 * fade, (pxm * 0.007 * size).max(0.7));
+                        dot(out, c0[2], (sx, sy), (pxm * 0.0045 * size).max(0.5), col, 0.95 * fade);
                     }
                     Fall::Flake | Fall::Slush => {
                         let (col, r, a) = if kind == Fall::Flake { ([0.85, 0.87, 0.92], 0.011, 0.85) } else { ([0.62, 0.66, 0.72], 0.008, 0.6) };
                         let r = (pxm * r * size * (0.6 + 0.8 * hf(base ^ 0x15, k))).max(0.5);
-                        dot(gbuf, hdr, w, h, c0[2], (sx, sy), r, seen(mul3(light, col)), a * fade.sqrt());
+                        dot(out, c0[2], (sx, sy), r, seen(mul3(light, col)), a * fade.sqrt());
                     }
                 }
             }
@@ -458,16 +415,16 @@ pub(super) fn draw_precip(ctx: &Ctx, gbuf: &[GPixel], hdr: &mut [[f32; 3]]) {
             let Some([sx, sy]) = v.project(c) else { continue };
             let (xi, yi) = (sx as i64, sy as i64);
             if xi < 0 || yi < 0 || xi >= w as i64 || yi >= h as i64 { continue; }
-            let g = &gbuf[yi as usize * w + xi as usize];
-            if g.id != id::GROUND || (g.depth - c[2]).abs() > 0.15 * c[2] + 0.1 { continue; }
+            // Drawn where the ground shows there, once everything before is drawn.
+            let gate = Some((xi, yi, c[2]));
             let light = ctx.apply_fog(mul3(air_light(ctx, x, 0.05, d), tint), c[2]);
             let age = a / life;
             if hail {
                 // A hailstone bouncing.
                 let p3 = v.to_cam(x, 0.1 * size * (std::f32::consts::PI * age).sin(), d);
-                if let Some(s) = v.project(p3) { dot(gbuf, hdr, w, h, p3[2] - 0.02, (s[0], s[1]), (v.px_per_m(p3[2]) * 0.0045 * size).max(0.5), mul3(light, [0.9, 0.92, 0.95]), 0.9 * (1.0 - age)); }
+                if let Some(s) = v.project(p3) { dot(out, p3[2] - 0.02, (s[0], s[1]), (v.px_per_m(p3[2]) * 0.0045 * size).max(0.5), mul3(light, [0.9, 0.92, 0.95]), 0.9 * (1.0 - age)); out.last_mut().unwrap().gate = gate; }
             } else {
-                splash(ctx, gbuf, hdr, x, d, age, mul3(light, [0.75, 0.78, 0.85]), size, p.seed, key);
+                splash(ctx, out, gate, x, d, age, mul3(light, [0.75, 0.78, 0.85]), size, p.seed, key);
             }
         }
     }
@@ -477,31 +434,18 @@ pub(super) fn draw_precip(ctx: &Ctx, gbuf: &[GPixel], hdr: &mut [[f32; 3]]) {
         let cyc = cycles(2.5, ls);
         let slant = wind * 0.05;
         let col = scale3(ctx.fog_col, ctx.gain * 1.3);
-        let seed = p.seed;
-        hdr.par_chunks_mut(w).enumerate().for_each(|(y, row)| {
-            for (x, px) in row.iter_mut().enumerate() {
-                let g = &gbuf[y * w + x];
-                let far = if g.id == id::NONE { 1.0 } else { smoothstep(25.0, 60.0, g.depth) };
-                if far <= 0.0 { continue; }
-                let col_id = ((x as f32 - slant * y as f32) / 2.0).floor() as i64;
-                let speed = 1.0 + (hash(seed ^ 0x72, col_id) % 2) as f32;
-                let s = (y as f32 / h as f32 * 2.5 + hf(seed ^ 0x71, col_id) - speed * cyc * ctx.tphase).rem_euclid(1.0);
-                let st = smoothstep(0.75, 1.0, s) * (0.4 + 0.6 * hf(seed ^ 0x73, col_id));
-                *px = add3(*px, scale3(col, amt * st * far));
-            }
-        });
+        out.push(Splat { z: 0.0, gate: None, shape: Shape::Curtain { amt, slant, cyc, seed: p.seed, col, tphase: ctx.tphase } });
     }
 }
 
 /// Water dripping from the ceiling, or from the tops of the walls: a bead forms, falls and
 /// splashes, from the same spots every time.
-pub(super) fn draw_drips(ctx: &Ctx, gbuf: &[GPixel], hdr: &mut [[f32; 3]]) {
+pub(super) fn draw_drips(ctx: &Ctx, out: &mut Vec<Splat>) {
     let dr = &ctx.scene.weather.drips;
     if !dr.enabled || dr.rate <= 0.0 { return; }
     let s = ctx.scene;
     let (top, from_walls) = if s.ceiling.enabled { (s.ceiling.height, false) } else if s.walls.enabled && s.walls.height > 0.0 { (s.walls.height, true) } else { return };
     let v = &ctx.view;
-    let (w, h) = (v.width, v.height);
     let ls = s.motion.loop_seconds();
     let cd = cycles(0.4, ls);
     let period = ls / cd;
@@ -525,7 +469,7 @@ pub(super) fn draw_drips(ctx: &Ctx, gbuf: &[GPixel], hdr: &mut [[f32; 3]]) {
             let light = |y: f32| ctx.apply_fog(scale3(mul3(air_light(ctx, x, y, d), col), 1.4), z);
             if a < form {
                 let p = v.to_cam(x, top - 0.012, d);
-                if let Some(sp) = v.project(p) { dot(gbuf, hdr, w, h, p[2] - 0.01, (sp[0], sp[1]), (v.px_per_m(p[2]) * 0.006 * a / form).max(0.4), light(top), 0.8); }
+                if let Some(sp) = v.project(p) { dot(out, p[2] - 0.01, (sp[0], sp[1]), (v.px_per_m(p[2]) * 0.006 * a / form).max(0.4), light(top), 0.8); }
                 continue;
             }
             let tf = (a - form) * period;
@@ -534,17 +478,17 @@ pub(super) fn draw_drips(ctx: &Ctx, gbuf: &[GPixel], hdr: &mut [[f32; 3]]) {
                 let vel = 9.8 * tf;
                 let p0 = v.to_cam(x, y, d);
                 let (Some(s0), Some(s1)) = (v.project(p0), v.project(v.to_cam(x, y + vel * 0.03, d))) else { continue };
-                streak(gbuf, hdr, w, h, p0[2], (s1[0], s1[1]), (s0[0], s0[1]), light(y), 0.7, (v.px_per_m(p0[2]) * 0.004).max(0.6));
+                streak(out, p0[2], (s1[0], s1[1]), (s0[0], s0[1]), light(y), 0.7, (v.px_per_m(p0[2]) * 0.004).max(0.6));
             } else {
                 let after = tf - fall_t;
-                if after < 0.15 { splash(ctx, gbuf, hdr, x, d, after / 0.15, light(0.05), 0.6, dr.seed, k); }
+                if after < 0.15 { splash(ctx, out, None, x, d, after / 0.15, light(0.05), 0.6, dr.seed, k); }
             }
         }
     }
 }
 
 /// Sand streaming past on the wind.
-pub(super) fn draw_sandstorm(ctx: &Ctx, gbuf: &[GPixel], hdr: &mut [[f32; 3]]) {
+pub(super) fn draw_sandstorm(ctx: &Ctx, out: &mut Vec<Splat>) {
     let st = &ctx.scene.weather.sandstorm;
     if !st.enabled || !ctx.wx.open || st.intensity <= 0.0 { return; }
     let v = &ctx.view;
@@ -576,13 +520,13 @@ pub(super) fn draw_sandstorm(ctx: &Ctx, gbuf: &[GPixel], hdr: &mut [[f32; 3]]) {
             if s0[0] < -60.0 || s0[0] > w as f32 + 60.0 || s0[1] < 0.0 || s0[1] > h as f32 { continue; }
             // Lit sand, a little brighter than the haze it flies through, thinning into it.
             let lit = ctx.apply_fog(scale3(mul3(air_light(ctx, x, y, d), col), 1.3), c0[2]);
-            streak(gbuf, hdr, w, h, c0[2], (s1[0], s1[1]), (s0[0], s0[1]), lit, alpha * ctx.fog_t(c0[2]).sqrt(), (v.px_per_m(c0[2]) * 0.004).max(0.6));
+            streak(out, c0[2], (s1[0], s1[1]), (s0[0], s0[1]), lit, alpha * ctx.fog_t(c0[2]).sqrt(), (v.px_per_m(c0[2]) * 0.004).max(0.6));
         }
     }
 }
 
 /// Wisps of mist rising from the ground, swelling and fading.
-pub(super) fn draw_wisps(ctx: &Ctx, gbuf: &[GPixel], hdr: &mut [[f32; 3]]) {
+pub(super) fn draw_wisps(ctx: &Ctx, out: &mut Vec<Splat>) {
     let m = &ctx.scene.weather.mist;
     if !m.enabled || m.wisps <= 0.0 { return; }
     let v = &ctx.view;
@@ -615,15 +559,7 @@ pub(super) fn draw_wisps(ctx: &Ctx, gbuf: &[GPixel], hdr: &mut [[f32; 3]]) {
             let (rx, ry) = (r, r * 0.6);
             let (x0, x1) = (((sx - rx).floor().max(0.0)) as usize, ((sx + rx).ceil().min(w as f32 - 1.0)).max(0.0) as usize);
             let (y0, y1) = (((sy - ry).floor().max(0.0)) as usize, ((sy + ry).ceil().min(h as f32 - 1.0)).max(0.0) as usize);
-            for py in y0..=y1 {
-                for px in x0..=x1 {
-                    let i = py * w + px;
-                    if c[2] >= gbuf[i].depth + 0.5 { continue; }
-                    let q = ((px as f32 + 0.5 - sx) / rx).powi(2) + ((py as f32 + 0.5 - sy) / ry).powi(2);
-                    if q >= 1.0 { continue; }
-                    hdr[i] = mix3(hdr[i], lit, alpha * (1.0 - q).powi(2));
-                }
-            }
+            out.push(Splat { z: c[2], gate: None, shape: Shape::Wisp { sx, sy, rx, ry, x0: x0 as i64, x1: x1 as i64, y0: y0 as i64, y1: y1 as i64, lit, alpha } });
         }
     }
 }
@@ -692,28 +628,92 @@ fn air_density(ctx: &Ctx) -> f32 {
     (0.3 + fog + mist + ctx.wx.veil * 0.8).min(1.0)
 }
 
-/// Light made visible by the air: rays from the sun streaming past whatever stands against the
-/// sky, and haloes round lamps. Worked out at half resolution and added over the frame.
-pub(super) fn light_shafts(ctxs: &[Ctx], here: usize, gbuf: &[GPixel], hdr: &mut [[f32; 3]]) {
+/// What the light shafts need, worked out once for either engine: the half-resolution grid, the
+/// sun's rays (cell position, glow radius, gain, colour) and the lamps' haloes (gain, and for each
+/// tile of 16 x 16 cells the lamps whose reach its lines of sight can pass through).
+pub(super) struct ShaftSetup {
+    pub mw: usize, pub mh: usize,
+    pub sun: Option<(f32, f32, f32, f32, [f32; 3])>,
+    pub lamps: Option<(f32, usize, Vec<Vec<u16>>)>,
+}
+
+pub(super) fn shaft_setup(ctxs: &[Ctx], here: usize) -> Option<ShaftSetup> {
     let ctx = &ctxs[here];
     let ls = &ctx.scene.weather.light_shafts;
-    if !ls.enabled || (ls.sun <= 0.0 && ls.lamps <= 0.0) { return; }
+    if !ls.enabled || (ls.sun <= 0.0 && ls.lamps <= 0.0) { return None; }
     let v = &ctx.view;
     let (w, h) = (v.width, v.height);
     let q = 2usize;
     let (mw, mh) = (w.div_ceil(q), h.div_ceil(q));
     let air = air_density(ctx);
-    let mut add = vec![[0.0f32; 3]; mw * mh];
     let sky = &ctx.scene.sky;
     let hy = v.horizon_px.max(2.0);
     let sun_light = if sky.enabled && sky.sun.enabled && sky.sun.emits_light { ctx.sky_lights.first().map(|s| s.color) } else { None };
-    if let (true, Some(sun_col)) = (ls.sun > 0.0, sun_light) {
-        let (ox, oy) = (v.left as f32, v.top as f32);
-        let (fw, fhy) = (w as f32 - 2.0 * ox, (hy - oy).max(2.0));
-        let (sx, sy) = ((ox + sky.sun.pos[0] * fw) / q as f32, (oy + sky.sun.pos[1].clamp(0.0, 1.0) * fhy) / q as f32);
-        // What the rays are made of: open sky, far brighter round the sun than anywhere else (as
-        // the real sky is), so gaps in leaves or walls near the sun stream light.
-        let glow_r = 0.28 * fhy / q as f32;
+    let sun = match (ls.sun > 0.0, sun_light) {
+        (true, Some(sun_col)) => {
+            let (ox, oy) = (v.left as f32, v.top as f32);
+            let (fw, fhy) = (w as f32 - 2.0 * ox, (hy - oy).max(2.0));
+            let (sx, sy) = ((ox + sky.sun.pos[0] * fw) / q as f32, (oy + sky.sun.pos[1].clamp(0.0, 1.0) * fhy) / q as f32);
+            // What the rays are made of: open sky, far brighter round the sun than anywhere else (as
+            // the real sky is), so gaps in leaves or walls near the sun stream light.
+            let glow_r = 0.28 * fhy / q as f32;
+            Some((sx, sy, glow_r, ls.sun.max(0.0) * air * 0.6, sun_col))
+        }
+        _ => None,
+    };
+    let mut lamps = None;
+    if ls.lamps > 0.0 {
+        let lights: Vec<&PointLight> = ctxs.iter().flat_map(|c| c.lights.iter()).collect();
+        if !lights.is_empty() {
+            let k = ls.lamps.max(0.0) * air * 0.012 * ctx.gain;
+            let cell_px = |c: usize| ((c % mw * q + q / 2).min(w - 1), (c / mw * q + q / 2).min(h - 1));
+            // Which lamps can light the air along any ray of each tile of cells: a lamp adds only
+            // where the line of sight passes within its radius, so one whose cone of reach misses
+            // the tile's cone of rays (both sides of the eye) adds nothing there.
+            const TILE: usize = 16;
+            let (tc, tr) = (mw.div_ceil(TILE), mh.div_ceil(TILE));
+            let lists: Vec<Vec<u16>> = (0..tc * tr).into_par_iter().map(|t| {
+                let (c0, r0) = (t % tc * TILE, t / tc * TILE);
+                let (c1, r1) = ((c0 + TILE).min(mw) - 1, (r0 + TILE).min(mh) - 1);
+                let (xa, ya) = cell_px(r0 * mw + c0);
+                let (xb, yb) = cell_px(r1 * mw + c1);
+                let (mid, _) = shaft_ray(v, (xa + xb) / 2, (ya + yb) / 2);
+                let ang = |d: [f32; 3]| dot3(d, mid).clamp(-1.0, 1.0).acos();
+                let edges = [(xa, ya), (xb, ya), (xa, yb), (xb, yb), ((xa + xb) / 2, ya), ((xa + xb) / 2, yb), (xa, (ya + yb) / 2), (xb, (ya + yb) / 2)];
+                let spread = edges.iter().map(|&(x, y)| ang(shaft_ray(v, x, y).0)).fold(0.0f32, f32::max) * 1.05 + 0.01;
+                lights.iter().enumerate().filter(|(_, l)| {
+                    let dist = dot3(l.pos, l.pos).sqrt();
+                    if dist <= l.radius * 1.01 { return true; }
+                    let reach = (l.radius / dist).min(1.0).asin() + spread;
+                    let th = ang([l.pos[0] / dist, l.pos[1] / dist, l.pos[2] / dist]);
+                    th <= reach || th >= std::f32::consts::PI - reach
+                }).map(|(i, _)| i as u16).collect()
+            }).collect();
+            lamps = Some((k, tc, lists));
+        }
+    }
+    Some(ShaftSetup { mw, mh, sun, lamps })
+}
+
+/// The unit line of sight through pixel (cx, cy) and its length per metre ahead.
+fn shaft_ray(v: &View, cx: usize, cy: usize) -> ([f32; 3], f32) {
+    let dir = [(cx as f32 + 0.5 - v.center_px) / v.focal_px, (v.horizon_px - cy as f32 - 0.5) / v.focal_px, 1.0];
+    let dl = dot3(dir, dir).sqrt();
+    ([dir[0] / dl, dir[1] / dl, dir[2] / dl], dl)
+}
+
+/// Light made visible by the air: rays from the sun streaming past whatever stands against the
+/// sky, and haloes round lamps. Worked out at half resolution and added over the frame.
+pub(super) fn light_shafts(ctxs: &[Ctx], here: usize, gbuf: &[GPixel], hdr: &mut [[f32; 3]]) {
+    let Some(su) = shaft_setup(ctxs, here) else { return };
+    let ctx = &ctxs[here];
+    let v = &ctx.view;
+    let (w, h) = (v.width, v.height);
+    let q = 2usize;
+    let (mw, mh) = (su.mw, su.mh);
+    let mut add = vec![[0.0f32; 3]; mw * mh];
+    let hy = v.horizon_px.max(2.0);
+    if let Some((sx, sy, glow_r, k, sun_col)) = su.sun {
         let mask: Vec<f32> = (0..mw * mh).into_par_iter().map(|c| {
             let (cx, cy) = (c % mw * q, c / mw * q);
             let near_sun = 0.1 + 12.0 * (-(((c % mw) as f32 + 0.5 - sx).powi(2) + ((c / mw) as f32 + 0.5 - sy).powi(2)) / (glow_r * glow_r)).exp();
@@ -725,7 +725,6 @@ pub(super) fn light_shafts(ctxs: &[Ctx], here: usize, gbuf: &[GPixel], hdr: &mut
             near_sun * open as f32 / (q * q) as f32
         }).collect();
         let steps = 48;
-        let k = ls.sun.max(0.0) * air * 0.6;
         add.par_iter_mut().enumerate().for_each(|(c, o)| {
             let (px, py) = ((c % mw) as f32 + 0.5, (c / mw) as f32 + 0.5);
             let (dx, dy) = ((sx - px) / steps as f32, (sy - py) / steps as f32);
@@ -741,58 +740,29 @@ pub(super) fn light_shafts(ctxs: &[Ctx], here: usize, gbuf: &[GPixel], hdr: &mut
             *o = add3(*o, scale3(sun_col, (1.0 - (-acc * 0.04).exp()) * k));
         });
     }
-    if ls.lamps > 0.0 {
+    if let Some((k, tc, lists)) = &su.lamps {
         let lights: Vec<&PointLight> = ctxs.iter().flat_map(|c| c.lights.iter()).collect();
-        if !lights.is_empty() {
-            let k = ls.lamps.max(0.0) * air * 0.012 * ctx.gain;
-            let ray = |cx: usize, cy: usize| {
-                let dir = [(cx as f32 + 0.5 - v.center_px) / v.focal_px, (v.horizon_px - cy as f32 - 0.5) / v.focal_px, 1.0];
-                let dl = dot3(dir, dir).sqrt();
-                ([dir[0] / dl, dir[1] / dl, dir[2] / dl], dl)
-            };
-            let cell_px = |c: usize| ((c % mw * q + q / 2).min(w - 1), (c / mw * q + q / 2).min(h - 1));
-            // Which lamps can light the air along any ray of each tile of cells: a lamp adds only
-            // where the line of sight passes within its radius, so one whose cone of reach misses
-            // the tile's cone of rays (both sides of the eye) adds nothing there.
-            const TILE: usize = 16;
-            let (tc, tr) = (mw.div_ceil(TILE), mh.div_ceil(TILE));
-            let lists: Vec<Vec<u16>> = (0..tc * tr).into_par_iter().map(|t| {
-                let (c0, r0) = (t % tc * TILE, t / tc * TILE);
-                let (c1, r1) = ((c0 + TILE).min(mw) - 1, (r0 + TILE).min(mh) - 1);
-                let (xa, ya) = cell_px(r0 * mw + c0);
-                let (xb, yb) = cell_px(r1 * mw + c1);
-                let (mid, _) = ray((xa + xb) / 2, (ya + yb) / 2);
-                let ang = |d: [f32; 3]| dot3(d, mid).clamp(-1.0, 1.0).acos();
-                let edges = [(xa, ya), (xb, ya), (xa, yb), (xb, yb), ((xa + xb) / 2, ya), ((xa + xb) / 2, yb), (xa, (ya + yb) / 2), (xb, (ya + yb) / 2)];
-                let spread = edges.iter().map(|&(x, y)| ang(ray(x, y).0)).fold(0.0f32, f32::max) * 1.05 + 0.01;
-                lights.iter().enumerate().filter(|(_, l)| {
-                    let dist = dot3(l.pos, l.pos).sqrt();
-                    if dist <= l.radius * 1.01 { return true; }
-                    let reach = (l.radius / dist).min(1.0).asin() + spread;
-                    let th = ang([l.pos[0] / dist, l.pos[1] / dist, l.pos[2] / dist]);
-                    th <= reach || th >= std::f32::consts::PI - reach
-                }).map(|(i, _)| i as u16).collect()
-            }).collect();
-            add.par_iter_mut().enumerate().for_each(|(c, o)| {
-                let (cx, cy) = cell_px(c);
-                let (dir, dl) = ray(cx, cy);
-                let depth = gbuf[cy * w + cx].depth.min(80.0);
-                let reach = depth * dl;
-                let mut glow = [0.0f32; 3];
-                for l in lists[(c / mw / TILE) * tc + (c % mw) / TILE].iter().map(|&i| lights[i as usize]) {
-                    // Light scattered toward the eye along the line of sight, from a point light
-                    // in clear air: the integral of 1/r^2 along the ray.
-                    let b = dot3(dir, l.pos);
-                    let h2 = (dot3(l.pos, l.pos) - b * b).max(0.0);
-                    if h2 > l.radius * l.radius { continue; }
-                    let hh = (h2 + 0.02).sqrt();
-                    let integ = (((reach - b) / hh).atan() - (-b / hh).atan()) / hh;
-                    let fall = (1.0 - h2.sqrt() / l.radius).powi(2);
-                    glow = add3(glow, scale3(l.color, integ * fall));
-                }
-                *o = add3(*o, scale3(glow, k));
-            });
-        }
+        let cell_px = |c: usize| ((c % mw * q + q / 2).min(w - 1), (c / mw * q + q / 2).min(h - 1));
+        const TILE: usize = 16;
+        add.par_iter_mut().enumerate().for_each(|(c, o)| {
+            let (cx, cy) = cell_px(c);
+            let (dir, dl) = shaft_ray(v, cx, cy);
+            let depth = gbuf[cy * w + cx].depth.min(80.0);
+            let reach = depth * dl;
+            let mut glow = [0.0f32; 3];
+            for l in lists[(c / mw / TILE) * tc + (c % mw) / TILE].iter().map(|&i| lights[i as usize]) {
+                // Light scattered toward the eye along the line of sight, from a point light
+                // in clear air: the integral of 1/r^2 along the ray.
+                let b = dot3(dir, l.pos);
+                let h2 = (dot3(l.pos, l.pos) - b * b).max(0.0);
+                if h2 > l.radius * l.radius { continue; }
+                let hh = (h2 + 0.02).sqrt();
+                let integ = (((reach - b) / hh).atan() - (-b / hh).atan()) / hh;
+                let fall = (1.0 - h2.sqrt() / l.radius).powi(2);
+                glow = add3(glow, scale3(l.color, integ * fall));
+            }
+            *o = add3(*o, scale3(glow, *k));
+        });
     }
     hdr.par_chunks_mut(w).enumerate().for_each(|(y, row)| {
         for (x, px) in row.iter_mut().enumerate() {
@@ -938,6 +908,30 @@ fn bilinear(src: &[[f32; 3]], w: usize, h: usize, x: f32, y: f32) -> [f32; 3] {
     mix3(top, bot, ty)
 }
 
+/// The raindrops on a w x h lens now: centre, radii and opacity, in drawing order.
+pub(super) fn lens_drops(ctx: &Ctx, w: usize, h: usize, weight: f32) -> Vec<[f32; 5]> {
+    let l = &ctx.scene.weather.lens;
+    let ls = ctx.scene.motion.loop_seconds();
+    let amount = l.amount.clamp(0.0, 1.0);
+    let cd = cycles(0.18, ls);
+    let n = (amount * 30.0).round().max(1.0) as i64;
+    let mut out = Vec::new();
+    for j in 0..n {
+        let tt = hf(l.seed ^ 0x41, j) + cd * ctx.tphase;
+        let a = tt - tt.floor();
+        let key = j * 1031 + (tt.floor() as i64).rem_euclid(cd as i64);
+        let r = (0.018 + 0.04 * hf(l.seed ^ 0x42, key)) * w as f32;
+        let cx = hf(l.seed ^ 0x43, key) * w as f32;
+        let mut cy = hf(l.seed ^ 0x44, key) * h as f32;
+        // Some grow heavy and run down the glass.
+        if hf(l.seed ^ 0x45, key) > 0.55 { cy += smoothstep(0.35, 1.0, a) * (0.15 + 0.3 * hf(l.seed ^ 0x46, key)) * h as f32; }
+        let alpha = smoothstep(0.0, 0.06, a) * (1.0 - smoothstep(0.8, 1.0, a)) * weight;
+        if alpha <= 0.0 { continue; }
+        out.push([cx, cy, r, r * 1.1, alpha]);
+    }
+    out
+}
+
 /// Raindrops or frost on the lens, `weight` 0..1 (a crossing hands the lens from one world to
 /// the next).
 pub(super) fn lens(ctx: &Ctx, weight: f32, hdr: &mut Vec<[f32; 3]>) {
@@ -949,20 +943,7 @@ pub(super) fn lens(ctx: &Ctx, weight: f32, hdr: &mut Vec<[f32; 3]>) {
     let amount = l.amount.clamp(0.0, 1.0);
     match l.kind {
         LensKind::Drops => {
-            let cd = cycles(0.18, ls);
-            let n = (amount * 30.0).round().max(1.0) as i64;
-            for j in 0..n {
-                let tt = hf(l.seed ^ 0x41, j) + cd * ctx.tphase;
-                let a = tt - tt.floor();
-                let key = j * 1031 + (tt.floor() as i64).rem_euclid(cd as i64);
-                let r = (0.018 + 0.04 * hf(l.seed ^ 0x42, key)) * w as f32;
-                let cx = hf(l.seed ^ 0x43, key) * w as f32;
-                let mut cy = hf(l.seed ^ 0x44, key) * h as f32;
-                // Some grow heavy and run down the glass.
-                if hf(l.seed ^ 0x45, key) > 0.55 { cy += smoothstep(0.35, 1.0, a) * (0.15 + 0.3 * hf(l.seed ^ 0x46, key)) * h as f32; }
-                let alpha = smoothstep(0.0, 0.06, a) * (1.0 - smoothstep(0.8, 1.0, a)) * weight;
-                if alpha <= 0.0 { continue; }
-                let ry = r * 1.1;
+            for [cx, cy, r, ry, alpha] in lens_drops(ctx, w, h, weight) {
                 for py in (cy - ry).floor().max(0.0) as usize..=((cy + ry).ceil() as usize).min(h - 1) {
                     for px in (cx - r).floor().max(0.0) as usize..=((cx + r).ceil() as usize).min(w - 1) {
                         let (dx, dy) = ((px as f32 + 0.5 - cx) / r, (py as f32 + 0.5 - cy) / ry);

@@ -48,6 +48,11 @@ static TO_SRGB: std::sync::LazyLock<ToSrgb> = std::sync::LazyLock::new(|| {
     ToSrgb { bucket, starts }
 });
 
+/// `lin_to_srgb`'s own tables, for the GPU: the byte at the bottom of each of 4096 buckets, and
+/// the linear value where each byte begins.
+#[cfg(feature = "gpu")]
+pub(crate) fn srgb_tables() -> (Vec<u8>, [f32; 257]) { let t = &*TO_SRGB; (t.bucket.clone(), t.starts) }
+
 /// Linear light (0..1) to an sRGB byte.
 #[inline]
 pub fn lin_to_srgb(v: f32) -> u8 {

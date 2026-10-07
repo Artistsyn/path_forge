@@ -52,9 +52,8 @@ impl GpuEffects {
     }
 
     async fn new_async() -> Result<Self, String> {
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
             backends: wgpu::Backends::all(),
-            dx12_shader_compiler: Default::default(),
             ..Default::default()
         });
         let adapter = instance
@@ -64,7 +63,7 @@ impl GpuEffects {
                 force_fallback_adapter: false,
             })
             .await
-            .ok_or_else(|| "No GPU adapter available".to_string())?;
+            .map_err(|e| format!("No GPU adapter available: {e}"))?;
 
         let (device, queue) = adapter
             .request_device(
@@ -73,8 +72,8 @@ impl GpuEffects {
                     required_features: wgpu::Features::empty(),
                     required_limits: wgpu::Limits::default(),
                     memory_hints: wgpu::MemoryHints::Performance,
+                    trace: wgpu::Trace::Off,
                 },
-                None,
             )
             .await
             .map_err(|e| format!("request_device failed: {e}"))?;
@@ -136,7 +135,7 @@ impl GpuEffects {
             label: Some("path_forge_gpu_effects_pipeline"),
             layout: Some(&pipeline_layout),
             module: &shader,
-            entry_point: "main",
+            entry_point: Some("main"),
             compilation_options: Default::default(),
             cache: None,
         });
@@ -195,14 +194,14 @@ impl GpuEffects {
         });
 
         self.queue.write_texture(
-            wgpu::ImageCopyTexture {
+            wgpu::TexelCopyTextureInfo {
                 texture: &in_tex,
                 mip_level: 0,
                 origin: wgpu::Origin3d::ZERO,
                 aspect: wgpu::TextureAspect::All,
             },
             input_rgba,
-            wgpu::ImageDataLayout {
+            wgpu::TexelCopyBufferLayout {
                 offset: 0,
                 bytes_per_row: Some(4 * width),
                 rows_per_image: Some(height),
@@ -296,15 +295,15 @@ impl GpuEffects {
         }
 
         encoder.copy_texture_to_buffer(
-            wgpu::ImageCopyTexture {
+            wgpu::TexelCopyTextureInfo {
                 texture: &out_tex,
                 mip_level: 0,
                 origin: wgpu::Origin3d::ZERO,
                 aspect: wgpu::TextureAspect::All,
             },
-            wgpu::ImageCopyBuffer {
+            wgpu::TexelCopyBufferInfo {
                 buffer: &out_buf,
-                layout: wgpu::ImageDataLayout {
+                layout: wgpu::TexelCopyBufferLayout {
                     offset: 0,
                     bytes_per_row: Some(padded_bpr),
                     rows_per_image: Some(height),
@@ -319,7 +318,7 @@ impl GpuEffects {
         slice.map_async(wgpu::MapMode::Read, move |res| {
             let _ = tx.send(res);
         });
-        self.device.poll(wgpu::Maintain::Wait);
+        let _ = self.device.poll(wgpu::PollType::Wait);
         match rx.recv() {
             Ok(Ok(())) => {}
             Ok(Err(e)) => return Err(format!("GPU readback map failed: {e}")),

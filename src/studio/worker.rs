@@ -87,12 +87,20 @@ pub struct Preview {
 }
 
 impl Preview {
-    pub fn spawn(ctx: egui::Context) -> Preview {
+    /// `gpu`: the window's device, when frames should render there (each worker gets buffers of
+    /// its own on it, so the two never wait for each other's).
+    pub fn spawn(ctx: egui::Context, gpu: Option<Arc<crate::world::gpu::GpuContext>>) -> Preview {
         let shared = Arc::new((Mutex::new(Shared::default()), Condvar::new()));
         for k in 0..WORKERS {
-            let (sh, ctx) = (shared.clone(), ctx.clone());
+            let (sh, ctx, gpu) = (shared.clone(), ctx.clone(), gpu.clone());
             std::thread::Builder::new().name(format!("pf-preview-{k}")).spawn(move || {
                 let mut r = WorldRenderer::default();
+                if let Some(c) = gpu {
+                    match crate::world::gpu::Gpu::new(c) {
+                        Ok(g) => r.set_gpu(Some(Arc::new(g))),
+                        Err(e) => eprintln!("preview: GPU renderer unavailable, drawing on the CPU: {e}"),
+                    }
+                }
                 let (lock, cv) = &*sh;
                 loop {
                     let job = {
@@ -163,7 +171,7 @@ impl Drop for Preview {
 pub fn thumbnails(ctx: egui::Context, scale: f32, frames: usize) -> Receiver<(usize, usize, Image)> {
     let (tx, rx) = channel();
     std::thread::Builder::new().name("pf-thumbs".into()).spawn(move || {
-        let mut r = WorldRenderer::default();
+        let mut r = WorldRenderer::auto();
         let scenes: Vec<crate::scene::Scene> = crate::scene::presets::ALL.iter().map(|(_, make)| make()).collect();
         for k in 0..frames.max(1) {
             for (i, s) in scenes.iter().enumerate() {
@@ -194,7 +202,7 @@ pub fn estimate(ctx: egui::Context, scene: Arc<Scene>, job: ExportJob) -> Receiv
 pub fn check_loop(ctx: egui::Context, scene: Scene, base_dir: Option<PathBuf>) -> Receiver<LoopReport> {
     let (tx, rx) = channel();
     std::thread::spawn(move || {
-        let mut r = WorldRenderer::default();
+        let mut r = WorldRenderer::auto();
         let size = ((scene.canvas.width / 2).max(16), (scene.canvas.height / 2).max(16));
         let opts = RenderOptions { size: Some(size), base_dir, ..RenderOptions::default() };
         let _ = tx.send(review::check_loop(&mut r, &scene, &opts, 24));
@@ -288,7 +296,7 @@ impl WalkPreview {
         let (tx, jobs) = channel::<WalkRequest>();
         let (done, rx) = channel::<WalkFrame>();
         std::thread::Builder::new().name("pf-walk".into()).spawn(move || {
-            let mut r = WorldRenderer::default();
+            let mut r = WorldRenderer::auto();
             while let Ok(mut job) = jobs.recv() {
                 while let Ok(newer) = jobs.try_recv() { job = newer; }
                 let opts = RenderOptions { size: Some(job.size), ..RenderOptions::default() };

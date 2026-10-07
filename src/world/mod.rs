@@ -10,6 +10,8 @@ pub mod palette;
 pub mod post;
 pub mod looks;
 pub mod render;
+#[cfg(feature = "gpu")]
+pub mod gpu;
 
 pub use render::{lightning_times, Image, Layers, Layout, RenderOptions, WorldIn, WorldRenderer};
 pub use view::View;

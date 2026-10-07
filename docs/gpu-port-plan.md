@@ -1,6 +1,6 @@
 # GPU port of the v3 renderer — plan
 
-2026-10-07. Status: planned, nothing built yet.
+2026-10-07. Status: phases 0-4 and most of 6 built (see "Where it stands" at the end).
 
 ## Goal
 
@@ -204,3 +204,48 @@ caches, atlas, parity harness, binning) is the part with no CPU counterpart.
 - **Float drift in long chains** (fog over far distances, adaptation in crossings). The per-pass
   parity mode exists so this is found where it starts.
 - **GPU timing on a busy machine:** compare passes within one trace (as on the Quest).
+
+## Where it stands (2026-10-08)
+
+Built, and drawn on the GPU for every frame that shows one world:
+
+| Pass | WGSL | Notes |
+|---|---|---|
+| Shading, mist | `shade.wgsl` | Mist loops every lamp in index order (the CPU's tile lists come from a G-buffer the GPU has since changed); out-of-reach lamps add exactly nothing, so the sum is the same. |
+| Sky, sky bodies, lightning, veil, fog bank | `sky.wgsl` | Stars and cloud blobs binned per 16 x 16 tile in drawing order. |
+| Billboards | `cards.wgsl` | Sprites in one texel store keyed by `Arc` pointer; mip level chosen on the CPU (`Sprite::lod`). Pick ids and depth match the CPU exactly. |
+| Tufts, flames, wisps, particles, precipitation, splashes, curtains, drips, sand | `splat.wgsl` | Every pass now emits `render::splat::Splat` shapes; one list drawn by either engine. Blades (which write the G-buffer) in their own dispatch; splash gates read it after. |
+| Reflections | `reflect.wgsl` | `ColumnBlur` as double-float (hi + lo) running sums: exact for these sums, as f64 is. Blocked scan (64-row blocks). Skipped when nothing in the frame can reflect. |
+| Light shafts | `shafts.wgsl` | Setup shared with the CPU (`weather::shaft_setup`). |
+| Crop, pick, heat shimmer, lens drops and frost, bloom, tone map, Kuwahara, grade, outline, lens warp, ramp levels, palette and dither, stats, upscale, paper and scanlines | `post.wgsl` | One scratch buffer at offsets the CPU plans per frame; tables (sRGB thresholds, palette LUT, `.cube`) cached by pointer. Only the output bytes come back (plus pick, depth, stats when asked). |
+
+Still on the CPU: rasterisation and prop shadows (about 1.5 ms), and every frame of two
+worlds (crossings, forks, journeys). Those frames draw on the CPU even with a GPU renderer; the
+joins of transition and fork clips are frames of one world, so they still match the loops
+exactly on either engine (tested).
+
+**Parity** (`pf parity --engine gpu`): every preset at two times, max difference 1/255; 31
+weather scenes and an all-sky stress scene, max 1-6; 19 style variants pass (palettes snap an
+isolated pixel to the next colour, p99.9 = 0).
+
+**Fast math.** wgpu-hal 25 builds every Metal library with `CompileOptions::new()`, so fast math
+is on and there is no switch short of a fork. Division (`div`) is corrected with an fma, and
+`rnd(x)` (an OR with a uniform that is always zero) stops a product being fused into an add or a
+sum being reassociated wherever a threshold or a floor follows. With those, alpha ties at exactly
+0.5 land on the same side as on the CPU.
+
+**Where it is used.** The studio preview (each worker has its own buffers on eframe's device),
+`pf`, exports and MCP use the GPU when there is an adapter. `--engine cpu` (or `PF_ENGINE=cpu`)
+forces the reference renderer; export metadata says which drew the frames. The game runtime
+stays on the CPU unless the game calls `Runtime::use_gpu` (optionally with its own device).
+
+**Timings** (480 x 854, M4, per frame): Bog Boardwalk 27.9 -> 12.7 ms, rain 27.5 -> 13.2,
+Ice Cave 23.9 -> 11.9, Haunted Forest 17.0 -> 10.1, Forest Path 11.9 -> 9.6. The GPU passes
+take 3.5-6 ms of that; the rest is the CPU's raster, shadows and buffer preparation before the
+GPU starts, and the wait. `pf bench --stages` lists GPU pass times (`g.*`, timestamp queries).
+Studio: rain plays 24/24 frames on time at ~30 ms per worker (CPU preview ~51 ms).
+
+**Forks that divide the road** (`path.fork.style: "Split"`, `side: "Both"`) were added on both
+engines together: `Forks::branch_sd` on the CPU, `branch_sd` in `common.wgsl`, parity max 1/255.
+
+Next: frames of two worlds on the GPU (phase 5), the raster, zero-copy display in the studio.

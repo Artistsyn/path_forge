@@ -242,7 +242,8 @@ Patches of thick fog along the path that the camera walks into and out of.
 
 Forks. On open ground a branch path splits off at `angle` and runs away into the distance; between
 walls the fork is a side passage: an opening in the wall with a dark passage behind it. The walk
-itself stays on the main path.
+itself stays on the main path. `style` chooses how a branch leaves on open ground: through a
+gap in the path's edge, or by the road itself dividing.
 
 | Field | Type | Default | Meaning |
 |---|---|---|---|
@@ -250,6 +251,7 @@ itself stays on the main path.
 | `spacing` | number | `24.0` | Distance from one fork to the next, metres (snapped to divide the loop). |
 | `offset` | number | `14.0` | Where along the loop the first fork is, metres. |
 | `side` | [ForkSide](#forkside) | `"Alternate"` |  |
+| `style` | [ForkStyle](#forkstyle) | `"Side"` | How a branch leaves the road on open ground (between walls a fork is always a side passage). |
 | `angle` | number | `38.0` | Angle of a branch path from the main path, degrees (open ground). |
 | `half_width` | number | `1.1` | Half the width of a branch path, or of a side passage's opening, metres. |
 | `depth` | number | `7.0` | How deep a side passage goes before it is lost in the dark, metres (between walls). |
@@ -257,7 +259,19 @@ itself stays on the main path.
 
 ### ForkSide
 
-One of `Left` \| `Right` \| `Alternate`.
+Which side a branch leaves on: one side, alternating from fork to fork, or both at once (the
+road divides three ways with `ForkStyle::Split`).
+
+One of `Left` \| `Right` \| `Alternate` \| `Both`.
+
+### ForkStyle
+
+How a branch leaves the road on open ground.
+
+| Value | Meaning |
+|---|---|
+| `Side` | A side path through a gap in the road's edge. |
+| `Split` | The road itself divides: it widens, stays one paved surface for a stretch, then parts round a grass point, each path running on alone. |
 
 ### HeatShimmer
 

@@ -954,14 +954,14 @@ fn create_tile_texture(
         view_formats: &[],
     });
     queue.write_texture(
-        wgpu::ImageCopyTexture {
+        wgpu::TexelCopyTextureInfo {
             texture: &tex,
             mip_level: 0,
             origin: wgpu::Origin3d::ZERO,
             aspect: wgpu::TextureAspect::All,
         },
         rgba,
-        wgpu::ImageDataLayout {
+        wgpu::TexelCopyBufferLayout {
             offset: 0,
             bytes_per_row: Some(side * 4),
             rows_per_image: Some(side),
@@ -982,9 +982,8 @@ impl GpuSceneRenderer {
     }
 
     async fn new_async() -> Result<Self, String> {
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
             backends: wgpu::Backends::all(),
-            dx12_shader_compiler: Default::default(),
             ..Default::default()
         });
         let adapter = instance
@@ -994,7 +993,7 @@ impl GpuSceneRenderer {
                 force_fallback_adapter: false,
             })
             .await
-            .ok_or_else(|| "No GPU adapter available".to_owned())?;
+            .map_err(|e| format!("No GPU adapter available: {e}"))?;
 
         let (device, queue) = adapter
             .request_device(
@@ -1003,8 +1002,8 @@ impl GpuSceneRenderer {
                     required_features: wgpu::Features::empty(),
                     required_limits: wgpu::Limits::default(),
                     memory_hints: wgpu::MemoryHints::Performance,
+                    trace: wgpu::Trace::Off,
                 },
-                None,
             )
             .await
             .map_err(|e| format!("request_device failed: {e}"))?;
@@ -1076,7 +1075,7 @@ impl GpuSceneRenderer {
             label: Some("path_forge_gpu_scene_pipeline"),
             layout: Some(&pipeline_layout),
             module: &shader,
-            entry_point: "main",
+            entry_point: Some("main"),
             compilation_options: Default::default(),
             cache: None,
         });
@@ -1711,15 +1710,15 @@ impl GpuSceneRenderer {
             .ok_or_else(|| "GPU output cache unavailable".to_owned())?;
 
         encoder.copy_texture_to_buffer(
-            wgpu::ImageCopyTexture {
+            wgpu::TexelCopyTextureInfo {
                 texture: &output_cached.texture,
                 mip_level: 0,
                 origin: wgpu::Origin3d::ZERO,
                 aspect: wgpu::TextureAspect::All,
             },
-            wgpu::ImageCopyBuffer {
+            wgpu::TexelCopyBufferInfo {
                 buffer: &output_cached.readback,
-                layout: wgpu::ImageDataLayout {
+                layout: wgpu::TexelCopyBufferLayout {
                     offset: 0,
                     bytes_per_row: Some(output_cached.padded_bpr),
                     rows_per_image: Some(height),
@@ -1739,7 +1738,7 @@ impl GpuSceneRenderer {
         slice.map_async(wgpu::MapMode::Read, move |res| {
             let _ = tx.send(res);
         });
-        self.device.poll(wgpu::Maintain::Wait);
+        let _ = self.device.poll(wgpu::PollType::Wait);
         match rx.recv() {
             Ok(Ok(())) => {}
             Ok(Err(e)) => return Err(format!("GPU scene readback map failed: {e}")),

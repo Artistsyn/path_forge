@@ -469,7 +469,7 @@ struct Loaded {
 }
 
 impl Server {
-    pub fn new() -> Server { Server { renderer: WorldRenderer::default(), home: home() } }
+    pub fn new() -> Server { Server { renderer: WorldRenderer::auto(), home: home() } }
 
     fn resolve(&self, p: &str) -> PathBuf {
         let p = PathBuf::from(p);

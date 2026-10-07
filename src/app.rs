@@ -954,7 +954,7 @@ impl PathForgeApp {
         egui::TopBottomPanel::top("top_bar")
             .frame(egui::Frame::none()
                 .fill(Color32::from_rgb(8,6,4))
-                .inner_margin(egui::Margin::symmetric(10.0, 5.0)))
+                .inner_margin(egui::Margin::symmetric(10, 5)))
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
                     ui.label(RichText::new("PATH").color(Color32::from_rgb(200,144,48))
@@ -1068,7 +1068,7 @@ impl PathForgeApp {
             .max_width(270.0)
             .frame(egui::Frame::none()
                 .fill(Color32::from_rgb(6,4,2))
-                .inner_margin(egui::Margin::same(4.0)))
+                .inner_margin(egui::Margin::same(4)))
             .show(ctx, |ui| {
                 egui::ScrollArea::vertical().show(ui, |ui| {
                     // ── CANVAS ───────────────────────────────────────────
@@ -2024,14 +2024,14 @@ impl PathForgeApp {
 
         let frame = egui::Frame::none()
             .fill(Color32::from_rgb(8,6,4))
-            .inner_margin(egui::Margin::same(0.0))
+            .inner_margin(egui::Margin::same(0))
             .stroke(egui::Stroke::new(1.0, Color32::from_rgb(20,18,12)));
 
         frame.show(ui, |ui| {
             // Header button
             let hdr = egui::Frame::none()
                 .fill(hdr_bg)
-                .inner_margin(egui::Margin::symmetric(8.0, 5.0));
+                .inner_margin(egui::Margin::symmetric(8, 5));
             hdr.show(ui, |ui| {
                 ui.horizontal(|ui| {
                     if ui.add(egui::Button::new(
@@ -2051,7 +2051,7 @@ impl PathForgeApp {
             if *open {
                 let body_frame = egui::Frame::none()
                     .fill(Color32::from_rgb(8,6,4))
-                    .inner_margin(egui::Margin::symmetric(8.0, 6.0));
+                    .inner_margin(egui::Margin::symmetric(8, 6));
                 body_frame.show(ui, |ui| {
                     changed = body(ui, false);
                 });
