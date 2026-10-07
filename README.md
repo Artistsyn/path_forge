@@ -15,12 +15,39 @@ the game where things are on screen.
 | | |
 |---|---|
 | `path_forge [scene.json]` | The studio: a live preview, an inspector generated from the scene schema, a timeline, a preset gallery and an export window. It reloads the file when it changes on disk. |
-| `pf` | Headless CLI: `presets`, `dump`, `render`, `sheet`, `seam`, `gallery`, `styles`, `animsheet`, `export`, `animcheck`, `skill`, `kit`, `project`, `assets`, `pack`. |
+| `pf` | Headless CLI: `presets`, `dump`, `render`, `sheet`, `gallery`, `styles`, `kit`, `schema`, `seam`, `bench`, `animcheck`, `animsheet`, `gifdiff`, `export`, `transition`, `journey`, `project`, `assets`, `pack`, `skill`. |
 | `pf_mcp` | MCP server on stdio with 20 `pf_*` tools that return images, so an AI agent can design, look at and export scenes. |
 
 ```bash
 cargo build --release
 ```
+
+## Documentation
+
+- [docs/MANUAL.md](docs/MANUAL.md): the full manual. Scenes, the studio, looks, kits, every export
+  format and its metadata, encounter clips, how to make transitions, forks and journeys, the live
+  runtime (Rust and C), Quartz games, projects, the CLI and the MCP server.
+- [docs/SCENE_REFERENCE.md](docs/SCENE_REFERENCE.md): every scene, transition, fork and journey
+  field with its type, default and meaning, generated from the code (`pf schema --markdown`; a test
+  keeps it current).
+
+## Export formats
+
+| Format | What you get |
+|---|---|
+| `webp` | Animated WebP, full colour, lossy or lossless, far smaller than GIF |
+| `gif` | 256-colour GIF (the scene's palette, or the best colours across the loop) |
+| `apng` | Animated PNG, lossless |
+| `png` | A folder of frames |
+| `sheet` | Sprite sheet pages plus a TexturePacker/Aseprite-style atlas |
+| `depth` | 16-bit depth per frame, for hiding game objects behind scenery |
+| `layers` | Near/mid/far transparent layers per frame, for parallax |
+
+Every export also writes `<name>.json`: frame count, fps, metres per frame, lightning times, the
+camera projection that maps world metres to screen pixels, and the scene. Animated WebP plays
+slowly in Safari, Preview and Quick Look on macOS, because Apple's decoder replays every earlier
+frame. Chrome, Firefox, Discord and game engines play it at its real speed. See the manual,
+§7.
 
 ## Props as data: kits
 
@@ -118,6 +145,9 @@ from Edit > Transition / fork…, and agents use `pf_transition` and `pf_journey
 plays the same journey: `Runtime::from_journey`, `step`, `go`, `choose`, `state` (C:
 `pf_runtime_open_journey`, `pf_runtime_step`, `pf_runtime_go`, `pf_runtime_choose`,
 `pf_runtime_state`, `pf_runtime_transition_to`, `pf_runtime_fork`).
+
+The manual's §9-11 walk through making each one, in the studio and from a shell, and what each
+export contains. Quartz games play journeys with the `quartz_path_forge` plugin (manual §13).
 
 ## Using PathForge from an AI agent
 
