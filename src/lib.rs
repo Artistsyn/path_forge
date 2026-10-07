@@ -3,6 +3,7 @@
 
 pub mod settings;
 pub mod scene;
+pub mod docs;
 pub mod world;
 pub mod export;
 pub mod review;

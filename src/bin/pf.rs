@@ -1,22 +1,46 @@
-//! `pf` — headless PathForge: render frames, contact sheets, seam checks and benchmarks.
+//! `pf` — PathForge from a shell: render, look, check, export, plan transitions and forks,
+//! export journeys, and manage kits, projects and the agent skill. docs/MANUAL.md explains each.
 //!
-//!   pf presets
-//!   pf dump    (--preset NAME | --scene FILE)                 v3 scene JSON to stdout (2.0 files are converted)
+//! Looking
+//!   pf presets                                                   the built-in presets
+//!   pf dump    (--preset NAME | --scene FILE)                    v3 scene JSON to stdout (2.0 files are converted)
 //!   pf render  (--preset NAME | --scene FILE) [--t 0..1] -o out.png
 //!   pf sheet   (--preset NAME | --scene FILE) [--frames 8] [--cols 4] [--scale 0.5] -o out.png
-//!   pf seam    [--preset NAME | --scene FILE] [--frames 24] [--steps 1]
-//!   pf bench   [--preset NAME | --scene FILE] [--frames 10]
-//!   pf gallery [--t 0..1] [--cols 5] [--scale 0.3] -o out.png   first frame of every preset in one image
-//!   pf export  (--preset NAME | --scene FILE) [--formats gif,webp,apng,png,sheet] [--quality 0..100] [--frames N] [--name STEM] [--lossy 0..1] [--dither on|off] [--clip loop|encounter [--slow M] [--start FRAME]|transition (--to-preset NAME|--to-scene FILE) [--approach M]] -o FOLDER
-//!   pf animsheet --file X.gif|X.webp [--frames 8] [--cols 8] [--scale 0.3] -o out.png   frames of any animation in one image
-//!   pf gifdiff --a A --b B [--frame K] [-o cmp.png]                two GIF/WebP files frame by frame; image: A | B | difference x4
-//!   pf animcheck (--preset NAME | --scene FILE) --file X.gif|X.webp [--frame K] [-o cmp.png]
-//!                                                                  an export against fresh renders of its scene: true error per frame
-//!   pf styles  (--preset NAME | --scene FILE) [--t 0..1] [--scale 0.35] [--only NAME] -o out.png   the scene in every style preset
-//!   pf parity  [--preset NAME]                                  2.0 engine only: CPU vs GPU
+//!   pf gallery [--t 0..1] [--cols 5] [--scale 0.3] -o out.png    first frame of every preset
+//!   pf styles  (--preset NAME | --scene FILE) [--t 0..1] [--scale 0.35] [--only NAME] -o out.png
+//!   pf kit     --kit @NAME|FOLDER [--only NAME] [-o out.png]     every prop of a kit
+//!   pf schema  [--markdown]                                      the scene format (JSON schema, or the reference)
 //!
+//! Checking
+//!   pf seam    [--preset NAME | --scene FILE] [--frames 24] [--steps 1]   the loop joins (every preset by default)
+//!   pf bench   [--preset NAME | --scene FILE] [--frames 10]
+//!   pf animcheck (--preset NAME | --scene FILE) --file X.gif|X.webp [--frame K] [-o cmp.png]   an export vs fresh renders
+//!   pf animsheet --file X.gif|X.webp [--frames 8] [--cols 8] [--scale 0.3] -o out.png
+//!   pf gifdiff --a A --b B [--frame K] [-o cmp.png]
+//!
+//! Exporting
+//!   pf export  (--preset NAME | --scene FILE) -o FOLDER [--formats gif,webp,apng,png,sheet,depth,layers]
+//!              [--quality 0..100] [--frames N] [--name STEM] [--lossy 0..1] [--dither on|off]
+//!              [--clip loop | encounter [--slow M] [--start FRAME]
+//!                     | transition (--to-preset NAME | --to-scene FILE) [--approach M] [--entries N]
+//!                     | fork (--left-preset NAME | --left-scene FILE) (--right-preset NAME | --right-scene FILE)]
+//!
+//! Transitions, forks, journeys
+//!   pf transition (--preset NAME | --scene FILE) (--to-preset NAME | --to-scene FILE)
+//!              [--threshold auto|open|doorway|cave|gate|portal] [--marker auto|none|archway|ruinedarch|gate|banners|portal]
+//!              [--approach M] [--json] [--frames 12] [--cols 6] [--scale 0.3] [--frame K] [-o sheet.png]
+//!   pf transition (--preset NAME | --scene FILE) (--left-preset NAME | --left-scene FILE) (--right-preset NAME | --right-scene FILE)
+//!              [--take left|right] [--angle DEG] [--approach M] [--frames 12] [--cols 6] [--scale 0.3] [-o sheet.png]
+//!   pf journey --file J.journey.json [--out FOLDER [--formats webp,...] [--entries N]]
+//!
+//! Projects and the skill
+//!   pf project --new FOLDER [--preset NAME]                      scenes/ assets/ kits/ exports/ and a first scene
+//!   pf assets  --scene FILE                                      every file a scene uses, and whether it is there
+//!   pf pack    --scene FILE [--out FOLDER] [--name STEM]         copy what it uses beside it, paths made relative
+//!   pf skill   [--install DIR|~ [--agent claude,codex,copilot,cursor|all] [--force yes]]
+//!
+//!   pf parity  [--preset NAME]                                   2.0 engine only: CPU vs GPU
 //! `--engine v2` runs the PathForge 2.0 renderers (with `--backend cpu|gpu`) for comparison.
-//! With no --preset/--scene, seam and bench run over every built-in preset.
 
 use path_forge::gpu_scene::{self, GpuSceneRenderer};
 use path_forge::renderer::PathRenderer;
@@ -94,20 +118,23 @@ fn diff(a: &[u8], b: &[u8], thresh: u8) -> (f64, f64) {
 struct Args { cmd: String, opts: HashMap<String, String> }
 
 fn parse_args() -> Result<Args, String> {
-    let mut it = std::env::args().skip(1);
+    let mut it = std::env::args().skip(1).peekable();
     let cmd = it.next().ok_or_else(usage)?;
     let mut opts = HashMap::new();
+    // A flag followed by another flag (or by nothing) stands alone (`--json`, `--markdown`);
+    // a value may still start with '-' when it is a number (`--approach -5`).
+    let is_flag = |a: &str| a.starts_with('-') && !a[1..].starts_with(|c: char| c.is_ascii_digit() || c == '.');
     while let Some(a) = it.next() {
         let key = a.strip_prefix("--").or_else(|| a.strip_prefix('-'))
             .ok_or_else(|| format!("unexpected argument `{a}`\n{}", usage()))?;
-        let val = it.next().ok_or_else(|| format!("`{a}` needs a value"))?;
+        let val = match it.peek() { Some(n) if !is_flag(n) => it.next().unwrap_or_default(), _ => "true".to_owned() };
         opts.insert(key.to_owned(), val);
     }
     Ok(Args { cmd, opts })
 }
 
 fn usage() -> String {
-    "usage: pf <presets|dump|render|transition|journey|sheet|seam|gallery|styles|animsheet|export|animcheck|gifdiff|bench|parity|skill|kit|project|assets|pack> [--preset NAME | --scene FILE] [options]  (see src/bin/pf.rs)".into()
+    "usage: pf <presets|dump|render|sheet|gallery|styles|kit|schema|seam|bench|animcheck|animsheet|gifdiff|export|transition|journey|project|assets|pack|skill|parity> [--preset NAME | --scene FILE] [options]  (see src/bin/pf.rs)".into()
 }
 
 fn norm(s: &str) -> String { s.to_lowercase().replace([' ', '_', '-'], "") }
@@ -733,6 +760,7 @@ fn main() -> ExitCode {
 "pack" => cmd_pack(&args),
 "assets" => cmd_assets(&args),
 "project" => cmd_project(&args),
+"schema" => { if args.opts.contains_key("markdown") { print!("{}", path_forge::docs::scene_reference()); } else { println!("{}", serde_json::to_string_pretty(&path_forge::docs::schema()).map_err(|e| e.to_string()).unwrap_or_default()); } Ok(()) }
         other => Err(format!("unknown command `{other}`\n{}", usage())),
     });
     match res {

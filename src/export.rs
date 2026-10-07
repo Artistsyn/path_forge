@@ -653,6 +653,10 @@ fn export_frames(scene: &Scene, job: &ExportJob, stem: &str, seq: &Seq, renderer
     // GIF frame delays are whole hundredths and browsers treat < 2 as slow: cap GIF at 50 fps.
     let gif_step = if job.formats.contains(&Format::Gif) && fps > 50.0 { (fps / 50.0).ceil() as u32 } else { 1 };
     if gif_step > 1 { notes.push(format!("{stem}.gif uses every {gif_step}th frame: GIF timing cannot go above 50 fps ({fps:.0} fps requested).")); }
+    // Apple's ImageIO decodes animated WebP frame k by decoding frames 0..k (measured on macOS 26.6:
+    // 480x854, frame 287 took 1.4 s), whatever the frame flags, so Safari, Preview and Quick Look fall
+    // behind within a few frames. Chrome, Firefox, Discord and engines decode it themselves.
+    if job.formats.contains(&Format::Webp) && n > 24 { notes.push(format!("{stem}.webp plays slowly in Safari, Preview and Quick Look (Apple's decoder replays every earlier frame); view it in Chrome, Firefox, Discord or vwebp.")); }
     let opts = RenderOptions { size: Some((w as u32, h as u32)), base_dir: job.base_dir.clone(), depth: job.formats.iter().any(|f| matches!(f, Format::Depth | Format::Layers)), ..RenderOptions::default() };
     let mut frame = |renderer: &mut WorldRenderer, k: u32| {
         let (d, t) = seq.frames[(k as usize).min(seq.frames.len() - 1)];

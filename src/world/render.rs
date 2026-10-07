@@ -2435,6 +2435,37 @@ fn draw_lightning(ctx: &Ctx, s: &Strike, flash: [f32; 3], gbuf: &[GPixel], hdr: 
 
 // ── Sky ────────────────────────────────────────────────────────────────────
 
+/// Brightness of the moon's surface at a point `n` of its sphere (unit radius, z toward the
+/// viewer): soft dark maria, round craters with darker floors and brighter rims, and fine
+/// mottling. Fixed to the moon, so the same at every phase. Craters are placed and measured on
+/// the sphere, so the ones near the limb come out foreshortened; every edge is at least a pixel
+/// wide (`px`, disc units per pixel), so a small moon blurs instead of turning blocky.
+fn moon_albedo(n: [f32; 3], px: f32) -> f32 {
+    use super::looks::value_noise as vn;
+    let [x, y, z] = n;
+    // Maria: big soft patches, more of them up and to the left, as on the near side.
+    let m = 0.55 * vn(x * 2.2 + 3.1, y * 2.2 + 7.4) + 0.3 * vn(x * 4.7 + 1.3, y * 4.7 + 5.2) + 0.15 * vn(x * 9.0 + 4.0, y * 9.0);
+    let soft = (2.0 * px).max(0.04);
+    let maria = smoothstep(0.55 - soft, 0.6 + soft, m - 0.1 * y - 0.06 * x);
+    let mut a = 1.0 - 0.42 * maria;
+    for k in 0..22 {
+        // A centre on the near hemisphere, and a radius: many small, a few large.
+        let (u, v) = (hf(0x3A1, k) * 1.8 - 0.9, hf(0x3A2, k) * 1.8 - 0.9);
+        if u * u + v * v > 0.85 { continue; }
+        let w = (1.0 - u * u - v * v).sqrt();
+        let rad = 0.04 + 0.16 * hf(0x3A3, k).powi(3);
+        let d = ((x - u).powi(2) + (y - v).powi(2) + (z - w).powi(2)).sqrt() / rad;
+        if d > 1.4 { continue; }
+        let e = (px / rad).max(0.06);
+        let floor = 1.0 - smoothstep(0.78 - e, 0.82 + e, d);
+        let rim = smoothstep(0.72 - e, 0.92, d) * (1.0 - smoothstep(1.0, 1.2 + e, d));
+        a *= 1.0 - 0.2 * floor + 0.14 * rim;
+    }
+    // Fine mottling, faded out where it would be smaller than a pixel.
+    let grain = (1.0 - smoothstep(0.03, 0.08, px)) * (vn(x * 24.0 + 9.0, y * 24.0) - 0.5);
+    a * (1.0 + 0.16 * grain)
+}
+
 fn draw_sky_bodies(ctx: &Ctx, gbuf: &[GPixel], hdr: &mut [[f32; 3]]) {
     let v = &ctx.view;
     let (w, h) = (v.width, v.height);
@@ -2450,6 +2481,9 @@ fn draw_sky_bodies(ctx: &Ctx, gbuf: &[GPixel], hdr: &mut [[f32; 3]]) {
         *p = if additive { add3(*p, scale3(c, a)) } else { mix3(*p, c, a.clamp(0.0, 1.0)) };
     };
     let scale = (h as f32 - oy) / 854.0;
+    // The moon hides the stars behind it, its dark side too.
+    let moon_disc = sky.moon.body.enabled.then(|| (ox + sky.moon.body.pos[0] * fw, oy + sky.moon.body.pos[1].clamp(0.0, 1.0) * fhy, sky.moon.body.radius * fhy));
+    let behind_moon = |x: i64, y: i64| moon_disc.is_some_and(|(cx, cy, r)| (x as f32 + 0.5 - cx).powi(2) + (y as f32 + 0.5 - cy).powi(2) < r * r);
     if sky.stars.enabled {
         let tw = sky.stars.twinkle.clamp(0.0, 4.0);
         let n = sky.stars.count.min(6000) as i64;
@@ -2474,7 +2508,7 @@ fn draw_sky_bodies(ctx: &Ctx, gbuf: &[GPixel], hdr: &mut [[f32; 3]]) {
             let ri = r.ceil() as i64;
             for oy in -ri..=ri { for ox in -ri..=ri {
                 let dd = ((ox * ox + oy * oy) as f32).sqrt();
-                if dd <= r { add(hdr, sx + ox, sy + oy, [0.9, 0.92, 1.0], b * (1.0 - dd / (r + 1.0)), true); }
+                if dd <= r && !behind_moon(sx + ox, sy + oy) { add(hdr, sx + ox, sy + oy, [0.9, 0.92, 1.0], b * (1.0 - dd / (r + 1.0)), true); }
             }}
         }
     }
@@ -2494,32 +2528,60 @@ fn draw_sky_bodies(ctx: &Ctx, gbuf: &[GPixel], hdr: &mut [[f32; 3]]) {
         let (cx, cy, r) = (ox + m.body.pos[0] * fw, oy + m.body.pos[1].clamp(0.0, 1.0) * fhy, m.body.radius * fhy);
         let c = rgb_lin(m.body.color);
         let gr = r * 2.6;
+        // The moon is a sphere lit by the sun at the phase angle: 0 full (sun behind the viewer),
+        // ±1 new; waxing is lit on the right. A point of the disc is lit where its normal faces
+        // the sun, which draws the terminator as the real half-ellipse.
+        let ph = m.phase.clamp(-1.0, 1.0);
+        let angle = ph.abs() * std::f32::consts::PI;
+        let sun = [if ph < 0.0 { -angle.sin() } else { angle.sin() }, angle.cos()];
+        let lit_fraction = 0.5 * (1.0 + angle.cos());
         for y in (cy - gr) as i64..=(cy + gr) as i64 { for x in (cx - gr) as i64..=(cx + gr) as i64 {
             let (dx, dy) = ((x as f32 + 0.5 - cx) / r, (y as f32 + 0.5 - cy) / r);
             let dd = (dx * dx + dy * dy).sqrt();
             if dd < 1.0 {
-                // Phase: a second disc offset sideways cuts the lit part.
-                let off = m.phase.clamp(-1.0, 1.0) * 2.0;
-                let shadowed = m.phase.abs() > 0.02 && ((dx + off).powi(2) + dy * dy).sqrt() < 1.0;
-                let crater = if m.craters { 1.0 - 0.18 * (hf(7, ((dx * 4.0).floor() as i64) * 31 + (dy * 4.0).floor() as i64) > 0.7) as i32 as f32 } else { 1.0 };
-                let col = if shadowed { scale3(c, 0.06) } else { scale3(c, 1.6 * crater) };
-                add(hdr, x, y, col, m.opacity, false);
+                let nz = (1.0 - dd * dd).max(0.0).sqrt();
+                // About a pixel of soft terminator.
+                let edge = (1.5 / r.max(1.0)).clamp(0.01, 0.2);
+                let lit = smoothstep(-edge, edge, dx * sun[0] + nz * sun[1]);
+                let crater = if m.craters { moon_albedo([dx, dy, nz], 1.0 / r.max(1.0)) } else { 1.0 };
+                // Sunlit surface over the sky. The unlit side reflects almost nothing: what shows
+                // there is the sky in front of it (the stars behind are hidden above), plus faint
+                // earthshine, which only reads against a dark sky.
+                if lit > 0.0 { add(hdr, x, y, scale3(c, 1.15 * crater), m.opacity * lit, false); }
+                add(hdr, x, y, c, 0.012 * m.opacity * (1.0 - lit), true);
+                // The halo is scattered in the air in front of the moon, so it lies over the dark
+                // side too (without it, the dark side read as a disc darker than the sky round it).
+                add(hdr, x, y, c, 0.15 * lit_fraction, true);
             } else if dd * r < gr {
-                add(hdr, x, y, c, 0.15 * (1.0 - (dd * r - r) / (gr - r)).powi(2), true);
+                add(hdr, x, y, c, 0.15 * lit_fraction * (1.0 - (dd * r - r) / (gr - r)).powi(2), true);
             }
         }}
     }
     if sky.clouds.enabled {
         let cl = &sky.clouds;
         let span = fw * 1.6;
-        let cyc = cl.drift.round().max(0.0);
+        // A whole number of crossings per loop wraps each cloud back to where it
+        // started. Any other drift (0.4x, 1.5x) cannot: a cloud would end the loop
+        // somewhere else. Then each cloud lives exactly one loop instead, forming,
+        // drifting at the speed asked and dissolving, with the lives staggered so
+        // the sky never empties; the last frame still matches the first.
+        let drift = cl.drift.max(0.0);
+        let whole = (drift - drift.round()).abs() < 1e-3;
         let tint = rgb_lin(cl.tint);
         let lit = add3(scale3(ctx.ambient, 0.6), ctx.sky_lights.iter().fold([0.0; 3], |a, s| add3(a, scale3(s.color, 0.4))));
         let col = mul3(tint, add3(lit, [0.35; 3]));
         for i in 0..cl.count.min(200) as i64 {
             let base = hf(cl.seed ^ 0x11, i) * span;
-            let speed = if cyc > 0.0 { cyc * (1.0 + (hash(cl.seed ^ 0x22, i) % 2) as f32) } else { 0.0 };
-            let cx = ox + (base + speed * span * ctx.tphase).rem_euclid(span) - (span - fw) * 0.5;
+            let speed = drift * (1.0 + (hash(cl.seed ^ 0x22, i) % 2) as f32);
+            let (travel, life) = if whole {
+                (speed * span * ctx.tphase, 1.0)
+            } else {
+                let ph = (ctx.tphase + hf(cl.seed ^ 0x77, i)).rem_euclid(1.0);
+                // Centred on its spot over its life; fades over a fifth of it at each end.
+                (speed * span * (ph - 0.5), smoothstep(0.0, 0.2, ph) * smoothstep(0.0, 0.2, 1.0 - ph))
+            };
+            if life <= 0.0 { continue; }
+            let cx = ox + (base + travel).rem_euclid(span) - (span - fw) * 0.5;
             let cy = oy + fhy * (0.12 + 0.6 * hf(cl.seed ^ 0x33, i));
             let size = fhy * (0.06 + 0.08 * hf(cl.seed ^ 0x44, i)) * cl.scale;
             let blobs = 3 + (cl.variation * 4.0) as i64;
@@ -2533,7 +2595,7 @@ fn draw_sky_bodies(ctx: &Ctx, gbuf: &[GPixel], hdr: &mut [[f32; 3]]) {
                     let d2 = dx * dx + dy * dy;
                     if d2 < 1.0 {
                         let shade = 1.0 - 0.25 * dy.max(0.0);
-                        add(hdr, x, y, scale3(col, shade), cl.opacity * (1.0 - d2).powf(1.2) * 0.8, false);
+                        add(hdr, x, y, scale3(col, shade), cl.opacity * life * (1.0 - d2).powf(1.2) * 0.8, false);
                     }
                 }}
             }
@@ -2800,6 +2862,71 @@ mod tests {
     fn preset(n: &str) -> Scene { crate::scene::presets::ALL.iter().find(|(m, _)| *m == n).unwrap().1() }
     fn luma(img: &Image) -> f32 {
         img.rgba.chunks_exact(4).map(|p| 0.3 * p[0] as f32 + 0.55 * p[1] as f32 + 0.15 * p[2] as f32).sum::<f32>() / (img.rgba.len() / 4) as f32
+    }
+
+    /// The moon's dark side shows the sky in front of it (it used to be painted as a near-black
+    /// disc whatever the opacity), it hides the stars behind it, and phase follows its doc:
+    /// 0 full, ±1 new, with no jump next to 0.
+    #[test]
+    fn the_moons_dark_side_is_sky_and_phase_is_continuous() {
+        let (w, h) = (120usize, 214usize);
+        let luma = |img: &Image, x: f32, y: f32| { let i = (y as usize * w + x as usize) * 4; 0.3 * img.rgba[i] as f32 + 0.55 * img.rgba[i + 1] as f32 + 0.15 * img.rgba[i + 2] as f32 };
+        let opts = RenderOptions { size: Some((w as u32, h as u32)), time: Some(0.0), layers: Layers { particles: false, post: false, ..Layers::default() }, ..RenderOptions::default() };
+        let mut r = WorldRenderer::default();
+        let with_moon = |name: &str, phase: f32| {
+            let mut s = preset(name);
+            s.sky.clouds.enabled = false;
+            s.sky.moon.body.enabled = true;
+            s.sky.moon.body.pos = [0.5, 0.3];
+            s.sky.moon.body.radius = 0.12;
+            s.sky.moon.phase = phase;
+            s.sky.moon.opacity = 1.0;
+            s
+        };
+        let s = with_moon("Desert Canyon", 0.5);
+        let v = View::new(&s, w, h);
+        let (cx, cy, rad) = (0.5 * w as f32, 0.3 * v.horizon_px, 0.12 * v.horizon_px);
+        let img = r.render(&s, 0.0, &opts);
+        // Waxing half: lit on the right, dark on the left.
+        let (dark, lit, beside) = (luma(&img, cx - 0.5 * rad, cy), luma(&img, cx + 0.5 * rad, cy), luma(&img, cx - 1.3 * rad, cy));
+        assert!(lit > dark + 20.0, "lit {lit} vs dark {dark}");
+        assert!((dark - beside).abs() < 12.0, "the dark side ({dark}) should read as the sky beside it ({beside})");
+        // Phase 0.02 is a nearly full moon (it used to draw nearly new).
+        let full = r.render(&with_moon("Desert Canyon", 0.0), 0.0, &opts);
+        let near = r.render(&with_moon("Desert Canyon", 0.02), 0.0, &opts);
+        let d: f32 = full.rgba.iter().zip(&near.rgba).map(|(a, b)| (*a as f32 - *b as f32).abs()).sum::<f32>() / full.rgba.len() as f32;
+        assert!(d < 0.5, "phase 0.02 differs from full by {d}");
+        // At night no star shows through the dark side: its brightest pixel is no brighter than
+        // the faint earthshine and halo across it.
+        let s = with_moon("Night Road", 0.6);
+        let img = r.render(&s, 0.0, &opts);
+        let v = View::new(&s, w, h);
+        let (cx, cy, rad) = (0.5 * w as f32, 0.3 * v.horizon_px, 0.12 * v.horizon_px);
+        let mut samples = Vec::new();
+        for y in (cy - 0.8 * rad) as i32..(cy + 0.8 * rad) as i32 { for x in (cx - 0.9 * rad) as i32..(cx - 0.3 * rad) as i32 { samples.push(luma(&img, x as f32, y as f32)); } }
+        let (lo, hi) = samples.iter().fold((f32::MAX, 0.0f32), |(a, b), &l| (a.min(l), b.max(l)));
+        assert!(hi - lo < 25.0, "a star shows through the dark side: luma {lo}..{hi}");
+    }
+
+    /// Clouds move at any drift, not only whole ones (0.4x used to round to 0 and
+    /// stand still), and the loop still closes exactly.
+    #[test]
+    fn clouds_drift_at_fractional_speeds_and_the_loop_closes() {
+        let sky_rows = |img: &Image| img.rgba[..img.rgba.len() * 2 / 5].to_vec();
+        let diff = |a: &[u8], b: &[u8]| a.iter().zip(b).map(|(x, y)| (*x as f32 - *y as f32).abs()).sum::<f32>() / a.len() as f32;
+        let mut r = WorldRenderer::default();
+        for (drift, moves) in [(0.0, false), (0.4, true), (0.45, true), (1.5, true), (1.0, true), (2.0, true)] {
+            let mut s = preset("Desert Canyon");
+            s.sky.clouds = Clouds { enabled: true, count: 24, drift, opacity: 1.0, ..Clouds::default() };
+            let secs = s.motion.loop_seconds();
+            let opts = |t: f32| RenderOptions { size: Some((90, 160)), time: Some(t), layers: Layers { particles: false, post: false, ..Layers::default() }, ..RenderOptions::default() };
+            let a = r.render(&s, 0.0, &opts(0.0));
+            let b = r.render(&s, 0.0, &opts(secs * 0.3));
+            let end = r.render(&s, 0.0, &opts(secs));
+            let d = diff(&sky_rows(&a), &sky_rows(&b));
+            assert_eq!(d > 0.05, moves, "drift {drift}: sky changed by {d} over 0.3 of the loop");
+            assert_eq!(a.rgba, end.rgba, "drift {drift}: the loop must close");
+        }
     }
 
     #[test]

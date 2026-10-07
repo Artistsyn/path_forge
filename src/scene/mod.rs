@@ -392,7 +392,9 @@ impl Default for Stars {
 pub struct Clouds {
     pub enabled: bool,
     pub count: u32,
-    /// Whole drifts across the sky per loop (rounded so the loop stays seamless).
+    /// Drifts across the sky per loop. Whole numbers wrap each cloud round the sky; any other
+    /// value (0.4, 1.5) keeps its exact speed, with each cloud forming and dissolving over one
+    /// loop so the loop stays seamless.
     pub drift: f32,
     pub scale: f32,
     pub opacity: f32,
