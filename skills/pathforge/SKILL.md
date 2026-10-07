@@ -67,8 +67,9 @@ depth layers or a depth map).
   `dry_run: true` to see what an edit would change without writing it.
 - Props for biomes: Tree, Pine, Bush, Rock, Boulder, Cactus, DeadTree, Mushroom, Pillar,
   Gravestone, Crystal, Stalagmite, Reeds, Willow, Palm, Obelisk, Icicle (hangs from the ceiling or
-  wall tops), IceSpike. A layer without a `tint` takes its kind's own colour. Particles add "Sand"
-  (blown low and sideways) to dust, embers, fireflies, rain, snow, leaves, ash and spores.
+  wall tops), IceSpike. A layer without a `tint` takes its kind's own colour. Particles: Dust,
+  Embers, Fireflies, Rain, Snow, Leaves, Ash, Spores, Sand (blown low and sideways) and Petals;
+  set a particle layer's `color` to its kind's own when you change its kind (the studio does).
 - **Props as data (kits):** when no built-in kind fits, describe the prop instead of settling.
   A prop layer with `"def": "<kit folder>#<name>"` (or a name in the scene's `prop_defs`) draws
   that definition: an image, a `pool` of images or folders of PNGs (one picked per prop), or a
@@ -101,7 +102,9 @@ depth layers or a depth map).
   from more than a few metres back: that is how real stairs look, so show descents close up.
   `pf_camera` accounts for the steps (`stairs_note` in the camera data gives the formulas).
 - **Bridges:** `path.bridge` (`spacing`, `length`, `depth` of the drop, `bottom` "Ground" /
-  "Water" / "Void", `deck` material (planks by default), `railing` "Posts" / "Parapet" / "None").
+  "Water" / "Void", `water_level` (how far below the deck water lies), `deck` material (planks by
+  default), `railing` "Posts" / "Parapet" / "Balustrade" / "Iron" / "Rope" / "None", `end_pillars`
+  (a pillar or newel post at each end), `rail_color` (iron bars or rope)).
   The ground beside the path falls away and walls carry on down into the gap; trees and rocks
   stop at the edge and standing lamps move onto the railing. In a walled corridor the walls must
   stand back from the path (`walls.gap` 1.5 m or more) or there is no gap to cross; pf_analyze warns.
@@ -115,11 +118,34 @@ depth layers or a depth map).
   overhead), so lamps, trees, the moon and clouds show in them, and lamps lay glints on rough wet
   stone. Glossy scenes render that extra margin, so they cost about a quarter more per frame. Pattern "Water" on the verge makes a lake or swamp; "Ice" a frozen floor. A wet road
   in the rain (`gloss` 0.45, `ripples` 0.08) is the cheapest big upgrade to a night street.
-- **Weather:** `weather.lightning` (`strikes` per loop, `intensity`, `color`, `bolts`) flashes the
-  scene from the sky and draws forked bolts where the sky shows; the export metadata lists each
-  strike's frame for syncing thunder. `weather.fog_banks` (`spacing`, `length`, `density` per metre)
-  are thick stretches of fog the camera walks into and out of. Rain, snow, embers, leaves, ash,
-  spores and fireflies are `particles[]`.
+- **Weather and the air** (every part works in any scene and repeats with the loop; all are
+  off until `enabled`):
+  - `weather.precipitation`: `kind` Rain / Snow / Sleet / Hail, `intensity` 0.1 drizzle to 1
+    downpour or blizzard. It falls only where the sky is open (not under a ceiling) and changes the
+    ground: rain and sleet make it `wetness` (darker, glossy, lamps streak in it), `puddles` (still
+    water with rings where drops land), `splashes`; snow and sleet lie as `cover` on the ground,
+    verges, wall tops and the tops of props, with a trodden `track` down the path; `haze` is
+    curtains of rain far off or a blizzard's whiteout. Wet ground costs what any glossy floor
+    costs (reflections, about 2x a dry frame); falling drops and snow cost almost nothing. For a
+    night street: Rain 0.6, wetness 0.9, puddles 0.35, plus lightning.
+  - `weather.wind`: `speed` m/s (negative blows left), `gusts`, `sway`. Rain and snow slant and
+    drift, particles are carried, trees, reeds, grass and banners bend (rocks and pillars do not).
+  - `weather.drips`: water falling from the ceiling (or wall tops) in caves, sewers, crypts.
+  - `weather.sandstorm`: streaming sand, a sand-coloured haze that hides the distance, the sun a
+    dim disc. Pair with wind.
+  - `weather.mist`: low mist (`height` m, `density` per metre, `patchiness`, `wisps` rising).
+    Keep `density` around 0.1-0.2: it thickens with distance, so near ground stays clear.
+  - `weather.light_shafts`: `sun` rays streaming past trees, walls and arches near a sun in the
+    sky (stronger with fog or mist), and `lamps` haloes in the air round every light.
+  - `sky.clouds.shadows`: cloud shadows drifting over the ground (needs a light-giving sun).
+  - `weather.heat_shimmer`: the distance wavers above the horizon (deserts, lava).
+  - `sky.aurora` (curtains in a night sky: `low`/`high` colours, `height`, `speed`) and
+    `sky.rainbow` (`x` across the sky, `size` 1 spans the frame, `double`).
+  - `weather.lens`: `kind` Drops (rain landing on and running down the lens) or Frost (creeping
+    in from the edges).
+  - `weather.lightning` (`strikes` per loop, `intensity`, `color`, `bolts`) flashes the scene and
+    draws bolts; export metadata lists each strike's frame for thunder. `weather.fog_banks` are
+    thick stretches of fog the camera walks through.
 
 ## 4. Look before you claim (every few edits)
 

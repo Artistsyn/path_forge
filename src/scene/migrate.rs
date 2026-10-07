@@ -97,8 +97,9 @@ pub fn from_v2(o: &PathForgeSettings, name: &str) -> Scene {
         clouds: Clouds {
             enabled: o.sky.clouds_enabled, count: o.sky.cloud_count, drift: o.sky.cloud_speed.max(0.0).round().max(1.0),
             scale: o.sky.cloud_scale, opacity: o.sky.cloud_opacity, tint: o.sky.cloud_tint, variation: o.sky.cloud_variation,
-            seed: o.sky.cloud_seed,
+            seed: o.sky.cloud_seed, ..Clouds::default()
         },
+        ..Sky::default()
     };
 
     let fog_color = if o.post.fog_enabled { o.post.fog_color } else { o.scene.void_color };

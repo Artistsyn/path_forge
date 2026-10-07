@@ -17,13 +17,28 @@ pub mod id {
     pub const CHASM: u8 = 6;
     /// The far wall of a bridge's gap, facing the camera.
     pub const CLIFF: u8 = 7;
-    /// Bridge railings: posts, rails, parapets.
-    pub const RAIL: u8 = 8;
     pub const PROP: u8 = 10;
     pub const FIXTURE: u8 = 11;
     pub const TUFT: u8 = 12;
     /// The face of the threshold between two worlds (a hillside, an end wall), facing the camera.
     pub const FACADE: u8 = 13;
+    /// Bridge railings: posts, rails, parapets, pillars. One id per material and face, so each
+    /// face is lit with its own normal: `RAIL + 4 * material + face`.
+    pub const RAIL: u8 = 20;
+    const RAIL_END: u8 = RAIL + 4 * 3;
+    /// Railing materials: stone (the walls, or the path), wood (the deck), and `rail_color`.
+    pub const STONE: u8 = 0;
+    pub const WOOD: u8 = 1;
+    pub const PAINT: u8 = 2;
+    /// Railing faces: toward the path, away from it, the top, and the end facing the camera.
+    pub const INNER: u8 = 0;
+    pub const OUTER: u8 = 1;
+    pub const TOP: u8 = 2;
+    pub const FRONT: u8 = 3;
+    pub const fn rail(material: u8, face: u8) -> u8 { RAIL + 4 * material + face }
+    pub const fn is_rail(id: u8) -> bool { id >= RAIL && id < RAIL_END }
+    /// (material, face) of a railing id.
+    pub const fn rail_parts(id: u8) -> (u8, u8) { ((id - RAIL) / 4, (id - RAIL) % 4) }
 }
 
 #[derive(Clone, Copy, Debug)]

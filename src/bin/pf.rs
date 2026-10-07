@@ -63,10 +63,12 @@ struct Renderers {
     cpu: PathRenderer,
     gpu: Option<Result<GpuSceneRenderer, String>>,
     gpu_backend: bool,
+    /// Render as the studio's preview does: with frame stats and pick ids.
+    studio: bool,
 }
 
 impl Renderers {
-    fn new(gpu_backend: bool) -> Self { Self { world: WorldRenderer::default(), cpu: PathRenderer::default(), gpu: None, gpu_backend } }
+    fn new(gpu_backend: bool) -> Self { Self { world: WorldRenderer::default(), cpu: PathRenderer::default(), gpu: None, gpu_backend, studio: false } }
 
     /// Size of a frame and the length of one loop in the item's own units.
     fn dims(item: &Item) -> (usize, usize, f32) {
@@ -80,7 +82,7 @@ impl Renderers {
     fn frame(&mut self, item: &Item, pos: f32) -> Result<Vec<u8>, String> {
         match item {
             Item::V3(s, dir) => {
-                let opts = RenderOptions { base_dir: dir.clone(), ..RenderOptions::default() };
+                let opts = RenderOptions { base_dir: dir.clone(), stats: self.studio, pick: self.studio, ..RenderOptions::default() };
                 Ok(self.world.render(s, pos, &opts).rgba)
             }
             Item::V2(s) => {
@@ -313,15 +315,26 @@ fn cmd_parity(args: &Args) -> Result<(), String> {
 fn cmd_bench(args: &Args) -> Result<(), String> {
     let frames: usize = opt(args, "frames", 10usize)?.max(1);
     let mut r = Renderers::new(gpu_backend(args)?);
+    r.studio = args.opts.contains_key("studio");
     println!("{:<16} {:>10}", "scene", "ms/frame");
     for (name, item) in items(args)? {
         let (_, _, len) = Renderers::dims(&item);
         r.frame(&item, 0.0)?; // warm caches
+        let stages = args.opts.contains_key("stages");
+        r.world.profile = stages;
+        r.world.stages.clear();
         let t0 = Instant::now();
         for i in 0..frames {
             r.frame(&item, len * (i as f32 + 0.5) / frames as f32)?;
         }
         println!("{:<16} {:>10.1}", name, t0.elapsed().as_secs_f64() * 1000.0 / frames as f64);
+        if stages {
+            // Loudest first: where the frame's time goes.
+            let mut st = r.world.stages.clone();
+            st.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+            let line: Vec<String> = st.iter().filter(|(_, ms)| *ms / frames as f64 >= 0.05).map(|(n, ms)| format!("{n} {:.1}", ms / frames as f64)).collect();
+            println!("    {}", line.join(" | "));
+        }
     }
     Ok(())
 }

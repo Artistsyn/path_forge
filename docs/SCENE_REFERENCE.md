@@ -90,6 +90,18 @@ Where a prop is fixed.
 | `Ground` | Stands on the ground. |
 | `Ceiling` | Hangs from the ceiling, or from the top of the walls; stands when there is neither. |
 
+### Aurora
+
+| Field | Type | Default | Meaning |
+|---|---|---|---|
+| `enabled` | boolean | `false` |  |
+| `intensity` | number | `0.8` |  |
+| `low` | integer × 3 | `[70,255,150]` | Colour at the foot of the curtains. |
+| `high` | integer × 3 | `[170,90,255]` | Colour at their tops. |
+| `height` | number | `0.45` | Where the curtains hang: 0 high in the sky .. 1 down at the horizon. |
+| `speed` | number | `1.0` | How fast the curtains ripple. |
+| `seed` | integer | `0` |  |
+
 ### Branch
 
 One of `Left` \| `Right`.
@@ -107,10 +119,13 @@ the path crosses on a deck. Walls carry on down into the gap.
 | `offset` | number | `6.0` | Where along the loop the first bridge starts, metres. |
 | `depth` | number | `10.0` | How far down the bottom of the gap is, metres. |
 | `bottom` | [BridgeBottom](#bridgebottom) | `"Ground"` | What is down there. |
+| `water_level` | number | `10.0` | With a Water bottom: how far below the deck the water lies, metres (never deeper than `depth`). |
 | `bottom_color` | integer × 3 | `[150,150,150]` | Colour of water, or of ground far below (multiplied with the verge or path material). |
 | `deck` | [Material](#material) | (see the type) | The deck: planks, stone... |
 | `railing` | [Railing](#railing) | `"Posts"` |  |
 | `rail_height` | number | `1.0` | Railing height, metres. |
+| `end_pillars` | boolean | `true` | A taller pillar or newel post where each railing starts and ends. |
+| `rail_color` | integer × 3 | `[34,35,38]` | Colour of iron bars, or of rope. |
 
 ### BridgeBottom
 
@@ -124,8 +139,8 @@ the path crosses on a deck. Walls carry on down into the gap.
 
 | Field | Type | Default | Meaning |
 |---|---|---|---|
-| `eye_height` | number | `1.600000023841858` | Eye height above the path, metres. |
-| `horizon` | number | `0.2199999988079071` | Horizon position as a fraction of the canvas height from the top (0.1..0.9). |
+| `eye_height` | number | `1.6` | Eye height above the path, metres. |
+| `horizon` | number | `0.22` | Horizon position as a fraction of the canvas height from the top (0.1..0.9). |
 | `zoom` | number | `1.0` | Zoom: 1.0 puts the ground at `eye_height` metres ahead on the bottom row. Higher = narrower view. |
 | `lens_curve` | number | `0.0` | Screen-space lens bend of the horizon (-1..1); 0 is a flat horizon. |
 
@@ -143,7 +158,7 @@ Output size in pixels. Portrait by default, like a phone held upright.
 | Field | Type | Default | Meaning |
 |---|---|---|---|
 | `enabled` | boolean | `false` |  |
-| `height` | number | `3.5999999046325684` |  |
+| `height` | number | `3.6` |  |
 | `material` | [Material](#material) | (see the type) |  |
 
 ### Clouds
@@ -154,14 +169,26 @@ Output size in pixels. Portrait by default, like a phone held upright.
 | `count` | integer | `10` |  |
 | `drift` | number | `1.0` | Drifts across the sky per loop. Whole numbers wrap each cloud round the sky; any other value (0.4, 1.5) keeps its exact speed, with each cloud forming and dissolving over one loop so the loop stays seamless. |
 | `scale` | number | `1.0` |  |
-| `opacity` | number | `0.4000000059604645` |  |
+| `opacity` | number | `0.4` |  |
 | `tint` | integer × 3 | `[226,230,238]` |  |
-| `variation` | number | `0.550000011920929` |  |
+| `variation` | number | `0.55` |  |
+| `shadows` | number | `0.0` | Shadows of clouds drifting over the ground (0..1; needs a light-giving sun). They drift with the wind when there is one, and work with the clouds themselves switched off too. |
 | `seed` | integer | `0` |  |
 
 ### Dither
 
 One of `None` \| `Bayer2` \| `Bayer4` \| `Bayer8`.
+
+### Drips
+
+Drops falling from the ceiling, or from the tops of the walls where there is no ceiling.
+
+| Field | Type | Default | Meaning |
+|---|---|---|---|
+| `enabled` | boolean | `false` |  |
+| `rate` | number | `1.0` | Drips per metre of path per loop. |
+| `color` | integer × 3 | `[190,205,220]` |  |
+| `seed` | integer | `0` |  |
 
 ### Fixture
 
@@ -173,10 +200,10 @@ A repeating light source along the path: torches, lanterns, fireflies, crystals.
 | `kind` | [FixtureKind](#fixturekind) | `"Torch"` |  |
 | `side` | [Side](#side) | `"Both"` |  |
 | `mount` | [Mount](#mount) | `"Wall"` |  |
-| `height` | number | `2.0999999046325684` | Height of the flame or orb above the path, metres. |
+| `height` | number | `2.1` | Height of the flame or orb above the path, metres. |
 | `spacing` | number | `6.0` | Distance between fixtures along the path, metres (snapped to divide the loop). |
 | `offset` | number | `0.0` | Shift of the whole row along the path, metres. |
-| `lateral` | number | `0.30000001192092896` | For ground and floating mounts: distance outside the path edge, metres (negative = over the path). |
+| `lateral` | number | `0.3` | For ground and floating mounts: distance outside the path edge, metres (negative = over the path). |
 | `size` | number | `1.0` | Size multiplier for the fixture and flame. |
 | `light` | boolean | `true` |  |
 | `intensity` | number | `1.0` |  |
@@ -224,19 +251,47 @@ itself stays on the main path.
 | `offset` | number | `14.0` | Where along the loop the first fork is, metres. |
 | `side` | [ForkSide](#forkside) | `"Alternate"` |  |
 | `angle` | number | `38.0` | Angle of a branch path from the main path, degrees (open ground). |
-| `half_width` | number | `1.100000023841858` | Half the width of a branch path, or of a side passage's opening, metres. |
+| `half_width` | number | `1.1` | Half the width of a branch path, or of a side passage's opening, metres. |
 | `depth` | number | `7.0` | How deep a side passage goes before it is lost in the dark, metres (between walls). |
-| `height` | number | `2.5999999046325684` | Height of a side passage, metres (between walls). |
+| `height` | number | `2.6` | Height of a side passage, metres (between walls). |
 
 ### ForkSide
 
 One of `Left` \| `Right` \| `Alternate`.
 
+### HeatShimmer
+
+Heat haze: the picture wavers over the distant ground and just above the horizon.
+
+| Field | Type | Default | Meaning |
+|---|---|---|---|
+| `enabled` | boolean | `false` |  |
+| `strength` | number | `0.5` | How far the picture wavers (0..1). |
+| `speed` | number | `1.0` | How fast it wavers. |
+
+### Lens
+
+Something on the camera's lens.
+
+| Field | Type | Default | Meaning |
+|---|---|---|---|
+| `enabled` | boolean | `false` |  |
+| `kind` | [LensKind](#lenskind) | `"Drops"` |  |
+| `amount` | number | `0.5` | How many drops, or how far the frost reaches in (0..1). |
+| `seed` | integer | `0` |  |
+
+### LensKind
+
+| Value | Meaning |
+|---|---|
+| `Drops` | Raindrops that land on the lens, linger and run down. |
+| `Frost` | Frost creeping in from the edges. |
+
 ### Lighting
 
 | Field | Type | Default | Meaning |
 |---|---|---|---|
-| `ambient` | number | `0.6000000238418579` | Ambient light level (0..2). |
+| `ambient` | number | `0.6` | Ambient light level (0..2). |
 | `ambient_color` | integer × 3 | `[200,205,220]` |  |
 | `void_color` | integer × 3 | `[0,0,0]` | Colour of the far distance and of anything outside the world (dungeon darkness). |
 | `fog` | [Fog](#fog) | (see the type) | Distance fog. |
@@ -255,6 +310,16 @@ Lightning strikes: a flash that lights the whole scene, and a bolt in the sky.
 | `bolts` | boolean | `true` | Draw the bolt in the sky (needs the sky visible). |
 | `seed` | integer | `0` |  |
 
+### LightShafts
+
+Light scattered by the air. Stronger in fog, mist, haze and dust.
+
+| Field | Type | Default | Meaning |
+|---|---|---|---|
+| `enabled` | boolean | `false` |  |
+| `sun` | number | `0.6` | Rays from the sun past trees, walls and arches (needs the sun in the sky). |
+| `lamps` | number | `0.4` | Glowing haloes in the air round lamps, torches and other lights. |
+
 ### Marker
 
 One of `Auto` \| `None` \| `Archway` \| `RuinedArch` \| `Gate` \| `Banners` \| `Portal`.
@@ -269,13 +334,27 @@ A tiling surface material generated procedurally.
 | `base` | integer × 3 | `[80,72,62]` |  |
 | `mortar` | integer × 3 | `[34,30,26]` |  |
 | `noise` | integer | `10` |  |
-| `damage` | number | `0.20000000298023224` |  |
+| `damage` | number | `0.2` |  |
 | `seed` | integer | `0` |  |
-| `tile_size` | number | `2.4000000953674316` | Metres covered by one repeat of the texture. |
+| `tile_size` | number | `2.4` | Metres covered by one repeat of the texture. |
 | `rotate` | boolean | `false` |  |
 | `brightness` | number | `1.0` | Albedo multiplier. |
 | `gloss` | number | `0.0` | How mirror-like a floor is: 0 matte, about 0.3-0.5 wet stone, 0.6 ice, 1 still water. Reflections are traced against the finished frame, so lamps, trees and the sky show in it. |
 | `ripples` | number | `0.0` | Ripples (water) or roughness (wet stone) that break reflections up: 0 glassy .. 1 choppy. |
+
+### Mist
+
+Mist lying low over the ground, drifting, with wisps rising from it.
+
+| Field | Type | Default | Meaning |
+|---|---|---|---|
+| `enabled` | boolean | `false` |  |
+| `height` | number | `0.8` | Height of the mist above the ground, metres. |
+| `density` | number | `0.25` | Thickness: optical depth per metre inside it (0.2 thin .. 1.5 thick). |
+| `color` | integer × 3 | `[205,210,220]` |  |
+| `patchiness` | number | `0.6` | How patchy it is (0 even .. 1 in drifting banks). |
+| `wisps` | number | `0.4` | Wisps rising from it (0..1). |
+| `seed` | integer | `0` |  |
 
 ### Moon
 
@@ -283,7 +362,7 @@ A tiling surface material generated procedurally.
 |---|---|---|---|
 | `body` | [SkyBody](#skybody) | (see the type) |  |
 | `phase` | number | `0.0` | -1 waning .. 0 full .. 1 waxing. |
-| `opacity` | number | `0.8999999761581421` |  |
+| `opacity` | number | `0.9` |  |
 | `craters` | boolean | `true` |  |
 
 ### Motion
@@ -325,11 +404,12 @@ One of `Wall` \| `Ground` \| `Ceiling` \| `Floating`.
 
 ### ParticleKind
 
-One of `Dust` \| `Embers` \| `Fireflies` \| `Rain` \| `Snow` \| `Leaves` \| `Ash` \| `Spores` \| `Sand`.
+One of `Dust` \| `Embers` \| `Fireflies` \| `Rain` \| `Snow` \| `Leaves` \| `Ash` \| `Spores` \| `Sand` \| `Petals`.
 
 ### Particles
 
-Small moving things in the air: dust, embers, rain, snow, leaves.
+Small moving things in the air: dust, embers, rain, snow, leaves, petals. They drift with the wind
+when there is one. For weather that soaks or covers the ground, use `weather.precipitation`.
 
 | Field | Type | Default | Meaning |
 |---|---|---|---|
@@ -345,12 +425,12 @@ Small moving things in the air: dust, embers, rain, snow, leaves.
 
 | Field | Type | Default | Meaning |
 |---|---|---|---|
-| `half_width` | number | `1.100000023841858` | Half the path width near the camera, metres. |
+| `half_width` | number | `1.1` | Half the path width near the camera, metres. |
 | `flare` | number | `0.0` | 0 = straight edges in true perspective; up to 0.9 widens the path into the distance (stylised). |
 | `bend` | number | `0.0` | Lateral curve of the road ahead (-1 left .. 1 right). |
 | `hill` | number | `0.0` | Vertical curve of the road ahead (-1 dips away .. 1 rises). |
-| `edge_noise` | number | `0.11999999731779099` | How ragged the path edge is, metres. |
-| `edge_dark` | number | `0.3499999940395355` | Darkening toward the path edge (0..1). |
+| `edge_noise` | number | `0.12` | How ragged the path edge is, metres. |
+| `edge_dark` | number | `0.35` | Darkening toward the path edge (0..1). |
 | `material` | [Material](#material) | (see the type) |  |
 | `stairs` | [Stairs](#stairs) | (see the type) | Flights of steps the walk climbs (or descends) for ever. |
 | `bridge` | [Bridge](#bridge) | (see the type) | Stretches where the ground beside the path falls away and the path crosses on a bridge. |
@@ -367,10 +447,36 @@ One of `Cobblestone` \| `Brick` \| `StoneBlock` \| `Sand` \| `Dirt` \| `Grass` \
 | `exposure` | number | `1.0` |  |
 | `contrast` | number | `1.0` |  |
 | `saturation` | number | `1.0` |  |
-| `bloom` | number | `0.3499999940395355` | Glow around bright light (0..1). |
-| `vignette` | number | `0.3499999940395355` |  |
+| `bloom` | number | `0.35` | Glow around bright light (0..1). |
+| `vignette` | number | `0.35` |  |
 | `grain` | number | `0.0` |  |
 | `tint` | integer × 3 | `[255,255,255]` | Colour multiplied over the final image. |
+
+### Precipitation
+
+Rain, snow, sleet or hail. It falls wherever the sky is open (not under a ceiling).
+
+| Field | Type | Default | Meaning |
+|---|---|---|---|
+| `enabled` | boolean | `false` |  |
+| `kind` | [PrecipKind](#precipkind) | `"Rain"` |  |
+| `intensity` | number | `0.5` | How hard it falls: 0.1 a few drops or flakes, 0.5 steady, 1 a downpour or a blizzard. |
+| `size` | number | `1.0` | Size of the drops, flakes or hailstones. |
+| `tint` | integer × 3 | `[255,255,255]` | Colour multiplied over the drops or flakes (white = their natural colour in the scene's light). |
+| `wetness` | number | `0.8` | Rain and sleet: how wet the ground gets, darker and glossy (0..1). |
+| `puddles` | number | `0.3` | Rain and sleet: puddles on the path and verge that mirror the scene, with rings where drops land (0..1 = how much ground they cover). |
+| `splashes` | number | `0.6` | Rain, sleet and hail: splashes where drops land (0..1). |
+| `cover` | number | `0.8` | Snow and sleet: snow lying on the ground, the verges, the tops of walls and props (0..1). |
+| `track` | number | `0.6` | A trodden track down the middle of the path in lying snow (0 = untouched .. 1 = trodden to slush). |
+| `haze` | number | `0.5` | Haze of a heavy fall: curtains of rain in the distance, a blizzard's whiteout (0..1). |
+| `seed` | integer | `0` |  |
+
+### PrecipKind
+
+| Value | Meaning |
+|---|---|
+| `Rain`, `Snow`, `Hail` |  |
+| `Sleet` | Wet snow mixed with rain. |
 
 ### PropDef
 
@@ -412,11 +518,11 @@ A repeating row (or several rows) of props beside the path.
 | `jitter` | number | `0.5` | Random sideways placement, metres. |
 | `density` | number | `1.0` | Share of slots that hold a prop (0..1), for natural gaps. |
 | `scale` | number | `1.0` |  |
-| `scale_var` | number | `0.20000000298023224` |  |
+| `scale_var` | number | `0.2` |  |
 | `tint` | integer × 3 | `[40,110,34]` | Colour of procedural props. Left out of a scene file, it is the kind's own colour. |
-| `sink` | number | `0.019999999552965164` | How far the base sinks into the ground, as a fraction of height. |
+| `sink` | number | `0.02` | How far the base sinks into the ground, as a fraction of height. |
 | `shadow` | boolean | `true` |  |
-| `shadow_opacity` | number | `0.6000000238418579` |  |
+| `shadow_opacity` | number | `0.6` |  |
 | `sprite` | [SpriteRef](#spriteref) | (see the type) |  |
 | `seed` | integer | `1` |  |
 | `def` | string |  | A prop described by data instead of `kind`: the name of one in `prop_defs`, or `"<kit folder>#<name>"` for one in a kit (relative to the scene file). Placement (side, spacing, scale...) still comes from this layer. |
@@ -429,9 +535,9 @@ Light a prop gives off.
 |---|---|---|---|
 | `enabled` | boolean | `false` |  |
 | `color` | integer × 3 | `[255,190,110]` |  |
-| `intensity` | number | `0.800000011920929` |  |
+| `intensity` | number | `0.8` |  |
 | `radius` | number | `4.0` | Reach, metres. |
-| `at` | number | `0.800000011920929` | Where the light sits, as a fraction of the prop's height from its base. |
+| `at` | number | `0.8` | Where the light sits, as a fraction of the prop's height from its base. |
 | `flicker` | number | `0.0` | 0 steady, 1 like a flame. |
 
 ### Railing
@@ -440,7 +546,34 @@ Light a prop gives off.
 |---|---|
 | `None` |  |
 | `Posts` | Wooden posts with two rails, in the deck material. |
-| `Parapet` | A low solid wall, in the wall material (or the path material without walls). |
+| `Parapet` | A low solid wall with a coping, in the wall material (or the path material without walls). |
+| `Balustrade` | Stone balusters on a plinth under a handrail, in the wall (or path) material. |
+| `Iron` | Iron bars between rails, on a stone kerb, in `rail_color`. |
+| `Rope` | Ropes sagging between wooden posts, in `rail_color`. |
+
+### Rainbow
+
+A rainbow: an arc round the point opposite the sun, with a faint second bow outside it.
+
+| Field | Type | Default | Meaning |
+|---|---|---|---|
+| `enabled` | boolean | `false` |  |
+| `intensity` | number | `0.5` |  |
+| `x` | number | `0.5` | Where its centre is across the sky (0 left .. 1 right). |
+| `size` | number | `1.0` | Size: 1 spans the frame's width (a real 42-degree bow is wider than a portrait view). |
+| `double` | boolean | `true` | Draw the fainter second bow outside the first. |
+
+### Sandstorm
+
+A sandstorm: sand streaming past on the wind (to the right unless the wind says otherwise),
+a sand-coloured haze that hides the distance, and the sun dimmed to a disc.
+
+| Field | Type | Default | Meaning |
+|---|---|---|---|
+| `enabled` | boolean | `false` |  |
+| `intensity` | number | `0.5` | 0.2 blowing sand .. 1 a wall of sand. |
+| `color` | integer × 3 | `[214,172,116]` |  |
+| `seed` | integer | `0` |  |
 
 ### SetPiece
 
@@ -453,10 +586,10 @@ A structure spanning the path, repeated along it.
 | `spacing` | number | `24.0` | Distance between repeats, metres (snapped to divide the loop; the loop length = once per loop). |
 | `offset` | number | `12.0` | Shift along the path, metres. |
 | `width` | number | `0.0` | Clear width of the opening, metres. 0 = fit the path (and the gap to the walls). |
-| `height` | number | `3.4000000953674316` | Clear height of the opening, metres. |
+| `height` | number | `3.4` | Clear height of the opening, metres. |
 | `tint` | integer × 3 | `[118,110,100]` | Stone or wood colour. |
 | `accent` | integer × 3 | `[150,30,36]` | Cloth, trim or glow colour. |
-| `shadow` | number | `0.6000000238418579` | Sun shadow strength, 0..1. |
+| `shadow` | number | `0.6` | Sun shadow strength, 0..1. |
 | `sprite` | [SpriteRef](#spriteref) | (see the type) | An image used instead of the painted structure; it is stretched to span the opening. |
 | `seed` | integer | `0` |  |
 
@@ -487,7 +620,7 @@ One part of a drawn prop.
 
 | Field | Type | Default | Meaning |
 |---|---|---|---|
-| `shape` | [Shape](#shape) | (see the type) |  |
+| `shape` | [Shape](#shape) | `{"Rect":{"min":[-0.1,0.0],"max":[0.1,1.0]}}` |  |
 | `color` | integer × 3 | `[128,128,128]` |  |
 | `shade` | number | `0.5` | Rounding light from the upper left: 0 flat, 1 strong. |
 | `cut` | boolean | `false` | Cut a hole through what is painted so far instead of painting. |
@@ -508,14 +641,16 @@ One of `Both` \| `Left` \| `Right` \| `Center`.
 | `moon` | [Moon](#moon) | (see the type) |  |
 | `stars` | [Stars](#stars) | (see the type) |  |
 | `clouds` | [Clouds](#clouds) | (see the type) |  |
+| `aurora` | [Aurora](#aurora) | (see the type) | Northern lights: curtains of green and violet light rippling across the sky. |
+| `rainbow` | [Rainbow](#rainbow) | (see the type) |  |
 
 ### SkyBody
 
 | Field | Type | Default | Meaning |
 |---|---|---|---|
 | `enabled` | boolean | `false` |  |
-| `pos` | number × 2 | `[0.7200000286102295,0.3499999940395355]` | Position in the sky: x 0..1 across, y 0 (top) .. 1 (horizon). |
-| `radius` | number | `0.07999999821186066` | Radius as a fraction of the sky height. |
+| `pos` | number × 2 | `[0.72,0.35]` | Position in the sky: x 0..1 across, y 0 (top) .. 1 (horizon). |
+| `radius` | number | `0.08` | Radius as a fraction of the sky height. |
 | `color` | integer × 3 | `[255,236,190]` |  |
 | `emits_light` | boolean | `true` | Lights the world and casts shadows. |
 | `intensity` | number | `1.0` |  |
@@ -541,8 +676,8 @@ walker (smoothly over each flight), and the loop still closes: the view one flig
 | `enabled` | boolean | `false` |  |
 | `spacing` | number | `12.0` | Distance from one flight to the next, metres (snapped to divide the loop). |
 | `steps` | integer | `8` | Steps per flight. |
-| `rise` | number | `0.17000000178813934` | Height of each step, metres (real stairs: 0.15-0.2). |
-| `run` | number | `0.3199999928474426` | Depth of each step, metres (real stairs: 0.25-0.35). |
+| `rise` | number | `0.17` | Height of each step, metres (real stairs: 0.15-0.2). |
+| `run` | number | `0.32` | Depth of each step, metres (real stairs: 0.25-0.35). |
 | `offset` | number | `3.0` | Where along the loop the first flight starts, metres. |
 | `descending` | boolean | `false` | Walk down the steps instead of up. |
 
@@ -616,15 +751,36 @@ Ground beside the path. Disabled = void beyond the path edge (walls usually cove
 | `enabled` | boolean | `true` |  |
 | `gap` | number | `0.25` | Gap between the path edge and the wall, metres. |
 | `height` | number | `4.5` | Wall height, metres. 0 = taller than anything the camera can see. |
-| `base_shadow` | number | `0.550000011920929` | Darkening where the wall meets the ground (0..1). |
+| `base_shadow` | number | `0.55` | Darkening where the wall meets the ground (0..1). |
 | `material` | [Material](#material) | (see the type) |  |
 
 ### Weather
 
-Weather events. Both repeat exactly with the loop.
+Weather and the air: rain and snow, wind, storms, mist, light in the air, heat haze, the lens.
+Every part works in any scene and repeats exactly with the loop.
 
 | Field | Type | Default | Meaning |
 |---|---|---|---|
 | `lightning` | [Lightning](#lightning) | (see the type) |  |
 | `fog_banks` | [FogBanks](#fogbanks) | (see the type) |  |
+| `precipitation` | [Precipitation](#precipitation) | (see the type) | Rain, snow, sleet or hail falling everywhere open to the sky, and what it does to the ground. |
+| `drips` | [Drips](#drips) | (see the type) | Water dripping from the ceiling (or the tops of the walls where there is none). |
+| `wind` | [Wind](#wind) | (see the type) | Wind: slants rain and snow, carries particles sideways, sways plants and banners. |
+| `sandstorm` | [Sandstorm](#sandstorm) | (see the type) | A sandstorm: sand streaming past, a sand-coloured haze, the sun dimmed to a disc. |
+| `mist` | [Mist](#mist) | (see the type) | Mist lying on the ground, and wisps rising from it. |
+| `light_shafts` | [LightShafts](#lightshafts) | `{"enabled":false,"sun":0.6,"lamps":0.4}` | Light made visible by the air: shafts from the sun past trees and walls, haloes round lamps. |
+| `heat_shimmer` | [HeatShimmer](#heatshimmer) | `{"enabled":false,"strength":0.5,"speed":1.0}` | Heat haze: the air shimmers over the ground in the distance. |
+| `lens` | [Lens](#lens) | (see the type) | Raindrops or frost on the camera's lens. |
+
+### Wind
+
+Wind across the path.
+
+| Field | Type | Default | Meaning |
+|---|---|---|---|
+| `enabled` | boolean | `false` |  |
+| `speed` | number | `3.0` | Wind speed, metres per second: positive blows to the right, negative to the left. |
+| `gusts` | number | `0.4` | How much it rises and falls in gusts (0 steady .. 1 squally). |
+| `sway` | number | `0.5` | How much trees, reeds, grass and banners sway (0..1). |
+| `seed` | integer | `0` |  |
 

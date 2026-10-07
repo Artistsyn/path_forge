@@ -25,6 +25,7 @@ fn night_sky(top: Rgb, horizon: Rgb) -> Sky {
         moon: Moon { body: SkyBody { enabled: true, ..Moon::default().body }, ..Moon::default() },
         stars: Stars { enabled: true, ..Stars::default() },
         clouds: Clouds { enabled: true, opacity: 0.22, tint: [120, 130, 160], ..Clouds::default() },
+        ..Sky::default()
     }
 }
 
@@ -35,6 +36,7 @@ fn day_sky(top: Rgb, horizon: Rgb, sun_pos: [f32; 2]) -> Sky {
         moon: Moon::default(),
         stars: Stars::default(),
         clouds: Clouds { enabled: true, ..Clouds::default() },
+        ..Sky::default()
     }
 }
 
@@ -102,6 +104,7 @@ pub fn bog_boardwalk() -> Scene {
     s.fixtures = vec![Fixture { kind: FixtureKind::Lantern, mount: Mount::Ground, lateral: 0.05, height: 1.5, spacing: 8.0, radius: 7.0, intensity: 1.1, side: Side::Both, ..Fixture::default() }];
     s.particles = vec![dust(ParticleKind::Fireflies, 60), dust(ParticleKind::Spores, 30)];
     s.weather.fog_banks = FogBanks { enabled: true, spacing: 12.0, length: 4.0, density: 0.22, offset: 6.0 };
+    s.weather.mist = Mist { enabled: true, height: 0.5, density: 0.14, color: [150, 180, 170], patchiness: 0.6, wisps: 0.6, ..Mist::default() };
     s.motion.speed = 3.2;
     s
 }
@@ -200,6 +203,7 @@ pub fn mossy_sewer() -> Scene {
     s.light.fog.color = [6, 14, 6];
     s.fixtures = vec![Fixture { kind: FixtureKind::Firefly, mount: Mount::Floating, lateral: -0.6, height: 1.4, spacing: 3.0, radius: 3.0, intensity: 0.7, jitter: 0.6, ..Fixture::default() }];
     s.particles = vec![dust(ParticleKind::Spores, 80)];
+    s.weather.drips = Drips { enabled: true, rate: 1.5, color: [150, 190, 150], ..Drips::default() };
     s.motion.speed = 3.2;
     s
 }
@@ -219,6 +223,8 @@ pub fn forest_path() -> Scene {
         PropLayer { jitter: 0.4, density: 0.7, ..props(PropKind::Bush, 0.5, 3.0, 1.0, 11) },
     ];
     s.particles = vec![dust(ParticleKind::Leaves, 40)];
+    s.weather.wind = Wind { enabled: true, speed: 2.5, gusts: 0.5, sway: 0.5, ..Wind::default() };
+    s.weather.light_shafts = LightShafts { enabled: true, sun: 0.7, lamps: 0.0 };
     s.motion.speed = 4.0;
     s
 }
@@ -238,6 +244,7 @@ pub fn desert_canyon() -> Scene {
         PropLayer { density: 0.8, jitter: 1.0, ..props(PropKind::Rock, 0.8, 4.0, 1.0, 5) },
     ];
     s.motion = Motion { loop_length: 48.0, speed: 6.0, fps: 24 };
+    s.weather.heat_shimmer = HeatShimmer { enabled: true, strength: 0.45, ..HeatShimmer::default() };
     s
 }
 
@@ -313,7 +320,8 @@ pub fn dark_street() -> Scene {
     s.sky = night_sky([4, 6, 18], [20, 16, 34]);
     s.light = indoor_light(0.18, [6, 6, 12], 30.0);
     s.fixtures = vec![Fixture { kind: FixtureKind::Lantern, height: 3.0, spacing: 8.0, radius: 7.5, intensity: 1.3, ..Fixture::default() }];
-    s.particles = vec![dust(ParticleKind::Rain, 260)];
+    s.particles = vec![];
+    s.weather.precipitation = Precipitation { enabled: true, kind: PrecipKind::Rain, intensity: 0.6, wetness: 0.9, puddles: 0.35, ..Precipitation::default() };
     s.weather.lightning = Lightning { enabled: true, strikes: 1, intensity: 1.3, ..Lightning::default() };
     s.motion.speed = 3.6;
     s
@@ -334,7 +342,9 @@ pub fn mountain_pass() -> Scene {
         PropLayer { density: 0.6, jitter: 1.5, rows: 2, row_spacing: 5.0, ..props(PropKind::Boulder, 2.0, 7.0, 1.0, 23) },
         PropLayer { density: 0.6, ..props(PropKind::Pine, 6.0, 6.0, 1.0, 29) },
     ];
-    s.particles = vec![dust(ParticleKind::Snow, 90)];
+    s.particles = vec![];
+    s.weather.precipitation = Precipitation { enabled: true, kind: PrecipKind::Snow, intensity: 0.35, cover: 0.35, track: 0.5, haze: 0.4, ..Precipitation::default() };
+    s.weather.wind = Wind { enabled: true, speed: 2.5, gusts: 0.5, sway: 0.5, ..Wind::default() };
     s.path.bridge = Bridge { enabled: true, spacing: 42.0, length: 11.0, offset: 16.0, depth: 40.0, bottom_color: [120, 130, 150], ..Bridge::default() };
     s.motion = Motion { loop_length: 42.0, speed: 5.0, fps: 24 };
     s
@@ -372,6 +382,7 @@ pub fn haunted_forest() -> Scene {
     s.fixtures = vec![Fixture { kind: FixtureKind::IceWisp, mount: Mount::Floating, lateral: 0.5, height: 1.5, spacing: 8.0, radius: 5.0, jitter: 0.8, ..Fixture::default() }];
     s.particles = vec![dust(ParticleKind::Spores, 50)];
     s.weather.fog_banks = FogBanks { enabled: true, spacing: 12.0, length: 5.0, density: 0.3, offset: 3.0 };
+    s.weather.mist = Mist { enabled: true, height: 0.6, density: 0.12, color: [150, 170, 185], patchiness: 0.7, wisps: 0.5, ..Mist::default() };
     s.path.fork = Fork { enabled: true, spacing: 24.0, offset: 9.0, side: ForkSide::Right, angle: 34.0, half_width: 0.75, ..Fork::default() };
     s.post.saturation = 0.8;
     s

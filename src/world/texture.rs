@@ -4,27 +4,75 @@ use crate::scene::{Material, Pattern};
 use std::collections::HashMap;
 
 /// sRGB byte to linear light.
-pub fn srgb_to_lin(v: u8) -> f32 { SRGB_LUT.with(|l| l[v as usize]) }
+#[inline]
+pub fn srgb_to_lin(v: u8) -> f32 { SRGB_LUT[v as usize] }
 
-thread_local! {
-    static SRGB_LUT: [f32; 256] = {
-        let mut t = [0.0f32; 256];
-        for (i, e) in t.iter_mut().enumerate() {
-            let c = i as f32 / 255.0;
-            *e = if c <= 0.04045 { c / 12.92 } else { ((c + 0.055) / 1.055).powf(2.4) };
-        }
-        t
-    };
-}
+static SRGB_LUT: std::sync::LazyLock<[f32; 256]> = std::sync::LazyLock::new(|| {
+    let mut t = [0.0f32; 256];
+    for (i, e) in t.iter_mut().enumerate() {
+        let c = i as f32 / 255.0;
+        *e = if c <= 0.04045 { c / 12.92 } else { ((c + 0.055) / 1.055).powf(2.4) };
+    }
+    t
+});
 
 pub fn rgb_lin(c: [u8; 3]) -> [f32; 3] { [srgb_to_lin(c[0]), srgb_to_lin(c[1]), srgb_to_lin(c[2])] }
+
+/// The sRGB curve itself, as `lin_to_srgb` answers it.
+fn lin_to_srgb_exact(v: f32) -> u8 {
+    let v = v.clamp(0.0, 1.0);
+    let s = if v <= 0.0031308 { v * 12.92 } else { 1.055 * v.powf(1.0 / 2.4) - 0.055 };
+    (s * 255.0 + 0.5) as u8
+}
+
+const TO_SRGB_BUCKETS: usize = 4096;
+
+/// `lin_to_srgb` without a powf per channel: the byte at the bottom of each of 4096 buckets, and the
+/// linear value where each byte begins (found from the curve itself, so answers match it exactly).
+struct ToSrgb { bucket: Vec<u8>, starts: [f32; 257] }
+
+static TO_SRGB: std::sync::LazyLock<ToSrgb> = std::sync::LazyLock::new(|| {
+    let mut starts = [f32::INFINITY; 257];
+    starts[0] = f32::NEG_INFINITY;
+    for k in 1..=255usize {
+        // The smallest v in 0..=1 whose byte is k or more: a search over the bits of positive floats.
+        let (mut lo, mut hi) = (0u32, 1.0f32.to_bits());
+        if lin_to_srgb_exact(f32::from_bits(hi)) < k as u8 { continue; }
+        while lo < hi {
+            let mid = lo + (hi - lo) / 2;
+            if lin_to_srgb_exact(f32::from_bits(mid)) >= k as u8 { hi = mid; } else { lo = mid + 1; }
+        }
+        starts[k] = f32::from_bits(lo);
+    }
+    let bucket = (0..TO_SRGB_BUCKETS).map(|i| lin_to_srgb_exact(i as f32 / TO_SRGB_BUCKETS as f32)).collect();
+    ToSrgb { bucket, starts }
+});
 
 /// Linear light (0..1) to an sRGB byte.
 #[inline]
 pub fn lin_to_srgb(v: f32) -> u8 {
     let v = v.clamp(0.0, 1.0);
-    let s = if v <= 0.0031308 { v * 12.92 } else { 1.055 * v.powf(1.0 / 2.4) - 0.055 };
-    (s * 255.0 + 0.5) as u8
+    let t = &*TO_SRGB;
+    let mut b = t.bucket[((v * TO_SRGB_BUCKETS as f32) as usize).min(TO_SRGB_BUCKETS - 1)];
+    while b < 255 && v >= t.starts[b as usize + 1] { b += 1; }
+    b
+}
+
+#[cfg(test)]
+#[test]
+fn srgb_table_matches_the_curve() {
+    // Every float from 0 to 1 a few ulps apart, plus each byte's exact edges.
+    let mut v = 0.0f32;
+    while v <= 1.0 {
+        assert_eq!(lin_to_srgb(v), lin_to_srgb_exact(v), "at {v}");
+        v = f32::from_bits(v.to_bits() + 997).max(v + 1e-9);
+    }
+    for k in 1..=255 {
+        let s = TO_SRGB.starts[k];
+        assert_eq!(lin_to_srgb(s), lin_to_srgb_exact(s));
+        let below = f32::from_bits(s.to_bits() - 1);
+        assert_eq!(lin_to_srgb(below), lin_to_srgb_exact(below));
+    }
 }
 
 /// A square tiling texture in linear colour with a mip chain.

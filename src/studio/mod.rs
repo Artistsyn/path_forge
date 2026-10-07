@@ -106,7 +106,7 @@ pub struct Studio {
     shown_tag: u64,
     tag: u64,
     pending: bool,
-    sent: Option<(u64, f32)>,
+    sent: Option<(u64, u32)>,
     render_ms: f32,
     stats: Option<crate::world::render::FrameStats>,
     drag: Option<Drag>,
@@ -114,6 +114,9 @@ pub struct Studio {
     /// selection, with the frame number and selection it was drawn for.
     pick: Option<crate::world::render::Pick>,
     frame_no: u64,
+    /// Playback self-report (`PF_STUDIO_STATS=1`): frames the playhead passed this second, and how
+    /// many of them were on screen when it did.
+    play: (Instant, u32, u32, u32),
     outline: Option<(TextureHandle, (u64, Selection))>,
     gallery_open: bool,
     /// Gallery thumbnails: each preset's frames across its loop, played while the gallery is open.
@@ -130,6 +133,38 @@ pub struct Studio {
 
 fn to_doc(scene: &Scene) -> Value {
     serde_json::from_str(&serde_json::to_string(scene).unwrap_or_default()).unwrap_or(Value::Null)
+}
+
+/// A particle or prop layer that changes kind takes the new kind's own colour, unless its colour
+/// was set by hand (anything but the old kind's own): snow comes out white, not dust-beige.
+fn follow_kind_colours(before: &Value, doc: &mut Value) {
+    use crate::scene::{ParticleKind, PropKind};
+    let colour = |v: &Value| serde_json::from_value::<[u8; 3]>(v.clone()).ok();
+    let lists: [(&str, &str, fn(&Value) -> Option<[u8; 3]>); 2] = [
+        ("particles", "color", |k| serde_json::from_value::<ParticleKind>(k.clone()).ok().map(|k| k.default_color())),
+        ("props", "tint", |k| serde_json::from_value::<PropKind>(k.clone()).ok().map(|k| k.default_tint())),
+    ];
+    for (list, field, own) in lists {
+        let Some(old) = before.get(list).and_then(Value::as_array) else { continue };
+        let Some(new) = doc.get_mut(list).and_then(Value::as_array_mut) else { continue };
+        for (o, n) in old.iter().zip(new.iter_mut()) {
+            if o.get("kind") == n.get("kind") { continue; }
+            let (Some(was), Some(now)) = (o.get("kind").and_then(own), n.get("kind").and_then(own)) else { continue };
+            if n.get(field).and_then(colour).map_or(true, |c| c == was) { n[field] = serde_json::json!(now); }
+        }
+    }
+    // Iron and rope have colours of their own: switching between them carries the colour along
+    // unless it was changed by hand.
+    use crate::scene::Railing;
+    let railing = |d: &Value| d.pointer("/path/bridge/railing").and_then(|k| serde_json::from_value::<Railing>(k.clone()).ok());
+    if let (Some(was), Some(now)) = (railing(before), railing(doc)) {
+        let defaults = [Railing::Iron, Railing::Rope].map(|k| k.default_color());
+        if let (true, Some(c)) = (was != now, now.default_color()) {
+            if let Some(b) = doc.pointer_mut("/path/bridge") {
+                if b.get("rail_color").and_then(colour).map_or(true, |old| defaults.contains(&Some(old))) { b["rail_color"] = serde_json::json!(c); }
+            }
+        }
+    }
 }
 
 fn stamp(p: &Path) -> Option<(SystemTime, u64)> {
@@ -157,7 +192,7 @@ impl Studio {
             selection: Selection::Section("camera"), advanced: false, guides: false,
             playing: true, pos: 0.0, last_tick: Instant::now(),
             preview: worker::Preview::spawn(cc.egui_ctx.clone()), texture: None, shown_tag: 0, tag: 1, pending: false, sent: None,
-            render_ms: 0.0, stats: None, drag: None, pick: None, frame_no: 0, outline: None,
+            render_ms: 0.0, stats: None, drag: None, pick: None, frame_no: 0, outline: None, play: (Instant::now(), 0, 0, u32::MAX),
             gallery_open: open.is_none(), thumbs: vec![Vec::new(); presets::ALL.len()], thumbs_rx: None, remix: RemixUi::default(), walk: walk::WalkUi::default(),
             loop_rx: None, loop_report: None, export: ExportDialog::default(), status: String::new(), title: String::new(),
         };
@@ -298,17 +333,29 @@ impl Studio {
     }
 
     fn request_frame(&mut self) {
-        let d = self.frame_distance(self.frame_index());
-        let want = (self.tag, d);
-        if self.sent == Some(want) || self.pending { return; }
-        self.preview.request(worker::Request { scene: self.scene.clone(), base_dir: self.base_dir(), distance: d, tag: self.tag });
-        self.sent = Some(want);
-        self.pending = true;
+        let ahead = self.playing && self.drag.is_none();
+        self.preview.want(worker::Want { scene: self.scene.clone(), base_dir: self.base_dir(), tag: self.tag, index: self.frame_index(), ahead });
     }
 
     fn receive_frame(&mut self, ctx: &egui::Context) {
-        if let Some(f) = self.preview.poll() {
-            self.pending = false;
+        let at = self.frame_index();
+        let (f, exact) = self.preview.frame(self.tag, at);
+        self.pending = !exact;
+        if self.playing && at != self.play.3 {
+            self.play.3 = at;
+            self.play.1 += 1;
+            if exact { self.play.2 += 1; }
+        }
+        if self.play.0.elapsed().as_secs_f32() >= 1.0 {
+            if std::env::var_os("PF_STUDIO_STATS").is_some() && self.playing {
+                eprintln!("playback: {}/{} frames on time, {:.1} ms/frame render", self.play.2, self.play.1, self.render_ms);
+            }
+            self.play = (Instant::now(), 0, 0, self.play.3);
+        }
+        let Some(f) = f else { return };
+        if self.sent == Some((f.tag, f.index)) { return; }
+        self.sent = Some((f.tag, f.index));
+        {
             self.render_ms = f.ms;
             self.shown_tag = f.tag;
             self.stats = f.image.stats.clone();
@@ -1066,7 +1113,7 @@ impl eframe::App for Studio {
         self.walk_window(ctx);
         self.dev_shot(ctx);
 
-        if self.doc != before { self.sync_scene(); }
+        if self.doc != before { follow_kind_colours(&before, &mut self.doc); self.sync_scene(); }
         self.commit_edits(ctx);
         self.request_frame();
 
