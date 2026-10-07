@@ -119,10 +119,13 @@ the path crosses on a deck. Walls carry on down into the gap.
 | `offset` | number | `6.0` | Where along the loop the first bridge starts, metres. |
 | `depth` | number | `10.0` | How far down the bottom of the gap is, metres. |
 | `bottom` | [BridgeBottom](#bridgebottom) | `"Ground"` | What is down there. |
+| `water_level` | number | `10.0` | With a Water bottom: how far below the deck the water lies, metres (never deeper than `depth`). |
 | `bottom_color` | integer × 3 | `[150,150,150]` | Colour of water, or of ground far below (multiplied with the verge or path material). |
 | `deck` | [Material](#material) | (see the type) | The deck: planks, stone... |
 | `railing` | [Railing](#railing) | `"Posts"` |  |
 | `rail_height` | number | `1.0` | Railing height, metres. |
+| `end_pillars` | boolean | `true` | A taller pillar or newel post where each railing starts and ends. |
+| `rail_color` | integer × 3 | `[34,35,38]` | Colour of iron bars, or of rope. |
 
 ### BridgeBottom
 
@@ -543,7 +546,10 @@ Light a prop gives off.
 |---|---|
 | `None` |  |
 | `Posts` | Wooden posts with two rails, in the deck material. |
-| `Parapet` | A low solid wall, in the wall material (or the path material without walls). |
+| `Parapet` | A low solid wall with a coping, in the wall material (or the path material without walls). |
+| `Balustrade` | Stone balusters on a plinth under a handrail, in the wall (or path) material. |
+| `Iron` | Iron bars between rails, on a stone kerb, in `rail_color`. |
+| `Rope` | Ropes sagging between wooden posts, in `rail_color`. |
 
 ### Rainbow
 

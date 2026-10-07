@@ -63,7 +63,7 @@ pub fn finish(view: &View, scene: &Scene, phase: f32, hdr: &[[f32; 3]], post_on:
 fn bloom_buffer(hdr: &[[f32; 3]], w: usize, h: usize) -> Vec<[f32; 3]> {
     let (qw, qh) = (w.div_ceil(4), h.div_ceil(4));
     let mut q = vec![[0.0f32; 3]; qw * qh];
-    for (i, e) in q.iter_mut().enumerate() {
+    q.par_iter_mut().enumerate().for_each(|(i, e)| {
         let (qx, qy) = (i % qw, i / qw);
         let mut acc = [0.0f32; 3];
         let mut n = 0.0;
@@ -77,7 +77,7 @@ fn bloom_buffer(hdr: &[[f32; 3]], w: usize, h: usize) -> Vec<[f32; 3]> {
             }
         }
         *e = [acc[0] / n, acc[1] / n, acc[2] / n];
-    }
+    });
     // Two passes of a wide separable blur.
     for _ in 0..2 {
         q = blur(&q, qw, qh, true);
@@ -125,7 +125,7 @@ pub fn outline(rgb: &mut [[f32; 3]], gbuf: &[GPixel], w: usize, h: usize, o: &Ou
     let col = [o.color[0] as f32, o.color[1] as f32, o.color[2] as f32];
     // Ink lines only around things near enough to carry them; far away they turn into noise.
     const INK_DISTANCE: f32 = 14.0;
-    let is_obj = |g: &GPixel| g.id >= id::PROP && g.depth < INK_DISTANCE;
+    let is_obj = |g: &GPixel| g.id >= id::PROP && !id::is_rail(g.id) && g.depth < INK_DISTANCE;
     let marks: Vec<bool> = (0..w * h).into_par_iter().map(|i| {
         let (x, y) = (i % w, i / w);
         let g = &gbuf[i];

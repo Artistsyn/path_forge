@@ -146,6 +146,8 @@ pub struct Bridge {
     pub depth: f32,
     /// What is down there.
     pub bottom: BridgeBottom,
+    /// With a Water bottom: how far below the deck the water lies, metres (never deeper than `depth`).
+    pub water_level: f32,
     /// Colour of water, or of ground far below (multiplied with the verge or path material).
     pub bottom_color: Rgb,
     /// The deck: planks, stone...
@@ -153,13 +155,17 @@ pub struct Bridge {
     pub railing: Railing,
     /// Railing height, metres.
     pub rail_height: f32,
+    /// A taller pillar or newel post where each railing starts and ends.
+    pub end_pillars: bool,
+    /// Colour of iron bars, or of rope.
+    pub rail_color: Rgb,
 }
 impl Default for Bridge {
     fn default() -> Self {
         Bridge {
             enabled: false, spacing: 24.0, length: 8.0, offset: 6.0, depth: 10.0, bottom: BridgeBottom::Ground, bottom_color: [150, 150, 150],
             deck: Material { pattern: Pattern::Planks, base: [104, 78, 54], mortar: [30, 22, 16], noise: 8, damage: 0.15, seed: 0, tile_size: 1.2, rotate: false, brightness: 1.0, ..Material::default() },
-            railing: Railing::Posts, rail_height: 1.0,
+            railing: Railing::Posts, rail_height: 1.0, end_pillars: true, rail_color: Railing::Iron.default_color().unwrap(), water_level: 10.0,
         }
     }
 }
@@ -179,8 +185,25 @@ pub enum Railing {
     None,
     /// Wooden posts with two rails, in the deck material.
     Posts,
-    /// A low solid wall, in the wall material (or the path material without walls).
+    /// A low solid wall with a coping, in the wall material (or the path material without walls).
     Parapet,
+    /// Stone balusters on a plinth under a handrail, in the wall (or path) material.
+    Balustrade,
+    /// Iron bars between rails, on a stone kerb, in `rail_color`.
+    Iron,
+    /// Ropes sagging between wooden posts, in `rail_color`.
+    Rope,
+}
+
+impl Railing {
+    /// The colour `rail_color` takes for this railing when it is picked, if it uses one.
+    pub fn default_color(self) -> Option<Rgb> {
+        match self {
+            Railing::Iron => Some([34, 35, 38]),
+            Railing::Rope => Some([150, 124, 86]),
+            _ => None,
+        }
+    }
 }
 
 /// Flights of steps along the path, each followed by a landing. The camera climbs them like a

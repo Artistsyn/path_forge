@@ -103,6 +103,25 @@ speed, and each cloud forms, drifts and dissolves once per loop, so the loop sti
 shrinks towards new at either end (negative on the waning side, positive on the waxing side). The unlit part shows the sky and the stars behind it, plus a
 faint earthshine.
 
+**Bridges** (`path.bridge`). Every `spacing` metres the ground beside the path drops away for
+`length` metres and the path crosses on a `deck`. Below it is `bottom`: ground `depth` metres down,
+water, or a bottomless void. With water, `water_level` sets how far below the deck the surface lies
+(it never goes deeper than `depth`), so a bridge can skim a stream or span a gorge. `railing` is one of:
+
+| Railing | What it looks like |
+|---|---|
+| `Posts` | Wooden posts every 1.6 m with two rails, in the deck material. |
+| `Parapet` | A solid low wall with a coping on top, in the wall material (the path material without walls). |
+| `Balustrade` | Turned stone balusters on a plinth under a handrail, in the wall (or path) material. |
+| `Iron` | Iron bars between two rails on a stone kerb, with a stouter post every few metres, in `rail_color`. |
+| `Rope` | Ropes hanging between wooden posts, in `rail_color`. |
+| `None` | An open deck. |
+
+`rail_height` sets the height. `end_pillars` (on by default) puts a pillar or newel post with a cap
+at each end of every railing: stone for parapets, balustrades and iron, wood for posts and rope.
+Every railing is built as solid pieces, with faces on all the sides the camera can see. In the
+studio, switching between Iron and Rope also switches `rail_color`, unless you have chosen a colour yourself.
+
 ### Weather and the air
 
 Every effect here works in any scene, can be combined with the others, and repeats exactly with
@@ -162,6 +181,11 @@ generated from the scene format, and a timeline along the bottom.
 - **Timeline.** Play and pause (Space), step a frame (← →, ⏮ ⏭), or drag to any frame. It shows
   the frame number, the time within the loop, the metres walked, and how long the last frame took
   to render. The preview walks at the scene's `motion.speed` in real time.
+- **Smooth playback.** While playing, the preview renders the frames ahead of the playhead on two
+  threads at once and keeps them (up to 512 MB), so after the first pass through the loop it plays
+  from memory. Each change to the scene starts the loop's cache again. While you drag a slider,
+  only the current frame renders, and the newest finished frame shows meanwhile.
+  `PF_STUDIO_STATS=1 path_forge scene.json` prints once a second how many frames were on time.
 - **Camera guides** (View > Camera guides, or G) draw the path edges and distance marks.
 - **File:** New from preset… (the gallery), Open… ⌘O, Save ⌘S, Save as… ⇧⌘S, Export… ⌘E, Show
   in Finder, Gather files into the scene folder, Pack into folder… (§14).
@@ -563,7 +587,9 @@ pf skill --install .
 - `pf animcheck --preset NAME --file X.webp` compares an exported file frame by frame with fresh
   renders, so you can tell an encoding problem from a scene problem.
 - `pf animsheet --file X.webp -o sheet.png` lays out an export's frames, as decoded, in a sheet.
-- `pf bench` times rendering.
+- `pf bench` times rendering. `--stages` adds where each frame's time goes (shading,
+  reflections, mist, post…, loudest first). `--studio` renders as the studio preview does (with
+  frame stats and click-to-select ids).
 - `pf_analyze` (MCP) warns about scenes that usually look wrong: too dark, blown out, props or
   lights out of view, a path that does not read against its verge.
 
@@ -572,6 +598,7 @@ pf skill --install .
 | Symptom | Cause and fix |
 |---|---|
 | A WebP shows one frame or plays slowly on a Mac | Safari, Preview and Quick Look (§7, Viewing exports). Use Chrome, Firefox, Discord or `vwebp`. |
+| The preview stutters with many effects on | The first pass through the loop renders live; after that it plays from memory. Rain on glossy floors, still water, mist and light shafts cost the most: `pf bench --stages --scene file.json` names the expensive part. |
 | The export walks faster or slower than wanted | Change `motion.speed` (m/s). fps only sets how many frames cover the loop. |
 | A GIF looks banded | GIF has 256 colours. Use WebP, or a pixel-art palette, or dithering. |
 | A GIF exported at 60 fps plays at 30 | GIF timing tops out at 50 fps; PathForge uses every 2nd frame and says so. |

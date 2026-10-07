@@ -70,9 +70,12 @@ fn noise2(x: f32, w: f32, cell: f32, loop_len: f32, seed: u32) -> f32 {
     let (ix, iw) = (tx.floor() as i64, tw.floor() as i64);
     let s = |f: f32| f * f * (3.0 - 2.0 * f);
     let (fx, fw) = (s(tx - ix as f32), s(tw - iw as f32));
-    let v = |a: i64, b: i64| hf(seed ^ (a as u32).wrapping_mul(0x9E37_79B1), b.rem_euclid(n));
-    let (a, b) = (v(ix, iw), v(ix + 1, iw));
-    let (c0, d0) = (v(ix, iw + 1), v(ix + 1, iw + 1));
+    let v = |a: i64, b: i64| hf(seed ^ (a as u32).wrapping_mul(0x9E37_79B1), b);
+    // The two rows along the loop, wrapped once (one integer division, not four).
+    let w0 = iw.rem_euclid(n);
+    let w1 = if w0 + 1 == n { 0 } else { w0 + 1 };
+    let (a, b) = (v(ix, w0), v(ix + 1, w0));
+    let (c0, d0) = (v(ix, w1), v(ix + 1, w1));
     let top = a + (b - a) * fx;
     let bot = c0 + (d0 - c0) * fx;
     top + (bot - top) * fw
@@ -183,7 +186,7 @@ pub(super) fn surface(ctx: &Ctx, g: &GPixel, tex: u8, albedo: [f32; 3], gloss: f
                     }
                 }
             }
-        } else if matches!(g.id, id::WALL_L | id::WALL_R | id::FACADE | id::CLIFF) {
+        } else if matches!(g.id, id::WALL_L | id::WALL_R | id::FACADE | id::CLIFF) || id::is_rail(g.id) {
             a = scale3(a, 1.0 - 0.18 * wx.wet);
         }
     }
@@ -208,6 +211,9 @@ pub(super) fn surface(ctx: &Ctx, g: &GPixel, tex: u8, albedo: [f32; 3], gloss: f
             rp *= 1.0 - cov;
         } else if g.id == id::RISER {
             a = mix3(a, SNOW, 0.35 * s);
+        } else if id::is_rail(g.id) && id::rail_parts(g.id).1 == id::TOP {
+            // Snow lies along the top of a railing.
+            a = mix3(a, SNOW, (1.6 * s).min(0.95));
         } else if matches!(g.id, id::WALL_L | id::WALL_R) {
             // A cap on the top of the wall, and drifts banked against its foot.
             let top = ctx.wall_top();
@@ -242,6 +248,9 @@ fn rain_rings(ctx: &Ctx, x: f32, w: f32) -> (f32, f32) {
             let (dx, dw) = (x - px, w - pw);
             let r = (dx * dx + dw * dw).sqrt();
             let rad = 0.02 + 0.22 * a;
+            // Further than 0.093 m from the ring the envelope is under exp(-7.06) < 1e-3 at any age:
+            // the test below would drop it anyway, without the exp.
+            if (r - rad).abs() > 0.093 { continue; }
             let env = (1.0 - a).powi(2) * (-((r - rad) / 0.035).powi(2)).exp();
             if env < 1e-3 { continue; }
             let slope = 0.25 * env * (TAU * (r - rad) / 0.045).sin();
@@ -306,8 +315,11 @@ fn dot(gbuf: &[GPixel], hdr: &mut [[f32; 3]], w: usize, h: usize, z: f32, (sx, s
 
 /// The light at a point in the air: every lamp near the camera, the ambient and sky alone farther
 /// off (where the fog has most of it anyway).
-fn air_light(ctx: &Ctx, x: f32, y: f32, d: f32) -> [f32; 3] {
-    if d < 18.0 { ctx.light_at(x, y, d, None, 0, 1.0) } else { ctx.sky_lights.iter().fold(ctx.ambient, |a, s| add3(a, scale3(s.color, 0.5))) }
+fn air_light(ctx: &Ctx, x: f32, y: f32, d: f32) -> [f32; 3] { air_light_among(ctx, x, y, d, None) }
+
+/// `air_light` looking only at the lamps in `near` (the ones that can reach this part of the screen).
+fn air_light_among(ctx: &Ctx, x: f32, y: f32, d: f32, near: Option<&[u16]>) -> [f32; 3] {
+    if d < 18.0 { ctx.light_among(x, y, d, None, 0, 1.0, None, near) } else { ctx.sky_lights.iter().fold(ctx.ambient, |a, s| add3(a, scale3(s.color, 0.5))) }
 }
 
 /// Half the width of the ground in view at the far end of `range`, or between the walls.
@@ -631,6 +643,11 @@ fn mist_patch(ctx: &Ctx, x: f32, d: f32) -> f32 {
 pub(super) fn apply_mist(ctxs: &[Ctx], gbuf: &[GPixel], hdr: &mut [[f32; 3]]) {
     if !ctxs.iter().any(|c| c.scene.weather.mist.enabled && c.scene.weather.mist.density > 0.0) { return; }
     let w = ctxs[0].view.width;
+    // The lamps that can reach the air each tile lights (the point air_light measures from).
+    let tiles = super::tile_lights_at(ctxs, gbuf, |ctx, g| {
+        let m = &ctx.scene.weather.mist;
+        (g.id != id::NONE && g.d < 18.0).then(|| ctx.view.to_cam(g.x, (m.height.max(0.05) * 0.5).min(ctx.view.eye_height), g.d))
+    });
     hdr.par_chunks_mut(w).enumerate().for_each(|(row, line)| {
         for (x, px) in line.iter_mut().enumerate() {
             let g = &gbuf[row * w + x];
@@ -660,7 +677,7 @@ pub(super) fn apply_mist(ctxs: &[Ctx], gbuf: &[GPixel], hdr: &mut [[f32; 3]]) {
             let tau = m.density.max(0.0) * mist_patch(ctx, gx, gd) * len;
             let a = 1.0 - (-tau).exp();
             if a < 0.003 { continue; }
-            let light = if g.id == id::NONE { ctx.sky_lights.iter().fold(ctx.ambient, |a, s| add3(a, scale3(s.color, 0.5))) } else { air_light(ctx, gx, (top * 0.5).min(eye), gd) };
+            let light = if g.id == id::NONE { ctx.sky_lights.iter().fold(ctx.ambient, |a, s| add3(a, scale3(s.color, 0.5))) } else { air_light_among(ctx, gx, (top * 0.5).min(eye), gd, tiles.as_ref().map(|t| t.at(x, row))) };
             let col = ctx.apply_fog(mul3(rgb_lin(m.color), light), z * 0.5);
             *px = mix3(*px, col, a);
         }
@@ -728,16 +745,41 @@ pub(super) fn light_shafts(ctxs: &[Ctx], here: usize, gbuf: &[GPixel], hdr: &mut
         let lights: Vec<&PointLight> = ctxs.iter().flat_map(|c| c.lights.iter()).collect();
         if !lights.is_empty() {
             let k = ls.lamps.max(0.0) * air * 0.012 * ctx.gain;
-            add.par_iter_mut().enumerate().for_each(|(c, o)| {
-                let (cx, cy) = (c % mw * q + q / 2, c / mw * q + q / 2);
-                let (cx, cy) = (cx.min(w - 1), cy.min(h - 1));
+            let ray = |cx: usize, cy: usize| {
                 let dir = [(cx as f32 + 0.5 - v.center_px) / v.focal_px, (v.horizon_px - cy as f32 - 0.5) / v.focal_px, 1.0];
                 let dl = dot3(dir, dir).sqrt();
-                let dir = [dir[0] / dl, dir[1] / dl, dir[2] / dl];
+                ([dir[0] / dl, dir[1] / dl, dir[2] / dl], dl)
+            };
+            let cell_px = |c: usize| ((c % mw * q + q / 2).min(w - 1), (c / mw * q + q / 2).min(h - 1));
+            // Which lamps can light the air along any ray of each tile of cells: a lamp adds only
+            // where the line of sight passes within its radius, so one whose cone of reach misses
+            // the tile's cone of rays (both sides of the eye) adds nothing there.
+            const TILE: usize = 16;
+            let (tc, tr) = (mw.div_ceil(TILE), mh.div_ceil(TILE));
+            let lists: Vec<Vec<u16>> = (0..tc * tr).into_par_iter().map(|t| {
+                let (c0, r0) = (t % tc * TILE, t / tc * TILE);
+                let (c1, r1) = ((c0 + TILE).min(mw) - 1, (r0 + TILE).min(mh) - 1);
+                let (xa, ya) = cell_px(r0 * mw + c0);
+                let (xb, yb) = cell_px(r1 * mw + c1);
+                let (mid, _) = ray((xa + xb) / 2, (ya + yb) / 2);
+                let ang = |d: [f32; 3]| dot3(d, mid).clamp(-1.0, 1.0).acos();
+                let edges = [(xa, ya), (xb, ya), (xa, yb), (xb, yb), ((xa + xb) / 2, ya), ((xa + xb) / 2, yb), (xa, (ya + yb) / 2), (xb, (ya + yb) / 2)];
+                let spread = edges.iter().map(|&(x, y)| ang(ray(x, y).0)).fold(0.0f32, f32::max) * 1.05 + 0.01;
+                lights.iter().enumerate().filter(|(_, l)| {
+                    let dist = dot3(l.pos, l.pos).sqrt();
+                    if dist <= l.radius * 1.01 { return true; }
+                    let reach = (l.radius / dist).min(1.0).asin() + spread;
+                    let th = ang([l.pos[0] / dist, l.pos[1] / dist, l.pos[2] / dist]);
+                    th <= reach || th >= std::f32::consts::PI - reach
+                }).map(|(i, _)| i as u16).collect()
+            }).collect();
+            add.par_iter_mut().enumerate().for_each(|(c, o)| {
+                let (cx, cy) = cell_px(c);
+                let (dir, dl) = ray(cx, cy);
                 let depth = gbuf[cy * w + cx].depth.min(80.0);
                 let reach = depth * dl;
                 let mut glow = [0.0f32; 3];
-                for l in &lights {
+                for l in lists[(c / mw / TILE) * tc + (c % mw) / TILE].iter().map(|&i| lights[i as usize]) {
                     // Light scattered toward the eye along the line of sight, from a point light
                     // in clear air: the integral of 1/r^2 along the ray.
                     let b = dot3(dir, l.pos);

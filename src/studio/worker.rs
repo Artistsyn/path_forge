@@ -8,53 +8,153 @@ use crate::scene::transition::{Branch, ForkChoice, Transition};
 use crate::world::{Image, RenderOptions, WorldRenderer};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::collections::{HashMap, HashSet};
 use std::sync::mpsc::{channel, Receiver, Sender};
-use std::sync::Arc;
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::Instant;
 
-pub struct Request {
+/// What the studio wants on screen: a scene (by tag) and the frame of its loop at the playhead.
+/// While playing, the frames after it are rendered ahead and kept, so playback runs from the cache.
+pub struct Want {
     pub scene: Arc<Scene>,
     pub base_dir: Option<PathBuf>,
-    pub distance: f32,
     pub tag: u64,
+    pub index: u32,
+    pub ahead: bool,
 }
 
 pub struct Frame {
     pub image: Image,
     pub distance: f32,
     pub tag: u64,
+    pub index: u32,
     pub ms: f32,
 }
 
-/// Renders the newest request only: older ones still queued are dropped.
+/// Most memory the cached frames of a loop may take.
+const CACHE_BYTES: usize = 512 << 20;
+/// Frames rendered at once: each worker owns a renderer and the rayon pool is shared, so a second
+/// frame fills the cores while the first waits at its serial steps.
+const WORKERS: usize = 2;
+
+#[derive(Default)]
+struct Shared {
+    want: Option<Want>,
+    /// Finished frames of the wanted tag, by index.
+    cache: HashMap<u32, Arc<Frame>>,
+    cache_tag: u64,
+    busy: HashSet<(u64, u32)>,
+    /// The newest frame finished, of any tag: shown while the wanted one is still rendering.
+    latest: Option<Arc<Frame>>,
+    stop: bool,
+}
+
+impl Shared {
+    /// Frames in the loop, and how many from the playhead on are worth keeping.
+    fn window(&self) -> Option<(u32, u32)> {
+        let w = self.want.as_ref()?;
+        let n = w.scene.motion.frames();
+        let bytes = (w.scene.canvas.width as usize * w.scene.canvas.height as usize * 4).max(1);
+        let keep = (CACHE_BYTES / bytes).clamp(1, n as usize) as u32;
+        Some((n, if w.ahead { keep } else { 1 }))
+    }
+
+    /// The next frame to render: the playhead's, then those after it, skipping any done or under way.
+    fn next_job(&self) -> Option<(Arc<Scene>, Option<PathBuf>, u64, u32, f32)> {
+        let (n, ahead) = self.window()?;
+        let w = self.want.as_ref()?;
+        (0..ahead).map(|k| (w.index + k) % n).find(|k| !self.cache.contains_key(k) && !self.busy.contains(&(w.tag, *k))).map(|k| {
+            let len = w.scene.motion.loop_length.max(1.0);
+            (w.scene.clone(), w.base_dir.clone(), w.tag, k, len * k as f32 / n as f32)
+        })
+    }
+
+    /// Drop cached frames of another tag, or outside the window ahead of the playhead.
+    fn trim(&mut self) {
+        let Some(w) = self.want.as_ref() else { return };
+        if self.cache_tag != w.tag { self.cache.clear(); self.cache_tag = w.tag; }
+        let Some((n, _)) = self.window() else { return };
+        let bytes = (w.scene.canvas.width as usize * w.scene.canvas.height as usize * 4).max(1);
+        let keep = (CACHE_BYTES / bytes).clamp(1, n as usize) as u32;
+        let at = w.index;
+        self.cache.retain(|k, _| (k + n - at) % n < keep);
+    }
+}
+
+/// The preview: renders the wanted frame first and the next ones ahead, on a few threads.
 pub struct Preview {
-    tx: Sender<Request>,
-    rx: Receiver<Frame>,
+    shared: Arc<(Mutex<Shared>, Condvar)>,
 }
 
 impl Preview {
     pub fn spawn(ctx: egui::Context) -> Preview {
-        let (tx, jobs) = channel::<Request>();
-        let (done, rx) = channel::<Frame>();
-        std::thread::Builder::new().name("pf-preview".into()).spawn(move || {
-            let mut r = WorldRenderer::default();
-            while let Ok(mut job) = jobs.recv() {
-                while let Ok(newer) = jobs.try_recv() { job = newer; }
-                let t0 = Instant::now();
-                let opts = RenderOptions { base_dir: job.base_dir.clone(), stats: true, pick: true, ..RenderOptions::default() };
-                let image = r.render(&job.scene, job.distance, &opts);
-                let ms = t0.elapsed().as_secs_f32() * 1000.0;
-                if done.send(Frame { image, distance: job.distance, tag: job.tag, ms }).is_err() { break; }
-                ctx.request_repaint();
-            }
-        }).expect("preview thread");
-        Preview { tx, rx }
+        let shared = Arc::new((Mutex::new(Shared::default()), Condvar::new()));
+        for k in 0..WORKERS {
+            let (sh, ctx) = (shared.clone(), ctx.clone());
+            std::thread::Builder::new().name(format!("pf-preview-{k}")).spawn(move || {
+                let mut r = WorldRenderer::default();
+                let (lock, cv) = &*sh;
+                loop {
+                    let job = {
+                        let mut s = lock.lock().unwrap();
+                        loop {
+                            if s.stop { return; }
+                            if let Some(j) = s.next_job() { s.busy.insert((j.2, j.3)); break j; }
+                            s = cv.wait(s).unwrap();
+                        }
+                    };
+                    let (scene, base_dir, tag, index, distance) = job;
+                    let t0 = Instant::now();
+                    let opts = RenderOptions { base_dir, stats: true, pick: true, ..RenderOptions::default() };
+                    let image = r.render(&scene, distance, &opts);
+                    let frame = Arc::new(Frame { image, distance, tag, index, ms: t0.elapsed().as_secs_f32() * 1000.0 });
+                    let mut s = lock.lock().unwrap();
+                    s.busy.remove(&(tag, index));
+                    if s.latest.as_ref().map_or(true, |l| l.tag <= tag) { s.latest = Some(frame.clone()); }
+                    if s.want.as_ref().is_some_and(|w| w.tag == tag) {
+                        s.trim();
+                        s.cache.insert(index, frame);
+                        s.trim();
+                    }
+                    drop(s);
+                    cv.notify_all();
+                    ctx.request_repaint();
+                }
+            }).expect("preview thread");
+        }
+        Preview { shared }
     }
-    pub fn request(&self, r: Request) { let _ = self.tx.send(r); }
-    pub fn poll(&self) -> Option<Frame> {
-        let mut last = None;
-        while let Ok(f) = self.rx.try_recv() { last = Some(f); }
-        last
+
+    /// Say what is wanted now; cheap to call every UI frame.
+    pub fn want(&self, w: Want) {
+        let (lock, cv) = &*self.shared;
+        let mut s = lock.lock().unwrap();
+        let same = s.want.as_ref().is_some_and(|o| o.tag == w.tag && o.index == w.index && o.ahead == w.ahead);
+        if same { return; }
+        s.want = Some(w);
+        s.trim();
+        drop(s);
+        cv.notify_all();
+    }
+
+    /// The wanted frame if it is ready, else the newest one finished (or None before any).
+    pub fn frame(&self, tag: u64, index: u32) -> (Option<Arc<Frame>>, bool) {
+        let s = self.shared.0.lock().unwrap();
+        match s.cache.get(&index).filter(|_| s.cache_tag == tag) {
+            Some(f) => (Some(f.clone()), true),
+            // A frame rendered ahead of the playhead is not shown early: the last one stays up.
+            None => {
+                let ahead = |l: &Frame| s.window().is_some_and(|(n, keep)| l.tag == tag && (l.index + n - index) % n < keep);
+                (s.latest.clone().filter(|l| !ahead(l)), false)
+            }
+        }
+    }
+}
+
+impl Drop for Preview {
+    fn drop(&mut self) {
+        self.shared.0.lock().unwrap().stop = true;
+        self.shared.1.notify_all();
     }
 }
 

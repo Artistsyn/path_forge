@@ -102,7 +102,9 @@ depth layers or a depth map).
   from more than a few metres back: that is how real stairs look, so show descents close up.
   `pf_camera` accounts for the steps (`stairs_note` in the camera data gives the formulas).
 - **Bridges:** `path.bridge` (`spacing`, `length`, `depth` of the drop, `bottom` "Ground" /
-  "Water" / "Void", `deck` material (planks by default), `railing` "Posts" / "Parapet" / "None").
+  "Water" / "Void", `water_level` (how far below the deck water lies), `deck` material (planks by
+  default), `railing` "Posts" / "Parapet" / "Balustrade" / "Iron" / "Rope" / "None", `end_pillars`
+  (a pillar or newel post at each end), `rail_color` (iron bars or rope)).
   The ground beside the path falls away and walls carry on down into the gap; trees and rocks
   stop at the edge and standing lamps move onto the railing. In a walled corridor the walls must
   stand back from the path (`walls.gap` 1.5 m or more) or there is no gap to cross; pf_analyze warns.

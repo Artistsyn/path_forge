@@ -41,7 +41,7 @@ const META: &[Meta] = &[
     m("path.stairs.spacing", 2.0, 96.0, " m"), m("path.stairs.steps", 1.0, 40.0, ""), m("path.stairs.rise", 0.05, 0.4, " m"),
 m("path.stairs.run", 0.15, 1.0, " m"), m("path.stairs.offset", 0.0, 96.0, " m"),
 m("path.bridge.spacing", 4.0, 96.0, " m"), m("path.bridge.length", 0.5, 64.0, " m"), m("path.bridge.offset", 0.0, 96.0, " m"),
-m("path.bridge.depth", 0.5, 120.0, " m"), m("path.bridge.rail_height", 0.2, 2.0, " m"),
+m("path.bridge.depth", 0.5, 120.0, " m"), m("path.bridge.rail_height", 0.2, 2.0, " m"), m("path.bridge.water_level", 0.1, 120.0, " m"),
 m("path.fork.spacing", 4.0, 96.0, " m"), m("path.fork.offset", 0.0, 96.0, " m"), m("path.fork.angle", 5.0, 85.0, "°"),
 m("path.fork.half_width", 0.2, 4.0, " m"), m("path.fork.depth", 0.5, 30.0, " m"), m("path.fork.height", 0.5, 6.0, " m"),
 m("*.gloss", 0.0, 1.0, ""), m("*.ripples", 0.0, 1.0, ""),
