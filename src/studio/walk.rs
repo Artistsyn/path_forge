@@ -101,7 +101,7 @@ impl Studio {
         let Ok(path) = std::env::var("PF_STUDIO_SHOT") else { return };
         w.shot_frames += 1;
         ctx.request_repaint();
-        if w.shot_frames == 240 { ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot); }
+        if w.shot_frames == 240 { ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(Default::default())); }
         let shot = ctx.input(|i| i.events.iter().find_map(|e| match e { egui::Event::Screenshot { image, .. } => Some(image.clone()), _ => None }));
         if let Some(img) = shot {
             let [w, h] = img.size;

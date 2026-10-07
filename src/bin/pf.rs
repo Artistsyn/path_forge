@@ -70,6 +70,14 @@ struct Renderers {
 impl Renderers {
     fn new(gpu_backend: bool) -> Self { Self { world: WorldRenderer::default(), cpu: PathRenderer::default(), gpu: None, gpu_backend, studio: false } }
 
+    /// The renderers a command asked for: `--backend` for the 2.0 engine; the v3 renderer on the
+    /// GPU where there is one, `--engine cpu` for the CPU reference, `--engine gpu` to insist.
+    fn for_args(args: &Args) -> Result<Self, String> {
+        let mut r = Self::new(gpu_backend(args)?);
+        r.world = world_for(args)?;
+        Ok(r)
+    }
+
     /// Size of a frame and the length of one loop in the item's own units.
     fn dims(item: &Item) -> (usize, usize, f32) {
         match item {
@@ -200,7 +208,7 @@ fn cmd_render(args: &Args) -> Result<(), String> {
     let (name, item) = one_item(args)?;
     let out = args.opts.get("o").or(args.opts.get("out")).ok_or("render needs -o out.png")?;
     let t: f32 = opt(args, "t", 0.0)?;
-    let mut r = Renderers::new(gpu_backend(args)?);
+    let mut r = Renderers::for_args(args)?;
     let (w, h, len) = Renderers::dims(&item);
     let t0 = Instant::now();
     let buf = r.frame(&item, t * len)?;
@@ -216,7 +224,7 @@ fn cmd_sheet(args: &Args) -> Result<(), String> {
     let frames: usize = opt(args, "frames", 8usize)?.max(1);
     let cols: usize = opt(args, "cols", 4usize)?.max(1);
     let scale: f32 = opt(args, "scale", 0.5f32)?.clamp(0.05, 1.0);
-    let mut r = Renderers::new(gpu_backend(args)?);
+    let mut r = Renderers::for_args(args)?;
     let (w, h, len) = Renderers::dims(&item);
     let (tw, th) = (((w as f32) * scale).round().max(1.0) as usize, ((h as f32) * scale).round().max(1.0) as usize);
     let rows = frames.div_ceil(cols);
@@ -255,7 +263,7 @@ fn cmd_sheet(args: &Args) -> Result<(), String> {
 ///   wrap  — difference between the last frame and the first (what the viewer sees at the loop point)
 fn cmd_seam(args: &Args) -> Result<(), String> {
     let frames: usize = opt(args, "frames", 24usize)?.max(2);
-    let mut r = Renderers::new(gpu_backend(args)?);
+    let mut r = Renderers::for_args(args)?;
     println!("{:<16} {:>9} {:>8} {:>9} {:>9} {:>7}  verdict", "scene", "exact", "exact%", "step", "wrap", "wrap/st");
     let mut failures = 0;
     for (name, item) in items(args)? {
@@ -294,7 +302,59 @@ fn cmd_seam(args: &Args) -> Result<(), String> {
     Ok(())
 }
 
+/// The v3 renderer `--engine` asks for: the GPU where there is one unless `cpu`; `gpu` fails
+/// without one.
+fn world_for(args: &Args) -> Result<WorldRenderer, String> {
+    match args.opts.get("engine").map(|s| s.as_str()) {
+        Some("cpu") => Ok(WorldRenderer::default()),
+        Some("gpu") => { let mut r = WorldRenderer::default(); r.set_gpu(Some(world_gpu()?)); Ok(r) }
+        _ => Ok(WorldRenderer::auto()),
+    }
+}
+
+/// The v3 renderer's GPU passes on a headless device.
+fn world_gpu() -> Result<std::sync::Arc<path_forge::world::gpu::Gpu>, String> {
+    let ctx = path_forge::world::gpu::GpuContext::headless()?;
+    eprintln!("GPU: {}", ctx.info);
+    Ok(std::sync::Arc::new(path_forge::world::gpu::Gpu::new(ctx)?))
+}
+
+/// GPU against CPU, scene by scene: the mean difference (0..255 per channel), the 99.9th
+/// percentile and the largest of each pixel's largest channel difference, and the verdict against
+/// the gate (mean <= 0.5, 99.9% within 4).
+fn parity_gpu(args: &Args) -> Result<(), String> {
+    let mut cpu = Renderers::new(false);
+    let mut gpu = Renderers::new(false);
+    gpu.world.set_gpu(Some(world_gpu()?));
+    let times: Vec<f32> = match args.opts.get("t") { Some(t) => vec![t.parse().map_err(|_| "--t: a number")?], None => vec![0.0, 0.37] };
+    println!("{:<16} {:>5} {:>8} {:>7} {:>5}  {}", "scene", "t", "mean", "p99.9", "max", "verdict");
+    let mut failed = 0;
+    for (name, item) in items(args)? {
+        let (w, _, len) = Renderers::dims(&item);
+        for &t in &times {
+            let c = cpu.frame(&item, t * len)?;
+            let g = gpu.frame(&item, t * len)?;
+            let mut per: Vec<u8> = c.chunks_exact(4).zip(g.chunks_exact(4)).map(|(a, b)| (0..3).map(|k| a[k].abs_diff(b[k])).max().unwrap()).collect();
+            let mean = c.chunks_exact(4).zip(g.chunks_exact(4)).map(|(a, b)| (0..3).map(|k| a[k].abs_diff(b[k]) as f64).sum::<f64>() / 3.0).sum::<f64>() / per.len().max(1) as f64;
+            let worst = per.iter().enumerate().max_by_key(|(_, d)| **d).map(|(i, d)| (i % w, i / w, *d)).unwrap_or((0, 0, 0));
+            per.sort_unstable();
+            let p999 = per[((per.len() as f64 * 0.999) as usize).min(per.len() - 1)];
+            let ok = mean <= 0.5 && p999 <= 4;
+            if !ok { failed += 1; }
+            println!("{:<16} {:>5.2} {:>8.3} {:>7} {:>5}  {} (worst at {},{})", name, t, mean, p999, worst.2, if ok { "ok" } else { "OVER" }, worst.0, worst.1);
+            if let Some(dir) = args.opts.get("o") {
+                let (fw, fh, _) = Renderers::dims(&item);
+                let base = format!("{dir}/{}_{t}", name.replace([' ', '/'], "_"));
+                save_png(&format!("{base}_cpu.png"), fw, fh, &c)?;
+                save_png(&format!("{base}_gpu.png"), fw, fh, &g)?;
+            }
+        }
+    }
+    if failed > 0 { Err(format!("{failed} frame(s) over the parity gate")) } else { Ok(()) }
+}
+
 fn cmd_parity(args: &Args) -> Result<(), String> {
+    if args.opts.get("engine").is_some_and(|e| e == "gpu") { return parity_gpu(args); }
     let mut cpu = Renderers::new(false);
     let mut gpu = Renderers::new(true);
     println!("{:<16} {:>6} {:>9} {:>9}", "scene", "t", "mean", "px>16");
@@ -314,7 +374,7 @@ fn cmd_parity(args: &Args) -> Result<(), String> {
 
 fn cmd_bench(args: &Args) -> Result<(), String> {
     let frames: usize = opt(args, "frames", 10usize)?.max(1);
-    let mut r = Renderers::new(gpu_backend(args)?);
+    let mut r = Renderers::for_args(args)?;
     r.studio = args.opts.contains_key("studio");
     println!("{:<16} {:>10}", "scene", "ms/frame");
     for (name, item) in items(args)? {
@@ -346,7 +406,7 @@ fn cmd_gallery(args: &Args) -> Result<(), String> {
     let scale: f32 = opt(args, "scale", 0.3f32)?.clamp(0.05, 1.0);
     let t: f32 = opt(args, "t", 0.0)?;
     let list = items(args)?;
-    let mut r = Renderers::new(gpu_backend(args)?);
+    let mut r = Renderers::for_args(args)?;
     let (w0, h0, _) = Renderers::dims(&list[0].1);
     let (tw, th) = ((w0 as f32 * scale) as usize, (h0 as f32 * scale) as usize);
     let rows = list.len().div_ceil(cols);
@@ -419,7 +479,7 @@ fn cmd_styles(args: &Args) -> Result<(), String> {
     let t: f32 = args.opts.get("t").and_then(|v| v.parse().ok()).unwrap_or(0.0);
     let scale: f32 = args.opts.get("scale").and_then(|v| v.parse().ok()).unwrap_or(0.35);
     let out = args.opts.get("o").ok_or("-o out.png")?;
-    let mut r = WorldRenderer::default();
+    let mut r = world_for(args)?;
     let mut imgs = Vec::new();
     let only = args.opts.get("only").map(|o| o.to_lowercase());
     for st in scene::styles::ALL.iter().filter(|st| only.as_ref().is_none_or(|o| st.name.to_lowercase().contains(o.as_str()))) {
@@ -445,7 +505,7 @@ fn cmd_kit(args: &Args) -> Result<(), String> {
     } else { (review::kit_backdrop(), std::env::current_dir().ok()) };
     let scale: f32 = opt(args, "scale", 0.35f32)?;
     let cols: usize = opt(args, "cols", 4usize)?;
-    let (img, names, warnings) = review::kit_sheet(&mut WorldRenderer::default(), kit, args.opts.get("only").map(|s| s.as_str()), &backdrop, base, scale, cols)?;
+    let (img, names, warnings) = review::kit_sheet(&mut world_for(args)?, kit, args.opts.get("only").map(|s| s.as_str()), &backdrop, base, scale, cols)?;
     for (i, (n, d)) in names.iter().enumerate() { println!("{:>2}  {:<20} {}", i + 1, n, d); }
     for w in &warnings { println!("warning: {w}"); }
     if let Some(out) = args.opts.get("o") {
@@ -504,7 +564,7 @@ fn cmd_animcheck(args: &Args) -> Result<(), String> {
     let (scene, dir) = match one_item(args)?.1 { Item::V3(s, d) => (s, d), Item::V2(_) => return Err("animcheck needs a v3 scene".into()) };
     let (w, h) = (frames[0].width, frames[0].height);
     let opts = RenderOptions { size: Some((w as u32, h as u32)), base_dir: dir, ..RenderOptions::default() };
-    let mut r = WorldRenderer::default();
+    let mut r = world_for(args)?;
     let n = frames.len();
     let lp = scene.motion.loop_length.max(1.0);
     let mut worst = (0usize, 0.0f64);
@@ -608,7 +668,7 @@ fn cmd_transition(args: &Args) -> Result<(), String> {
     let scale: f32 = opt(args, "scale", 0.3f32)?.clamp(0.05, 1.0);
     let size = ((a.canvas.width as f32 * scale).round().max(16.0) as u32, (a.canvas.height as f32 * scale).round().max(16.0) as u32);
     let opts = RenderOptions { size: Some(size), ..RenderOptions::default() };
-    let mut r = WorldRenderer::default();
+    let mut r = world_for(args)?;
     let mut imgs = Vec::new();
     let say = |notes: &[String], warnings: &[String]| {
         for n in notes { println!("  plan: {n}"); }
@@ -748,7 +808,11 @@ fn cmd_skill(args: &Args) -> Result<(), String> {
 }
 
 fn main() -> ExitCode {
-    let res = parse_args().and_then(|args| match args.cmd.as_str() {
+    let res = parse_args().and_then(|args| {
+        // `--engine cpu` reaches every renderer the command makes, exports included.
+        if args.opts.get("engine").is_some_and(|e| e == "cpu") { std::env::set_var("PF_ENGINE", "cpu"); }
+        Ok(args)
+    }).and_then(|args| match args.cmd.as_str() {
         "presets" => {
             if v2(&args) { for (n, _) in v2presets::ALL { println!("{n}"); } }
             else { for (n, _) in scene::presets::ALL { println!("{n}"); } }

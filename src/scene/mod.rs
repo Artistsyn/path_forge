@@ -104,7 +104,8 @@ pub struct PathShape {
 
 /// Forks. On open ground a branch path splits off at `angle` and runs away into the distance; between
 /// walls the fork is a side passage: an opening in the wall with a dark passage behind it. The walk
-/// itself stays on the main path.
+/// itself stays on the main path. `style` chooses how a branch leaves on open ground: through a
+/// gap in the path's edge, or by the road itself dividing.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(default)]
 pub struct Fork {
@@ -114,6 +115,8 @@ pub struct Fork {
     /// Where along the loop the first fork is, metres.
     pub offset: f32,
     pub side: ForkSide,
+    /// How a branch leaves the road on open ground (between walls a fork is always a side passage).
+    pub style: ForkStyle,
     /// Angle of a branch path from the main path, degrees (open ground).
     pub angle: f32,
     /// Half the width of a branch path, or of a side passage's opening, metres.
@@ -124,11 +127,24 @@ pub struct Fork {
     pub height: f32,
 }
 impl Default for Fork {
-    fn default() -> Self { Fork { enabled: false, spacing: 24.0, offset: 14.0, side: ForkSide::Alternate, angle: 38.0, half_width: 1.1, depth: 7.0, height: 2.6 } }
+    fn default() -> Self { Fork { enabled: false, spacing: 24.0, offset: 14.0, side: ForkSide::Alternate, style: ForkStyle::Side, angle: 38.0, half_width: 1.1, depth: 7.0, height: 2.6 } }
 }
 
+/// Which side a branch leaves on: one side, alternating from fork to fork, or both at once (the
+/// road divides three ways with `ForkStyle::Split`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-pub enum ForkSide { Left, Right, Alternate }
+pub enum ForkSide { Left, Right, Alternate, Both }
+
+/// How a branch leaves the road on open ground.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub enum ForkStyle {
+    /// A side path through a gap in the road's edge.
+    #[default]
+    Side,
+    /// The road itself divides: it widens, stays one paved surface for a stretch, then parts round
+    /// a grass point, each path running on alone.
+    Split,
+}
 
 /// Bridges: every `spacing` metres the ground beside the path drops away for `length` metres, and
 /// the path crosses on a deck. Walls carry on down into the gap.

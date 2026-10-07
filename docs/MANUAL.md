@@ -73,7 +73,7 @@ times in seconds.
 |---|---|
 | `canvas` | Output size in pixels (default 480 × 854, portrait). |
 | `camera` | Eye height, horizon position, zoom, lens curve. |
-| `path` | The road: width, flare, bend (curving left or right), hill (rising or dipping), ragged edges, material and pattern (cobblestone, brick, stone block, sand, dirt, grass, planks, water, ice…), stairs, bridges, and side paths or side passages that branch off as scenery. |
+| `path` | The road: width, flare, bend (curving left or right), hill (rising or dipping), ragged edges, material and pattern (cobblestone, brick, stone block, sand, dirt, grass, planks, water, ice…), stairs, bridges, and side paths, roads that divide in two or three, or side passages that branch off as scenery. |
 | `verge` | The ground beside an open path: its material and grass tufts. Off, the path edge drops into void (walls usually cover it). |
 | `walls` | Walls either side (a corridor, a canyon, a street) and their material. |
 | `ceiling` | A roof at a height, with its material. |

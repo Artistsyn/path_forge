@@ -108,10 +108,14 @@ depth layers or a depth map).
   The ground beside the path falls away and walls carry on down into the gap; trees and rocks
   stop at the edge and standing lamps move onto the railing. In a walled corridor the walls must
   stand back from the path (`walls.gap` 1.5 m or more) or there is no gap to cross; pf_analyze warns.
-- **Forks:** `path.fork` (`spacing`, `side` "Left" / "Right" / "Alternate", `angle`,
-  `half_width`). On open ground a branch path splits off and runs away; between walls it becomes
-  a side passage (a doorway under a ceiling, an alley without one). The walk stays on the main
-  path. Alternating sides needs an even number of forks per loop; pf_analyze says when it is odd.
+- **Forks:** `path.fork` (`spacing`, `side` "Left" / "Right" / "Alternate" / "Both", `style`,
+  `angle`, `half_width`). On open ground `style` "Side" (the default) sends a branch path off
+  through a gap in the road's edge; "Split" divides the road itself: it widens into one paved
+  surface, then parts round a grass point, the branch curving away to run on at `angle` (smaller
+  angles, 15-30, make a long gentle Y). `side` "Both" with "Split" divides it three ways. Between
+  walls a fork is always a side passage (a doorway under a ceiling, an alley without one), on both
+  walls with "Both". The walk stays on the main path. Alternating sides needs an even number of
+  forks per loop; pf_analyze says when it is odd.
 - **Wet, icy and watery floors:** every material has `gloss` (0 matte, 0.3-0.5 wet stone, about
   0.6 ice, 1 still water) and `ripples` (0 glassy to 1 choppy). Reflections are traced against the
   rendered world, including what stands above and beside the frame (a canopy, a ceiling, lamps

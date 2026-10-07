@@ -20,6 +20,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 mod weather;
+mod splat;
+use splat::{Shape, Splat};
 
 /// Which parts of the world to draw, for layered exports.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -119,6 +121,9 @@ pub struct WorldRenderer {
     /// Time each stage of a frame took, summed over frames while `profile` is on (`pf bench --stages`).
     pub profile: bool,
     pub stages: Vec<(&'static str, f64)>,
+    /// GPU passes, when a device was given (`set_gpu`); every pass without one runs on the CPU.
+    #[cfg(feature = "gpu")]
+    gpu: Option<Arc<super::gpu::Gpu>>,
 }
 
 /// Times the stages of one frame when profiling is on; costs one branch per stage when it is off.
@@ -167,6 +172,12 @@ fn path_noise(dw: f32, loop_len: f32, cell: f32, seed: u32) -> f32 {
     let a = hf(seed, i.rem_euclid(n));
     let b = hf(seed, (i + 1).rem_euclid(n));
     a + (b - a) * f
+}
+
+/// Smooth minimum of two signed distances: their union with the corners rounded over k.
+fn smin(a: f32, b: f32, k: f32) -> f32 {
+    let h = (k - (a - b).abs()).max(0.0) / k;
+    a.min(b) - h * h * k * 0.25
 }
 
 fn smoothstep(e0: f32, e1: f32, x: f32) -> f32 {
@@ -520,9 +531,32 @@ impl<'a> Ctx<'a> {
     fn wall_x(&self, d: f32) -> f32 { self.view.path_half_width(d) + self.scene.walls.gap.max(0.0) }
 
     /// Whether ground at (x, d) is a fork: a branch path on open ground, or a side passage's floor.
+    /// With the split style, it is ground the branch roads pave that the main road alone would not.
     fn on_fork(&self, x: f32, d: f32) -> bool {
         let Some(f) = &self.fork else { return false };
-        if self.scene.walls.enabled { x.abs() > self.wall_x(d) - 1e-3 } else { f.on_branch(x, self.scroll + d, self.view.path_half_width(d)) }
+        if self.scene.walls.enabled { return x.abs() > self.wall_x(d) - 1e-3; }
+        if f.split { let (m, _, u) = self.split_field(x, d); return u < 0.0 && u < m; }
+        f.on_branch(x, self.scroll + d, self.view.path_half_width(d))
+    }
+
+    /// The split style's ground: (main road, branch roads, both together) as signed distances in
+    /// metres, the last a smooth union so the roads meet in rounded corners.
+    fn split_field(&self, x: f32, d: f32) -> (f32, f32, f32) {
+        let f = self.fork.as_ref().unwrap();
+        let m = x.abs() - self.path_edge(d);
+        let b = f.branch_sd(x, self.scroll + d, self.view.path_half_width(d));
+        (m, b, smin(m, b, f.fillet()))
+    }
+
+    /// The darkening toward the road's edges (path.edge_dark) where a split road's edges run: the
+    /// main road's falloff over the outer half of its width, carried round the branches.
+    fn split_edge_dark(&self, x: f32, d: f32) -> f32 {
+        let f = self.fork.as_ref().unwrap();
+        let (m, b, _) = self.split_field(x, d);
+        let edge = self.path_edge(d).max(0.05);
+        let (rm, rb) = (0.5 * edge, 0.5 * f.hw);
+        let n = smin(m / rm, b / rb, f.fillet() / rm.min(rb));
+        1.0 - self.scene.path.edge_dark.clamp(0.0, 1.0) * (1.0 - smoothstep(0.0, 1.0, -n))
     }
 
     /// Whether `d` metres ahead is on a bridge (the ground beside the path has dropped away).
@@ -740,6 +774,34 @@ struct Plan {
 }
 
 impl WorldRenderer {
+    /// Run the passes that have a GPU form on this device (None: everything on the CPU).
+    #[cfg(feature = "gpu")]
+    pub fn set_gpu(&mut self, gpu: Option<Arc<super::gpu::Gpu>>) { self.gpu = gpu; }
+
+    /// A renderer that draws on the GPU where there is one (`gpu::shared`), else on the CPU.
+    pub fn auto() -> WorldRenderer {
+        #[allow(unused_mut)]
+        let mut r = WorldRenderer::default();
+        #[cfg(feature = "gpu")]
+        if let Some(c) = super::gpu::shared() {
+            match super::gpu::Gpu::new(c) {
+                Ok(g) => r.set_gpu(Some(Arc::new(g))),
+                Err(e) => eprintln!("GPU renderer unavailable, rendering on the CPU: {e}"),
+            }
+        }
+        r
+    }
+
+    /// Which engine draws this renderer's frames: "gpu" or "cpu" (frames of several worlds at
+    /// once are still drawn on the CPU either way).
+    pub fn engine(&self) -> &'static str {
+        #[cfg(feature = "gpu")]
+        if self.gpu.is_some() { return "gpu"; }
+        "cpu"
+    }
+    #[cfg(feature = "gpu")]
+    pub fn gpu(&self) -> Option<&Arc<super::gpu::Gpu>> { self.gpu.as_ref() }
+
     /// Render the scene `distance` metres along the path.
     pub fn render(&mut self, scene: &Scene, distance: f32, opts: &RenderOptions) -> Image {
         let w = WorldIn { scene, distance, time: opts.time, base_dir: opts.base_dir.clone() };
@@ -1040,9 +1102,62 @@ impl WorldRenderer {
         // Deferred lighting.
         let mut hdr = vec![[0.0f32; 3]; bw * bh];
         let mut refl = vec![Refl::default(); bw * bh];
-        shade(&ctxs, &plan.sky_w, &soft, &gbuf, &sun_mask, &ao_mask, &layers, &mut hdr, &mut refl);
+        // On the GPU (one world), the frame's buffers stay there from here on; `gpu_has` says
+        // which ones hold newer data than the CPU's copies, and a CPU pass fetches what it needs.
+        // Post on the GPU needs the palette, its levels and the grade first (finding them can render
+        // frames of its own).
+        #[cfg(feature = "gpu")]
+        let mut gpu_look = if self.gpu.is_some() && gpu_world(&ctxs, &soft).is_some() {
+            let base = worlds[plan.look].base_dir.clone();
+            let look_opts = RenderOptions { base_dir: base.clone(), ..opts.clone() };
+            let lut = look_opts.palette.clone().or_else(|| self.palette_for(look, &look_opts));
+            let levels = lut.as_ref().filter(|l| l.ramp.is_some()).map(|_| self.loop_levels(look, base.clone()));
+            let grade = if layers.post && !look.style.grade.trim().is_empty() && look.style.grade_strength > 0.0 { self.grade_for(&look.style.grade, base.as_deref()) } else { None };
+            Some((lut, levels, grade))
+        } else { None };
+        #[cfg(feature = "gpu")]
+        let gpu_arc = self.gpu.clone();
+        #[cfg(feature = "gpu")]
+        let mut gf = match (&gpu_arc, gpu_world(&ctxs, &soft)) {
+            (Some(g), Some(ctx)) => {
+                let tiles = tile_lights(std::slice::from_ref(ctx), &gbuf);
+                let mut p = gpu_params(ctx, &layers);
+                if let Some(t) = &tiles { p.tiles_on = 1; p.tile_cols = t.cols as u32; }
+                let mut f = g.frame(&p);
+                f.profile = self.profile;
+                // Whether any pixel can reflect (shade gives gloss only to these).
+                let reflects = p.path_gloss > 0.0 || p.verge_gloss > 0.0 || p.deck_gloss > 0.0 || (p.bridge_on != 0 && p.br_bottom == 1) || p.wx_wet > 0.0 || p.wx_puddles > 0.0;
+                Some((f, GpuHas { reflects, ..GpuHas::default() }, tiles))
+            }
+            _ => None,
+        };
+        #[cfg(feature = "gpu")]
+        if let Some((f, has, tiles)) = gf.as_mut() {
+            f.put_gbuf(&gbuf);
+            f.put_masks(&sun_mask, &ao_mask);
+            gpu_shade(f, &ctxs[0], tiles.take());
+            has.hdr = true;
+            has.refl = true;
+        }
+        #[cfg(feature = "gpu")]
+        let on_gpu = gf.is_some();
+        #[cfg(not(feature = "gpu"))]
+        let on_gpu = false;
+        if !on_gpu { shade(&ctxs, &plan.sky_w, &soft, &gbuf, &sun_mask, &ao_mask, &layers, &mut hdr, &mut refl); }
         prof.mark("shade");
-        if layers.sky {
+        let here = if plan.zb > 0.0 { 0 } else { plan.next };
+        let bank_t = ctxs[here].bank_t(ctxs[here].far);
+        // One world on the GPU: the sky, the veil and the bank are drawn there in one pass.
+        #[cfg(feature = "gpu")]
+        if let Some((f, _, _)) = gf.as_mut() {
+            let draw = layers.sky && plan.sky_w.any(0) && worlds[0].scene.sky.enabled;
+            let bank = (bank_t < 1.0).then(|| (bank_t, ctxs[here].fog_col));
+            if draw || bank.is_some() {
+                let strike = match &strikes[0] { (_, Some(s), flash) => Some((s, *flash)), _ => None };
+                f.sky(&gpu_sky(&ctxs[0], draw, strike, bank));
+            }
+        }
+        if layers.sky && !on_gpu {
             let skies: Vec<usize> = (0..n).filter(|&r| plan.sky_w.any(r) && worlds[r].scene.sky.enabled).collect();
             let draw = |r: usize, hdr: &mut Vec<[f32; 3]>| {
                 draw_sky_bodies(&ctxs[r], &gbuf, hdr);
@@ -1071,9 +1186,7 @@ impl WorldRenderer {
         }
         // A fog bank the camera is inside or looking through hides the sky too (the even fog is
         // already matched to the sky by its colour).
-        let here = if plan.zb > 0.0 { 0 } else { plan.next };
-        let bank_t = ctxs[here].bank_t(ctxs[here].far);
-        if bank_t < 1.0 {
+        if bank_t < 1.0 && !on_gpu {
             let fc = ctxs[here].fog_col;
             hdr.par_iter_mut().zip(gbuf.par_iter()).for_each(|(c, g)| if g.id == id::NONE { *c = mix3(fc, *c, bank_t); });
         }
@@ -1087,12 +1200,29 @@ impl WorldRenderer {
             // Set up every card, then draw them far to near in bands of rows side by side: within
             // a band the order is the same as drawing one card after another.
             let cards: Vec<Card> = bills.par_iter().filter_map(|b| Card::new(&ctxs[b.realm as usize], b, crisp)).collect();
+            // On the GPU, then everything after this still runs on the CPU: bring the GPU's
+            // results back.
+            #[cfg(feature = "gpu")]
+            if let Some((f, has, _)) = gf.as_mut() {
+                if !cards.is_empty() {
+                    let list: Vec<_> = cards.par_iter().map(|c| c.gpu()).collect();
+                    let boxes: Vec<_> = cards.iter().map(|c| (c.x0, c.y0, c.x1, c.y1)).collect();
+                    f.cards(&list, &super::gpu::bin_tiles(bw, bh, &boxes), opts.pick);
+                    has.gbuf = true;
+                    has.cards = true;
+                }
+            }
+            #[cfg(feature = "gpu")]
+            let cpu_cards = gf.is_none();
+            #[cfg(not(feature = "gpu"))]
+            let cpu_cards = true;
             const BAND: usize = 8;
             let band = |k: usize, g: &mut [GPixel], c: &mut [[f32; 3]], mut p: Option<&mut [u16]>| {
                 let (r0, r1) = ((k * BAND) as i64, (k * BAND + g.len() / bw) as i64 - 1);
                 for card in cards.iter().filter(|c| c.y1 >= r0 && c.y0 <= r1) { card.draw_rows(k * BAND, g, c, p.as_deref_mut()); }
             };
-            if opts.pick {
+            if !cpu_cards {
+            } else if opts.pick {
                 gbuf.par_chunks_mut(bw * BAND).zip(hdr.par_chunks_mut(bw * BAND)).zip(pick.par_chunks_mut(bw * BAND)).enumerate()
                     .for_each(|(k, ((g, c), p))| band(k, g, c, Some(p)));
             } else {
@@ -1100,40 +1230,126 @@ impl WorldRenderer {
             }
         }
         prof.mark("billboards");
+        // Grass, flames, the wisps, particles and weather, as one list of splats each pass adds to.
+        // On the GPU each list is kept and drawn in two dispatches (blades, which write the
+        // G-buffer, then the rest), and everything after this still runs on the CPU: bring the
+        // GPU's results back.
+        #[cfg(feature = "gpu")]
+        let splat_gpu = gf.is_some();
+        #[cfg(not(feature = "gpu"))]
+        let splat_gpu = false;
+        let mut tufts: Vec<Splat> = Vec::new();
         for ctx in &ctxs {
-            if layers.ground && ctx.scene.verge.tufts { draw_tufts(ctx, &mut gbuf, &mut hdr); }
+            if layers.ground && ctx.scene.verge.tufts { draw_tufts(ctx, &mut tufts); }
         }
+        if !splat_gpu { splat::draw_all(&tufts, &mut gbuf, &mut hdr, bw, bh); }
         prof.mark("tufts");
+        let mut splats: Vec<Splat> = Vec::new();
+        let mut later: Vec<Splat> = Vec::new();
+        let mut run = |list: &mut Vec<Splat>, gbuf: &mut Vec<GPixel>, hdr: &mut Vec<[f32; 3]>| {
+            if splat_gpu { later.append(list); } else { splat::draw_all(list, gbuf, hdr, bw, bh); list.clear(); }
+        };
         for f in &flames {
-            draw_flame(&ctxs[f.realm as usize], f, &gbuf, &mut hdr);
+            draw_flame(&ctxs[f.realm as usize], f, &mut splats);
         }
+        run(&mut splats, &mut gbuf, &mut hdr);
         prof.mark("flames");
         if layers.particles {
             for (r, ctx) in ctxs.iter().enumerate() {
-                weather::draw_wisps(ctx, &gbuf, &mut hdr);
+                weather::draw_wisps(ctx, &mut splats);
+                run(&mut splats, &mut gbuf, &mut hdr);
                 prof.mark("wisps");
                 for p in ctx.scene.particles.iter().filter(|p| p.enabled && p.count > 0) {
-                    draw_particles(ctx, p, strikes[r].0, &gbuf, &mut hdr);
+                    draw_particles(ctx, p, strikes[r].0, &mut splats);
                 }
+                run(&mut splats, &mut gbuf, &mut hdr);
                 prof.mark("particles");
-                weather::draw_precip(ctx, &gbuf, &mut hdr);
+                weather::draw_precip(ctx, &mut splats);
+                run(&mut splats, &mut gbuf, &mut hdr);
                 prof.mark("precip");
-                weather::draw_drips(ctx, &gbuf, &mut hdr);
-                weather::draw_sandstorm(ctx, &gbuf, &mut hdr);
+                weather::draw_drips(ctx, &mut splats);
+                weather::draw_sandstorm(ctx, &mut splats);
+                run(&mut splats, &mut gbuf, &mut hdr);
                 prof.mark("drips+sand");
             }
         }
+        #[cfg(feature = "gpu")]
+        if let Some((f, has, _)) = gf.as_mut() {
+            if !tufts.is_empty() {
+                let (l, b) = splat::gpu_list(&tufts, bw, bh);
+                f.splats(0, &l, &b);
+                has.gbuf = true;
+            }
+            if !later.is_empty() {
+                let (l, b) = splat::gpu_list(&later, bw, bh);
+                f.splats(1, &l, &b);
+            }
+            // Reflections in glossy floors, now that everything they could show is drawn.
+            if has.reflects { f.reflect(); }
+            has.refl = false;
+            // The air: mist over everything low.
+            let m = &ctxs[0].scene.weather.mist;
+            if layers.particles && m.enabled && m.density > 0.0 {
+                let travel = if ctxs[0].scene.weather.wind.enabled { ctxs[0].scene.weather.wind.speed * 0.5 } else { 0.4 } * ctxs[0].scene.motion.loop_seconds();
+                f.mist(&super::gpu::AirParams {
+                    mist_on: 1, density: m.density, top: m.height.max(0.05), patch: m.patchiness, travel, seed: m.seed,
+                    mist: rgb_lin(m.color), pad: [0; 3],
+                });
+            }
+            // Then light scattered in it.
+            if layers.particles {
+                if let Some(su) = weather::shaft_setup(&ctxs, if plan.zb > 0.0 { 0 } else { plan.next }) {
+                    let mut sp = super::gpu::ShaftParams { mw: su.mw as u32, mh: su.mh as u32, hy: ctxs[0].view.horizon_px.max(2.0), ..Default::default() };
+                    if let Some((sx, sy, glow_r, k, col)) = su.sun { (sp.sun_on, sp.sx, sp.sy, sp.glow_r, sp.k_sun, sp.sun) = (1, sx, sy, glow_r, k, col); }
+                    let lists = match su.lamps {
+                        Some((k, tc, lists)) => { (sp.lamps_on, sp.k_lamp, sp.tc, sp.n_lights) = (1, k, tc as u32, ctxs[0].lights.len() as u32); lists }
+                        None => Vec::new(),
+                    };
+                    f.shafts(&sp, &lists);
+                }
+            }
+            // Post and style too, when its buffers fit: then only the finished frame comes back.
+            let fits = f.post_words(w, h, layers.post && look.style.paint >= 0.5).is_some();
+            if let (true, Some((lut, levels, grade))) = (fits, gpu_look.take()) {
+                let fv = ctxs[0].view.frame();
+                let input = gpu_post_params(&ctxs[0], &fv, look, &layers, opts, (gl, gt, w, h, out_w, out_h, px), crisp, has.cards, lut.as_deref(), levels, grade.as_deref());
+                let out = f.post(input);
+                prof.mark("gpu post");
+                if self.profile { prof.out.extend(f.pass_times()); }
+                let mut img = Image { width: out_w, height: out_h, rgba: out.rgba, stats: None, depth: None, pick: None };
+                img.pick = out.pick.map(|ids| Pick { width: w, height: h, ids });
+                img.depth = out.depth.map(|mut d| {
+                    if fv.lens_curve.abs() > 0.001 { super::post::lens_warp_depth(&mut d, w, h, fv.horizon_px, fv.lens_curve); }
+                    super::post::upscale_depth(&d, w, h, px, out_w, out_h)
+                });
+                img.stats = out.stats.map(|rows| stats_from_rows(&ctxs[0], &rows, w * h, bills.len()));
+                for (name, ms) in prof.out {
+                    match self.stages.iter_mut().find(|(n, _)| *n == name) { Some(e) => e.1 += ms, None => self.stages.push((name, ms)) }
+                }
+                return img;
+            }
+            f.download(super::gpu::Down {
+                gbuf: has.gbuf.then_some(&mut gbuf[..]),
+                hdr: has.hdr.then_some(&mut hdr[..]),
+                refl: has.refl.then_some(bytemuck::cast_slice_mut(&mut refl[..])),
+                pick: (has.cards && opts.pick).then_some(&mut pick[..]),
+            });
+            prof.mark("gpu wait+read");
+            if self.profile { prof.out.extend(f.pass_times()); }
+        }
+        #[cfg(feature = "gpu")]
+        drop(gf);
 
         // Reflections in glossy floors, now that everything they could show is drawn.
-        if refl.iter().any(|r| r.r >= 0.002) {
+        if !splat_gpu && refl.iter().any(|r| r.r >= 0.002) {
             reflect_pass(&ctxs[0], &gbuf, &refl, &mut hdr);
         }
         prof.mark("reflect");
         // The air: mist over everything low, then light scattered in it.
         if layers.particles {
-            weather::apply_mist(&ctxs, &gbuf, &mut hdr);
+            if !splat_gpu { weather::apply_mist(&ctxs, &gbuf, &mut hdr); }
             prof.mark("mist");
-            weather::light_shafts(&ctxs, if plan.zb > 0.0 { 0 } else { plan.next }, &gbuf, &mut hdr);
+            if !splat_gpu { weather::light_shafts(&ctxs, if plan.zb > 0.0 { 0 } else { plan.next }, &gbuf, &mut hdr); }
             prof.mark("shafts");
         }
         if gl > 0 || gt > 0 {
@@ -1283,7 +1499,7 @@ impl WorldRenderer {
             wall_tile: snap_to_loop(scene.walls.material.tile_size, loop_len),
             ceil_tile: snap_to_loop(scene.ceiling.material.tile_size, loop_len),
             bridge: Spans::new(&scene.path.bridge, loop_len),
-            fork: Forks::new(&scene.path.fork, loop_len),
+            fork: Forks::new(&scene.path.fork, scene.path.edge_noise, loop_len),
             deck_tex: self.textures.get(&scene.path.bridge.deck),
             bottom_tex: match scene.path.bridge.bottom {
                 BridgeBottom::Water => self.textures.get(&Material { pattern: Pattern::Plain, base: scene.path.bridge.bottom_color, ..Material::default() }),
@@ -1445,7 +1661,7 @@ impl WorldRenderer {
                     // Over a bridge's gap there is no ground beside the path: a lamp that stood there
                     // hangs on the railing instead, so the rhythm of light carries across.
                     if matches!(f.mount, Mount::Wall) && scene.walls.enabled && sign != 0.0
-                        && ctx.fork.and_then(|fk| fk.opening(ctx.scroll + d)) == Some(sign) { continue; }
+                        && ctx.fork.is_some_and(|fk| fk.opens(ctx.scroll + d, sign)) { continue; }
                     let standing = matches!(f.mount, Mount::Ground) || (matches!(f.mount, Mount::Wall) && !scene.walls.enabled);
                     let x = if standing && x.abs() > hw && ctx.on_bridge(d) { x.signum() * (hw + 0.05) } else { x };
                     if !ctx.owns(x, 0.0, d) { continue; }
@@ -1683,15 +1899,16 @@ impl Spans {
 
 /// Where the forks are along the world.
 #[derive(Clone, Copy, Debug)]
-struct Forks { period: f32, offset: f32, side: ForkSide, tan: f32, hw: f32, depth: f32, height: f32, per_loop: i64 }
+struct Forks { period: f32, offset: f32, side: ForkSide, split: bool, tan: f32, hw: f32, noise: f32, depth: f32, height: f32, per_loop: i64 }
 
 impl Forks {
-    fn new(f: &Fork, loop_len: f32) -> Option<Forks> {
+    fn new(f: &Fork, edge_noise: f32, loop_len: f32) -> Option<Forks> {
         if !f.enabled || f.half_width <= 0.0 { return None; }
         let period = snap_to_loop(f.spacing.max(4.0), loop_len);
+        let hw = f.half_width.clamp(0.2, period * 0.2);
         Some(Forks {
-            period, offset: f.offset, side: f.side, tan: f.angle.clamp(5.0, 85.0).to_radians().tan(),
-            hw: f.half_width.clamp(0.2, period * 0.2), depth: f.depth.clamp(0.5, 100.0), height: f.height.max(0.5),
+            period, offset: f.offset, side: f.side, split: f.style == ForkStyle::Split, tan: f.angle.clamp(5.0, 85.0).to_radians().tan(),
+            hw, noise: edge_noise.clamp(0.0, hw * 0.5), depth: f.depth.clamp(0.5, 100.0), height: f.height.max(0.5),
             per_loop: (loop_len / period).round().max(1.0) as i64,
         })
     }
@@ -1699,39 +1916,104 @@ impl Forks {
         // Sides follow the fork's place in the loop, not its count from the start, or the fork just
         // ahead would change sides when the loop wraps. With an odd number per loop two neighbours
         // share a side at the wrap (one per loop: always the left).
-        match self.side { ForkSide::Left => -1.0, ForkSide::Right => 1.0, ForkSide::Alternate => if k.rem_euclid(self.per_loop) % 2 == 0 { -1.0 } else { 1.0 } }
+        match self.side { ForkSide::Left | ForkSide::Both => -1.0, ForkSide::Right => 1.0, ForkSide::Alternate => if k.rem_euclid(self.per_loop) % 2 == 0 { -1.0 } else { 1.0 } }
     }
+    /// The sides fork k leaves on: one, or both (the second is 0 when there is only one).
+    fn sides(&self, k: i64) -> [f32; 2] { if self.side == ForkSide::Both { [-1.0, 1.0] } else { [self.side_of(k), 0.0] } }
+    fn has_side(&self, k: i64, side: f32) -> bool { self.sides(k).contains(&side) }
     /// Junctions whose branch could reach world distance w: (where, which side).
+    #[cfg(test)]
     fn near(&self, w: f32, reach: f32) -> impl Iterator<Item = (f32, f32)> + '_ {
         let k0 = ((w - self.offset - reach) / self.period).floor() as i64;
         let k1 = ((w - self.offset + self.hw * 2.0) / self.period).floor() as i64;
-        (k0..=k1).map(move |k| (self.offset + k as f32 * self.period, self.side_of(k)))
+        (k0..=k1).flat_map(move |k| self.sides(k).into_iter().filter(|&d| d != 0.0).map(move |d| (self.offset + k as f32 * self.period, d)))
     }
     /// Whether ground at (x, w) is on a branch path. A branch leaves the main path's edge at its
     /// junction and runs off at the fork angle, with a rounded mouth.
     fn on_branch(&self, x: f32, w: f32, main_hw: f32) -> bool {
         let reach = 300.0 / self.tan;
         let norm = (1.0 + self.tan * self.tan).sqrt();
-        self.near(w, reach).any(|(j, side)| {
+        let hit = |j: f32, side: f32| {
             let t = w - j;
             if t < -self.hw || x * side <= 0.0 { return false; }
             // The centreline starts inside the main path and heads off at the fork angle.
             let x0 = side * main_hw * 0.5;
             let dist = if t >= 0.0 { ((x - x0) - side * self.tan * t).abs() / norm } else { ((x - x0).powi(2) + t * t).sqrt() };
             dist < self.hw
-        })
+        };
+        // Only junctions in two narrow windows can reach (x, w): the one whose centreline crosses
+        // x near here (t* = (|x| - main_hw/2) / tan, give or take hw * norm / tan), and those
+        // within hw of w (the rounded mouth). Each is widened by a period against rounding, and
+        // kept inside the range `near` would walk, so the answer is the same, junction for junction.
+        let k = |m: f32| ((m - self.offset) / self.period).floor() as i64;
+        let (k0, k1) = (k(w - reach), k(w + self.hw * 2.0));
+        let ts = (x.abs() - main_hw * 0.5) / self.tan;
+        let spread = self.hw * norm / self.tan;
+        let at = |k: i64| self.offset + k as f32 * self.period;
+        let window = |lo: f32, hi: f32| (k(lo) - 1).max(k0)..=(k(hi) + 1).min(k1);
+        window(w - ts - spread, w - ts + spread).chain(window(w - self.hw, w + self.hw))
+            .any(|k| self.sides(k).into_iter().any(|side| side != 0.0 && hit(at(k), side)))
     }
-    /// The side passage (between walls) open at world distance w, if any: its side.
-    fn opening(&self, w: f32) -> Option<f32> {
+    /// How far the split style rounds the corners where a branch meets the road, metres.
+    fn fillet(&self) -> f32 { self.hw }
+    /// The split style: signed distance (metres, below 0 inside) from ground at (x, w) to the
+    /// nearest branch road. A branch leaves the middle of the main road at its junction, running
+    /// alongside it at first (one wide paved surface) and curving away until it runs on at the fork
+    /// angle; a grass point opens between the two once they have drawn apart. Its edges wobble like
+    /// the main road's, differently for each fork in the loop.
+    ///
+    /// Distance is measured across the road (along x) and scaled by the centreline's slope there,
+    /// so a point is within e of the centreline only where |x - xc(t)| < e * sqrt(1 + slope^2) <=
+    /// e * norm; xc rising with t, that bounds the junctions worth looking at to a window.
+    fn branch_sd(&self, x: f32, w: f32, main_hw: f32) -> f32 {
+        let r = (main_hw + self.hw) / self.tan;
+        let norm = (1.0 + self.tan * self.tan).sqrt();
+        let cap = self.hw + self.noise + self.fillet();
+        let e = cap * norm;
+        // The distance along the road at which the centreline is v out from the middle.
+        let tc = |v: f32| if v <= 0.0 { 0.0 } else { ((v / self.tan + r).powi(2) - r * r).sqrt() };
+        let reach = 300.0 / self.tan;
+        let (t_lo, t_hi) = (tc(x.abs() - e), tc(x.abs() + e).min(reach));
+        let k = |m: f32| ((m - self.offset) / self.period).floor() as i64;
+        let lo = w - t_hi;
+        let hi = w - t_lo + if t_lo == 0.0 { cap } else { 0.0 };
+        (k(lo) - 1..=k(hi) + 1).fold(f32::INFINITY, |best, kk| self.branch_sd_at(x, w, kk, r, best))
+    }
+    /// One junction's branches' signed distance at (x, w), or `best` if that is nearer.
+    fn branch_sd_at(&self, x: f32, w: f32, kk: i64, r: f32, mut best: f32) -> f32 {
+        let cap = self.hw + self.noise + self.fillet();
+        let t = w - (self.offset + kk as f32 * self.period);
+        if t < -cap || t > 300.0 / self.tan { return best; }
+        for side in self.sides(kk) {
+            if side == 0.0 || x * side <= 0.0 { continue; }
+            let dist = if t >= 0.0 {
+                let q = (t * t + r * r).sqrt();
+                let xc = side * self.tan * (q - r);
+                let slope = self.tan * t / q;
+                (x - xc).abs() / (1.0 + slope * slope).sqrt()
+            } else {
+                (x * x + t * t).sqrt()
+            };
+            if dist - self.hw - self.noise >= best { continue; }
+            let seed = 303 + 7 * (kk.rem_euclid(self.per_loop) as u32) + if side > 0.0 { 3 } else { 0 };
+            let tn = t.max(0.0);
+            let n = path_noise(tn, 1024.0, 0.9, seed) * 0.65 + path_noise(tn, 1024.0, 0.3, seed + 1) * 0.35;
+            best = best.min(dist - (self.hw + self.noise * (n * 2.0 - 1.0)));
+        }
+        best
+    }
+    /// Whether a side passage (between walls) opens on `side` at world distance w.
+    fn opens(&self, w: f32, side: f32) -> bool {
         let k = ((w - self.offset) / self.period).floor() as i64;
         let u = w - self.offset - k as f32 * self.period;
-        (u < self.hw * 2.0).then(|| self.side_of(k))
+        u < self.hw * 2.0 && self.has_side(k, side)
     }
     /// Each side passage overlapping [a, b): (start, end, side), world metres.
     fn openings(&self, a: f32, b: f32) -> Vec<(f32, f32, f32)> {
         let k0 = ((a - self.offset) / self.period).floor() as i64 - 1;
         let k1 = ((b - self.offset) / self.period).ceil() as i64;
-        (k0..=k1).map(|k| { let s = self.offset + k as f32 * self.period; (s, s + self.hw * 2.0, self.side_of(k)) }).filter(|&(s, e, _)| e > a && s < b).collect()
+        (k0..=k1).flat_map(|k| { let s = self.offset + k as f32 * self.period; self.sides(k).into_iter().filter(|&d| d != 0.0).map(move |d| (s, s + self.hw * 2.0, d)) })
+            .filter(|&(s, e, _)| e > a && s < b).collect()
     }
 }
 
@@ -1852,11 +2134,11 @@ fn build_geometry(ctx: &Ctx, layers: &Layers) -> Vec<Tri> {
             // With side passages every wall is also cut at the passage height, so the far post of each
             // opening shares its edge with the wall beside it.
             let ph = passage_h.filter(|&h| h < top - 1e-3);
-            let open = ctx.fork.filter(|_| !openings.is_empty()).and_then(|f| f.opening(v.scroll + 0.5 * (d0 + d1)));
+            let open = ctx.fork.filter(|_| !openings.is_empty());
+            let mid = v.scroll + 0.5 * (d0 + d1);
             for (sign, wid) in [(-1.0f32, id::WALL_L), (1.0, id::WALL_R)] {
                 let (x0, x1) = (sign * ctx.wall_x(d0), sign * ctx.wall_x(d1));
-                let f = ctx.fork.unwrap_or(Forks { period: 1.0, offset: 0.0, side: ForkSide::Left, tan: 1.0, hw: 0.0, depth: 0.0, height: 0.0, per_loop: 1 });
-                if open == Some(sign) {
+                if let Some(f) = open.filter(|f| f.opens(mid, sign)) {
                     // A side passage: floor and ceiling run back into the dark, a lintel above.
                     let (p0, p1) = (sign * (ctx.wall_x(d0) + f.depth), sign * (ctx.wall_x(d1) + f.depth));
                     let h = ph.unwrap_or(top);
@@ -2092,7 +2374,9 @@ fn surface_uv(ctx: &Ctx, g: &GPixel) -> Option<(f32, f32, u8)> {
 
 /// What a glossy floor pixel needs from the reflection pass: how much it reflects (fog included),
 /// the colour it already assumed from the sky, how rough it is, and its ripple slope.
+#[repr(C)]
 #[derive(Clone, Copy, Default)]
+#[cfg_attr(feature = "gpu", derive(bytemuck::Pod, bytemuck::Zeroable))]
 struct Refl { r: f32, env: [f32; 3], rough: f32, sx: f32 }
 
 /// Gloss and ripples of the material a floor pixel shows.
@@ -2192,7 +2476,9 @@ fn shade_px(ctx: &Ctx, g: &GPixel, gbuf: &[GPixel], i: usize, x: usize, y: usize
     let (normal, skip) = match g.id {
         id::GROUND => {
             ao *= passage_dark(ctx, g);
-            if tex == 0 && !ctx.on_fork(g.x, g.d) {
+            if tex == 0 && ctx.fork.is_some_and(|f| f.split) && !scene.walls.enabled {
+                ao *= ctx.split_edge_dark(g.x, g.d);
+            } else if tex == 0 && !ctx.on_fork(g.x, g.d) {
                 let edge = ctx.path_edge(g.d).max(0.05);
                 ao *= 1.0 - scene.path.edge_dark.clamp(0.0, 1.0) * smoothstep(0.5, 1.0, g.x.abs() / edge);
             }
@@ -2296,9 +2582,9 @@ fn shade_px(ctx: &Ctx, g: &GPixel, gbuf: &[GPixel], i: usize, x: usize, y: usize
             let s = norm * dot3(n, hv).max(0.0).powf(e) * fres(dot3(hv, v).max(0.0)) * ndl * gloss * k;
             spec = add3(spec, scale3(col, s));
         };
-        let all: Vec<u16>;
-        let near = match near_lights { Some(l) => l, None => { all = (0..ctx.lights.len() as u16).collect(); &all } };
-        for pl in near.iter().map(|&k| &ctx.lights[k as usize]) {
+        let picked = near_lights.map(|l| l.iter().map(|&k| &ctx.lights[k as usize]));
+        let all = near_lights.is_none().then(|| ctx.lights.iter());
+        for pl in picked.into_iter().flatten().chain(all.into_iter().flatten()) {
             let lp = [pl.pos[0] - p[0], pl.pos[1] - p[1], pl.pos[2] - p[2]];
             let d2 = dot3(lp, lp);
             let r2 = pl.radius * pl.radius;
@@ -2312,6 +2598,291 @@ fn shade_px(ctx: &Ctx, g: &GPixel, gbuf: &[GPixel], i: usize, x: usize, y: usize
         rf = Refl { r: r * ctx.fog_t(g.depth), env: scale3(env, ctx.gain), rough, sx };
     }
     Some((ctx.apply_fog(c, g.depth), rf))
+}
+
+/// The one world a frame's GPU passes can draw: one world, no boundary, no patches mixed in from
+/// another. Crossings and forks run on the CPU until their GPU form exists.
+#[cfg(feature = "gpu")]
+fn gpu_world<'c, 'a>(ctxs: &'c [Ctx<'a>], soft: &[(u8, f32)]) -> Option<&'c Ctx<'a>> {
+    let c = ctxs.first()?;
+    (ctxs.len() == 1 && soft.is_empty() && c.facade.is_none() && c.portal.is_none() && c.front.is_none() && c.bounds.is_none()
+        && c.verge_beyond.is_none() && c.view.split.is_none() && c.view.shear.is_none()).then_some(c)
+}
+
+/// The world's parameters as the GPU passes read them (gpu::WorldParams, `World` in common.wgsl).
+#[cfg(feature = "gpu")]
+fn gpu_params(ctx: &Ctx, layers: &Layers) -> super::gpu::WorldParams {
+    let (s, v) = (ctx.scene, &ctx.view);
+    let b = &s.path.bridge;
+    let fb = &s.weather.fog_banks;
+    let st = v.stairs;
+    let sp = ctx.bridge;
+    let fk = ctx.fork;
+    let rot = |m: &Material, bit: u32| if m.rotate { bit } else { 0 };
+    super::gpu::WorldParams {
+        width: v.width as u32, height: v.height as u32, horizon_px: v.horizon_px, center_px: v.center_px,
+        focal_px: v.focal_px, eye_height: v.eye_height, bend: v.bend, hill: v.hill,
+        half_width: v.half_width, flare: v.flare, near_ground: v.near_ground, scroll: v.scroll,
+        top: v.top as f32, left: v.left as f32,
+        stairs_on: st.is_some() as u32, st_period: st.map_or(1.0, |t| t.period), st_run: st.map_or(1.0, |t| t.run), st_rise: st.map_or(0.0, |t| t.rise),
+        st_steps: st.map_or(1.0, |t| t.steps as f32), st_offset: st.map_or(0.0, |t| t.offset),
+        loop_len: ctx.loop_len, tphase: ctx.tphase, far: ctx.far, gain: ctx.gain,
+        fog_on: ctx.fog.is_some() as u32, fog_dist: ctx.fog.map_or(1.0, |f| f.1), fog: ctx.fog_col,
+        void: ctx.void_lin, ambient: ctx.ambient, sky_top: rgb_lin(s.sky.top), sky_hor: rgb_lin(s.sky.horizon),
+        sky_on: (layers.sky && s.sky.enabled) as u32, match_sky: s.light.fog.match_sky as u32,
+        env_fog: (ctx.fog.is_some() || fb.enabled) as u32,
+        edge_noise: s.path.edge_noise, edge_dark: s.path.edge_dark, verge_on: s.verge.enabled as u32, walls_on: s.walls.enabled as u32,
+        walls_gap: s.walls.gap, base_shadow: s.walls.base_shadow, wall_top: ctx.wall_top(), ceiling_on: s.ceiling.enabled as u32,
+        bands: s.light.bands,
+        path_tile: ctx.path_tile, verge_tile: ctx.verge_tile, wall_tile: ctx.wall_tile, ceil_tile: ctx.ceil_tile, deck_tile: ctx.deck_tile, bottom_tile: ctx.bottom_tile,
+        rotate: rot(&s.path.material, 1) | rot(&s.verge.material, 2) | rot(&s.walls.material, 4) | rot(&s.ceiling.material, 8) | rot(&b.deck, 16),
+        path_gloss: s.path.material.gloss, path_rip: s.path.material.ripples, verge_gloss: s.verge.material.gloss, verge_rip: s.verge.material.ripples,
+        deck_gloss: b.deck.gloss, deck_rip: b.deck.ripples,
+        bridge_on: sp.is_some() as u32, br_period: sp.map_or(1.0, |p| p.period), br_len: sp.map_or(0.0, |p| p.len), br_offset: sp.map_or(0.0, |p| p.offset),
+        br_floor: sp.map_or(b.depth, |p| p.floor),
+        br_bottom: match b.bottom { BridgeBottom::Ground => 0, BridgeBottom::Water => 1, BridgeBottom::Void => 2 },
+        bottom: rgb_lin(b.bottom_color), deck_base: rgb_lin(b.deck.base), rail: rgb_lin(b.rail_color),
+        fork_on: fk.is_some() as u32, fk_period: fk.map_or(1.0, |f| f.period), fk_offset: fk.map_or(0.0, |f| f.offset),
+        fk_side: fk.map_or(0, |f| match f.side { ForkSide::Left => 0, ForkSide::Right => 1, ForkSide::Alternate => 2, ForkSide::Both => 3 }),
+        fk_tan: fk.map_or(1.0, |f| f.tan), fk_hw: fk.map_or(0.0, |f| f.hw), fk_per_loop: fk.map_or(1, |f| f.per_loop as u32),
+        fb_on: fb.enabled as u32, fb_density: fb.density, fb_spacing: fb.spacing, fb_length: fb.length, fb_offset: fb.offset,
+        wx_wet: ctx.wx.wet, wx_puddles: ctx.wx.puddles, wx_snow: ctx.wx.snow, wx_track: ctx.wx.track, wx_rings: ctx.wx.rings,
+        precip_seed: s.weather.precipitation.seed, loop_seconds: s.motion.loop_seconds(),
+        n_lights: ctx.lights.len() as u32, n_sky: ctx.sky_lights.len() as u32, tiles_on: 0, tile_cols: 0,
+        zero: 0, fk_style: fk.map_or(0, |f| f.split as u32), fk_noise: fk.map_or(0.0, |f| f.noise), pad: 0,
+    }
+}
+
+/// Which of a GPU frame's buffers hold newer data than the CPU's copies.
+#[cfg(feature = "gpu")]
+#[derive(Default)]
+struct GpuHas { hdr: bool, refl: bool, gbuf: bool, cards: bool, reflects: bool }
+
+/// render::shade on the GPU for one world (the G-buffer and masks are already there).
+#[cfg(feature = "gpu")]
+fn gpu_shade(f: &mut super::gpu::Frame, ctx: &Ctx, tiles: Option<TileLights>) {
+    let input = super::gpu::ShadeInput {
+        textures: [&ctx.path_tex, &ctx.verge_tex, &ctx.wall_tex, &ctx.ceil_tex, &ctx.deck_tex, &ctx.bottom_tex],
+        lights: ctx.lights.iter().map(|l| [l.pos[0], l.pos[1], l.pos[2], l.radius, l.color[0], l.color[1], l.color[2], 0.0]).collect(),
+        sky: ctx.sky_lights.iter().map(|l| [l.dir[0], l.dir[1], l.dir[2], 0.0, l.color[0], l.color[1], l.color[2], 0.0]).collect(),
+        tiles: tiles.map(|t| t.lists),
+    };
+    f.shade(&input);
+}
+
+/// Post and style's settings for the GPU, from the same scene values `render_worlds` reads.
+/// `dims` is (gl, gt, w, h, out_w, out_h, px); `fv` the view after the crop.
+#[cfg(feature = "gpu")]
+#[allow(clippy::too_many_arguments)]
+fn gpu_post_params<'a>(ctx: &Ctx, fv: &View, scene: &Scene, layers: &Layers, opts: &RenderOptions, dims: (usize, usize, usize, usize, usize, usize, usize),
+                       crisp: bool, cards: bool, lut: Option<&'a PaletteLut>, levels: Option<(f32, f32)>, grade: Option<&'a super::looks::Grade>) -> super::gpu::PostIn<'a> {
+    let (gl, gt, w, h, out_w, out_h, px) = dims;
+    let mut p = super::gpu::PostParams { w: w as u32, h: h as u32, gl: gl as u32, gt: gt as u32, out_w: out_w as u32, out_h: out_h as u32, px: px as u32, ..Default::default() };
+    p.pick_on = opts.pick as u32;
+    let _ = cards;
+    p.hz = fv.horizon_px;
+    p.unit = 854.0 / h as f32;
+    let ls = scene.motion.loop_seconds();
+    let post_on = layers.post;
+    let hs = &scene.weather.heat_shimmer;
+    let shimmer = post_on && hs.enabled && hs.strength > 0.0;
+    if shimmer { (p.sh_on, p.sh_strength, p.sh_c1, p.sh_c2) = (1, hs.strength, cycles(1.1 * hs.speed.max(0.0), ls), cycles(1.9 * hs.speed.max(0.0), ls)); }
+    let l = &scene.weather.lens;
+    let mut drops = Vec::new();
+    if post_on && l.enabled && l.amount > 0.0 {
+        p.lens_weight = 1.0;
+        p.lens_seed = l.seed;
+        match l.kind {
+            LensKind::Drops => { p.lens_kind = 1; drops = weather::lens_drops(ctx, w, h, 1.0); }
+            LensKind::Frost => {
+                p.lens_kind = 2;
+                (p.th, p.tw, p.aspect) = (1.0 - 0.55 * l.amount.clamp(0.0, 1.0), cycles(0.5, ls), w as f32 / h as f32);
+            }
+        }
+    }
+    let pp = &scene.post;
+    p.post_on = post_on as u32;
+    let bloom = post_on && pp.bloom > 0.001;
+    p.bloom = if bloom { pp.bloom } else { 0.0 };
+    p.exposure = if post_on { pp.exposure.max(0.0) } else { 1.0 };
+    p.grain_seed = (ctx.tphase.rem_euclid(1.0) * 4096.0).round() as u32 % 4096;
+    (p.tint_r, p.tint_g, p.tint_b) = (pp.tint[0] as f32 / 255.0, pp.tint[1] as f32 / 255.0, pp.tint[2] as f32 / 255.0);
+    (p.saturation, p.contrast, p.vignette, p.grain) = (pp.saturation, pp.contrast, pp.vignette, pp.grain);
+    let st = &scene.style;
+    let kuwahara = post_on && st.paint >= 0.5;
+    if kuwahara { p.kuw_r = st.paint.round().clamp(1.0, 16.0) as i32; }
+    let mut cube = None;
+    if let Some(g) = grade {
+        p.grade_s = st.grade_strength;
+        match g {
+            super::looks::Grade::Cube { size, data } => { (p.grade, p.grade_n) = (8, *size as u32); cube = Some(&data[..]); }
+            super::looks::Grade::Builtin(_) => {
+                let name = st.grade.trim().to_lowercase().replace(['-', '_'], " ");
+                p.grade = ["warm", "cool", "teal orange", "faded", "night", "sepia", "vivid"].iter().position(|n| *n == name).map_or(0, |k| k as u32 + 1);
+            }
+        }
+    }
+    if st.outline.enabled {
+        (p.ol_on, p.ol_objects_only) = (1, st.outline.objects_only as u32);
+        (p.ol_r, p.ol_g, p.ol_b) = (st.outline.color[0] as f32, st.outline.color[1] as f32, st.outline.color[2] as f32);
+    }
+    let warp = fv.lens_curve.abs() > 0.001;
+    if warp {
+        p.lw_on = 1;
+        p.lw_amp = fv.lens_curve.clamp(-1.0, 1.0) * h as f32 * 0.22;
+        p.lw_den = (w.max(2) - 1) as f32;
+        p.lw_blend_top = (fv.horizon_px - 40.0 * h as f32 / 854.0).max(0.0);
+        p.lw_span = 60.0 * h as f32 / 854.0;
+        p.lw_nearest = (crisp || st.palette != Palette::Full) as u32;
+    }
+    let mut lut_in = None;
+    if let Some(lut) = lut {
+        if let (Some(_), Some((lo, hi))) = (lut.ramp, levels) { (p.ramp_on, p.ramp_lo, p.ramp_k) = (1, lo, 255.0 / (hi - lo).max(8.0)); }
+        let (bits, table) = lut.table();
+        (p.q_on, p.q_bits, p.q_amp) = (1, bits, lut.spread * st.dither_strength.clamp(0.0, 1.0) * 1.6);
+        p.dither = match st.dither { Dither::None => 0, Dither::Bayer2 => 1, Dither::Bayer4 => 2, Dither::Bayer8 => 3 };
+        lut_in = Some((bits, table, lut.colors.iter().map(|c| (c[0] as u32) << 16 | (c[1] as u32) << 8 | c[2] as u32).collect()));
+    }
+    if post_on { (p.paper, p.scan) = (st.paper, st.scanlines); }
+    p.stats_on = opts.stats as u32;
+    (p.sky_enabled, p.verge_enabled) = (scene.sky.enabled as u32, scene.verge.enabled as u32);
+    let key = 1 + lut.map_or(0, |l| l as *const PaletteLut as usize) ^ grade.map_or(0, |g| (g as *const super::looks::Grade as usize) << 1);
+    super::gpu::PostIn { params: p, drops, key, lut: lut_in, cube, kuwahara, shimmer, warp, bloom, want_depth: opts.depth }
+}
+
+/// `frame_stats` from the GPU's per-row sums (11 counts, 11 luma sums, the total, a row each).
+#[cfg(feature = "gpu")]
+fn stats_from_rows(ctx: &Ctx, rows: &[f32], px: usize, billboards: usize) -> FrameStats {
+    const CLASSES: [&str; 11] = ["sky", "void", "chasm", "bridge", "path", "verge", "walls", "ceiling", "props", "fixtures", "grass"];
+    let (mut n, mut l, mut total) = ([0.0f64; 11], [0.0f64; 11], 0.0f64);
+    for r in rows.chunks_exact(23) {
+        for k in 0..11 { n[k] += r[k] as f64; l[k] += r[11 + k] as f64; }
+        total += r[22] as f64;
+    }
+    let px = px.max(1) as f64;
+    let seen = || (0..11).filter(|&k| n[k] > 0.0);
+    FrameStats {
+        coverage: seen().map(|k| (CLASSES[k].to_string(), (n[k] / px) as f32)).collect(),
+        luma: seen().map(|k| (CLASSES[k].to_string(), (l[k] / n[k]) as f32)).collect(),
+        mean_luma: (total / px) as f32,
+        lights: ctx.lights.len(),
+        billboards,
+    }
+}
+
+/// The sky pass's input for one world: the same constants `draw_sky_bodies`, `draw_lightning`,
+/// `veil_sky` and the fog bank compute, with the stars, cloud blobs and bolt segments as lists.
+/// `draw` is false when only the bank applies; `bank` is its (transmittance, colour) when < 1.
+#[cfg(feature = "gpu")]
+fn gpu_sky(ctx: &Ctx, draw: bool, strike: Option<(&Strike, [f32; 3])>, bank: Option<(f32, [f32; 3])>) -> super::gpu::SkyInput {
+    use super::gpu::{bin_tiles, SkyParams};
+    let v = &ctx.view;
+    let (w, h) = (v.width, v.height);
+    let sky = &ctx.scene.sky;
+    let hy = v.horizon_px.max(2.0);
+    let (ox, oy) = (v.left as f32, v.top as f32);
+    let (fw, fhy) = (w as f32 - 2.0 * ox, (hy - oy).max(2.0));
+    let mut p: SkyParams = bytemuck::Zeroable::zeroed();
+    (p.hy, p.ox, p.oy, p.fw, p.fhy, p.tile_cols) = (hy, ox, oy, fw, fhy, w.div_ceil(16) as u32);
+    for k in 0..22i64 {
+        let (u, vv) = (hf(0x3A1, k) * 1.8 - 0.9, hf(0x3A2, k) * 1.8 - 0.9);
+        p.craters[k as usize] = if u * u + vv * vv > 0.85 { [0.0, 0.0, 0.0, -1.0] } else {
+            [u, vv, (1.0 - u * u - vv * vv).sqrt(), 0.04 + 0.16 * hf(0x3A3, k).powi(3)]
+        };
+    }
+    let mut prims: Vec<f32> = Vec::new();
+    let mut bins: Vec<u32> = Vec::new();
+    if draw {
+        if sky.moon.body.enabled {
+            p.md_on = 1;
+            p.md = [ox + sky.moon.body.pos[0] * fw, oy + sky.moon.body.pos[1].clamp(0.0, 1.0) * fhy, sky.moon.body.radius * fhy];
+        }
+        let stars = star_list(ctx);
+        if !stars.is_empty() {
+            (p.stars_on, p.star_prims, p.star_bins) = (1, prims.len() as u32, bins.len() as u32);
+            let boxes: Vec<_> = stars.iter().map(|s| (s.x - s.ri, s.y - s.ri, s.x + s.ri, s.y + s.ri)).collect();
+            for s in &stars { prims.extend([s.x as f32, s.y as f32, s.r, s.ri as f32, s.b, 0.0]); }
+            bins.extend(bin_tiles(w, h, &boxes));
+        }
+        let a = &sky.aurora;
+        if a.enabled && a.intensity > 0.0 {
+            let ls = ctx.scene.motion.loop_seconds();
+            let sp = a.speed.max(0.0);
+            p.au_on = 1;
+            p.au_c = [cycles(0.05 * sp, ls), cycles(0.09 * sp, ls), cycles(0.21 * sp, ls)];
+            p.au_t = TAU * ctx.tphase;
+            (p.au_lo, p.au_hi) = (rgb_lin(a.low), rgb_lin(a.high));
+            p.au_seed = a.seed as u32;
+            (p.au_p1, p.au_p2) = (hf(a.seed ^ 0x81, 0) * TAU, hf(a.seed ^ 0x82, 0) * TAU);
+            p.au_height = a.height.clamp(0.0, 1.0);
+            p.au_k = a.intensity.max(0.0) * 0.55;
+        }
+        if sky.sun.enabled {
+            let su = &sky.sun;
+            p.sun_on = 1;
+            (p.s_x, p.s_y, p.s_r) = (ox + su.pos[0] * fw, oy + su.pos[1].clamp(0.0, 1.0) * fhy, (su.radius * fhy).max(0.75));
+            p.s_c = scale3(rgb_lin(su.color), 0.4 + 0.6 * su.intensity.clamp(0.0, 3.0));
+            let fog = ctx.fog.map_or(0.0, |(_, d)| (40.0 / d).min(1.5));
+            p.s_spread = 1.0 + 2.5 * ctx.wx.veil + fog;
+            p.s_focal = v.focal_px.max(1.0);
+        }
+        if sky.moon.body.enabled {
+            let m = &sky.moon;
+            let r = m.body.radius * fhy;
+            p.moon_on = 1;
+            p.m_c = rgb_lin(m.body.color);
+            p.m_gr = r * 2.6;
+            let ph = m.phase.clamp(-1.0, 1.0);
+            let angle = ph.abs() * std::f32::consts::PI;
+            (p.m_sx, p.m_sy) = (if ph < 0.0 { -angle.sin() } else { angle.sin() }, angle.cos());
+            p.m_litf = 0.5 * (1.0 + angle.cos());
+            p.m_op = m.opacity;
+            p.m_craters = m.craters as u32;
+        }
+        if let Some(cs) = cloud_list(ctx) {
+            if !cs.blobs.is_empty() {
+                (p.cl_on, p.cl_prims, p.cl_bins) = (1, prims.len() as u32, bins.len() as u32);
+                p.cl_col = cs.col;
+                if let Some((sx, sy, sc)) = cs.sun_at { (p.cl_sun, p.cl_sx, p.cl_sy, p.cl_sc) = (1, sx, sy, sc); }
+                p.cl_op = cs.opacity;
+                let boxes: Vec<_> = cs.blobs.iter().map(|b| ((b.x - b.rx) as i64, (b.y - b.ry) as i64, (b.x + b.rx) as i64, (b.y + b.ry) as i64)).collect();
+                for b in &cs.blobs { prims.extend([b.x, b.y, b.rx, b.ry, b.life, 0.0]); }
+                bins.extend(bin_tiles(w, h, &boxes));
+            }
+        }
+        let r = &sky.rainbow;
+        if r.enabled && r.intensity > 0.0 {
+            let rad = 0.6 * fw * r.size.max(0.05);
+            let band = 0.06 * rad;
+            p.rb_on = 1;
+            (p.rb_cx, p.rb_cy, p.rb_rad, p.rb_band, p.rb_rad2, p.rb_band2) = (ox + r.x * fw, hy + 0.12 * rad, rad, band, 1.21 * rad, 1.7 * band);
+            let sun = ctx.sky_lights.first().map_or(0.6, |s| weather::lum(s.color).clamp(0.2, 2.0));
+            p.rb_k = r.intensity.max(0.0) * 0.32 * sun;
+            p.rb_double = r.double as u32;
+        }
+        if let Some((s, flash)) = strike {
+            (p.fl_on, p.fl) = (1, flash);
+            let l = &ctx.scene.weather.lightning;
+            if l.bolts && s.bolt >= 0.05 {
+                let scale = (h as f32 - oy) / 854.0;
+                let segs = bolt_segments(ctx, s);
+                let glow_r = 7.0 * scale;
+                let (mut bx0, mut bx1, mut by1) = (f32::MAX, f32::MIN, 0.0f32);
+                for (a, b, _) in &segs { bx0 = bx0.min(a[0].min(b[0])); bx1 = bx1.max(a[0].max(b[0])); by1 = by1.max(a[1].max(b[1])); }
+                p.bolt_on = 1;
+                p.b_xa = (bx0 - glow_r * 3.0).max(0.0) as usize as u32;
+                p.b_xb = ((bx1 + glow_r * 3.0) as usize).min(w - 1) as u32;
+                p.b_yb = ((by1 + glow_r) as usize).min(h - 1) as u32;
+                p.b_gain = s.bolt * l.intensity.max(0.0);
+                (p.b_core, p.b_tint, p.b_glow, p.b_scale) = (rgb_lin([235, 240, 255]), rgb_lin(l.color), glow_r, scale);
+                (p.b_nsegs, p.b_prims) = (segs.len() as u32, prims.len() as u32);
+                for (a, b, wgt) in &segs { prims.extend([a[0], a[1], b[0], b[1], *wgt, 0.0]); }
+            }
+        }
+        p.veil = ctx.wx.veil.max(0.0);
+    }
+    if let Some((t, c)) = bank { (p.bank_on, p.bank_t, p.bank) = (1, t, c); }
+    super::gpu::SkyInput { params: p, prims, bins }
 }
 
 /// Which point lights can reach each 16 x 16 tile of the screen: those whose sphere touches the
@@ -2711,8 +3282,8 @@ fn draw_lightning(ctx: &Ctx, s: &Strike, flash: [f32; 3], gbuf: &[GPixel], hdr: 
     let (w, h) = (v.width, v.height);
     let hy = v.horizon_px.max(2.0);
     // Placed in the frame; a guarded view renders more above and beside it.
-    let (ox, oy) = (v.left as f32, v.top as f32);
-    let (fw, fhy) = (w as f32 - 2.0 * ox, (hy - oy).max(2.0));
+    let oy = v.top as f32;
+    let fhy = (hy - oy).max(2.0);
     let l = &ctx.scene.weather.lightning;
     // The clouds light up from inside: brighter high in the sky.
     for y in 0..(hy as usize).min(h) {
@@ -2722,43 +3293,8 @@ fn draw_lightning(ctx: &Ctx, s: &Strike, flash: [f32; 3], gbuf: &[GPixel], hdr: 
         }
     }
     if !l.bolts || s.bolt < 0.05 { return; }
-    // One channel per strike: a jagged walk down from the top, with a branch or two.
-    let seed = bolt_seed(l.seed, s.index);
     let scale = (h as f32 - oy) / 854.0;
-    let mut segs: Vec<([f32; 2], [f32; 2], f32)> = Vec::new();
-    let x0 = ox + fw * s.x;
-    let bottom = fhy * (0.75 + 0.2 * hf(seed, 1));
-    let steps = 14;
-    let dy = bottom / steps as f32;
-    // Above the frame the channel carries on up to the top of what is rendered.
-    let mut p = [x0, oy];
-    let mut up = (hf(seed, 3) - 0.5) * 0.6;
-    for k in 0.. {
-        if p[1] <= 0.0 { break; }
-        let q = [p[0] + (up + (hf(seed, 300 + k) - 0.5) * 1.6) * dy, p[1] - dy];
-        segs.push((q, p, 1.0));
-        up = up * 0.7 + (hf(seed, 330 + k) - 0.5) * 0.3;
-        p = q;
-    }
-    let mut p = [x0, oy];
-    let mut drift = (hf(seed, 2) - 0.5) * 0.6;
-    for k in 0..steps {
-        let dx = (drift + (hf(seed, 10 + k) - 0.5) * 1.6) * dy;
-        let q = [p[0] + dx, p[1] + dy];
-        segs.push((p, q, 1.0));
-        if k > 2 && k < steps - 3 && hf(seed, 40 + k) > 0.78 {
-            // A fork: thinner, dimmer, dies out partway down.
-            let mut b = q;
-            let side = if hf(seed, 60 + k) > 0.5 { 1.0 } else { -1.0 };
-            for j in 0..(3 + (hash(seed, 80 + k) % 4) as i64) {
-                let c = [b[0] + side * dy * (0.5 + hf(seed, 100 + k * 8 + j)), b[1] + dy * (0.6 + 0.4 * hf(seed, 200 + k * 8 + j))];
-                segs.push((b, c, 0.45));
-                b = c;
-            }
-        }
-        drift = drift * 0.7 + (hf(seed, 30 + k) - 0.5) * 0.3;
-        p = q;
-    }
+    let segs = bolt_segments(ctx, s);
     let core = rgb_lin([235, 240, 255]);
     let tint = rgb_lin(l.color);
     let glow_r = 7.0 * scale;
@@ -2793,7 +3329,146 @@ fn draw_lightning(ctx: &Ctx, s: &Strike, flash: [f32; 3], gbuf: &[GPixel], hdr: 
     }
 }
 
+/// A strike's channel as line segments (from, to, weight): a jagged walk down from the top, with a
+/// branch or two.
+fn bolt_segments(ctx: &Ctx, s: &Strike) -> Vec<([f32; 2], [f32; 2], f32)> {
+    let v = &ctx.view;
+    let w = v.width;
+    let hy = v.horizon_px.max(2.0);
+    let (ox, oy) = (v.left as f32, v.top as f32);
+    let (fw, fhy) = (w as f32 - 2.0 * ox, (hy - oy).max(2.0));
+    let l = &ctx.scene.weather.lightning;
+    let seed = bolt_seed(l.seed, s.index);
+    let mut segs: Vec<([f32; 2], [f32; 2], f32)> = Vec::new();
+    let x0 = ox + fw * s.x;
+    let bottom = fhy * (0.75 + 0.2 * hf(seed, 1));
+    let steps = 14;
+    let dy = bottom / steps as f32;
+    // Above the frame the channel carries on up to the top of what is rendered.
+    let mut p = [x0, oy];
+    let mut up = (hf(seed, 3) - 0.5) * 0.6;
+    for k in 0.. {
+        if p[1] <= 0.0 { break; }
+        let q = [p[0] + (up + (hf(seed, 300 + k) - 0.5) * 1.6) * dy, p[1] - dy];
+        segs.push((q, p, 1.0));
+        up = up * 0.7 + (hf(seed, 330 + k) - 0.5) * 0.3;
+        p = q;
+    }
+    let mut p = [x0, oy];
+    let mut drift = (hf(seed, 2) - 0.5) * 0.6;
+    for k in 0..steps {
+        let dx = (drift + (hf(seed, 10 + k) - 0.5) * 1.6) * dy;
+        let q = [p[0] + dx, p[1] + dy];
+        segs.push((p, q, 1.0));
+        if k > 2 && k < steps - 3 && hf(seed, 40 + k) > 0.78 {
+            // A fork: thinner, dimmer, dies out partway down.
+            let mut b = q;
+            let side = if hf(seed, 60 + k) > 0.5 { 1.0 } else { -1.0 };
+            for j in 0..(3 + (hash(seed, 80 + k) % 4) as i64) {
+                let c = [b[0] + side * dy * (0.5 + hf(seed, 100 + k * 8 + j)), b[1] + dy * (0.6 + 0.4 * hf(seed, 200 + k * 8 + j))];
+                segs.push((b, c, 0.45));
+                b = c;
+            }
+        }
+        drift = drift * 0.7 + (hf(seed, 30 + k) - 0.5) * 0.3;
+        p = q;
+    }
+    segs
+}
+
 // ── Sky ────────────────────────────────────────────────────────────────────
+
+/// One star as drawn: its centre pixel, radius, the radius in whole pixels, and brightness.
+#[derive(Clone, Copy)]
+struct Star { x: i64, y: i64, r: f32, ri: i64, b: f32 }
+
+/// The stars of a world's sky this frame, in drawing order (the CPU and GPU skies both draw these).
+fn star_list(ctx: &Ctx) -> Vec<Star> {
+    let sky = &ctx.scene.sky;
+    if !sky.stars.enabled { return Vec::new(); }
+    let v = &ctx.view;
+    let (w, h) = (v.width, v.height);
+    let hy = v.horizon_px.max(2.0);
+    let (ox, oy) = (v.left as f32, v.top as f32);
+    let (fw, fhy) = (w as f32 - 2.0 * ox, (hy - oy).max(2.0));
+    let scale = (h as f32 - oy) / 854.0;
+    let tw = sky.stars.twinkle.clamp(0.0, 4.0);
+    let n = sky.stars.count.min(6000) as i64;
+    // The sky outside the frame has stars too, as many per pixel as the top of the frame.
+    let area = fw * fhy * 0.95;
+    let extra = |a: f32| (n as f32 * 1.2 * a / area.max(1.0)).round() as i64;
+    let (n_top, n_side) = (extra(w as f32 * oy), extra(ox * fhy * 0.95));
+    (0..n + n_top + 2 * n_side).map(|i| {
+        let (sx, sy) = if i < n {
+            (ox + hf(sky.stars.seed ^ 0xA1, i) * fw, oy + hf(sky.stars.seed ^ 0xB2, i).powf(1.4) * fhy * 0.95)
+        } else if i < n + n_top {
+            (hf(sky.stars.seed ^ 0xA7, i) * w as f32, hf(sky.stars.seed ^ 0xB8, i) * oy)
+        } else {
+            let x = hf(sky.stars.seed ^ 0xA7, i) * ox;
+            (if (i - n - n_top) % 2 == 0 { x } else { w as f32 - x }, oy + hf(sky.stars.seed ^ 0xB8, i) * fhy * 0.95)
+        };
+        let freq = 1.0 + (hash(sky.stars.seed ^ 0xC3, i) % 4) as f32;
+        let tw_v = 0.5 + 0.5 * (TAU * freq * ctx.tphase + hf(sky.stars.seed ^ 0xD4, i) * TAU).sin();
+        let b = (0.35 + 0.65 * hf(sky.stars.seed ^ 0xE5, i)) * (1.0 - tw * 0.25 + tw * 0.25 * tw_v) * 1.4;
+        let r = (sky.stars.size * scale * (0.6 + hf(sky.stars.seed ^ 0xF6, i))).max(0.5);
+        Star { x: sx as i64, y: sy as i64, r, ri: r.ceil() as i64, b }
+    }).collect()
+}
+
+/// One soft ellipse of a cloud, centred at (x, y), with its share of the cloud's life.
+#[derive(Clone, Copy)]
+struct Blob { x: f32, y: f32, rx: f32, ry: f32, life: f32 }
+/// The clouds this frame: their colour, the sun that lights their edges, and every blob in order.
+struct CloudSet { col: [f32; 3], sun_at: Option<(f32, f32, [f32; 3])>, opacity: f32, blobs: Vec<Blob> }
+
+fn cloud_list(ctx: &Ctx) -> Option<CloudSet> {
+    let sky = &ctx.scene.sky;
+    if !sky.clouds.enabled { return None; }
+    let v = &ctx.view;
+    let w = v.width;
+    let hy = v.horizon_px.max(2.0);
+    let (ox, oy) = (v.left as f32, v.top as f32);
+    let (fw, fhy) = (w as f32 - 2.0 * ox, (hy - oy).max(2.0));
+    let cl = &sky.clouds;
+    let span = fw * 1.6;
+    // A whole number of crossings per loop wraps each cloud back to where it
+    // started. Any other drift (0.4x, 1.5x) cannot: a cloud would end the loop
+    // somewhere else. Then each cloud lives exactly one loop instead, forming,
+    // drifting at the speed asked and dissolving, with the lives staggered so
+    // the sky never empties; the last frame still matches the first.
+    let drift = cl.drift.max(0.0);
+    let whole = (drift - drift.round()).abs() < 1e-3;
+    let tint = rgb_lin(cl.tint);
+    let lit = add3(scale3(ctx.ambient, 0.6), ctx.sky_lights.iter().fold([0.0; 3], |a, s| add3(a, scale3(s.color, 0.4))));
+    let col = mul3(tint, add3(lit, [0.35; 3]));
+    // Clouds near the sun light up, most at their thin edges, where light comes through.
+    let sun_at = (sky.sun.enabled).then(|| (ox + sky.sun.pos[0] * fw, oy + sky.sun.pos[1].clamp(0.0, 1.0) * fhy, scale3(rgb_lin(sky.sun.color), 0.6)));
+    let mut blobs = Vec::new();
+    for i in 0..cl.count.min(200) as i64 {
+        let base = hf(cl.seed ^ 0x11, i) * span;
+        let speed = drift * (1.0 + (hash(cl.seed ^ 0x22, i) % 2) as f32);
+        let (travel, life) = if whole {
+            (speed * span * ctx.tphase, 1.0)
+        } else {
+            let ph = (ctx.tphase + hf(cl.seed ^ 0x77, i)).rem_euclid(1.0);
+            // Centred on its spot over its life; fades over a fifth of it at each end.
+            (speed * span * (ph - 0.5), smoothstep(0.0, 0.2, ph) * smoothstep(0.0, 0.2, 1.0 - ph))
+        };
+        if life <= 0.0 { continue; }
+        let cx = ox + (base + travel).rem_euclid(span) - (span - fw) * 0.5;
+        let cy = oy + fhy * (0.12 + 0.6 * hf(cl.seed ^ 0x33, i));
+        let size = fhy * (0.06 + 0.08 * hf(cl.seed ^ 0x44, i)) * cl.scale;
+        let n = 3 + (cl.variation * 4.0) as i64;
+        for b in 0..n {
+            let t = b as f32 / (n - 1).max(1) as f32;
+            let bx = cx + (t - 0.5) * size * (1.6 + cl.variation);
+            let by = cy - size * 0.25 * (t * 3.1).sin().abs() * (0.5 + cl.variation);
+            let (rx, ry) = (size * (0.55 + 0.35 * hf(cl.seed ^ 0x55, i * 8 + b)), size * (0.32 + 0.2 * hf(cl.seed ^ 0x66, i * 8 + b)));
+            blobs.push(Blob { x: bx, y: by, rx, ry, life });
+        }
+    }
+    Some(CloudSet { col, sun_at, opacity: cl.opacity, blobs })
+}
 
 /// Brightness of the moon's surface at a point `n` of its sphere (unit radius, z toward the
 /// viewer): soft dark maria, round craters with darker floors and brighter rims, and fine
@@ -2840,37 +3515,15 @@ fn draw_sky_bodies(ctx: &Ctx, gbuf: &[GPixel], hdr: &mut [[f32; 3]]) {
         let p = &mut hdr[y as usize * w + x as usize];
         *p = if additive { add3(*p, scale3(c, a)) } else { mix3(*p, c, a.clamp(0.0, 1.0)) };
     };
-    let scale = (h as f32 - oy) / 854.0;
     // The moon hides the stars behind it, its dark side too.
     let moon_disc = sky.moon.body.enabled.then(|| (ox + sky.moon.body.pos[0] * fw, oy + sky.moon.body.pos[1].clamp(0.0, 1.0) * fhy, sky.moon.body.radius * fhy));
     let behind_moon = |x: i64, y: i64| moon_disc.is_some_and(|(cx, cy, r)| (x as f32 + 0.5 - cx).powi(2) + (y as f32 + 0.5 - cy).powi(2) < r * r);
-    if sky.stars.enabled {
-        let tw = sky.stars.twinkle.clamp(0.0, 4.0);
-        let n = sky.stars.count.min(6000) as i64;
-        // The sky outside the frame has stars too, as many per pixel as the top of the frame.
-        let area = fw * fhy * 0.95;
-        let extra = |a: f32| (n as f32 * 1.2 * a / area.max(1.0)).round() as i64;
-        let (n_top, n_side) = (extra(w as f32 * oy), extra(ox * fhy * 0.95));
-        for i in 0..n + n_top + 2 * n_side {
-            let (sx, sy) = if i < n {
-                (ox + hf(sky.stars.seed ^ 0xA1, i) * fw, oy + hf(sky.stars.seed ^ 0xB2, i).powf(1.4) * fhy * 0.95)
-            } else if i < n + n_top {
-                (hf(sky.stars.seed ^ 0xA7, i) * w as f32, hf(sky.stars.seed ^ 0xB8, i) * oy)
-            } else {
-                let x = hf(sky.stars.seed ^ 0xA7, i) * ox;
-                (if (i - n - n_top) % 2 == 0 { x } else { w as f32 - x }, oy + hf(sky.stars.seed ^ 0xB8, i) * fhy * 0.95)
-            };
-            let (sx, sy) = (sx as i64, sy as i64);
-            let freq = 1.0 + (hash(sky.stars.seed ^ 0xC3, i) % 4) as f32;
-            let tw_v = 0.5 + 0.5 * (TAU * freq * ctx.tphase + hf(sky.stars.seed ^ 0xD4, i) * TAU).sin();
-            let b = (0.35 + 0.65 * hf(sky.stars.seed ^ 0xE5, i)) * (1.0 - tw * 0.25 + tw * 0.25 * tw_v) * 1.4;
-            let r = (sky.stars.size * scale * (0.6 + hf(sky.stars.seed ^ 0xF6, i))).max(0.5);
-            let ri = r.ceil() as i64;
-            for oy in -ri..=ri { for ox in -ri..=ri {
-                let dd = ((ox * ox + oy * oy) as f32).sqrt();
-                if dd <= r && !behind_moon(sx + ox, sy + oy) { add(hdr, sx + ox, sy + oy, [0.9, 0.92, 1.0], b * (1.0 - dd / (r + 1.0)), true); }
-            }}
-        }
+    for st in star_list(ctx) {
+        let (sx, sy, r, ri, b) = (st.x, st.y, st.r, st.ri, st.b);
+        for oy in -ri..=ri { for ox in -ri..=ri {
+            let dd = ((ox * ox + oy * oy) as f32).sqrt();
+            if dd <= r && !behind_moon(sx + ox, sy + oy) { add(hdr, sx + ox, sy + oy, [0.9, 0.92, 1.0], b * (1.0 - dd / (r + 1.0)), true); }
+        }}
     }
     weather::aurora(ctx, gbuf, hdr);
     if sky.sun.enabled {
@@ -2932,55 +3585,22 @@ fn draw_sky_bodies(ctx: &Ctx, gbuf: &[GPixel], hdr: &mut [[f32; 3]]) {
             }
         }}
     }
-    if sky.clouds.enabled {
-        let cl = &sky.clouds;
-        let span = fw * 1.6;
-        // A whole number of crossings per loop wraps each cloud back to where it
-        // started. Any other drift (0.4x, 1.5x) cannot: a cloud would end the loop
-        // somewhere else. Then each cloud lives exactly one loop instead, forming,
-        // drifting at the speed asked and dissolving, with the lives staggered so
-        // the sky never empties; the last frame still matches the first.
-        let drift = cl.drift.max(0.0);
-        let whole = (drift - drift.round()).abs() < 1e-3;
-        let tint = rgb_lin(cl.tint);
-        let lit = add3(scale3(ctx.ambient, 0.6), ctx.sky_lights.iter().fold([0.0; 3], |a, s| add3(a, scale3(s.color, 0.4))));
-        let col = mul3(tint, add3(lit, [0.35; 3]));
-        // Clouds near the sun light up, most at their thin edges, where light comes through.
-        let sun_at = (sky.sun.enabled).then(|| (ox + sky.sun.pos[0] * fw, oy + sky.sun.pos[1].clamp(0.0, 1.0) * fhy, scale3(rgb_lin(sky.sun.color), 0.6)));
-        for i in 0..cl.count.min(200) as i64 {
-            let base = hf(cl.seed ^ 0x11, i) * span;
-            let speed = drift * (1.0 + (hash(cl.seed ^ 0x22, i) % 2) as f32);
-            let (travel, life) = if whole {
-                (speed * span * ctx.tphase, 1.0)
-            } else {
-                let ph = (ctx.tphase + hf(cl.seed ^ 0x77, i)).rem_euclid(1.0);
-                // Centred on its spot over its life; fades over a fifth of it at each end.
-                (speed * span * (ph - 0.5), smoothstep(0.0, 0.2, ph) * smoothstep(0.0, 0.2, 1.0 - ph))
-            };
-            if life <= 0.0 { continue; }
-            let cx = ox + (base + travel).rem_euclid(span) - (span - fw) * 0.5;
-            let cy = oy + fhy * (0.12 + 0.6 * hf(cl.seed ^ 0x33, i));
-            let size = fhy * (0.06 + 0.08 * hf(cl.seed ^ 0x44, i)) * cl.scale;
-            let blobs = 3 + (cl.variation * 4.0) as i64;
-            for b in 0..blobs {
-                let t = b as f32 / (blobs - 1).max(1) as f32;
-                let bx = cx + (t - 0.5) * size * (1.6 + cl.variation);
-                let by = cy - size * 0.25 * (t * 3.1).sin().abs() * (0.5 + cl.variation);
-                let (rx, ry) = (size * (0.55 + 0.35 * hf(cl.seed ^ 0x55, i * 8 + b)), size * (0.32 + 0.2 * hf(cl.seed ^ 0x66, i * 8 + b)));
-                for y in (by - ry) as i64..=(by + ry) as i64 { for x in (bx - rx) as i64..=(bx + rx) as i64 {
-                    let (dx, dy) = ((x as f32 - bx) / rx, (y as f32 - by) / ry);
-                    let d2 = dx * dx + dy * dy;
-                    if d2 < 1.0 {
-                        let shade = 1.0 - 0.25 * dy.max(0.0);
-                        let mut c = scale3(col, shade);
-                        if let Some((sx, sy, sc)) = sun_at {
-                            let near = (-((x as f32 - sx).powi(2) + (y as f32 - sy).powi(2)) / (0.3 * fhy).powi(2)).exp();
-                            c = add3(c, scale3(sc, near * (0.25 + 0.9 * d2)));
-                        }
-                        add(hdr, x, y, c, cl.opacity * life * (1.0 - d2).powf(1.2) * 0.8, false);
+    if let Some(cs) = cloud_list(ctx) {
+        for bl in &cs.blobs {
+            let (bx, by, rx, ry, life) = (bl.x, bl.y, bl.rx, bl.ry, bl.life);
+            for y in (by - ry) as i64..=(by + ry) as i64 { for x in (bx - rx) as i64..=(bx + rx) as i64 {
+                let (dx, dy) = ((x as f32 - bx) / rx, (y as f32 - by) / ry);
+                let d2 = dx * dx + dy * dy;
+                if d2 < 1.0 {
+                    let shade = 1.0 - 0.25 * dy.max(0.0);
+                    let mut c = scale3(cs.col, shade);
+                    if let Some((sx, sy, sc)) = cs.sun_at {
+                        let near = (-((x as f32 - sx).powi(2) + (y as f32 - sy).powi(2)) / (0.3 * fhy).powi(2)).exp();
+                        c = add3(c, scale3(sc, near * (0.25 + 0.9 * d2)));
                     }
-                }}
-            }
+                    add(hdr, x, y, c, cs.opacity * life * (1.0 - d2).powf(1.2) * 0.8, false);
+                }
+            }}
         }
     }
     weather::rainbow(ctx, gbuf, hdr);
@@ -3033,6 +3653,26 @@ impl<'a> Card<'a> {
         })
     }
 
+    /// The card for the GPU's card pass (its sprite levels chosen here, as `draw_rows` samples them).
+    #[cfg(feature = "gpu")]
+    fn gpu(&self) -> super::gpu::CardIn {
+        let b = self.b;
+        let (plain, fog_t, fog, fog_mul, fog_add) = self.fog;
+        let (snow_on, snow_cap, snow) = self.snow.map_or((0, 0.0, [0.0; 3]), |(c, s)| (1, c, s));
+        let card = super::gpu::CardGpu {
+            sx: self.sx, wp: self.wp, hp: self.hp, sy_top: self.sy_top, sway: self.sway_px, z: self.z,
+            x0: self.x0 as i32, x1: self.x1 as i32, y0: self.y0 as i32, y1: self.y1 as i32,
+            light: self.light, snow_on, snow_cap, snow,
+            nearest: self.nearest as u32, flip: b.flip as u32, plain: plain as u32, fog_t, fog, fog_mul, fog_add,
+            emissive: b.emissive, id: b.id as u32, realm: b.realm as u32, world: b.world, source: b.source as u32,
+            ..Default::default()
+        };
+        super::gpu::CardIn {
+            card, sprite: b.sprite.clone(), lod: b.sprite.lod(self.hp),
+            glow: b.sprite.glow.as_ref().map(|g| (g.clone(), g.lod(self.hp))),
+        }
+    }
+
     /// Draw the card's rows that fall in a band starting at row `row0`; the slices hold that band.
     fn draw_rows(&self, row0: usize, gbuf: &mut [GPixel], hdr: &mut [[f32; 3]], mut pick: Option<&mut [u16]>) {
         let (b, w) = (self.b, self.w);
@@ -3069,9 +3709,8 @@ impl<'a> Card<'a> {
     }
 }
 
-fn draw_flame(ctx: &Ctx, f: &Flame, gbuf: &[GPixel], hdr: &mut [[f32; 3]]) {
+fn draw_flame(ctx: &Ctx, f: &Flame, out: &mut Vec<Splat>) {
     let v = &ctx.view;
-    let (w, h) = (v.width, v.height);
     let c = v.to_cam(f.world[0], f.world[1], f.world[2]);
     if c[2] < NEAR { return; }
     let Some([sx, sy]) = v.project(c) else { return };
@@ -3080,50 +3719,23 @@ fn draw_flame(ctx: &Ctx, f: &Flame, gbuf: &[GPixel], hdr: &mut [[f32; 3]]) {
     // Halo.
     let gr = (ppm * 0.7 * f.size).max(1.5);
     let glow = scale3(f.glow, 0.5 * fade * f.flicker);
-    for y in (sy - gr) as i64..=(sy + gr) as i64 {
-        for x in (sx - gr) as i64..=(sx + gr) as i64 {
-            if x < 0 || y < 0 || x as usize >= w || y as usize >= h { continue; }
-            let i = y as usize * w + x as usize;
-            if gbuf[i].depth < c[2] - 0.3 { continue; }
-            let dd = ((x as f32 + 0.5 - sx).powi(2) + (y as f32 + 0.5 - sy).powi(2)).sqrt() / gr;
-            if dd < 1.0 { hdr[i] = add3(hdr[i], scale3(glow, (1.0 - dd).powi(2))); }
-        }
-    }
+    out.push(Splat { z: c[2], gate: None, shape: Shape::Halo { sx, sy, gr, glow } });
     // Flame body, or a bright orb.
     let fh = (ppm * 0.16 * f.size * f.flicker).max(1.0);
     let Some(cols) = f.colors else {
         let r = (ppm * 0.05 * f.size).max(0.8);
-        for y in (sy - r) as i64..=(sy + r) as i64 { for x in (sx - r) as i64..=(sx + r) as i64 {
-            if x < 0 || y < 0 || x as usize >= w || y as usize >= h { continue; }
-            let i = y as usize * w + x as usize;
-            if gbuf[i].depth < c[2] - 0.1 { continue; }
-            let dd = ((x as f32 + 0.5 - sx).powi(2) + (y as f32 + 0.5 - sy).powi(2)).sqrt() / r;
-            if dd < 1.0 { hdr[i] = add3(hdr[i], scale3(f.glow, 3.0 * (1.0 - dd) * fade)); }
-        }}
+        out.push(Splat { z: c[2], gate: None, shape: Shape::Orb { sx, sy, r, glow: f.glow, fade } });
         return;
     };
     let lin = cols.map(rgb_lin);
     let (rx, ry) = (fh * 0.55, fh * 1.25);
     let cy = sy - ry * 0.55;
-    for y in (cy - ry) as i64..=(cy + ry) as i64 { for x in (sx - rx) as i64..=(sx + rx) as i64 {
-        if x < 0 || y < 0 || x as usize >= w || y as usize >= h { continue; }
-        let i = y as usize * w + x as usize;
-        if gbuf[i].depth < c[2] - 0.1 { continue; }
-        let (dx, dy) = ((x as f32 + 0.5 - sx) / rx, (y as f32 + 0.5 - cy) / ry);
-        // Teardrop: narrower toward the tip.
-        let taper = 1.0 + (-dy).max(0.0) * 0.8;
-        let dd = ((dx * taper).powi(2) + dy * dy).sqrt();
-        if dd >= 1.0 { continue; }
-        let (col, a) = if dd < 0.35 { (mix3(lin[0], lin[1], dd / 0.35), 1.0) }
-            else if dd < 0.7 { (mix3(lin[1], lin[2], (dd - 0.35) / 0.35), 0.85) }
-            else { (mix3(lin[2], lin[3], (dd - 0.7) / 0.3), 0.85 * (1.0 - (dd - 0.7) / 0.3)) };
-        hdr[i] = add3(hdr[i], scale3(col, a * 2.2 * fade));
-    }}
+    out.push(Splat { z: c[2], gate: None, shape: Shape::Body { sx, cy, rx, ry, lin, fade } });
 }
 
-fn draw_tufts(ctx: &Ctx, gbuf: &mut [GPixel], hdr: &mut [[f32; 3]]) {
+fn draw_tufts(ctx: &Ctx, out: &mut Vec<Splat>) {
     let v = &ctx.view;
-    let (w, h) = (v.width, v.height);
+    let w = v.width;
     let s = ctx.scene;
     let sp = snap_to_loop(0.22 / s.verge.tuft_density.clamp(0.1, 4.0), ctx.loop_len);
     let n = (ctx.loop_len / sp).round() as i64;
@@ -3154,24 +3766,14 @@ fn draw_tufts(ctx: &Ctx, gbuf: &mut [GPixel], hdr: &mut [[f32; 3]]) {
                 let bx = sx + (b as f32 - blades as f32 * 0.5) * hp * 0.12;
                 let len = hp * (0.6 + 0.4 * hf(0x7F, ikey * 8 + b));
                 let steps = len.ceil().max(1.0) as i64;
-                for st in 0..steps {
-                    let t = st as f32 / steps as f32;
-                    let (px, py) = ((bx + lean * len * t * t * 0.5) as i64, (sy - len * t) as i64);
-                    if px < 0 || py < 0 || px as usize >= w || py as usize >= h { continue; }
-                    let i = py as usize * w + px as usize;
-                    if c[2] >= gbuf[i].depth + 0.05 { continue; }
-                    hdr[i] = scale3(col, 0.7 + 0.5 * t);
-                    gbuf[i].id = id::TUFT;
-                    gbuf[i].depth = c[2];
-                }
+                out.push(Splat { z: c[2], gate: None, shape: Shape::Blade { bx, sy, lean, len, steps, col } });
             }
         }
     }
 }
 
-fn draw_particles(ctx: &Ctx, p: &Particles, loop_seconds: f32, gbuf: &[GPixel], hdr: &mut [[f32; 3]]) {
+fn draw_particles(ctx: &Ctx, p: &Particles, loop_seconds: f32, out: &mut Vec<Splat>) {
     let v = &ctx.view;
-    let (w, h) = (v.width, v.height);
     let s = ctx.scene;
     let lat = if s.walls.enabled { ctx.wall_x(5.0) } else { v.path_half_width(5.0) + 6.0 };
     let top = if s.ceiling.enabled { s.ceiling.height } else if s.walls.enabled && s.walls.height > 0.0 { s.walls.height.min(8.0) } else { 6.0 };
@@ -3254,18 +3856,7 @@ fn draw_particles(ctx: &Ctx, p: &Particles, loop_seconds: f32, gbuf: &[GPixel], 
             let (len_px, a) = if streak { (v.px_per_m(c[2]) * 0.35, 0.35) } else if sideways { (v.px_per_m(c[2]) * 0.2, 0.5) } else { (0.0, if emissive { 1.0 } else { 0.85 }) };
             let ri = r.ceil() as i64;
             let (dy_len, dx_len) = if sideways { (0, len_px as i64) } else { (len_px as i64, 0) };
-            for oy in -ri..=(ri + dy_len) {
-                for ox in -ri - dx_len..=ri {
-                    let (px, py) = (sx as i64 + ox, sy as i64 + oy);
-                    if px < 0 || py < 0 || px as usize >= w || py as usize >= h { continue; }
-                    let i = py as usize * w + px as usize;
-                    if c[2] >= gbuf[i].depth { continue; }
-                    let dd = (if sideways { 0.0 } else { (ox * ox) as f32 } + if streak { 0.0 } else { (oy * oy) as f32 }).sqrt() / (r + 0.5);
-                    if dd >= 1.0 { continue; }
-                    let k = (1.0 - dd) * a * life;
-                    hdr[i] = if additive { add3(hdr[i], scale3(lit, k * if emissive { 1.0 } else { 0.6 })) } else { mix3(hdr[i], lit, k) };
-                }
-            }
+            out.push(Splat { z: c[2], gate: None, shape: Shape::Mote { sx: sx as i64, sy: sy as i64, ri, dy_len, dx_len, r, sideways, streak, additive, emissive, lit, a, life } });
         }
     }
 }
@@ -3468,7 +4059,7 @@ mod tests {
                 path_tex: r.textures.get(&s.path.material), verge_tex: r.textures.get(&s.verge.material),
                 wall_tex: r.textures.get(&s.walls.material), ceil_tex: r.textures.get(&s.ceiling.material),
                 path_tile: 1.0, verge_tile: 1.0, wall_tile: 1.0, ceil_tile: 1.0,
-                bridge: Spans::new(&s.path.bridge, 24.0), fork: Forks::new(&s.path.fork, 24.0), deck_tex: r.textures.get(&s.path.bridge.deck), bottom_tex: r.textures.get(&s.verge.material),
+                bridge: Spans::new(&s.path.bridge, 24.0), fork: Forks::new(&s.path.fork, s.path.edge_noise, 24.0), deck_tex: r.textures.get(&s.path.bridge.deck), bottom_tex: r.textures.get(&s.verge.material),
                 deck_tile: 1.0, bottom_tile: 1.0, ambient: [0.0; 3],
                 sky_lights: vec![], lights: vec![], fog: None, fog_col: [0.0; 3], void_lin: [0.0; 3], realm: 0, bounds: None, facade: None, opening: None, portal: None, front: None, verge_beyond: None, gain: 1.0, wx: weather::Wx::default(),
             };
@@ -3482,6 +4073,75 @@ mod tests {
             }
         }
         let _ = &mut r;
+    }
+
+    #[test]
+    fn branch_test_by_windows_matches_walking_every_junction() {
+        for (angle, spacing, hw, side) in [(5.0f32, 4.0f32, 1.1f32, ForkSide::Alternate), (38.0, 24.0, 1.1, ForkSide::Left), (85.0, 9.0, 0.6, ForkSide::Right), (12.0, 6.0, 1.2, ForkSide::Alternate), (30.0, 8.0, 0.9, ForkSide::Both)] {
+            let f = Forks::new(&Fork { enabled: true, spacing, angle, half_width: hw, side, ..Fork::default() }, 0.0, 24.0).unwrap();
+            // The original: every junction within reach.
+            let walk = |x: f32, w: f32, main_hw: f32| {
+                let reach = 300.0 / f.tan;
+                let norm = (1.0 + f.tan * f.tan).sqrt();
+                f.near(w, reach).any(|(j, side)| {
+                    let t = w - j;
+                    if t < -f.hw || x * side <= 0.0 { return false; }
+                    let x0 = side * main_hw * 0.5;
+                    let dist = if t >= 0.0 { ((x - x0) - side * f.tan * t).abs() / norm } else { ((x - x0).powi(2) + t * t).sqrt() };
+                    dist < f.hw
+                })
+            };
+            let mut n = 0;
+            for i in 0..40_000i64 {
+                let x = (hf(1, i) - 0.5) * 120.0;
+                let w = hf(2, i) * 200.0 - 50.0;
+                let main_hw = 0.5 + hf(3, i) * 2.0;
+                let (a, b) = (f.on_branch(x, w, main_hw), walk(x, w, main_hw));
+                assert_eq!(a, b, "angle {angle} x {x} w {w} hw {main_hw}");
+                n += a as usize;
+            }
+            assert!(n > 100, "angle {angle}: too few points on a branch to mean anything ({n})");
+        }
+    }
+
+    #[test]
+    fn split_forks_pave_one_road_then_part_round_a_grass_point() {
+        for (angle, spacing, hw, side, noise) in [(38.0f32, 24.0f32, 1.1f32, ForkSide::Alternate, 0.15f32), (20.0, 24.0, 0.9, ForkSide::Both, 0.0), (70.0, 8.0, 0.6, ForkSide::Right, 0.3)] {
+            let f = Forks::new(&Fork { enabled: true, spacing, angle, half_width: hw, side, style: ForkStyle::Split, ..Fork::default() }, noise, 24.0).unwrap();
+            // The windowed search finds the same nearest branch as walking every junction.
+            for i in 0..40_000i64 {
+                let x = (hf(11, i) - 0.5) * 120.0;
+                let w = hf(12, i) * 200.0 - 50.0;
+                let main_hw = 0.5 + hf(13, i) * 2.0;
+                let r = (main_hw + f.hw) / f.tan;
+                let all = (-80..=80).fold(f32::INFINITY, |best, kk| f.branch_sd_at(x, w, kk, r, best));
+                let a = f.branch_sd(x, w, main_hw);
+                // Far from every branch the window may stop short of the nearest, which no one asks about.
+                if all < f.hw + f.fillet() { assert_eq!(a, all, "angle {angle} x {x} w {w} hw {main_hw}"); }
+            }
+            let main_hw = 1.5;
+            let j = f.offset + 3.0 * f.period;
+            let side = f.side_of(3);
+            let r = (main_hw + f.hw) / f.tan;
+            // At the junction the road starts to widen (the rounded corner of the two together);
+            // a bend's length on, the branch alone paves ground beyond the main road's edge.
+            let x = side * (main_hw + 0.05);
+            assert!(smin(x.abs() - main_hw, f.branch_sd(x, j + 0.5, main_hw), f.fillet()) < x.abs() - main_hw - 0.01, "angle {angle}: the road does not start to widen");
+            assert!(f.branch_sd(side * (main_hw + 0.2 * f.hw), j + r, main_hw) < 0.0, "angle {angle}: the road does not widen");
+            // Further on, between the two roads, a grass point: off both.
+            let t = 4.0 * r + 4.0 * f.hw / f.tan;
+            let xc = f.tan * (((t * t + r * r).sqrt()) - r);
+            let gore = side * 0.5 * (main_hw + xc);
+            assert!(xc - main_hw > 2.0 * f.hw + 2.0 * f.noise, "angle {angle}: test point not past the gore");
+            assert!(f.branch_sd(gore, j + t, main_hw) > 0.0 && gore.abs() > main_hw + f.noise, "angle {angle}: no grass between the roads");
+            // Every loop the same forks, noise and all.
+            for i in 0..2_000i64 {
+                let x = (hf(14, i) - 0.5) * 30.0;
+                let w = hf(15, i) * 24.0;
+                let (a, b) = (f.branch_sd(x, w, main_hw), f.branch_sd(x, w + 24.0, main_hw));
+                assert!((a.min(5.0) - b.min(5.0)).abs() < 2e-3, "angle {angle}: loop seam at x {x} w {w}: {a} vs {b}");
+            }
+        }
     }
 
     #[test]
@@ -3519,7 +4179,7 @@ mod tests {
                 path_tex: r.textures.get(&s.path.material), verge_tex: r.textures.get(&s.verge.material),
                 wall_tex: r.textures.get(&s.walls.material), ceil_tex: r.textures.get(&s.ceiling.material),
                 path_tile: 1.0, verge_tile: 1.0, wall_tile: 1.0, ceil_tile: 1.0,
-                bridge: Spans::new(&s.path.bridge, 24.0), fork: Forks::new(&s.path.fork, 24.0), deck_tex: r.textures.get(&s.path.bridge.deck), bottom_tex: r.textures.get(&s.verge.material),
+                bridge: Spans::new(&s.path.bridge, 24.0), fork: Forks::new(&s.path.fork, s.path.edge_noise, 24.0), deck_tex: r.textures.get(&s.path.bridge.deck), bottom_tex: r.textures.get(&s.verge.material),
                 deck_tile: 1.0, bottom_tile: 1.0, ambient: [0.0; 3],
                 sky_lights: vec![], lights: vec![], fog: None, fog_col: [0.0; 3], void_lin: [0.0; 3], realm: 0, bounds: None, facade: None, opening: None, portal: None, front: None, verge_beyond: None, gain: 1.0, wx: weather::Wx::default(),
             };
@@ -3563,7 +4223,7 @@ mod tests {
                 path_tex: r.textures.get(&s.path.material), verge_tex: r.textures.get(&s.verge.material),
                 wall_tex: r.textures.get(&s.walls.material), ceil_tex: r.textures.get(&s.ceiling.material),
                 path_tile: 1.0, verge_tile: 1.0, wall_tile: 1.0, ceil_tile: 1.0,
-                bridge: Spans::new(&s.path.bridge, 24.0), fork: Forks::new(&s.path.fork, 24.0), deck_tex: r.textures.get(&s.path.bridge.deck), bottom_tex: r.textures.get(&s.verge.material),
+                bridge: Spans::new(&s.path.bridge, 24.0), fork: Forks::new(&s.path.fork, s.path.edge_noise, 24.0), deck_tex: r.textures.get(&s.path.bridge.deck), bottom_tex: r.textures.get(&s.verge.material),
                 deck_tile: 1.0, bottom_tile: 1.0, ambient: [0.0; 3],
                 sky_lights: vec![], lights: vec![], fog: None, fog_col: [0.0; 3], void_lin: [0.0; 3], realm: 0, bounds: None, facade: None, opening: None, portal: None, front: None, verge_beyond: None, gain: 1.0, wx: weather::Wx::default(),
             };
@@ -3588,7 +4248,7 @@ mod tests {
         let base = preset("Stone Dungeon");
         let mut forked = base.clone();
         forked.path.fork.enabled = true;
-        let f = Forks::new(&forked.path.fork, 24.0).unwrap();
+        let f = Forks::new(&forked.path.fork, forked.path.edge_noise, 24.0).unwrap();
         let mut r = WorldRenderer::default();
         let gbuf_of = |r: &mut WorldRenderer, s: &Scene, scroll: f32| {
             let ctx = Ctx {
@@ -3596,7 +4256,7 @@ mod tests {
                 path_tex: r.textures.get(&s.path.material), verge_tex: r.textures.get(&s.verge.material),
                 wall_tex: r.textures.get(&s.walls.material), ceil_tex: r.textures.get(&s.ceiling.material),
                 path_tile: 1.0, verge_tile: 1.0, wall_tile: 1.0, ceil_tile: 1.0,
-                bridge: None, fork: Forks::new(&s.path.fork, 24.0), deck_tex: r.textures.get(&s.path.bridge.deck), bottom_tex: r.textures.get(&s.verge.material),
+                bridge: None, fork: Forks::new(&s.path.fork, s.path.edge_noise, 24.0), deck_tex: r.textures.get(&s.path.bridge.deck), bottom_tex: r.textures.get(&s.verge.material),
                 deck_tile: 1.0, bottom_tile: 1.0, ambient: [0.0; 3],
                 sky_lights: vec![], lights: vec![], fog: None, fog_col: [0.0; 3], void_lin: [0.0; 3], realm: 0, bounds: None, facade: None, opening: None, portal: None, front: None, verge_beyond: None, gain: 1.0, wx: weather::Wx::default(),
             };
@@ -3625,7 +4285,7 @@ mod tests {
             let mut s = preset(name);
             if let Some(f) = fork { s.path.fork = f; }
             s.path.fork.enabled = true;
-            let f = Forks::new(&s.path.fork, s.motion.loop_length).unwrap();
+            let f = Forks::new(&s.path.fork, s.path.edge_noise, s.motion.loop_length).unwrap();
             for k in -5..5 { assert_eq!(f.side_of(k), f.side_of(k + f.per_loop), "{name}: fork {k} changes side a loop later"); }
             // With two or more per loop, neighbours do alternate.
             if f.per_loop % 2 == 0 { assert_ne!(f.side_of(0), f.side_of(1)); }
@@ -3794,6 +4454,45 @@ mod tests {
         }
         // Inside the frame both agree.
         for y in (base as usize + 2)..(from - 4) { assert_eq!(guarded[y * w + 20], bare[y * w + 20], "row {y}"); }
+    }
+
+    #[cfg(feature = "gpu")]
+    #[test]
+    fn gpu_frames_fit_a_default_limits_device() {
+        // The studio draws on eframe's device: WebGPU's default limits, no features.
+        let Ok(ctx) = super::super::gpu::GpuContext::headless_with(true) else { eprintln!("no GPU here, skipped"); return };
+        let mut g = WorldRenderer::default();
+        g.set_gpu(Some(Arc::new(super::super::gpu::Gpu::new(ctx).unwrap())));
+        let mut c = WorldRenderer::default();
+        for name in ["Bog Boardwalk", "Ice Cave"] {
+            let s = preset(name);
+            let o = RenderOptions { pick: true, stats: true, ..RenderOptions::default() };
+            let (a, b) = (c.render(&s, 3.0, &o), g.render(&s, 3.0, &o));
+            let worst = a.rgba.iter().zip(&b.rgba).map(|(x, y)| x.abs_diff(*y)).max().unwrap();
+            assert!(worst <= 4, "{name}: worst channel difference {worst}");
+        }
+    }
+
+    #[cfg(feature = "gpu")]
+    #[test]
+    fn gpu_cards_name_and_place_the_same_pixels() {
+        // Pick ids and depth after the GPU's card pass match the CPU's, card for card.
+        let Ok(ctx) = super::super::gpu::GpuContext::headless() else { eprintln!("no GPU here, skipped"); return };
+        let mut g = WorldRenderer::default();
+        g.set_gpu(Some(Arc::new(super::super::gpu::Gpu::new(ctx).unwrap())));
+        let mut c = WorldRenderer::default();
+        for name in ["Forest Path", "Haunted Forest", "Ruined Castle", "Desert Ruins", "Night Road"] {
+            let s = preset(name);
+            let o = RenderOptions { pick: true, depth: true, stats: true, ..RenderOptions::default() };
+            let (a, b) = (c.render(&s, 3.0, &o), g.render(&s, 3.0, &o));
+            let (sa, sb) = (a.stats.clone().unwrap(), b.stats.clone().unwrap());
+            assert_eq!(sa.coverage, sb.coverage, "{name}: coverage");
+            for ((ka, la), (kb, lb)) in sa.luma.iter().zip(&sb.luma) { assert!(ka == kb && (la - lb).abs() < 0.01, "{name}: {ka} luma {la} vs {lb}"); }
+            let (pa, pb) = (a.pick.unwrap().ids, b.pick.unwrap().ids);
+            let ids = pa.iter().zip(&pb).filter(|(x, y)| x != y).count();
+            let depth = a.depth.unwrap().iter().zip(b.depth.unwrap().iter()).filter(|(x, y)| x != y).count();
+            assert!(ids == 0 && depth == 0, "{name}: {ids} pick ids and {depth} depths differ of {}", pa.len());
+        }
     }
 
     #[test]

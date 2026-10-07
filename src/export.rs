@@ -99,6 +99,8 @@ pub struct Progress {
 #[derive(Serialize)]
 struct Metadata<'a> {
     generator: &'static str,
+    /// The renderer that drew the frames: "gpu" or "cpu" (the reference).
+    engine: &'static str,
     name: &'a str,
     frames: u32,
     width: usize,
@@ -232,7 +234,7 @@ pub fn export(scene: &Scene, job: &ExportJob, mut progress: impl FnMut(Progress)
     if job.formats.contains(&Format::Gif) && fps > 50.0 { let step = (fps / 50.0).ceil() as u32; n = n.div_ceil(step) * step; }
     let lp = scene.motion.loop_length.max(1.0);
     let seq = Seq { frames: (0..n).map(|k| (lp * k as f32 / n as f32, None)).collect(), seconds: loop_seconds, looping: true };
-    let mut renderer = WorldRenderer::default();
+    let mut renderer = WorldRenderer::auto();
     let out = export_seq(scene, job, &stem, &seq, &mut renderer, &mut progress, cancel, &mut notes)?;
     let (w, h, n) = (out.width, out.height, out.frames);
     let mut files = out.files;
@@ -240,6 +242,7 @@ pub fn export(scene: &Scene, job: &ExportJob, mut progress: impl FnMut(Progress)
 
     let meta = Metadata {
         generator: concat!("PathForge ", env!("CARGO_PKG_VERSION"), " (scene v3)"),
+        engine: renderer.engine(),
         name: &scene.name, frames: n, width: w, height: h, loop_length_m: lp, metres_per_frame: lp / n as f32,
         speed_mps: scene.motion.speed, fps: n as f32 / loop_seconds, loop_seconds,
         playback: "Frames are evenly spaced in distance. To follow a character, show frame floor(distance_walked / metres_per_frame) mod frames; to play on a timer, advance at fps.",
@@ -290,7 +293,7 @@ pub fn estimate(scene: &Scene, job: &ExportJob, sample: u32) -> Result<Estimate,
     if job.formats.contains(&Format::Gif) && !matches!(scene.style.palette, Palette::Named(_) | Palette::Custom(_) | Palette::Auto(_)) && tmp_job.gif_palette.is_none() {
         let (w, h) = job.size.unwrap_or((scene.canvas.width, scene.canvas.height));
         let opts = RenderOptions { size: Some((w, h)), base_dir: job.base_dir.clone(), ..RenderOptions::default() };
-        let mut r = WorldRenderer::default();
+        let mut r = WorldRenderer::auto();
         let samples = 12.min(n);
         let mut px = Vec::new();
         for i in 0..samples {
@@ -302,7 +305,7 @@ pub fn estimate(scene: &Scene, job: &ExportJob, sample: u32) -> Result<Estimate,
     }
     let stem = prepare(scene, &tmp_job)?;
     let mut notes = Vec::new();
-    let out = export_seq(scene, &tmp_job, &stem, &seq, &mut WorldRenderer::default(), &mut |_| {}, &AtomicBool::new(false), &mut notes);
+    let out = export_seq(scene, &tmp_job, &stem, &seq, &mut WorldRenderer::auto(), &mut |_| {}, &AtomicBool::new(false), &mut notes);
     let result = out.map(|out| {
         let scale = n as f64 / k as f64;
         let mut parts: Vec<(String, u64)> = Vec::new();
@@ -383,7 +386,7 @@ pub fn export_encounter(scene: &Scene, job: &ExportJob, e: &Encounter, mut progr
     let t0 = Instant::now();
     let stem = prepare(scene, job)?;
     let (stop, idle, go, info) = encounter_clips(scene, e);
-    let mut renderer = WorldRenderer::default();
+    let mut renderer = WorldRenderer::auto();
     let mut notes = Vec::new();
     let mut files = Vec::new();
     let mut clips = serde_json::Map::new();
@@ -398,6 +401,7 @@ pub fn export_encounter(scene: &Scene, job: &ExportJob, e: &Encounter, mut progr
     }
     let mut meta = info;
     meta["generator"] = serde_json::json!(concat!("PathForge ", env!("CARGO_PKG_VERSION"), " (scene v3)"));
+    meta["engine"] = serde_json::json!(renderer.engine());
     meta["clips_files"] = serde_json::Value::Object(clips);
     meta["camera"] = serde_json::to_value(CameraInfo::new(scene, w, h)).unwrap_or_default();
     let mpath = job.out_dir.join(format!("{stem}_encounter.json"));
@@ -479,6 +483,7 @@ pub fn export_transition_entries(a: &Scene, b: &Scene, b_dir: Option<PathBuf>, j
     let mut notes: Vec<String> = crossing.warnings.clone();
     let mut list = Vec::new();
     let mut last = None;
+    let mut engine = "cpu";
     let a_dir = job.base_dir.clone();
     for k in 0..entries {
         let start_frame = k * loop_frames / entries;
@@ -486,7 +491,8 @@ pub fn export_transition_entries(a: &Scene, b: &Scene, b_dir: Option<PathBuf>, j
         let (seq, walk, duration) = transition_plan_from(a, b, &crossing, start_a);
         let total = walk.length();
         let name = if entries > 1 { format!("{stem}_e{k}") } else { stem.clone() };
-        let mut ra = WorldRenderer::default();
+        let mut ra = WorldRenderer::auto();
+        engine = ra.engine();
         let mut make = |r: &mut WorldRenderer, d: f32, t: Option<f32>, o: &RenderOptions| transition_frame(r, a, a_dir.as_deref(), b, b_dir.as_deref(), &walk, duration, d, t.unwrap_or(0.0), o);
         let out = export_frames(a, job, &name, &seq, &mut ra, &mut make, &mut progress, cancel, &mut notes)?;
         list.push(serde_json::json!({
@@ -502,6 +508,7 @@ pub fn export_transition_entries(a: &Scene, b: &Scene, b_dir: Option<PathBuf>, j
     let (out, duration, total) = last.ok_or("no clips")?;
     let meta = serde_json::json!({
         "generator": concat!("PathForge ", env!("CARGO_PKG_VERSION"), " (scene v3)"),
+        "engine": engine,
         "from": a.name, "to": b.name, "travel_m": total, "approach_m": crossing.approach,
         "threshold": crossing.threshold.name(), "plan": crossing.notes, "warnings": crossing.warnings,
         "transition": tr,
@@ -547,7 +554,7 @@ pub fn export_fork(a: &Scene, left: (&Scene, Option<PathBuf>), right: (&Scene, O
     let (pl, pr) = (crate::journey::Place { scene: left.0, dir: left.1.as_deref() }, crate::journey::Place { scene: right.0, dir: right.1.as_deref() });
     let pa = crate::journey::Place { scene: a, dir: a_dir.as_deref() };
     let mut files = Vec::new();
-    let mut r = WorldRenderer::default();
+    let mut r = WorldRenderer::auto();
     let mut make = |rr: &mut WorldRenderer, d: f32, t: Option<f32>, o: &RenderOptions| base.frame(rr, pa, pl, pr, d, times(t.unwrap_or(0.0)), o);
     let out0 = export_frames(a, job, &format!("{stem}_approach"), &approach, &mut r, &mut make, &mut progress, cancel, &mut notes)?;
     files.extend(out0.files.iter().cloned());
@@ -563,6 +570,7 @@ pub fn export_fork(a: &Scene, left: (&Scene, Option<PathBuf>), right: (&Scene, O
     }
     let meta = serde_json::json!({
         "generator": concat!("PathForge ", env!("CARGO_PKG_VERSION"), " (scene v3)"),
+        "engine": r.engine(),
         "from": a.name, "left": left.0.name, "right": right.0.name, "default": plan.default_branch.name(),
         "plan": plan.notes, "warnings": plan.warnings, "clips": clips, "width": out0.width, "height": out0.height,
         "playback": format!("Play the '{}' loop until its frame 0, then '{stem}_approach' once; ask the player during it. When it ends, play '{stem}_left' or '{stem}_right' (the {} one if no choice was made), then continue with that world's loop from its frame 0. Every join matches exactly.", a.name, plan.default_branch.name()),
@@ -795,6 +803,13 @@ fn export_frames(scene: &Scene, job: &ExportJob, stem: &str, seq: &Seq, renderer
             progress(Progress { stage: "render", done: k, total: n });
             batch.push((k, frame(renderer, k)));
         }
+        if job.formats.contains(&Format::Png) {
+            // PNG frames are independent files: encode the batch side by side.
+            batch.par_iter().try_for_each(|(k, img)| {
+                let p = png_dir.join(format!("{stem}_{k:04}.png"));
+                image::save_buffer(&p, &img.rgba, w as u32, h as u32, image::ExtendedColorType::Rgba8).map_err(|e| e.to_string())
+            })?;
+        }
         for (k, img) in &batch {
             if let Some((_, enc, stamps)) = &mut webp {
                 enc.add_frame(&img.rgba, stamps[*k as usize]).map_err(|e| format!("webp: {e:?}"))?;
@@ -802,10 +817,6 @@ fn export_frames(scene: &Scene, job: &ExportJob, stem: &str, seq: &Seq, renderer
             if let Some((_, writer, d)) = &mut apng {
                 writer.set_frame_delay(d[*k as usize].min(u16::MAX as u32) as u16, 1000).map_err(|e| e.to_string())?;
                 writer.write_image_data(&img.rgba).map_err(|e| e.to_string())?;
-            }
-            if job.formats.contains(&Format::Png) {
-                let p = png_dir.join(format!("{stem}_{k:04}.png"));
-                image::save_buffer(&p, &img.rgba, w as u32, h as u32, image::ExtendedColorType::Rgba8).map_err(|e| e.to_string())?;
             }
             if let Some(si) = &sheet_info {
                 let (page, slot) = ((*k / si.frames_per_page) as usize, *k % si.frames_per_page);
@@ -979,7 +990,8 @@ mod tests {
             let (seq, walk, duration) = transition_plan(&a, &b, &c);
             let total = walk.length();
             let opts = RenderOptions { size: Some((120, 214)), ..RenderOptions::default() };
-            let (mut rt, mut r) = (WorldRenderer::default(), WorldRenderer::default());
+            for gpu in engines() {
+            let (mut rt, mut r) = (renderer(gpu), renderer(gpu));
             let (d0, t0) = seq.frames[0];
             let first = transition_frame(&mut rt, &a, None, &b, None, &walk, duration, d0, t0.unwrap(), &opts);
             assert!(first.rgba == r.render(&a, 0.0, &RenderOptions { time: Some(0.0), ..opts.clone() }).rgba, "{an} -> {bn}: first frame is not loop A frame 0");
@@ -992,8 +1004,18 @@ mod tests {
             let da = crate::review::diff(&mid.rgba, &r.render(&a, sa, &opts).rgba, 0).0;
             let dbb = crate::review::diff(&mid.rgba, &r.render(&b, sb, &opts).rgba, 0).0;
             assert!(da > 1.0 && dbb > 1.0, "{an} -> {bn}: near the boundary both worlds should show: {da} {dbb}");
+            }
         }
     }
+
+    /// The engines a test can compare: the CPU, and the GPU where there is one.
+    fn engines() -> Vec<bool> {
+        let mut e = vec![false];
+        #[cfg(feature = "gpu")]
+        if crate::world::gpu::shared().is_some() { e.push(true); }
+        e
+    }
+    fn renderer(gpu: bool) -> crate::world::WorldRenderer { if gpu { crate::world::WorldRenderer::auto() } else { crate::world::WorldRenderer::default() } }
 
     #[test]
     fn fork_clips_join_the_approach_and_end_on_each_loop() {
@@ -1004,7 +1026,8 @@ mod tests {
         let (a, l, r) = (get("Forest Path"), get("Mountain Pass"), get("Desert Canyon"));
         let plan = plan_fork(&a, &l, &r, &ForkChoice::default());
         let opts = RenderOptions { size: Some((90, 160)), ..RenderOptions::default() };
-        let mut rr = WorldRenderer::default();
+        for gpu in engines() {
+        let mut rr = renderer(gpu);
         let (pa, pl, pr) = (Place { scene: &a, dir: None }, Place { scene: &l, dir: None }, Place { scene: &r, dir: None });
         let open = ForkWalk::new(plan.clone(), 0.0, [0.0, 0.0]);
         let at = open.decide_by();
@@ -1023,6 +1046,7 @@ mod tests {
         let mid = open.frame(&mut rr, pa, pl, pr, plan.approach * 0.85, [1.0, 1.0, 1.0], &opts);
         let (_, _, sb, _) = open.at(plan.approach * 0.85);
         assert!(crate::review::diff(&mid.rgba, &rr.render(&l, sb[0], &opts).rgba, 0).0 > 1.0);
+        }
     }
 
     #[test]

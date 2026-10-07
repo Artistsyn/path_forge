@@ -69,12 +69,17 @@ impl Sprite {
         Some(Sprite::from_rgba_lin(x1 - x0, y1 - y0, px))
     }
 
+    /// The mip level `sample` reads for a sprite drawn `screen_h` pixels tall.
+    #[inline]
+    pub fn lod(&self, screen_h: f32) -> usize {
+        let ratio = self.levels[0].1 as f32 / screen_h.max(1e-3);
+        (ratio.log2().max(0.0) as usize).min(self.levels.len() - 1)
+    }
+
     /// Sample at (u, v) in 0..1 (v = 0 at the top) for a sprite drawn `screen_h` pixels tall.
     #[inline]
     pub fn sample(&self, u: f32, v: f32, screen_h: f32, nearest: bool) -> [f32; 4] {
-        let ratio = self.levels[0].1 as f32 / screen_h.max(1e-3);
-        let lod = (ratio.log2().max(0.0) as usize).min(self.levels.len() - 1);
-        let (w, h, data) = &self.levels[lod];
+        let (w, h, data) = &self.levels[self.lod(screen_h)];
         let (w, h) = (*w, *h);
         if nearest {
             let x = ((u * w as f32) as usize).min(w - 1);

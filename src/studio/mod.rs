@@ -182,7 +182,15 @@ fn home_sub(name: &str) -> PathBuf {
 }
 
 impl Studio {
-    pub fn new(cc: &eframe::CreationContext<'_>, open: Option<PathBuf>, section: Option<String>) -> Studio {
+    /// The window's GPU device for the preview, unless `PF_ENGINE=cpu` asks for the reference renderer.
+fn preview_gpu(cc: &eframe::CreationContext<'_>) -> Option<Arc<crate::world::gpu::GpuContext>> {
+    if std::env::var("PF_ENGINE").is_ok_and(|e| e.eq_ignore_ascii_case("cpu")) { return None; }
+    let rs = cc.wgpu_render_state.as_ref()?;
+    let info = rs.adapter.get_info();
+    Some(crate::world::gpu::GpuContext::from_device(rs.device.clone(), rs.queue.clone(), format!("{} ({:?})", info.name, info.backend)))
+}
+
+pub fn new(cc: &eframe::CreationContext<'_>, open: Option<PathBuf>, section: Option<String>) -> Studio {
         style(&cc.egui_ctx);
         let scene = presets::ALL.iter().find(|(n, _)| *n == "Stone Dungeon").map(|(_, f)| f()).unwrap_or_default();
         let doc = to_doc(&scene);
@@ -191,7 +199,7 @@ impl Studio {
             file: None, disk_stamp: None, disk_changed: false, last_watch: Instant::now(),
             selection: Selection::Section("camera"), advanced: false, guides: false,
             playing: true, pos: 0.0, last_tick: Instant::now(),
-            preview: worker::Preview::spawn(cc.egui_ctx.clone()), texture: None, shown_tag: 0, tag: 1, pending: false, sent: None,
+            preview: worker::Preview::spawn(cc.egui_ctx.clone(), Self::preview_gpu(cc)), texture: None, shown_tag: 0, tag: 1, pending: false, sent: None,
             render_ms: 0.0, stats: None, drag: None, pick: None, frame_no: 0, outline: None, play: (Instant::now(), 0, 0, u32::MAX),
             gallery_open: open.is_none(), thumbs: vec![Vec::new(); presets::ALL.len()], thumbs_rx: None, remix: RemixUi::default(), walk: walk::WalkUi::default(),
             loop_rx: None, loop_report: None, export: ExportDialog::default(), status: String::new(), title: String::new(),
@@ -755,7 +763,7 @@ impl Studio {
                     if edge { px[y * w + x] = Color32::from_rgba_unmultiplied(110, 210, 255, 230); any = true; }
                 }
             }
-            let img = egui::ColorImage { size: [w, h], pixels: px };
+            let img = egui::ColorImage { size: [w, h], source_size: egui::vec2(w as f32, h as f32), pixels: px };
             if !any { self.outline = None; return; }
             match &mut self.outline {
                 Some((t, k)) => { t.set(img, TextureOptions::NEAREST); *k = key; }
