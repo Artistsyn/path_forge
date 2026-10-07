@@ -132,6 +132,26 @@ fn to_doc(scene: &Scene) -> Value {
     serde_json::from_str(&serde_json::to_string(scene).unwrap_or_default()).unwrap_or(Value::Null)
 }
 
+/// A particle or prop layer that changes kind takes the new kind's own colour, unless its colour
+/// was set by hand (anything but the old kind's own): snow comes out white, not dust-beige.
+fn follow_kind_colours(before: &Value, doc: &mut Value) {
+    use crate::scene::{ParticleKind, PropKind};
+    let colour = |v: &Value| serde_json::from_value::<[u8; 3]>(v.clone()).ok();
+    let lists: [(&str, &str, fn(&Value) -> Option<[u8; 3]>); 2] = [
+        ("particles", "color", |k| serde_json::from_value::<ParticleKind>(k.clone()).ok().map(|k| k.default_color())),
+        ("props", "tint", |k| serde_json::from_value::<PropKind>(k.clone()).ok().map(|k| k.default_tint())),
+    ];
+    for (list, field, own) in lists {
+        let Some(old) = before.get(list).and_then(Value::as_array) else { continue };
+        let Some(new) = doc.get_mut(list).and_then(Value::as_array_mut) else { continue };
+        for (o, n) in old.iter().zip(new.iter_mut()) {
+            if o.get("kind") == n.get("kind") { continue; }
+            let (Some(was), Some(now)) = (o.get("kind").and_then(own), n.get("kind").and_then(own)) else { continue };
+            if n.get(field).and_then(colour).map_or(true, |c| c == was) { n[field] = serde_json::json!(now); }
+        }
+    }
+}
+
 fn stamp(p: &Path) -> Option<(SystemTime, u64)> {
     let m = std::fs::metadata(p).ok()?;
     Some((m.modified().ok()?, m.len()))
@@ -1066,7 +1086,7 @@ impl eframe::App for Studio {
         self.walk_window(ctx);
         self.dev_shot(ctx);
 
-        if self.doc != before { self.sync_scene(); }
+        if self.doc != before { follow_kind_colours(&before, &mut self.doc); self.sync_scene(); }
         self.commit_edits(ctx);
         self.request_frame();
 

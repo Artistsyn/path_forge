@@ -327,14 +327,54 @@ pub struct Sky {
     pub moon: Moon,
     pub stars: Stars,
     pub clouds: Clouds,
+    /// Northern lights: curtains of green and violet light rippling across the sky.
+    pub aurora: Aurora,
+    pub rainbow: Rainbow,
 }
 impl Default for Sky {
     fn default() -> Self {
         Self {
             enabled: true, top: [70, 110, 170], horizon: [200, 190, 160],
             sun: SkyBody::default(), moon: Moon::default(), stars: Stars::default(), clouds: Clouds::default(),
+            aurora: Aurora::default(), rainbow: Rainbow::default(),
         }
     }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
+pub struct Aurora {
+    pub enabled: bool,
+    pub intensity: f32,
+    /// Colour at the foot of the curtains.
+    pub low: Rgb,
+    /// Colour at their tops.
+    pub high: Rgb,
+    /// Where the curtains hang: 0 high in the sky .. 1 down at the horizon.
+    pub height: f32,
+    /// How fast the curtains ripple.
+    pub speed: f32,
+    pub seed: u32,
+}
+impl Default for Aurora {
+    fn default() -> Self { Aurora { enabled: false, intensity: 0.8, low: [70, 255, 150], high: [170, 90, 255], height: 0.45, speed: 1.0, seed: 0 } }
+}
+
+/// A rainbow: an arc round the point opposite the sun, with a faint second bow outside it.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
+pub struct Rainbow {
+    pub enabled: bool,
+    pub intensity: f32,
+    /// Where its centre is across the sky (0 left .. 1 right).
+    pub x: f32,
+    /// Size: 1 spans the frame's width (a real 42-degree bow is wider than a portrait view).
+    pub size: f32,
+    /// Draw the fainter second bow outside the first.
+    pub double: bool,
+}
+impl Default for Rainbow {
+    fn default() -> Self { Rainbow { enabled: false, intensity: 0.5, x: 0.5, size: 1.0, double: true } }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -400,11 +440,14 @@ pub struct Clouds {
     pub opacity: f32,
     pub tint: Rgb,
     pub variation: f32,
+    /// Shadows of clouds drifting over the ground (0..1; needs a light-giving sun). They drift
+    /// with the wind when there is one, and work with the clouds themselves switched off too.
+    pub shadows: f32,
     pub seed: u32,
 }
 impl Default for Clouds {
     fn default() -> Self {
-        Self { enabled: false, count: 10, drift: 1.0, scale: 1.0, opacity: 0.4, tint: [226, 230, 238], variation: 0.55, seed: 0 }
+        Self { enabled: false, count: 10, drift: 1.0, scale: 1.0, opacity: 0.4, tint: [226, 230, 238], variation: 0.55, shadows: 0.0, seed: 0 }
     }
 }
 
@@ -555,12 +598,191 @@ impl Default for SetPiece {
     }
 }
 
-/// Weather events. Both repeat exactly with the loop.
+/// Weather and the air: rain and snow, wind, storms, mist, light in the air, heat haze, the lens.
+/// Every part works in any scene and repeats exactly with the loop.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema, Default)]
 #[serde(default)]
 pub struct Weather {
     pub lightning: Lightning,
     pub fog_banks: FogBanks,
+    /// Rain, snow, sleet or hail falling everywhere open to the sky, and what it does to the ground.
+    pub precipitation: Precipitation,
+    /// Water dripping from the ceiling (or the tops of the walls where there is none).
+    pub drips: Drips,
+    /// Wind: slants rain and snow, carries particles sideways, sways plants and banners.
+    pub wind: Wind,
+    /// A sandstorm: sand streaming past, a sand-coloured haze, the sun dimmed to a disc.
+    pub sandstorm: Sandstorm,
+    /// Mist lying on the ground, and wisps rising from it.
+    pub mist: Mist,
+    /// Light made visible by the air: shafts from the sun past trees and walls, haloes round lamps.
+    pub light_shafts: LightShafts,
+    /// Heat haze: the air shimmers over the ground in the distance.
+    pub heat_shimmer: HeatShimmer,
+    /// Raindrops or frost on the camera's lens.
+    pub lens: Lens,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Default)]
+pub enum PrecipKind {
+    #[default]
+    Rain,
+    Snow,
+    /// Wet snow mixed with rain.
+    Sleet,
+    Hail,
+}
+
+/// Rain, snow, sleet or hail. It falls wherever the sky is open (not under a ceiling).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
+pub struct Precipitation {
+    pub enabled: bool,
+    pub kind: PrecipKind,
+    /// How hard it falls: 0.1 a few drops or flakes, 0.5 steady, 1 a downpour or a blizzard.
+    pub intensity: f32,
+    /// Size of the drops, flakes or hailstones.
+    pub size: f32,
+    /// Colour multiplied over the drops or flakes (white = their natural colour in the scene's light).
+    pub tint: Rgb,
+    /// Rain and sleet: how wet the ground gets, darker and glossy (0..1).
+    pub wetness: f32,
+    /// Rain and sleet: puddles on the path and verge that mirror the scene, with rings where drops land (0..1 = how much ground they cover).
+    pub puddles: f32,
+    /// Rain, sleet and hail: splashes where drops land (0..1).
+    pub splashes: f32,
+    /// Snow and sleet: snow lying on the ground, the verges, the tops of walls and props (0..1).
+    pub cover: f32,
+    /// A trodden track down the middle of the path in lying snow (0 = untouched .. 1 = trodden to slush).
+    pub track: f32,
+    /// Haze of a heavy fall: curtains of rain in the distance, a blizzard's whiteout (0..1).
+    pub haze: f32,
+    pub seed: u32,
+}
+impl Default for Precipitation {
+    fn default() -> Self {
+        Precipitation {
+            enabled: false, kind: PrecipKind::Rain, intensity: 0.5, size: 1.0, tint: [255, 255, 255], wetness: 0.8,
+            puddles: 0.3, splashes: 0.6, cover: 0.8, track: 0.6, haze: 0.5, seed: 0,
+        }
+    }
+}
+
+/// Drops falling from the ceiling, or from the tops of the walls where there is no ceiling.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
+pub struct Drips {
+    pub enabled: bool,
+    /// Drips per metre of path per loop.
+    pub rate: f32,
+    pub color: Rgb,
+    pub seed: u32,
+}
+impl Default for Drips {
+    fn default() -> Self { Drips { enabled: false, rate: 1.0, color: [190, 205, 220], seed: 0 } }
+}
+
+/// Wind across the path.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
+pub struct Wind {
+    pub enabled: bool,
+    /// Wind speed, metres per second: positive blows to the right, negative to the left.
+    pub speed: f32,
+    /// How much it rises and falls in gusts (0 steady .. 1 squally).
+    pub gusts: f32,
+    /// How much trees, reeds, grass and banners sway (0..1).
+    pub sway: f32,
+    pub seed: u32,
+}
+impl Default for Wind {
+    fn default() -> Self { Wind { enabled: false, speed: 3.0, gusts: 0.4, sway: 0.5, seed: 0 } }
+}
+
+/// A sandstorm: sand streaming past on the wind (to the right unless the wind says otherwise),
+/// a sand-coloured haze that hides the distance, and the sun dimmed to a disc.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
+pub struct Sandstorm {
+    pub enabled: bool,
+    /// 0.2 blowing sand .. 1 a wall of sand.
+    pub intensity: f32,
+    pub color: Rgb,
+    pub seed: u32,
+}
+impl Default for Sandstorm {
+    fn default() -> Self { Sandstorm { enabled: false, intensity: 0.5, color: [214, 172, 116], seed: 0 } }
+}
+
+/// Mist lying low over the ground, drifting, with wisps rising from it.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
+pub struct Mist {
+    pub enabled: bool,
+    /// Height of the mist above the ground, metres.
+    pub height: f32,
+    /// Thickness: optical depth per metre inside it (0.2 thin .. 1.5 thick).
+    pub density: f32,
+    pub color: Rgb,
+    /// How patchy it is (0 even .. 1 in drifting banks).
+    pub patchiness: f32,
+    /// Wisps rising from it (0..1).
+    pub wisps: f32,
+    pub seed: u32,
+}
+impl Default for Mist {
+    fn default() -> Self { Mist { enabled: false, height: 0.8, density: 0.25, color: [205, 210, 220], patchiness: 0.6, wisps: 0.4, seed: 0 } }
+}
+
+/// Light scattered by the air. Stronger in fog, mist, haze and dust.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
+pub struct LightShafts {
+    pub enabled: bool,
+    /// Rays from the sun past trees, walls and arches (needs the sun in the sky).
+    pub sun: f32,
+    /// Glowing haloes in the air round lamps, torches and other lights.
+    pub lamps: f32,
+}
+impl Default for LightShafts {
+    fn default() -> Self { LightShafts { enabled: false, sun: 0.6, lamps: 0.4 } }
+}
+
+/// Heat haze: the picture wavers over the distant ground and just above the horizon.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
+pub struct HeatShimmer {
+    pub enabled: bool,
+    /// How far the picture wavers (0..1).
+    pub strength: f32,
+    /// How fast it wavers.
+    pub speed: f32,
+}
+impl Default for HeatShimmer {
+    fn default() -> Self { HeatShimmer { enabled: false, strength: 0.5, speed: 1.0 } }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Default)]
+pub enum LensKind {
+    /// Raindrops that land on the lens, linger and run down.
+    #[default]
+    Drops,
+    /// Frost creeping in from the edges.
+    Frost,
+}
+
+/// Something on the camera's lens.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
+pub struct Lens {
+    pub enabled: bool,
+    pub kind: LensKind,
+    /// How many drops, or how far the frost reaches in (0..1).
+    pub amount: f32,
+    pub seed: u32,
+}
+impl Default for Lens {
+    fn default() -> Self { Lens { enabled: false, kind: LensKind::Drops, amount: 0.5, seed: 0 } }
 }
 
 /// Lightning strikes: a flash that lights the whole scene, and a bolt in the sky.
@@ -853,17 +1075,17 @@ pub struct Kit {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-pub enum ParticleKind { Dust, Embers, Fireflies, Rain, Snow, Leaves, Ash, Spores, Sand }
+pub enum ParticleKind { Dust, Embers, Fireflies, Rain, Snow, Leaves, Ash, Spores, Sand, Petals }
 impl ParticleKind {
-    pub const ALL: [ParticleKind; 9] = [
+    pub const ALL: [ParticleKind; 10] = [
         ParticleKind::Dust, ParticleKind::Embers, ParticleKind::Fireflies, ParticleKind::Rain, ParticleKind::Snow,
-        ParticleKind::Leaves, ParticleKind::Ash, ParticleKind::Spores, ParticleKind::Sand,
+        ParticleKind::Leaves, ParticleKind::Ash, ParticleKind::Spores, ParticleKind::Sand, ParticleKind::Petals,
     ];
     pub fn name(self) -> &'static str {
         match self {
             ParticleKind::Dust => "Dust", ParticleKind::Embers => "Embers", ParticleKind::Fireflies => "Fireflies",
             ParticleKind::Rain => "Rain", ParticleKind::Snow => "Snow", ParticleKind::Leaves => "Leaves",
-            ParticleKind::Ash => "Ash", ParticleKind::Spores => "Spores", ParticleKind::Sand => "Sand",
+            ParticleKind::Ash => "Ash", ParticleKind::Spores => "Spores", ParticleKind::Sand => "Sand", ParticleKind::Petals => "Petals",
         }
     }
     pub fn default_color(self) -> Rgb {
@@ -872,11 +1094,13 @@ impl ParticleKind {
             ParticleKind::Fireflies => [170, 255, 100], ParticleKind::Rain => [160, 180, 210],
             ParticleKind::Snow => [240, 245, 255], ParticleKind::Leaves => [170, 110, 40],
             ParticleKind::Ash => [120, 116, 112], ParticleKind::Spores => [170, 140, 255], ParticleKind::Sand => [222, 190, 140],
+            ParticleKind::Petals => [255, 190, 210],
         }
     }
 }
 
-/// Small moving things in the air: dust, embers, rain, snow, leaves.
+/// Small moving things in the air: dust, embers, rain, snow, leaves, petals. They drift with the wind
+/// when there is one. For weather that soaks or covers the ground, use `weather.precipitation`.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(default)]
 pub struct Particles {

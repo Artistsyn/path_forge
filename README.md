@@ -49,6 +49,14 @@ slowly in Safari, Preview and Quick Look on macOS, because Apple's decoder repla
 frame. Chrome, Firefox, Discord and game engines play it at its real speed. See the manual,
 §7.
 
+## Weather and the air
+
+Rain, snow, sleet and hail that wet the ground, fill puddles that mirror the scene and settle as
+snow on the ground and on props; dripping ceilings; wind that slants the rain and sways trees and
+banners; sandstorms; low drifting mist; sun shafts through trees and haloes round lamps; cloud
+shadows; heat shimmer; aurora and rainbows; raindrops or frost on the lens. Any scene can use any of
+them, and every one repeats seamlessly with the loop (manual §2, Weather and the air).
+
 ## Props as data: kits
 
 Beyond the built-in prop kinds, a prop can be described by data: an image, a pool of images or

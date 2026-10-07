@@ -77,13 +77,13 @@ times in seconds.
 | `verge` | The ground beside an open path: its material and grass tufts. Off, the path edge drops into void (walls usually cover it). |
 | `walls` | Walls either side (a corridor, a canyon, a street) and their material. |
 | `ceiling` | A roof at a height, with its material. |
-| `sky` | Sky gradient (top and horizon colours), sun, moon (with phase and craters), stars, clouds (with drift). |
+| `sky` | Sky gradient (top and horizon colours), sun (with the bright aureole round it), moon (with phase and craters), stars, clouds (with drift and shadows on the ground), aurora, rainbow. |
 | `light` | Ambient light and its colour, the colour of the far distance, fog, and cel-shaded light bands. |
 | `fixtures` | Repeating lights: torches, lanterns, candles, braziers, crystals, fireflies, magic, green fire, ice wisps, mounted on walls, the ground or the ceiling, or floating. |
 | `props` | Layers of repeating objects: trees, pillars, rocks, barrels, banners, or data-defined props (§5). |
 | `set_pieces` | Structures spanning the path at intervals: archways, gates, banners. |
-| `particles` | Dust, embers, fireflies, rain, snow, leaves, ash, spores, sand. |
-| `weather` | Lightning and drifting fog banks. |
+| `particles` | Dust, embers, fireflies, rain, snow, leaves, ash, spores, sand, petals. They drift with the wind. |
+| `weather` | Rain, snow, sleet and hail with what they do to the ground, drips, wind, sandstorms, mist, light shafts, heat shimmer, drops or frost on the lens, lightning and fog banks. See [Weather and the air](#weather-and-the-air). |
 | `prop_defs` | Props described by data, named for the scene's prop layers to use. |
 | `post` | Exposure, contrast, saturation, bloom, vignette, grain, tint. |
 | `style` | How the picture is drawn: pixel size, palette, dither, outline, paint, grade (§4). |
@@ -102,6 +102,41 @@ speed, and each cloud forms, drifts and dissolves once per loop, so the loop sti
 **The moon** is drawn as a lit sphere. `phase` runs from −1 to 1: 0 is full, and the lit part
 shrinks towards new at either end (negative on the waning side, positive on the waxing side). The unlit part shows the sky and the stars behind it, plus a
 faint earthshine.
+
+### Weather and the air
+
+Every effect here works in any scene, can be combined with the others, and repeats exactly with
+the loop. Everything moving runs on loop time, so when the walk stops (an encounter) the rain keeps
+falling. Each is off until `enabled`. Field by field, see
+[SCENE_REFERENCE.md](SCENE_REFERENCE.md#weather).
+
+| Effect | Where | What it does |
+|---|---|---|
+| Rain, snow, sleet, hail | `weather.precipitation` | Falls wherever the sky is open (not under a ceiling), at `intensity` from a few drops to a downpour or blizzard, slanted by the wind. Rain and sleet make the ground wet (darker and glossy, so lamps streak in it), leave puddles that mirror the scene with rings where drops land, and splash. Snow and sleet lie on the ground, the verges, the tops of walls and the tops of props, with a trodden track down the path. `haze` adds curtains of rain in the distance or a blizzard's whiteout. |
+| Drips | `weather.drips` | Beads form on the ceiling (or the tops of the walls), fall and splash, from the same spots every time. For caves, sewers and crypts. |
+| Wind | `weather.wind` | `speed` in m/s (negative blows left) with `gusts`. Rain and snow slant and drift, particles are carried, and trees, reeds, palms, grass and banners bend and sway (`sway`); rocks, pillars and crates stay put. |
+| Sandstorm | `weather.sandstorm` | Sand streaming past, a sand-coloured haze that hides the distance, the sun dimmed to a disc. Follows the wind's direction. |
+| Mist | `weather.mist` | Mist lying below `height` metres, drifting in banks (`patchiness`), with wisps rising. Each pixel takes as much mist as its line of sight passes through, so the ground near the camera stays clear and the distance goes white. Keep `density` near 0.1-0.2. |
+| Light shafts | `weather.light_shafts` | `sun`: rays streaming past trees, walls and arches near the sun. `lamps`: glowing haloes in the air round every light. Both are stronger in fog, mist and haze. |
+| Cloud shadows | `sky.clouds.shadows` | Shadows drifting over the ground and walls, with the wind if there is one. They need a sun that gives light, and work with the clouds themselves switched off. |
+| Heat shimmer | `weather.heat_shimmer` | The distance wavers just above the horizon. Deserts, lava fields. |
+| Aurora | `sky.aurora` | Curtains of light rippling across a night sky, from `low` to `high` colour. |
+| Rainbow | `sky.rainbow` | An arc with a fainter, reversed second bow. `size` 1 spans the frame: a real 42-degree bow is wider than a portrait view. |
+| On the lens | `weather.lens` | `Drops`: raindrops land on the lens, each showing the scene upside down, linger and run down. `Frost`: crystals creeping in from the edges. |
+| Lightning | `weather.lightning` | Flashes that light the scene from the sky, and bolts where the sky shows. The export metadata gives each strike's frame, for thunder. |
+| Fog banks | `weather.fog_banks` | Thick stretches of fog the camera walks into and out of. |
+
+**Cost.** Falling rain and snow, splashes, mist and most effects cost little. Wet ground and puddles
+cost what any glossy floor costs: the reflections roughly double a frame's render time (Dark
+Street at 480 x 854: 11.6 ms dry, about 31 ms wet). Lower `wetness` and `puddles`, or render smaller,
+if the live runtime needs the time back.
+
+Presets that use them: Dark Street (rain, lightning), Mountain Pass (light snow, wind), Haunted
+Forest and Bog Boardwalk (mist), Desert Canyon (heat shimmer), Mossy Sewer (drips), Forest Path
+(breeze, sun shafts).
+
+In the studio, switching a particle layer to another kind also switches its colour to that kind's
+own, unless you had set the colour yourself.
 
 `pf dump --preset NAME` prints any preset as a full scene to start from. `pf schema` prints the
 JSON schema; `pf schema --markdown` prints [SCENE_REFERENCE.md](SCENE_REFERENCE.md). Scenes from
@@ -541,4 +576,6 @@ pf skill --install .
 | A GIF looks banded | GIF has 256 colours. Use WebP, or a pixel-art palette, or dithering. |
 | A GIF exported at 60 fps plays at 30 | GIF timing tops out at 50 fps; PathForge uses every 2nd frame and says so. |
 | A scene file names missing images | `pf assets --scene F`, then `pf pack --scene F`. |
+| Rain falls but the ground stays dry, or no rain shows | The scene has a ceiling: rain and snow fall only where the sky is open. Use `weather.drips` indoors. |
+| Rain made the frame much slower | Wet ground reflects like any glossy floor. Lower `wetness` and `puddles`. |
 | A transition looks wrong | Read the plan's warnings in the studio or with `pf transition … --json`, then set the threshold, approach or camera blend yourself. |

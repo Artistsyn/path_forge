@@ -67,8 +67,21 @@ fn ty(s: &Value) -> String {
 
 fn cell(s: &str) -> String { s.replace('|', "\\|").replace('\n', " ") }
 
+/// Numbers as they were written (f32 defaults come out of the schema as 0.800000011920929).
+fn tidy(v: &Value) -> Value {
+    match v {
+        Value::Number(n) if !n.is_i64() && !n.is_u64() => {
+            let x = (n.as_f64().unwrap_or(0.0) * 1e5).round() / 1e5;
+            serde_json::Number::from_f64(x).map_or(v.clone(), Value::Number)
+        }
+        Value::Array(a) => Value::Array(a.iter().map(tidy).collect()),
+        Value::Object(o) => Value::Object(o.iter().map(|(k, x)| (k.clone(), tidy(x))).collect()),
+        other => other.clone(),
+    }
+}
+
 fn default_text(v: &Value) -> String {
-    let t = match v { Value::String(s) => format!("\"{s}\""), other => other.to_string() };
+    let t = match tidy(v) { Value::String(s) => format!("\"{s}\""), other => other.to_string() };
     if t.len() > 48 { "(see the type)".into() } else { format!("`{}`", cell(&t)) }
 }
 

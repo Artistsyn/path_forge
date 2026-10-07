@@ -428,6 +428,15 @@ fn summary(s: &Scene) -> String {
         out += &format!("; {kind} every {} m", s.path.fork.spacing);
     }
     if s.weather.fog_banks.enabled { out += &format!("; fog banks every {} m", s.weather.fog_banks.spacing); }
+    let w = &s.weather;
+    if w.precipitation.enabled { out += &format!("; {:?} at {:.0}%", w.precipitation.kind, w.precipitation.intensity * 100.0).to_lowercase(); }
+    if w.drips.enabled { out += "; drips"; }
+    if w.wind.enabled { out += &format!("; wind {} m/s", w.wind.speed); }
+    for (on, name) in [(w.sandstorm.enabled, "sandstorm"), (w.mist.enabled, "ground mist"), (w.light_shafts.enabled, "light shafts"), (w.heat_shimmer.enabled, "heat shimmer"),
+        (s.sky.clouds.shadows > 0.0, "cloud shadows"), (s.sky.aurora.enabled, "aurora"), (s.sky.rainbow.enabled, "rainbow")] {
+        if on { out += &format!("; {name}"); }
+    }
+    if w.lens.enabled { out += &format!("; {:?} on the lens", w.lens.kind).to_lowercase(); }
     if !matches!(s.style.palette, crate::scene::Palette::Full) || s.style.pixel_size > 1 { out += &format!("; pixel style {}px", s.style.pixel_size); }
     out
 }
