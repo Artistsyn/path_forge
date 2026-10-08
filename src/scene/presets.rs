@@ -356,6 +356,62 @@ pub fn frozen_channel() -> Scene {
     s
 }
 
+/// Dawn on a still river: the sun just up ahead, a low mist lying on the water and lifting off
+/// it in wisps, glowing where the sun shines through it, the banks and willows clear above it.
+pub fn misty_river() -> Scene {
+    let mut s = river_run();
+    s.name = "Misty River".into();
+    s.path.bend = -0.2;
+    s.path.material = water([40, 62, 72], [22, 38, 46], 0.15);
+    s.path.waterway = Waterway { floating: Floating::None, ..waterway(1, 0.25) };
+    s.sky = day_sky([92, 124, 170], [246, 200, 162], [0.58, 0.86]);
+    s.sky.sun.color = [255, 210, 168];
+    s.sky.clouds.opacity = 0.35;
+    s.light = outdoor_light(0.45, [214, 196, 182], 80.0);
+    s.light.ambient_color = [214, 206, 214];
+    s.props[1].tint = [96, 120, 62];
+    s.weather.mist = Mist {
+        enabled: true, height: 1.6, density: 0.14, color: [226, 230, 238], patchiness: 0.7, wisps: 0.8,
+        soft: 1.0, over: MistOver::Path, spread: 2.0, glow: 0.8, ..Mist::default()
+    };
+    s.weather.wind = Wind { enabled: true, speed: 0.6, gusts: 0.2, sway: 0.15, ..Wind::default() };
+    s.particles = vec![];
+    s.motion.speed = 2.5;
+    s
+}
+
+/// A country lane at sunrise after a cold night: dew lifting off the fields as a thin ground mist,
+/// thickest at the ground and thinning upwards, the low sun shining through it between the trees.
+pub fn dawn_road() -> Scene {
+    let mut s = scene("Dawn Road");
+    s.camera.horizon = 0.32;
+    s.camera.eye_height = 1.6;
+    s.path.half_width = 1.6;
+    s.path.bend = 0.3;
+    s.path.edge_noise = 0.3;
+    s.path.edge_dark = 0.2;
+    s.path.material = mat(Pattern::Dirt, [118, 100, 76], [70, 58, 44], 2.0);
+    s.verge = Verge { enabled: true, material: mat(Pattern::Grass, [66, 96, 44], [40, 62, 28], 2.0), tufts: true, ..Verge::default() };
+    s.walls.enabled = false;
+    s.sky = day_sky([104, 132, 176], [250, 206, 166], [0.42, 0.9]);
+    s.sky.sun.color = [255, 204, 160];
+    s.light = outdoor_light(0.45, [206, 196, 190], 120.0);
+    s.light.ambient_color = [214, 208, 220];
+    s.props = vec![
+        PropLayer { density: 0.6, jitter: 0.6, tint: [60, 92, 42], ..props(PropKind::Bush, 0.6, 5.0, 0.9, 107) },
+        PropLayer { density: 0.7, jitter: 1.5, ..props(PropKind::Tree, 4.5, 9.0, 1.1, 109) },
+        PropLayer { rows: 2, row_spacing: 10.0, density: 0.5, jitter: 3.0, ..props(PropKind::Tree, 16.0, 14.0, 1.2, 113) },
+    ];
+    s.weather.mist = Mist {
+        enabled: true, height: 1.8, density: 0.07, color: [228, 230, 238], patchiness: 0.6, wisps: 0.5,
+        soft: 1.0, glow: 0.7, ..Mist::default()
+    };
+    s.weather.light_shafts = LightShafts { enabled: true, sun: 0.3, lamps: 0.0 };
+    s.particles = vec![dust(ParticleKind::Dust, 30)];
+    s.motion.speed = 2.0;
+    s
+}
+
 /// The black hole from ball_swing_game's boss arena, as a walk: a deck over nothing heading
 /// straight for it. Its shadow hangs over the path's end, ringed by light, the far side of its
 /// disk bent over the top and under the bottom, the stars smeared into arcs round it, and matter
@@ -849,5 +905,7 @@ pub const ALL: &[(&str, fn() -> Scene)] = &[
     ("Jungle River", jungle_river),
     ("Lagoon Swim", lagoon_swim),
     ("Frozen Channel", frozen_channel),
+    ("Misty River", misty_river),
+    ("Dawn Road", dawn_road),
 ("Hyperspace Jump", hyperspace_jump),
 ];

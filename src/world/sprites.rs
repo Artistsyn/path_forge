@@ -194,6 +194,49 @@ impl Canvas {
         self.poly(&[[a[0] + nx, a[1] + ny], [b[0] + nx, b[1] + ny], [b[0] - nx, b[1] - ny], [a[0] - nx, a[1] - ny]], c, 0.4);
     }
 
+    /// A flat ellipse turned by `ang` radians: a leaf, or a dab of foliage.
+    fn dab(&mut self, cx: f32, cy: f32, rx: f32, ry: f32, ang: f32, c: [f32; 3]) {
+        let (cx, cy, rx, ry) = (cx * self.k, cy * self.k, rx * self.k, ry * self.k);
+        if rx <= 0.0 || ry <= 0.0 { return; }
+        let (sn, cs) = ang.sin_cos();
+        let e = rx.max(ry);
+        for y in (cy - e).floor() as i32..=(cy + e).ceil() as i32 {
+            for x in (cx - e).floor() as i32..=(cx + e).ceil() as i32 {
+                let (dx, dy) = (x as f32 + 0.5 - cx, y as f32 + 0.5 - cy);
+                let (u, v) = ((dx * cs + dy * sn) / rx, (-dx * sn + dy * cs) / ry);
+                if u * u + v * v <= 1.0 { self.put(x, y, c); }
+            }
+        }
+    }
+
+    /// A limb from `a` (`wa` wide) to `b` (`wb` wide), rounded where it starts: shaded round on
+    /// the side away from the upper-left light, with bark furrows running along it.
+    fn limb(&mut self, a: [f32; 2], b: [f32; 2], wa: f32, wb: f32, c: [f32; 3], seed: f32) {
+        let k = self.k;
+        let (ax, ay, bx, by) = (a[0] * k, a[1] * k, b[0] * k, b[1] * k);
+        let (dx, dy) = (bx - ax, by - ay);
+        let len2 = (dx * dx + dy * dy).max(1e-6);
+        let len = len2.sqrt();
+        let (nx, ny) = (-dy / len, dx / len);
+        let side = if -0.6 * nx - 0.8 * ny >= 0.0 { 1.0 } else { -1.0 };
+        let (ha, hb) = (wa * k * 0.5, wb * k * 0.5);
+        let m = ha.max(hb) + 1.0;
+        for y in (ay.min(by) - m).floor() as i32..=(ay.max(by) + m).ceil() as i32 {
+            for x in (ax.min(bx) - m).floor() as i32..=(ax.max(bx) + m).ceil() as i32 {
+                let (px, py) = (x as f32 + 0.5 - ax, y as f32 + 0.5 - ay);
+                let t = (px * dx + py * dy) / len2;
+                if t > 1.0 { continue; }
+                let hw = ha + (hb - ha) * t.max(0.0);
+                let across = px * nx + py * ny;
+                if (t < 0.0 && px * px + py * py > ha * ha) || (t >= 0.0 && across.abs() > hw) { continue; }
+                let s = (across / hw.max(1e-3)).clamp(-1.0, 1.0) * side;
+                let round = (1.0 - s * s).max(0.0).sqrt();
+                let furrow = 0.86 + 0.14 * ((across / k) * 1.7 + seed + 0.8 * ((t * len / k) * 0.3 + seed).sin()).sin();
+                self.put(x, y, mul(c, (0.7 + 0.25 * round + 0.3 * s) * furrow));
+            }
+        }
+    }
+
     /// Alpha-weighted box filter from SS× down to 2× nominal size.
     fn finish(self) -> Sprite {
         let f = SS / 2;
@@ -246,27 +289,149 @@ fn paint_asteroid(tint: Rgb, variant: u32) -> Sprite {
     c.finish()
 }
 
+/// Foliage colour for a light level from 0 (deep shade) to 1 (full sun): dark and cool in the
+/// shade, light and warm in the sun, in a few soft steps the way a painter lays foliage in.
+fn leaf_tone(t: [f32; 3], lit: f32) -> [f32; 3] {
+    let l = lit.clamp(0.0, 1.0);
+    let q = 0.6 * ((l * 3.0).round() / 3.0) + 0.4 * l;
+    let shade = mix(mul(t, 0.28), [0.010, 0.026, 0.042], 0.3);
+    let sun = [t[0] * 1.5 + 0.03, t[1] * 1.32 + 0.022, t[2] * 0.85];
+    if q < 0.5 { mix(shade, t, q * 2.0) } else { mix(t, sun, (q - 0.5) * 2.0) }
+}
+
+/// The outward normal of a dome over the ellipse (cx, cy, rx, ry) at (x, y), facing the viewer.
+fn dome_normal(x: f32, y: f32, cx: f32, cy: f32, rx: f32, ry: f32) -> [f32; 3] {
+    let (nx, ny) = ((x - cx) / rx, (y - cy) / ry);
+    let r2 = nx * nx + ny * ny;
+    if r2 >= 1.0 { let r = r2.sqrt(); [nx / r, ny / r, 0.0] } else { [nx, ny, (1.0 - r2).sqrt()] }
+}
+
+/// Sun on foliage whose crown faces `crown` and whose own clump faces `clump`, lit from the
+/// upper left; `below` (0 at the crown's top, 1 at its bottom) takes light away underneath.
+fn foliage_light(crown: [f32; 3], clump: [f32; 3], below: f32) -> f32 {
+    let n = [0.55 * crown[0] + 0.45 * clump[0], 0.55 * crown[1] + 0.45 * clump[1], 0.55 * crown[2] + 0.45 * clump[2]];
+    let l = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt().max(1e-4);
+    let d = ((-0.45 * n[0] - 0.7 * n[1] + 0.55 * n[2]) / l).max(0.0);
+    (0.12 + 0.88 * d) * (1.0 - 0.45 * below.clamp(0.0, 1.0))
+}
+
+/// The crown of a broadleaf tree, as one dome: (cx, cy, rx, ry).
+type Crown = (f32, f32, f32, f32);
+
+/// One clump of leaves round `p`, `rad` across, `depth` from -1 (at the back of the crown) to 1
+/// (at the front): leaf dabs laid back to front, each lit as part of the clump and of the crown,
+/// with a few strays past the clump's edge to break its outline.
+fn leaf_clump(c: &mut Canvas, r: &mut Rng, t: [f32; 3], cr: Crown, p: [f32; 2], rad: f32, depth: f32) {
+    let n = (rad * rad * 0.55) as usize;
+    let mut dabs: Vec<(f32, f32, f32, bool)> = (0..n).map(|_| {
+        let a = r.range(0.0, std::f32::consts::TAU);
+        let stray = r.f() < 0.06;
+        let rr = if stray { r.range(0.95, 1.2) } else { r.f().sqrt() * 0.95 };
+        let (lx, ly) = (a.cos() * rr, a.sin() * rr * 0.85);
+        (lx, ly, (1.0 - lx * lx - ly * ly).max(0.0).sqrt(), stray)
+    }).collect();
+    dabs.sort_by(|a, b| a.2.partial_cmp(&b.2).unwrap());
+    let back = 0.72 + 0.28 * (depth + 1.0) * 0.5;
+    for (lx, ly, lz, stray) in dabs {
+        let (x, y) = (p[0] + lx * rad, p[1] + ly * rad);
+        let below = (y - (cr.1 - cr.3)) / (2.0 * cr.3);
+        let lit = foliage_light(dome_normal(x, y, cr.0, cr.1, cr.2, cr.3), [lx, ly, lz], below) * back * r.range(0.9, 1.08);
+        let size = if stray { r.range(1.5, 2.4) } else { r.range(2.4, 4.4) };
+        c.dab(x, y, size * r.range(1.0, 1.5), size, r.range(0.0, std::f32::consts::PI), leaf_tone(t, lit));
+    }
+}
+
+/// A willow branchlet springing from `start` on a limb: it arches up and over to `apex`, then
+/// hangs from there to `y1`, drawn as narrow leaves all along it.
+#[allow(clippy::too_many_arguments)]
+fn arching_branchlet(c: &mut Canvas, r: &mut Rng, t: [f32; 3], start: [f32; 2], apex: [f32; 2], y1: f32, out: f32, front: f32, lit_at: &dyn Fn(f32, f32) -> f32) {
+    // The rise: a curve that climbs from the limb and levels off at the apex, heading outward.
+    let ctrl = [start[0] + (apex[0] - start[0]) * 0.35, apex[1] - r.range(3.0, 9.0)];
+    let len = ((apex[0] - start[0]).powi(2) + (apex[1] - start[1]).powi(2)).sqrt() * 1.15;
+    let tone = r.range(0.7, 1.12);
+    let mut s = 0.0;
+    let mut alt = 1.0;
+    while s < len {
+        let u = s / len;
+        let p = [
+            (1.0 - u) * (1.0 - u) * start[0] + 2.0 * (1.0 - u) * u * ctrl[0] + u * u * apex[0],
+            (1.0 - u) * (1.0 - u) * start[1] + 2.0 * (1.0 - u) * u * ctrl[1] + u * u * apex[1],
+        ];
+        let d = [2.0 * (1.0 - u) * (ctrl[0] - start[0]) + 2.0 * u * (apex[0] - ctrl[0]), 2.0 * (1.0 - u) * (ctrl[1] - start[1]) + 2.0 * u * (apex[1] - ctrl[1])];
+        // Leaves along the shoot, drooping.
+        let ang = d[1].atan2(d[0]) + alt * r.range(0.5, 1.0);
+        c.dab(p[0], p[1], 2.4, 0.8, ang, leaf_tone(t, lit_at(p[0], p[1]) * front * tone * r.range(0.88, 1.1)));
+        if r.f() < 0.5 { alt = -alt; }
+        s += r.range(1.0, 1.8);
+    }
+    branchlet(c, r, t, apex[0], apex[1], y1, out, front, lit_at);
+}
+
+/// A willow branchlet hanging from (x, y0) to y1: it leaves its arch outward by `out` and falls
+/// nearly straight, drawn as narrow leaves along it, smaller towards the tip. `lit_at` gives
+/// the light at a point of it; `front` dims the ones behind.
+fn branchlet(c: &mut Canvas, r: &mut Rng, t: [f32; 3], x: f32, y0: f32, y1: f32, out: f32, front: f32, lit_at: &dyn Fn(f32, f32) -> f32) {
+    let len = (y1 - y0).max(4.0);
+    let sway = r.range(-5.0, 5.0);
+    let tone = r.range(0.65, 1.15);
+    let mut s = 0.0;
+    let mut alt = 1.0;
+    while s < len {
+        let f = s / len;
+        let px = x + out * (1.0 - (-s / 10.0).exp()) + sway * f * f;
+        let py = y0 + s;
+        let size = 1.0 - 0.45 * f;
+        let lit = lit_at(px, py) * front * tone;
+        let ang = std::f32::consts::FRAC_PI_2 + alt * r.range(0.1, 0.7);
+        c.dab(px + alt * r.range(0.0, 0.7) * size, py, 2.5 * size, 0.8 * size, ang, leaf_tone(t, lit * r.range(0.88, 1.1)));
+        if r.f() < 0.5 { alt = -alt; }
+        s += r.range(0.9, 1.7);
+    }
+}
+
 pub fn paint_prop(kind: PropKind, tint: Rgb, variant: u32) -> Sprite {
     let t = rgb_lin(tint);
     let mut r = Rng(variant.wrapping_mul(2_654_435_761).wrapping_add(0x9e37) | 1);
     let bark = mix([0.05, 0.035, 0.02], t, 0.15);
     match kind {
         PropKind::Tree => {
+            // A broadleaf tree as a painter lays one in: a tapering trunk flaring at the root and
+            // forking into limbs, and a crown of separate leaf clumps with sky and branches showing
+            // between them, each clump lit as part of the whole crown from the upper left (light
+            // and warm on top, dark and cool underneath), its edge broken by stray leaves.
             let mut c = Canvas::new(208, 256);
-            let trunk_w = r.range(14.0, 22.0);
-            c.rect(104.0 - trunk_w / 2.0, 120.0, 104.0 + trunk_w / 2.0, 256.0, bark, 0.8);
-            c.line([104.0, 170.0], [r.range(60.0, 80.0), 120.0], 8.0, bark);
-            c.line([104.0, 160.0], [r.range(128.0, 150.0), 112.0], 7.0, bark);
-            let blobs = 6 + (variant % 3) as usize;
-            for i in 0..blobs {
-                let a = i as f32 / blobs as f32 * std::f32::consts::TAU;
-                let (bx, by) = (104.0 + a.cos() * r.range(30.0, 58.0), 92.0 + a.sin() * r.range(22.0, 44.0));
-                c.ellipse(bx, by + 12.0, r.range(36.0, 50.0), r.range(30.0, 40.0), mul(t, 0.55), 0.6);
+            let cr: Crown = (104.0 + r.range(-6.0, 6.0), 94.0, r.range(80.0, 90.0), r.range(70.0, 78.0));
+            let n = 13 + (variant % 4) as usize;
+            let mut clumps: Vec<([f32; 2], f32, f32)> = Vec::new();
+            for _ in 0..600 {
+                if clumps.len() >= n { break; }
+                let a = r.range(0.0, std::f32::consts::TAU);
+                let rr = r.f().sqrt() * 0.76;
+                let p = [cr.0 + a.cos() * rr * cr.2, cr.1 + a.sin() * rr * cr.3];
+                // Bigger clumps up top where the light is.
+                let rad = r.range(19.0, 28.0) * (1.12 - 0.22 * ((p[1] - cr.1) / cr.3 + 1.0) * 0.5);
+                if clumps.iter().any(|(q, qr, _)| ((p[0] - q[0]).powi(2) + (p[1] - q[1]).powi(2)).sqrt() < 0.6 * (rad + qr)) { continue; }
+                clumps.push((p, rad, r.range(-1.0, 1.0)));
             }
-            for _ in 0..5 {
-                c.ellipse(104.0 + r.range(-46.0, 40.0), r.range(52.0, 104.0), r.range(28.0, 44.0), r.range(24.0, 34.0), t, 0.9);
+            clumps.sort_by(|a, b| a.2.partial_cmp(&b.2).unwrap());
+            let tw = r.range(15.0, 20.0);
+            let fork = [cr.0 + r.range(-4.0, 4.0), cr.1 + cr.3 * 0.6];
+            let bark = mul(bark, 1.6);
+            // Three main limbs, and a branch from the nearest one out to every clump.
+            let ends: Vec<[f32; 2]> = [-0.5f32, 0.05, 0.5].iter().map(|&f| [cr.0 + f * cr.2 + r.range(-8.0, 8.0), cr.1 - (0.42 - f.abs() * 0.5) * cr.3 + r.range(-6.0, 6.0)]).collect();
+            for (p, rad, z) in clumps.iter().filter(|k| k.2 < 0.0) { leaf_clump(&mut c, &mut r, t, cr, *p, *rad, *z); }
+            c.poly(&[[104.0 - tw * 1.0, 256.0], [104.0 + tw * 1.0, 256.0], [104.0 + tw * 0.5, 240.0], [104.0 - tw * 0.5, 240.0]], mul(bark, 0.75), 0.6);
+            c.limb([104.0, 256.0], fork, tw, tw * 0.72, bark, 0.4);
+            for (i, e) in ends.iter().enumerate() {
+                let mid = [fork[0] + (e[0] - fork[0]) * 0.45 + r.range(-6.0, 6.0), fork[1] + (e[1] - fork[1]) * 0.55];
+                c.limb(fork, mid, tw * 0.55, tw * 0.4, bark, i as f32 * 2.1);
+                c.limb(mid, *e, tw * 0.4, tw * 0.2, bark, i as f32 * 2.1 + 1.0);
             }
-            c.ellipse(96.0 + r.range(-10.0, 10.0), 52.0, 34.0, 26.0, mul(t, 1.25), 0.9);
+            for (p, _, _) in &clumps {
+                let e = ends.iter().min_by(|a, b| ((a[0] - p[0]).powi(2) + (a[1] - p[1]).powi(2)).partial_cmp(&((b[0] - p[0]).powi(2) + (b[1] - p[1]).powi(2))).unwrap()).unwrap();
+                c.limb(*e, *p, tw * 0.2, 1.6, bark, p[0]);
+            }
+            for (p, rad, z) in clumps.iter().filter(|k| k.2 >= 0.0) { leaf_clump(&mut c, &mut r, t, cr, *p, *rad, *z); }
             c.finish()
         }
         PropKind::Pine => {
@@ -283,13 +448,28 @@ pub fn paint_prop(kind: PropKind, tint: Rgb, variant: u32) -> Sprite {
             c.finish()
         }
         PropKind::Bush => {
+            // A shrub as a mound of leaf clumps sitting on the ground, lit as one dome like a tree's
+            // crown, with a few twigs showing low down between the clumps.
             let mut c = Canvas::new(192, 128);
-            for _ in 0..7 {
-                c.ellipse(96.0 + r.range(-54.0, 54.0), r.range(60.0, 92.0), r.range(28.0, 42.0), r.range(26.0, 36.0), mul(t, 0.6), 0.5);
+            let cr: Crown = (96.0 + r.range(-4.0, 4.0), 84.0, r.range(78.0, 88.0), r.range(44.0, 50.0));
+            for _ in 0..5 {
+                let x = cr.0 + r.range(-40.0, 40.0);
+                c.limb([cr.0 + r.range(-6.0, 6.0), 128.0], [x, r.range(84.0, 104.0)], 4.0, 1.2, mul(bark, 1.6), x);
             }
-            for _ in 0..6 {
-                c.ellipse(96.0 + r.range(-46.0, 46.0), r.range(36.0, 76.0), r.range(22.0, 36.0), r.range(20.0, 30.0), t, 0.9);
+            let n = 10 + (variant % 3) as usize;
+            let mut clumps: Vec<([f32; 2], f32, f32)> = Vec::new();
+            for _ in 0..400 {
+                if clumps.len() >= n { break; }
+                let a = r.range(0.0, std::f32::consts::TAU);
+                let rr = r.f().sqrt() * 0.75;
+                let rad = r.range(17.0, 24.0);
+                // The lowest clumps sit on the ground.
+                let p = [cr.0 + a.cos() * rr * cr.2, (cr.1 + a.sin() * rr * cr.3).min(128.0 - rad * 0.8)];
+                if clumps.iter().any(|(q, qr, _)| ((p[0] - q[0]).powi(2) + (p[1] - q[1]).powi(2)).sqrt() < 0.6 * (rad + qr)) { continue; }
+                clumps.push((p, rad, r.range(-1.0, 1.0)));
             }
+            clumps.sort_by(|a, b| a.2.partial_cmp(&b.2).unwrap());
+            for (p, rad, z) in &clumps { leaf_clump(&mut c, &mut r, t, cr, *p, *rad, *z); }
             c.finish()
         }
         PropKind::Rock | PropKind::Boulder => {
@@ -397,35 +577,68 @@ pub fn paint_prop(kind: PropKind, tint: Rgb, variant: u32) -> Sprite {
             c.finish()
         }
         PropKind::Willow => {
-            // A weeping tree: a gnarled trunk under a dome of fine streamers, gathered in clumps of
-            // different lengths, dark ones behind and lighter ones in front, tapering to their tips.
-            let mut c = Canvas::new(240, 256);
-            c.poly(&[[106.0, 256.0], [134.0, 256.0], [127.0, 112.0], [115.0, 112.0]], bark, 1.0);
-            c.line([120.0, 150.0], [r.range(70.0, 90.0), 98.0], 8.0, bark);
-            c.line([122.0, 136.0], [r.range(150.0, 172.0), 94.0], 7.0, bark);
-            c.ellipse(120.0, 88.0, 100.0, 56.0, mul(t, 0.42), 0.5);
-            let crown_y = |x: f32| 88.0 - 56.0 * (1.0 - ((x - 120.0) / 100.0).powi(2)).max(0.0).sqrt();
-            for layer in 0..2 {
-                let (count, shade) = if layer == 0 { (70, 0.55) } else { (110, 1.0) };
-                for _ in 0..count / 6 {
-                    let cx = 120.0 + r.range(-100.0, 100.0);
-                    let clump_len = r.range(80.0, 170.0) * (1.0 - ((cx - 120.0) / 120.0).abs() * 0.35);
-                    let sway = r.range(-10.0, 10.0);
-                    for _ in 0..6 {
-                        let x = cx + r.range(-9.0, 9.0);
-                        let y0 = crown_y(x) + r.range(0.0, 18.0);
-                        let len = clump_len * r.range(0.75, 1.0);
-                        let col = mul(t, shade * r.range(0.75, 1.15));
-                        let mut p = [x, y0];
-                        for k in 0..4 {
-                            let f = (k + 1) as f32 / 4.0;
-                            let q = [x + sway * f * f, (y0 + len * f).min(254.0)];
-                            c.line(p, q, 2.4 * (1.0 - f * 0.6), mix(col, mul(t, 1.35), f * 0.35));
-                            p = q;
-                        }
+            // A weeping willow is all branchlets: a short stout trunk divides low into a few big
+            // limbs that rise and spread, and from their tops long fine branchlets arch up, over
+            // and down, hanging in curtains nearly to the ground. The crown's rounded top is just
+            // where the branchlets arch over, so it is made of them too, never of leafy clumps.
+            // Lit from the upper left: the arches on top and the sunny side's outer curtains light
+            // and yellow-green, the curtains behind deep and cool, sky and limbs between curtains.
+            let mut c = Canvas::new(300, 256);
+            let lean = r.range(-10.0, 10.0);
+            let cr: Crown = (150.0 + lean * 0.6, 88.0, r.range(124.0, 136.0), r.range(64.0, 72.0));
+            let top_at = |x: f32| cr.1 - cr.3 * (1.0 - ((x - cr.0) / cr.2).powi(2)).max(0.0).sqrt();
+            let lit_at = |x: f32, y: f32| {
+                let nx = ((x - cr.0) / cr.2).clamp(-1.0, 1.0);
+                let n = [nx, -0.25, (1.0 - nx * nx).max(0.0).sqrt()];
+                let d = (-0.45 * n[0] - 0.7 * n[1] + 0.55 * n[2]).max(0.0) / 1.03;
+                // Darker deeper under the crown; the tips near the ground see some sky again.
+                let under = ((y - cr.1) / (240.0 - cr.1)).clamp(0.0, 1.0);
+                let arch = foliage_light(dome_normal(x, y, cr.0, cr.1, cr.2, cr.3), dome_normal(x, y, cr.0, cr.1, cr.2, cr.3), (y - (cr.1 - cr.3)) / (2.0 * cr.3));
+                let hang = (0.1 + 0.9 * d) * (1.0 - 0.4 * under * (1.0 - under) * 4.0 * 0.6 - 0.15 * under);
+                // Up in the arches the light is the dome's; below them, the curtains'.
+                let k = ((y - top_at(x)) / 30.0).clamp(0.0, 1.0);
+                arch + (hang - arch) * k
+            };
+            // The limbs: where they fork from the trunk, and the tops the branchlets spring from.
+            let tw = r.range(22.0, 28.0);
+            let fork = [150.0 + lean, r.range(178.0, 196.0)];
+            let nl = 3 + (variant % 3) as usize;
+            let limbs: Vec<([f32; 2], [f32; 2])> = (0..nl).map(|i| {
+                let f = (i as f32 + 0.5) / nl as f32 * 2.0 - 1.0 + r.range(-0.12, 0.12);
+                let tx = cr.0 + f * cr.2 * 0.6;
+                let top = [tx, top_at(tx) + r.range(22.0, 32.0)];
+                ([fork[0] + (top[0] - fork[0]) * 0.3, fork[1] + (top[1] - fork[1]) * 0.55], top)
+            }).collect();
+            let curtain = |c: &mut Canvas, r: &mut Rng, front: f32, count: usize, from: f32| {
+                for _ in 0..count {
+                    let fx = r.range(-0.97, 0.97);
+                    let x0 = cr.0 + fx * cr.2;
+                    let base = 236.0 + r.range(-30.0, 16.0) - 22.0 * fx.abs().powi(3);
+                    let strands = 6 + (r.f() * 8.0) as usize;
+                    let spread = r.range(5.0, 13.0);
+                    // The limb this curtain springs from: the one whose top is nearest.
+                    let lt = limbs.iter().map(|l| l.1).min_by(|a, b| (a[0] - x0).abs().partial_cmp(&(b[0] - x0).abs()).unwrap()).unwrap();
+                    for _ in 0..strands {
+                        let x = x0 + r.range(-spread, spread);
+                        let apex = [x, top_at(x) + from + r.range(-5.0, 9.0)];
+                        let start = [lt[0] + r.range(-10.0, 10.0), lt[1] + r.range(-4.0, 10.0)];
+                        let out = (x - cr.0) / cr.2 * r.range(5.0, 13.0);
+                        let y1 = (base + r.range(-12.0, 10.0)).min(254.0);
+                        arching_branchlet(c, r, t, start, apex, y1, out, front, &lit_at);
                     }
                 }
+            };
+            // The curtains behind, deep in the crown's shade.
+            curtain(&mut c, &mut r, 0.45, 28, 6.0);
+            let bark = mul(bark, 1.5);
+            c.poly(&[[150.0 - tw * 1.05, 256.0], [150.0 + tw * 1.05, 256.0], [150.0 + tw * 0.55, 242.0], [150.0 - tw * 0.55, 242.0]], mul(bark, 0.75), 0.6);
+            c.limb([150.0, 256.0], fork, tw, tw * 0.85, bark, 0.3);
+            for (i, (mid, top)) in limbs.iter().enumerate() {
+                c.limb(fork, *mid, tw * 0.5, tw * 0.36, bark, i as f32 * 1.7);
+                c.limb(*mid, *top, tw * 0.36, tw * 0.16, bark, i as f32 * 1.7 + 0.9);
             }
+            // The curtains in front, arching over the top of the crown.
+            curtain(&mut c, &mut r, 1.0, 48, 0.0);
             c.finish()
         }
         PropKind::Palm => {

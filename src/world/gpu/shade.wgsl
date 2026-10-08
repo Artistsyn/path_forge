@@ -26,7 +26,9 @@
 struct Air {
     mist_on: u32, density: f32, top: f32, patchy: f32,
     travel: f32, seed: u32, mist_r: f32, mist_g: f32,
-    mist_b: f32, pad0: u32, pad1: u32, pad2: u32,
+    mist_b: f32, soft: f32, over: u32, spread: f32,
+    glow_on: u32, sun_x: f32, sun_y: f32, fhy: f32,
+    sun_r: f32, sun_g: f32, sun_b: f32, pad0: u32,
 }
 @group(0) @binding(9) var<uniform> A: Air;
 
@@ -716,6 +718,31 @@ fn mist_patch(x: f32, d: f32) -> f32 {
     return max(1.0 - p + p * 2.0 * smoothstep_r(0.2, 0.8, n), 0.0);
 }
 
+// weather::mist_w / mist_g / mist_mean
+fn mist_w(top: f32, y: f32) -> f32 {
+    if y >= top { return 0.0; }
+    if y <= 0.0 { return 1.0; }
+    let u = 1.0 - div(y, top);
+    return 1.0 - A.soft + A.soft * u * u;
+}
+fn mist_g(top: f32, y: f32) -> f32 {
+    let yc = min(y, top);
+    if yc <= 0.0 { return yc; }
+    let u = 1.0 - div(yc, top);
+    return (1.0 - A.soft) * yc + A.soft * top * (1.0 - u * u * u) / 3.0;
+}
+fn mist_mean(top: f32, a: f32, b: f32) -> f32 {
+    let lo = min(a, b); let hi = max(a, b);
+    if hi - lo < 1e-4 { return mist_w(top, lo); }
+    return div(mist_g(top, hi) - mist_g(top, lo), hi - lo);
+}
+// weather::mist_glow
+fn mist_glow(dist: f32) -> f32 {
+    let r1 = 0.22 * A.fhy; let r2 = 0.9 * A.fhy;
+    let q = div(dist, r1);
+    return 0.75 * exp(-q * q) + 0.25 * exp(-div(dist, r2));
+}
+
 fn sky_air() -> vec3<f32> {
     var l = vec3<f32>(W.amb_r, W.amb_g, W.amb_b);
     for (var k = 0u; k < W.n_sky; k++) { l += sky_col(k) * 0.5; }
@@ -770,26 +797,35 @@ fn mist_main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let slope = (W.horizon_px - f32(row) - 0.5) / W.focal_px;
     let across = (f32(x) + 0.5 - W.center_px) / W.focal_px;
     let stretch = sqrt(1.0 + slope * slope + across * across);
-    var len: f32; var z: f32; var gx: f32; var gd: f32;
+    var z: f32; var gx: f32; var gd: f32;
     if none {
         if eye >= top { return; }
         z = W.far;
-        if slope > 1e-3 { z = min((top - eye) / slope, W.far); }
-        len = z * stretch; gx = 0.0; gd = z;
+        if slope > 1e-3 { z = min(div(top - eye, slope), W.far); }
+        gx = 0.0; gd = z;
     } else {
         z = min(g.depth, W.far * 2.0);
-        let y_seen = eye + slope * z;
-        let lo = min(eye, y_seen); let hi = max(eye, y_seen);
-        var inside = 0.0;
-        if hi <= top { inside = 1.0; } else if lo < top { inside = (top - lo) / max(hi - lo, 1e-4); }
-        len = z * stretch * inside; gx = g.x; gd = g.d;
+        gx = g.x; gd = g.d;
     }
+    let y_end = eye + slope * z;
+    var f = 1.0;
+    if A.over == 1u {
+        var lx = gx;
+        if none { lx = across * z; }
+        let e = water_edge(gd) + 0.5 * max(A.spread, 0.0);
+        if abs(lx) > e { f = div(e, abs(lx)); }
+    }
+    let len = z * stretch * f * mist_mean(top, eye, eye + (y_end - eye) * f);
     if len <= 1e-3 { return; }
-    let tau = max(A.density, 0.0) * mist_patch(gx, gd) * len;
+    let tau = max(A.density, 0.0) * mist_patch(gx * f, gd * f) * len;
     let a = 1.0 - exp(-tau);
     if a < 0.003 { return; }
     var light: vec3<f32>;
     if none { light = sky_air(); } else { light = air_light(gx, min(top * 0.5, eye), gd); }
+    if A.glow_on != 0u {
+        let dx = f32(x) + 0.5 - A.sun_x; let dy = f32(row) + 0.5 - A.sun_y;
+        light += vec3<f32>(A.sun_r, A.sun_g, A.sun_b) * mist_glow(sqrt(dx * dx + dy * dy));
+    }
     let col = apply_fog(vec3<f32>(A.mist_r, A.mist_g, A.mist_b) * light, z * 0.5);
     let c = mix3(vec3<f32>(hdr[i * 3u], hdr[i * 3u + 1u], hdr[i * 3u + 2u]), col, a);
     hdr[i * 3u] = c.x; hdr[i * 3u + 1u] = c.y; hdr[i * 3u + 2u] = c.z;

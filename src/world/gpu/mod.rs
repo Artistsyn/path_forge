@@ -480,7 +480,11 @@ const AIR_STRIDE: u64 = 256;
 #[derive(Clone, Copy, Default, bytemuck::Pod, bytemuck::Zeroable)]
 pub(crate) struct AirParams {
     pub mist_on: u32, pub density: f32, pub top: f32, pub patch: f32,
-    pub travel: f32, pub seed: u32, pub mist: [f32; 3], pub pad: [u32; 3],
+    pub travel: f32, pub seed: u32, pub mist: [f32; 3],
+    /// weather::apply_mist: thinning with height, over the path only (1) reaching `spread` past
+    /// its edges, and the glow towards the sun (at sun_x/sun_y, sky `fhy` pixels tall).
+    pub soft: f32, pub over: u32, pub spread: f32, pub glow_on: u32,
+    pub sun_x: f32, pub sun_y: f32, pub fhy: f32, pub sun: [f32; 3], pub pad: u32,
 }
 
 /// Textures kept on the GPU (see `Gpu::texel_buffer`): each held texture and where its levels
@@ -1517,7 +1521,7 @@ mod tests {
         assert_eq!(std::mem::size_of::<WorldParams>(), 4 * 216);
         assert_eq!(std::mem::size_of::<CardGpu>(), 4 * 42);
         assert_eq!(std::mem::size_of::<SplatGpu>(), 4 * 24);
-        assert_eq!(std::mem::size_of::<AirParams>(), 48);
+        assert_eq!(std::mem::size_of::<AirParams>(), 80);
         assert_eq!(std::mem::size_of::<ShaftParams>(), 64);
         assert_eq!(std::mem::size_of::<PostParams>(), 384);
         assert_eq!(std::mem::size_of::<SkyParams>() % 16, 0, "SkyParams is {} bytes", std::mem::size_of::<SkyParams>());

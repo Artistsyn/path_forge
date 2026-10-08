@@ -58,11 +58,11 @@ pf presets
 pf render --preset "Forest Path" -o forest.png
 ```
 
-There are 31 presets: Stone Dungeon, Stone Crypt, Mossy Sewer, Forest Path, Desert Canyon, Night
+There are 33 presets: Stone Dungeon, Stone Crypt, Mossy Sewer, Forest Path, Desert Canyon, Night
 Road, Magic Cavern, Ice Dungeon, Ruins Path, Dark Street, Mountain Pass, Volcanic Rift, Haunted
 Forest, Ruined Castle, Fiery Dungeon, Tower Stair, Bog Boardwalk, Desert Ruins, Ice Cave, Star Bridge,
 Hyperspace Run, Wormhole, Starship Flight, Event Horizon, Black Hole Arena, River Run, Canal Lanterns,
-Jungle River, Lagoon Swim, Frozen Channel and Hyperspace Jump.
+Jungle River, Lagoon Swim, Frozen Channel, Misty River, Dawn Road and Hyperspace Jump.
 Every one loops without a seam (`pf seam` checks them all).
 
 ## 2. Scenes
@@ -150,7 +150,7 @@ falling. Each is off until `enabled`. Field by field, see
 | Drips | `weather.drips` | Beads form on the ceiling (or the tops of the walls), fall and splash, from the same spots every time. For caves, sewers and crypts. |
 | Wind | `weather.wind` | `speed` in m/s (negative blows left) with `gusts`. Rain and snow slant and drift, particles are carried, and trees, reeds, palms, grass and banners bend and sway (`sway`); rocks, pillars and crates stay put. |
 | Sandstorm | `weather.sandstorm` | Sand streaming past, a sand-coloured haze that hides the distance, the sun dimmed to a disc. Follows the wind's direction. |
-| Mist | `weather.mist` | Mist lying below `height` metres, drifting in banks (`patchiness`), with wisps rising. Each pixel takes as much mist as its line of sight passes through, so the ground near the camera stays clear and the distance goes white. Keep `density` near 0.1-0.2. |
+| Mist | `weather.mist` | Mist lying below `height` metres, drifting in banks (`patchiness`), with wisps rising. Each pixel takes as much mist as its line of sight passes through, so the ground near the camera stays clear and the distance goes white. Keep `density` near 0.1-0.2. `soft` 1 makes it thickest at the ground and thin smoothly to nothing at `height` (morning ground fog, dew lifting off a field), with no flat top. `over: Path` keeps it over the path only (the water of a river, a road), fading out `spread` metres past the edges, and the wisps then lift off the path like steam. `glow` brightens it looking towards the sun, as mist does lit from behind (Misty River, Dawn Road). |
 | Light shafts | `weather.light_shafts` | `sun`: rays streaming past trees, walls and arches near the sun. `lamps`: glowing haloes in the air round every light. Both are stronger in fog, mist and haze. |
 | Cloud shadows | `sky.clouds.shadows` | Shadows drifting over the ground and walls, with the wind if there is one. They need a sun that gives light, and work with the clouds themselves switched off. |
 | Heat shimmer | `weather.heat_shimmer` | The distance wavers just above the horizon. Deserts, lava fields. |

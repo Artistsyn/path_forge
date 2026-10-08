@@ -1358,7 +1358,13 @@ impl WorldRenderer {
                     let m = &c.scene.weather.mist;
                     (m.enabled && m.density > 0.0).then(|| {
                         let travel = if c.scene.weather.wind.enabled { c.scene.weather.wind.speed * 0.5 } else { 0.4 } * c.scene.motion.loop_seconds();
-                        super::gpu::AirParams { mist_on: 1, density: m.density, top: m.height.max(0.05), patch: m.patchiness, travel, seed: m.seed, mist: rgb_lin(m.color), pad: [0; 3] }
+                        {
+                            let (glow_on, sun_x, sun_y, fhy, sun) = weather::mist_sun(c).map_or((0, 0.0, 0.0, 1.0, [0.0; 3]), |(x, y, f, s)| (1, x, y, f, s));
+                            super::gpu::AirParams {
+                                mist_on: 1, density: m.density, top: m.height.max(0.05), patch: m.patchiness, travel, seed: m.seed, mist: rgb_lin(m.color),
+                                soft: m.soft.clamp(0.0, 1.0), over: (m.over == crate::scene::MistOver::Path) as u32, spread: m.spread, glow_on, sun_x, sun_y, fhy, sun, pad: 0,
+                            }
+                        }
                     })
                 }).collect();
                 f.mist(&airs);

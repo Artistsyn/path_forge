@@ -546,7 +546,8 @@ pub(super) fn draw_wisps(ctx: &Ctx, out: &mut Vec<Splat>) {
     let cw = cycles(1.0 / 6.0, ls);
     let life = ls / cw;
     let range = ctx.far.min(30.0);
-    let lat = if ctx.scene.walls.enabled { ctx.wall_x(5.0) } else { ctx.view.path_half_width(5.0) + 5.0 };
+    let lat = if m.over == MistOver::Path { water::water_edge(ctx, 5.0) + 0.5 * m.spread.max(0.0) }
+        else if ctx.scene.walls.enabled { ctx.wall_x(5.0) } else { ctx.view.path_half_width(5.0) + 5.0 };
     let copies = (range / ctx.loop_len).ceil() as i64 + 1;
     let col = rgb_lin(m.color);
     let n = ((m.wisps.clamp(0.0, 1.0) * 1.6 * ctx.loop_len) as i64).min(2000);
@@ -585,8 +586,49 @@ fn mist_patch(ctx: &Ctx, x: f32, d: f32) -> f32 {
     (1.0 - p + p * 2.0 * smoothstep(0.2, 0.8, n)).max(0.0)
 }
 
+/// How much of the mist's density is left at height `y`: all of it under an even layer's top,
+/// or with `soft` thinning from the ground to nothing at the top as (1 - y/top)^2.
+fn mist_w(soft: f32, top: f32, y: f32) -> f32 {
+    if y >= top { 0.0 } else if y <= 0.0 { 1.0 } else { let u = 1.0 - y / top; 1.0 - soft + soft * u * u }
+}
+
+/// The mist's density summed from the ground up to height `y` (below the ground it carries on
+/// as dense as at the ground, under a bridge).
+fn mist_g(soft: f32, top: f32, y: f32) -> f32 {
+    let yc = y.min(top);
+    if yc <= 0.0 { return yc; }
+    let u = 1.0 - yc / top;
+    (1.0 - soft) * yc + soft * top * (1.0 - u * u * u) / 3.0
+}
+
+/// The mist's mean density along a line of sight between heights `a` and `b`.
+fn mist_mean(soft: f32, top: f32, a: f32, b: f32) -> f32 {
+    let (lo, hi) = (a.min(b), a.max(b));
+    if hi - lo < 1e-4 { mist_w(soft, top, lo) } else { (mist_g(soft, top, hi) - mist_g(soft, top, lo)) / (hi - lo) }
+}
+
+/// How bright the mist glows towards the sun, by distance from it on screen in pixels: lit from
+/// behind, mist scatters most of its light onwards, a bright core round the sun and a wide halo.
+fn mist_glow(dist: f32, fhy: f32) -> f32 {
+    let (r1, r2) = (0.22 * fhy, 0.9 * fhy);
+    0.75 * (-(dist / r1) * (dist / r1)).exp() + 0.25 * (-dist / r2).exp()
+}
+
+/// The sun on screen for mist's glow: (x, y) in pixels, the frame's sky height and its light.
+pub(super) fn mist_sun(ctx: &Ctx) -> Option<(f32, f32, f32, [f32; 3])> {
+    let m = &ctx.scene.weather.mist;
+    let sky = &ctx.scene.sky;
+    if m.glow <= 0.0 || !(sky.enabled && sky.sun.enabled && sky.sun.emits_light) { return None; }
+    let v = &ctx.view;
+    let (ox, oy) = (v.left as f32, v.top as f32);
+    let (fw, fhy) = (v.width as f32 - 2.0 * ox, (v.horizon_px.max(2.0) - oy).max(2.0));
+    ctx.sky_lights.first().map(|s| (ox + sky.sun.pos[0] * fw, oy + sky.sun.pos[1].clamp(0.0, 1.0) * fhy, fhy, scale3(s.color, m.glow)))
+}
+
 /// Mist lying over the ground: each pixel takes as much of it as its line of sight passes
-/// through, so near ground seen from above stays clear and the distance goes white.
+/// through, so near ground seen from above stays clear and the distance goes white. Mist `over`
+/// the path counts only the stretch of the line that runs over it (the camera stands on the
+/// path), so it fades across the banks rather than stopping at a line.
 pub(super) fn apply_mist(ctxs: &[Ctx], gbuf: &[GPixel], hdr: &mut [[f32; 3]]) {
     if !ctxs.iter().any(|c| c.scene.weather.mist.enabled && c.scene.weather.mist.density > 0.0) { return; }
     let w = ctxs[0].view.width;
@@ -601,30 +643,41 @@ pub(super) fn apply_mist(ctxs: &[Ctx], gbuf: &[GPixel], hdr: &mut [[f32; 3]]) {
             let ctx = &ctxs[(g.realm as usize).min(ctxs.len() - 1)];
             let m = &ctx.scene.weather.mist;
             if !m.enabled || m.density <= 0.0 { continue; }
+            let sun = mist_sun(ctx);
             let v = &ctx.view;
             let eye = v.eye_height;
             let top = m.height.max(0.05);
+            let soft = m.soft.clamp(0.0, 1.0);
             // Rise of the line of sight per metre ahead, and its length per metre ahead.
             let slope = (v.horizon_px - row as f32 - 0.5) / v.focal_px;
             let across = (x as f32 + 0.5 - v.center_px) / v.focal_px;
             let stretch = (1.0 + slope * slope + across * across).sqrt();
-            let (len, z, gx, gd) = if g.id == id::NONE {
+            // Where the line of sight ends: its depth, how high it is there, and where it lies.
+            let (z, y_end, gx, gd) = if g.id == id::NONE {
                 // Open sky: only from inside the mist, looking out through its top.
                 if eye >= top { continue; }
                 let z = if slope > 1e-3 { ((top - eye) / slope).min(ctx.far) } else { ctx.far };
-                (z * stretch, z, 0.0, z)
+                (z, eye + slope * z, 0.0, z)
             } else {
                 let z = g.depth.min(ctx.far * 2.0);
-                let y_seen = eye + slope * z;
-                let (lo, hi) = (eye.min(y_seen), eye.max(y_seen));
-                let inside = if hi <= top { 1.0 } else if lo >= top { 0.0 } else { (top - lo) / (hi - lo).max(1e-4) };
-                (z * stretch * inside, z, g.x, g.d)
+                (z, eye + slope * z, g.x, g.d)
             };
+            // The share of it that runs over the mist's ground.
+            let f = if m.over == MistOver::Path {
+                let lx = if g.id == id::NONE { across * z } else { gx };
+                let e = water::water_edge(ctx, gd) + 0.5 * m.spread.max(0.0);
+                if lx.abs() <= e { 1.0 } else { e / lx.abs() }
+            } else { 1.0 };
+            let len = z * stretch * f * mist_mean(soft, top, eye, eye + (y_end - eye) * f);
             if len <= 1e-3 { continue; }
-            let tau = m.density.max(0.0) * mist_patch(ctx, gx, gd) * len;
+            let tau = m.density.max(0.0) * mist_patch(ctx, gx * f, gd * f) * len;
             let a = 1.0 - (-tau).exp();
             if a < 0.003 { continue; }
-            let light = if g.id == id::NONE { ctx.sky_lights.iter().fold(ctx.ambient, |a, s| add3(a, scale3(s.color, 0.5))) } else { air_light_among(ctx, gx, (top * 0.5).min(eye), gd, tiles.as_ref().map(|t| t.at(x, row))) };
+            let mut light = if g.id == id::NONE { ctx.sky_lights.iter().fold(ctx.ambient, |a, s| add3(a, scale3(s.color, 0.5))) } else { air_light_among(ctx, gx, (top * 0.5).min(eye), gd, tiles.as_ref().map(|t| t.at(x, row))) };
+            if let Some((sx, sy, fhy, sun)) = sun {
+                let dist = ((x as f32 + 0.5 - sx).powi(2) + (row as f32 + 0.5 - sy).powi(2)).sqrt();
+                light = add3(light, scale3(sun, mist_glow(dist, fhy)));
+            }
             let col = ctx.apply_fog(mul3(rgb_lin(m.color), light), z * 0.5);
             *px = mix3(*px, col, a);
         }

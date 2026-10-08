@@ -145,6 +145,9 @@ depth layers or a depth map).
   - `weather.sandstorm`: streaming sand, a sand-coloured haze that hides the distance, the sun a
     dim disc. Pair with wind.
   - `weather.mist`: low mist (`height` m, `density` per metre, `patchiness`, `wisps` rising).
+    For morning ground fog use `soft` 1 (thins with height, no flat top), `density` 0.07-0.14
+    with the eye above most of it, `glow` 0.7-1 with a low sun ahead; `over: "Path"` and `spread`
+    keep it over a river or road (presets Misty River, Dawn Road).
     Keep `density` around 0.1-0.2: it thickens with distance, so near ground stays clear.
   - `weather.light_shafts`: `sun` rays streaming past trees, walls and arches near a sun in the
     sky (stronger with fog or mist), and `lamps` haloes in the air round every light.

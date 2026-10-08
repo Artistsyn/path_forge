@@ -461,6 +461,19 @@ Mist lying low over the ground, drifting, with wisps rising from it.
 | `patchiness` | number | `0.6` | How patchy it is (0 even .. 1 in drifting banks). |
 | `wisps` | number | `0.4` | Wisps rising from it (0..1). |
 | `seed` | integer | `0` |  |
+| `soft` | number | `0.0` | How it thins with height: 0 an even layer up to `height`, 1 thickest at the ground and thinning smoothly to nothing at `height` (ground fog, dew burning off in the morning sun). |
+| `over` | [MistOver](#mistover) | `"Everywhere"` | Where it lies: everywhere, or only over the path (a river's water, a road) and `spread` metres past its edges, fading out across them. |
+| `spread` | number | `1.0` | How far past the path's edges mist `over` the path reaches, metres. |
+| `glow` | number | `0.0` | How much brighter it glows looking towards the sun, as mist does lit from behind (0..2). |
+
+### MistOver
+
+Where mist lies.
+
+| Value | Meaning |
+|---|---|
+| `Everywhere` |  |
+| `Path` | Over the path only: the water of a waterway, or the road. |
 
 ### Moon
 

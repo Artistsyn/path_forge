@@ -1154,9 +1154,28 @@ pub struct Mist {
     /// Wisps rising from it (0..1).
     pub wisps: f32,
     pub seed: u32,
+    /// How it thins with height: 0 an even layer up to `height`, 1 thickest at the ground and
+    /// thinning smoothly to nothing at `height` (ground fog, dew burning off in the morning sun).
+    pub soft: f32,
+    /// Where it lies: everywhere, or only over the path (a river's water, a road) and `spread`
+    /// metres past its edges, fading out across them.
+    pub over: MistOver,
+    /// How far past the path's edges mist `over` the path reaches, metres.
+    pub spread: f32,
+    /// How much brighter it glows looking towards the sun, as mist does lit from behind (0..2).
+    pub glow: f32,
+}
+
+/// Where mist lies.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub enum MistOver {
+    #[default]
+    Everywhere,
+    /// Over the path only: the water of a waterway, or the road.
+    Path,
 }
 impl Default for Mist {
-    fn default() -> Self { Mist { enabled: false, height: 0.8, density: 0.25, color: [205, 210, 220], patchiness: 0.6, wisps: 0.4, seed: 0 } }
+    fn default() -> Self { Mist { enabled: false, height: 0.8, density: 0.25, color: [205, 210, 220], patchiness: 0.6, wisps: 0.4, seed: 0, soft: 0.0, over: MistOver::Everywhere, spread: 1.0, glow: 0.0 } }
 }
 
 /// Light scattered by the air. Stronger in fog, mist, haze and dust.
