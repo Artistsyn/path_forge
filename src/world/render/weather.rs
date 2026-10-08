@@ -9,6 +9,7 @@
 
 use super::*;
 use super::splat::{dot, streak};
+use crate::world::looks::value_noise;
 
 /// What the weather is doing in one world this frame, worked out once.
 #[derive(Clone, Copy, Debug, Default)]
@@ -264,6 +265,12 @@ fn rain_rings(ctx: &Ctx, x: f32, w: f32) -> (f32, f32) {
 }
 
 /// How much sunlight cloud shadows leave on the ground at (x, d), 1 = none.
+/// Cloud shade's settings for the GPU: (amount, travel a loop, seed), when there is any.
+#[cfg(feature = "gpu")]
+pub(super) fn cloud_params(ctx: &Ctx) -> Option<(f32, f32, u32)> {
+    (ctx.wx.clouds > 0.0).then(|| (ctx.wx.clouds, ctx.wx.cloud_travel, ctx.scene.sky.clouds.seed))
+}
+
 pub(super) fn cloud_shade(ctx: &Ctx, x: f32, d: f32) -> f32 {
     let wx = &ctx.wx;
     if wx.clouds <= 0.0 { return 1.0; }
@@ -787,40 +794,185 @@ pub(super) fn veil_sky(ctx: &Ctx, gbuf: &[GPixel], hdr: &mut [[f32; 3]]) {
     hdr.par_iter_mut().zip(gbuf.par_iter()).for_each(|(c, g)| if g.id == id::NONE { *c = mix3(*c, col, veil); });
 }
 
-/// Northern lights: curtains of light hanging in the sky, rippling and folding.
-pub(super) fn aurora(ctx: &Ctx, gbuf: &[GPixel], hdr: &mut [[f32; 3]]) {
+/// The aurora's constants for one frame. The GPU sky pass takes the same numbers (`gpu_sky`), and
+/// `sky.wgsl` repeats `aurora_col` and `aurora_px` step for step.
+///
+/// The model follows photographs of real aurorae: a thin bright lower edge that swells, pinches
+/// and folds, a green glow just over it, fine rays rising from it, a diffuse violet veil high
+/// above, and pink knots. Each part fades in and out and flows along the band on its own.
+/// Lengths are in units of the sky's height / 0.65, so the band keeps its shape on any frame.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct AuroraK {
+    /// The loop angle (whole turns per loop) and the size of every drift circle, which together
+    /// set the speed exactly: the loop closes however slow it is.
+    pub a: f32,
+    pub m: f32,
+    /// Pixel column of the middle, and pixels per unit.
+    pub cx: f32,
+    pub unit: f32,
+    pub lo: [f32; 3],
+    pub hi: [f32; 3],
+    pub acc: [f32; 3],
+    /// Height of the lower edge above the horizon, units.
+    pub foot: f32,
+    pub arc: f32,
+    pub tall: f32,
+    pub rays: f32,
+    pub waves: f32,
+    /// Where the band is lit: a smoothstep over a slow noise.
+    pub pres_lo: f32,
+    pub pres_hi: f32,
+    pub edge: f32,
+    pub k: f32,
+    /// Where this seed's band starts in the noise.
+    pub so: f32,
+}
+
+/// The drift of real aurorae, in turns of the drift circles per second at speed 1.
+const AURORA_TURNS_PER_SECOND: f32 = 1.0 / 24.0;
+
+pub(super) fn aurora_k(ctx: &Ctx) -> Option<AuroraK> {
     let a = &ctx.scene.sky.aurora;
-    if !a.enabled || a.intensity <= 0.0 { return; }
+    if !a.enabled || a.intensity <= 0.0 { return None; }
+    let v = &ctx.view;
+    let hy = v.horizon_px.max(2.0);
+    let (ox, oy) = (v.left as f32, v.top as f32);
+    let (fw, fhy) = (v.width as f32 - 2.0 * ox, (hy - oy).max(2.0));
+    // Whole turns per loop, and circles sized so the drift has exactly the asked speed.
+    let turns = a.speed.max(0.0) * AURORA_TURNS_PER_SECOND * ctx.scene.motion.loop_seconds();
+    let c = turns.round().max(1.0);
+    let shift = (a.coverage.clamp(0.0, 1.0) - 0.5) * 0.6;
+    Some(AuroraK {
+        a: TAU * ctx.tphase * c,
+        m: turns / c,
+        cx: ox + 0.5 * fw,
+        unit: fhy / 0.65,
+        lo: rgb_lin(a.low),
+        hi: rgb_lin(a.high),
+        acc: rgb_lin(a.accent),
+        foot: 0.65 * (0.02 + 0.8 * (1.0 - a.height.clamp(0.0, 1.0))),
+        arc: a.arc,
+        tall: a.tall.clamp(0.1, 4.0),
+        rays: a.rays.clamp(0.0, 2.0),
+        waves: a.waves.max(0.0),
+        pres_lo: 0.28 - shift,
+        pres_hi: 0.62 - shift,
+        edge: a.edge.max(0.0),
+        k: a.intensity.max(0.0) * 0.9,
+        so: (hf(a.seed ^ 0x81, 0) * 64.0).floor(),
+    })
+}
+
+/// The faint even light a bright aurora sheds on the ground, added to the ambient.
+pub(super) fn aurora_glow(a: &crate::scene::Aurora) -> [f32; 3] {
+    if !a.enabled || a.intensity <= 0.0 { return [0.0; 3]; }
+    scale3(mix3(rgb_lin(a.low), rgb_lin(a.high), 0.25), 0.06 * a.intensity * a.ground_glow.max(0.0))
+}
+
+impl AuroraK {
+    /// A point on the drift circle of radius r, phase ph.
+    fn l(&self, r: f32, ph: f32) -> (f32, f32) { let q = self.a + ph; (self.m * r * q.cos(), self.m * r * q.sin()) }
+    fn n(&self, x: f32, y: f32, r: f32, ph: f32) -> f32 { let (lx, ly) = self.l(r, ph); value_noise(x + lx, y + ly) }
+    fn fbm(&self, x: f32, y: f32, r: f32, ph: f32) -> f32 {
+        let (lx, ly) = self.l(r, ph);
+        let (mut x, mut y, mut amp, mut s) = (x + lx, y + ly, 0.5, 0.0);
+        for _ in 0..4 {
+            s += amp * value_noise(x, y);
+            x = x * 2.03 + 7.1;
+            y = y * 2.03 + 7.1;
+            amp *= 0.5;
+        }
+        s
+    }
+    /// How far the lower edge sags below its mean: broad swells and a tighter ripple.
+    fn base_wave(&self, x: f32) -> f32 {
+        let xs = x * 1.8 + 9.0;
+        let sheet = 0.6 * self.n(xs * 0.9, 0.0, 0.5, 0.0) + 0.4 * self.n(xs * 2.3 + 5.0, 0.0, 0.6, 1.7);
+        self.waves * (0.22 * (sheet - 0.5) + 0.06 * (self.n(x * 5.0, 0.0, 0.6, 3.0) - 0.5))
+    }
+}
+
+/// What the aurora does down one column, x in units from the middle.
+#[derive(Clone, Copy, Debug, Default)]
+pub(super) struct AuroraCol {
+    fx: f32,
+    /// Height of the lower edge, units above the horizon.
+    base: f32,
+    /// How much this stretch is lit (0..1), the edge's brightness and width, the veil's height,
+    /// and a pink knot.
+    pres: f32,
+    edge: f32,
+    wid: f32,
+    veil: f32,
+    knot: f32,
+}
+
+pub(super) fn aurora_col(k: &AuroraK, x: f32) -> AuroraCol {
+    let fx = x + 0.35 * k.m * k.a.sin() + 5.7 + k.so;
+    let bw = k.base_wave(fx);
+    let pres = smoothstep(k.pres_lo, k.pres_hi, k.fbm(fx * 1.2 + 3.0, 0.0, 0.9, 0.0));
+    // The edge breaks where the band is unlit (an unbroken bright line over dark sky reads as a
+    // hill's outline from the ground), and brightens where it turns, as a fold seen edge-on does.
+    let slope = (k.base_wave(fx + 0.012) - bw) / 0.012;
+    let along = 0.35 + 0.9 * smoothstep(0.25, 0.8, k.fbm(fx * 1.6, 7.0, 1.0, 0.0));
+    AuroraCol {
+        fx,
+        base: k.foot - k.arc * 0.05 * x * x - bw,
+        pres,
+        edge: along * (0.15 + 0.85 * pres) * (1.0 + 0.9 * slope.abs().min(1.5)),
+        wid: 0.008 + 0.016 * k.n(fx * 2.4, 5.0, 0.9, 1.0),
+        veil: k.tall * (0.35 + 0.25 * k.fbm(fx * 1.1, 3.0, 0.7, 1.5)),
+        knot: smoothstep(0.62, 0.82, k.fbm(fx * 2.2, 11.0, 1.1, 4.0)),
+    }
+}
+
+/// The aurora's light at height y (units above the horizon) in a column.
+pub(super) fn aurora_px(k: &AuroraK, c: &AuroraCol, x: f32, y: f32) -> [f32; 3] {
+    let hb = y - c.base;
+    if hb < -0.01 { return [0.0; 3]; }
+    let hp = hb.max(0.0);
+    let hn = hp / c.veil;
+    if hn > 1.6 { return [0.0; 3]; }
+    let below = smoothstep(-0.004, 0.002, hb);
+    let on = smoothstep(-0.02, 0.02, hb);
+    // Rays fan out a little as they rise.
+    let fxr = c.fx - hp * x * 0.25;
+    let arc = (-hp / (c.wid * 1.3)).exp() * c.edge;
+    let sh = (-hp / 0.045).exp();
+    let ray_s = k.n(fxr * 48.0, 0.0, 1.3, 0.0);
+    let ray_m = k.n(fxr * 14.0, hn * 2.0, 1.0, 2.0);
+    let rays = (1.0 + k.rays * (0.9 * ray_s.powf(1.6) * (0.5 + 0.5 * ray_m) - 0.45)).max(0.0);
+    let life = smoothstep(0.25, 0.75, k.n(fxr * 9.0, hn * 3.0, 1.5, 5.0));
+    let green = (-hn * 3.2).exp() * rays * (0.35 + 0.65 * c.pres) * (0.5 + 0.5 * life);
+    let pv = smoothstep(0.3, 0.7, k.fbm(c.fx * 0.9 + 17.0, hn * 1.4, 0.8, 2.0));
+    let violet = smoothstep(0.08, 0.5, hn) * (1.0 - smoothstep(0.7, 1.4, hn)) * pv * (0.5 + 0.5 * rays) * (0.4 + 0.6 * c.pres);
+    let spike = k.n(fxr * 90.0, 0.0, 1.4, 4.0).powi(6) * 3.0 * (-hp / 0.09).exp() * on * c.pres * k.rays.min(1.0);
+    let knot = c.knot * (-hp / 0.07).exp() * on;
+    let white = [1.0; 3];
+    let mut col = scale3(mix3(k.lo, white, 0.45), arc * 1.5 * k.edge);
+    col = add3(col, scale3(k.lo, sh * 0.55 * (0.15 + 0.85 * c.pres) + green * 0.9));
+    col = add3(col, scale3(k.hi, violet * 0.9));
+    col = add3(col, scale3(mix3(k.hi, k.acc, 0.5), violet * 0.35 * life));
+    col = add3(col, scale3(mix3(k.lo, white, 0.75), spike * 0.5));
+    col = add3(col, scale3(k.acc, knot * 0.6));
+    scale3(col, k.k * below)
+}
+
+/// Northern lights: a band of curtains hanging in the sky (see `AuroraK`).
+pub(super) fn aurora(ctx: &Ctx, gbuf: &[GPixel], hdr: &mut [[f32; 3]]) {
+    let Some(k) = aurora_k(ctx) else { return };
     let v = &ctx.view;
     let w = v.width;
     let hy = v.horizon_px.max(2.0);
-    let (ox, oy) = (v.left as f32, v.top as f32);
-    let (fw, fhy) = (w as f32 - 2.0 * ox, (hy - oy).max(2.0));
-    let ls = ctx.scene.motion.loop_seconds();
-    let sp = a.speed.max(0.0);
-    let (c1, c2, c3) = (cycles(0.05 * sp, ls), cycles(0.09 * sp, ls), cycles(0.21 * sp, ls));
-    let t = TAU * ctx.tphase;
-    let (lo, hi) = (rgb_lin(a.low), rgb_lin(a.high));
-    let seed = a.seed;
-    let (p1, p2) = (hf(seed ^ 0x81, 0) * TAU, hf(seed ^ 0x82, 0) * TAU);
-    let height = a.height.clamp(0.0, 1.0);
-    let k = a.intensity.max(0.0) * 0.55;
+    // Most of the work depends only on the column: do it once per column.
+    let cols: Vec<AuroraCol> = (0..w).into_par_iter().map(|x| aurora_col(&k, (x as f32 + 0.5 - k.cx) / k.unit)).collect();
     hdr.par_chunks_mut(w).enumerate().for_each(|(y, row)| {
         if y as f32 >= hy { return; }
-        let ny = (y as f32 + 0.5 - oy) / fhy;
+        let uy = (hy - (y as f32 + 0.5)) / k.unit;
         for (x, px) in row.iter_mut().enumerate() {
             if gbuf[y * w + x].id != id::NONE { continue; }
-            let nx = (x as f32 + 0.5 - ox) / fw;
-            // The foot of the curtain wanders across the sky.
-            let foot = 0.15 + 0.6 * height + 0.1 * (TAU * nx * 1.3 + c1 * t + p1).sin() + 0.04 * (TAU * nx * 3.7 - c2 * t + p2).sin();
-            let up = foot - ny;
-            let profile = if up < 0.0 { (-(up / 0.02).powi(2)).exp() } else { (-up / 0.22).exp() };
-            if profile < 0.01 { continue; }
-            // Folds of the curtain, and fine rays running up it.
-            let fold = 0.5 + 0.5 * (TAU * (nx * 2.0 + 0.3 * (TAU * nx * 0.7 + c1 * t).sin()) + p2).sin();
-            let ray = 0.55 + 0.45 * noise1(seed ^ 0x83, nx * 150.0 + 3.0 * (c3 * t + p1).sin());
-            let col = mix3(lo, hi, (up / 0.3).clamp(0.0, 1.0));
-            *px = add3(*px, scale3(col, k * profile * (0.25 + 0.75 * fold) * ray));
+            let c = aurora_px(&k, &cols[x], (x as f32 + 0.5 - k.cx) / k.unit, uy);
+            if c != [0.0; 3] { *px = add3(*px, c); }
         }
     });
 }

@@ -1,6 +1,6 @@
 # GPU port of the v3 renderer — plan
 
-2026-10-07. Status: phases 0-4 and most of 6 built (see "Where it stands" at the end).
+2026-10-07. Status: phases 0-5 and most of 6 built (see "Where it stands" at the end).
 
 ## Goal
 
@@ -207,45 +207,51 @@ caches, atlas, parity harness, binning) is the part with no CPU counterpart.
 
 ## Where it stands (2026-10-08)
 
-Built, and drawn on the GPU for every frame that shows one world:
+Every frame is drawn on the GPU, transitions, forks and journeys included.
 
 | Pass | WGSL | Notes |
 |---|---|---|
-| Shading, mist | `shade.wgsl` | Mist loops every lamp in index order (the CPU's tile lists come from a G-buffer the GPU has since changed); out-of-reach lamps add exactly nothing, so the sum is the same. |
-| Sky, sky bodies, lightning, veil, fog bank | `sky.wgsl` | Stars and cloud blobs binned per 16 x 16 tile in drawing order. |
+| Raster, prop shadows, cloud shade, lamp tiles | `geom.wgsl` | One world: triangles set up on the CPU (`raster::prepare`, shared with the CPU rasteriser) and binned per 16 x 16 tile in order; each pixel walks its tile's list with the CPU's edge, span and depth arithmetic, so the G-buffer is the CPU's. Prop shadows from the same caster setup (`shadow_casters`). Lamp tiles: the tile's box by workgroup atomics, lamps tested in parallel and gathered in index order. Frames of several worlds rasterise on the CPU (they mix worlds and adapt the eye from it) and upload. |
+| Shading, mist | `shade.wgsl` | One dispatch per world over its own pixels (`W` at that world's dynamic offset), then the soft patch edges where two worlds mix. Mist loops every lamp in index order; out-of-reach lamps add exactly nothing, so the sum is the same. |
+| Sky, sky bodies, lightning, veil, fog bank | `sky.wgsl` | Stars and cloud blobs binned per 16 x 16 tile in drawing order. Several worlds: each world's sky weighted per column (`SkyW::at`), seen through its adaptation and the first world's air, accumulated; the bank on the last. |
 | Billboards | `cards.wgsl` | Sprites in one texel store keyed by `Arc` pointer; mip level chosen on the CPU (`Sprite::lod`). Pick ids and depth match the CPU exactly. |
-| Tufts, flames, wisps, particles, precipitation, splashes, curtains, drips, sand | `splat.wgsl` | Every pass now emits `render::splat::Splat` shapes; one list drawn by either engine. Blades (which write the G-buffer) in their own dispatch; splash gates read it after. |
+| Tufts, flames, wisps, particles, precipitation, splashes, curtains, drips, sand | `splat.wgsl` | Every pass emits `render::splat::Splat` shapes; one list drawn by either engine. Blades (which write the G-buffer) in their own dispatch; splash gates read it after. |
 | Reflections | `reflect.wgsl` | `ColumnBlur` as double-float (hi + lo) running sums: exact for these sums, as f64 is. Blocked scan (64-row blocks). Skipped when nothing in the frame can reflect. |
-| Light shafts | `shafts.wgsl` | Setup shared with the CPU (`weather::shaft_setup`). |
-| Crop, pick, heat shimmer, lens drops and frost, bloom, tone map, Kuwahara, grade, outline, lens warp, ramp levels, palette and dither, stats, upscale, paper and scanlines | `post.wgsl` | One scratch buffer at offsets the CPU plans per frame; tables (sRGB thresholds, palette LUT, `.cube`) cached by pointer. Only the output bytes come back (plus pick, depth, stats when asked). |
+| Light shafts | `shafts.wgsl` | Setup shared with the CPU (`weather::shaft_setup`); every world's lamps in one list. |
+| Crop, pick, heat shimmer, lens drops and frost, bloom, tone map, Kuwahara, grade, outline, lens warp, ramp levels, palette and dither, stats, upscale, paper and scanlines | `post.wgsl` | One scratch buffer at offsets the CPU plans per frame; tables (sRGB thresholds, palette LUT, `.cube`) cached by pointer. Heat haze per pixel from its own world. Only the output bytes come back (plus pick, depth, stats when asked). |
 
-Still on the CPU: rasterisation and prop shadows (about 1.5 ms), and every frame of two
-worlds (crossings, forks, journeys). Those frames draw on the CPU even with a GPU renderer; the
-joins of transition and fork clips are frames of one world, so they still match the loops
-exactly on either engine (tested).
+**Several worlds.** `WorldParams` grew what a world adds in a frame of several: the boundary its
+view joins across (`View::split`), every world's shear, the first world's air in front of a
+boundary, light through a threshold (`Portal`, Lambert's polygon formula), the face round an
+opening (`Opening`, and the facade texture in its world's texture slots), and the wedge between a
+fork's branches. Each world's textures sit in one texel store (8 slots per world, kept between
+frames); lamps in one list with each world's offset. A WGSL override (`MULTI`) compiles all of it
+out of the pipelines used for one world, so those frames pay nothing for it. Left to the CPU in a
+frame of several worlds: post when both worlds' lenses show at once, or when pick ids are asked
+for (the studio's walk preview asks for neither).
 
 **Parity** (`pf parity --engine gpu`): every preset at two times, max difference 1/255; 31
-weather scenes and an all-sky stress scene, max 1-6; 19 style variants pass (palettes snap an
-isolated pixel to the next colour, p99.9 = 0).
+weather scenes, the fork styles and an all-sky stress scene, max 2; 19 style variants pass
+(palettes snap an isolated pixel to the next colour, p99.9 = 0). `--walks`: 70 frames of
+crossings (open, doorway, cave mouth, gate, portal, two automatic) and forks (both branches),
+max 3/255.
 
 **Fast math.** wgpu-hal 25 builds every Metal library with `CompileOptions::new()`, so fast math
 is on and there is no switch short of a fork. Division (`div`) is corrected with an fma, and
 `rnd(x)` (an OR with a uniform that is always zero) stops a product being fused into an add or a
 sum being reassociated wherever a threshold or a floor follows. With those, alpha ties at exactly
-0.5 land on the same side as on the CPU.
+0.5 land on the same side as on the CPU, and the GPU's rasteriser fills the CPU's pixels.
 
 **Where it is used.** The studio preview (each worker has its own buffers on eframe's device),
 `pf`, exports and MCP use the GPU when there is an adapter. `--engine cpu` (or `PF_ENGINE=cpu`)
 forces the reference renderer; export metadata says which drew the frames. The game runtime
 stays on the CPU unless the game calls `Runtime::use_gpu` (optionally with its own device).
 
-**Timings** (480 x 854, M4, per frame): Bog Boardwalk 27.9 -> 12.7 ms, rain 27.5 -> 13.2,
-Ice Cave 23.9 -> 11.9, Haunted Forest 17.0 -> 10.1, Forest Path 11.9 -> 9.6. The GPU passes
-take 3.5-6 ms of that; the rest is the CPU's raster, shadows and buffer preparation before the
-GPU starts, and the wait. `pf bench --stages` lists GPU pass times (`g.*`, timestamp queries).
-Studio: rain plays 24/24 frames on time at ~30 ms per worker (CPU preview ~51 ms).
+**Timings** (480 x 854, M4, per frame, machine under load so give or take 1-2 ms): Forest Path
+11.9 (CPU) -> 5.2 ms, Bog Boardwalk 27.9 -> 8.7, Ice Cave 23.9 -> 7.3, Dark Street ~8.5,
+Haunted Forest ~6. Raster on the GPU took 25-45% off the previous GPU frame (no G-buffer upload,
+no CPU raster, shadows or lamp tiles). Walks: a crossing 41.9 -> 24.7 ms, a fork 24.8 -> 22.6 (the
+CPU's share there is instancing and the raster of several worlds). `pf bench --stages` and
+`pf transition --stages` list GPU pass times (`g.*`, timestamp queries).
 
-**Forks that divide the road** (`path.fork.style: "Split"`, `side: "Both"`) were added on both
-engines together: `Forks::branch_sd` on the CPU, `branch_sd` in `common.wgsl`, parity max 1/255.
-
-Next: frames of two worlds on the GPU (phase 5), the raster, zero-copy display in the studio.
+Next: zero-copy display in the studio (the frame stays a texture egui draws); then phase 7.

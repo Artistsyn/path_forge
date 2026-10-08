@@ -21,6 +21,8 @@ use std::sync::Arc;
 
 mod weather;
 mod splat;
+mod space;
+mod blackhole;
 use splat::{Shape, Splat};
 
 /// Which parts of the world to draw, for layered exports.
@@ -71,10 +73,11 @@ pub const PICK_SKY: u16 = 5;
 const PICK_FIXTURES: u16 = 1 << 12;
 const PICK_PROPS: u16 = 2 << 12;
 const PICK_SET_PIECES: u16 = 3 << 12;
+const PICK_COMPANIONS: u16 = 4 << 12;
 
-/// The scene list and index a pick id names: ("fixtures" | "props" | "set_pieces", index).
+/// The scene list and index a pick id names: ("fixtures" | "props" | "set_pieces" | "companions", index).
 pub fn pick_item(id: u16) -> Option<(&'static str, usize)> {
-    let list = match id >> 12 { 1 => "fixtures", 2 => "props", 3 => "set_pieces", _ => return None };
+    let list = match id >> 12 { 1 => "fixtures", 2 => "props", 3 => "set_pieces", 4 => "companions", _ => return None };
     Some((list, (id & 0x0FFF) as usize))
 }
 
@@ -792,8 +795,7 @@ impl WorldRenderer {
         r
     }
 
-    /// Which engine draws this renderer's frames: "gpu" or "cpu" (frames of several worlds at
-    /// once are still drawn on the CPU either way).
+    /// Which engine draws this renderer's frames: "gpu" or "cpu".
     pub fn engine(&self) -> &'static str {
         #[cfg(feature = "gpu")]
         if self.gpu.is_some() { return "gpu"; }
@@ -995,7 +997,15 @@ impl WorldRenderer {
         tris.extend(facade_tris);
         prof.mark("geometry");
         let mut gbuf = vec![GPixel::EMPTY; bw * bh];
-        raster::rasterize(&mut gbuf, bw, bh, &tris, &ctxs[0].view);
+        // A frame of one world on the GPU is rasterised there (with its shadow masks and lamp
+        // tiles); several worlds need the G-buffer here first, to mix them and adapt the eye.
+        #[cfg(feature = "gpu")]
+        let gpu_geom = self.gpu.is_some() && n == 1;
+        #[cfg(not(feature = "gpu"))]
+        let gpu_geom = false;
+        #[cfg(feature = "gpu")]
+        let prepared = if gpu_geom { raster::prepare(bw, bh, &tris, &ctxs[0].view) } else { Vec::new() };
+        if !gpu_geom { raster::rasterize(&mut gbuf, bw, bh, &tris, &ctxs[0].view); }
         prof.mark("raster");
         // Where open ground, walls or roofs of two worlds meet over a band, mix them in patches.
         let mut soft: Vec<(u8, f32)> = Vec::new();
@@ -1031,6 +1041,7 @@ impl WorldRenderer {
             if layers.props {
                 self.collect_props(&mut ctxs[r], &o, &mut bills);
                 self.collect_set_pieces(&mut ctxs[r], &o, &mut bills);
+                self.collect_companions(&mut ctxs[r], &o, &mut bills);
             }
         }
         // A structure standing in the threshold.
@@ -1088,26 +1099,46 @@ impl WorldRenderer {
         // Shadow masks on the ground: sun shadows of props, and contact darkening under them.
         let mut sun_mask = vec![1.0f32; bw * bh];
         let mut ao_mask = vec![1.0f32; bw * bh];
-        if layers.ground {
+        if layers.ground && !gpu_geom {
             for ctx in &ctxs { prop_shadows(ctx, &bills, &gbuf, &mut sun_mask, &mut ao_mask); }
         }
         // Cloud shadows drifting over the ground and walls.
-        if ctxs.iter().any(|c| c.wx.clouds > 0.0) {
+        if ctxs.iter().any(|c| c.wx.clouds > 0.0) && !gpu_geom {
             sun_mask.par_iter_mut().zip(gbuf.par_iter()).for_each(|(m, g)| {
                 if g.id != id::NONE { *m *= weather::cloud_shade(&ctxs[(g.realm as usize).min(n - 1)], g.x, g.d); }
             });
         }
 
         prof.mark("shadows");
+        // Post and style take the look of one world (post settings blend as the camera crosses).
+        let blended;
+        let post_scene: &Scene = if n > 1 {
+            let (a, b) = (&worlds[0].scene.post, &worlds[plan.next].scene.post);
+            let t = plan.cam_t;
+            let mix = |x: f32, y: f32| x + (y - x) * t;
+            let mut s = look.clone();
+            s.post = Post {
+                exposure: mix(a.exposure, b.exposure), contrast: mix(a.contrast, b.contrast), saturation: mix(a.saturation, b.saturation),
+                bloom: mix(a.bloom, b.bloom), vignette: mix(a.vignette, b.vignette), grain: mix(a.grain, b.grain),
+                tint: [0, 1, 2].map(|k| mix(a.tint[k] as f32, b.tint[k] as f32).round() as u8),
+            };
+            blended = s;
+            &blended
+        } else { look };
         // Deferred lighting.
         let mut hdr = vec![[0.0f32; 3]; bw * bh];
         let mut refl = vec![Refl::default(); bw * bh];
-        // On the GPU (one world), the frame's buffers stay there from here on; `gpu_has` says
-        // which ones hold newer data than the CPU's copies, and a CPU pass fetches what it needs.
+        // The world whose air the camera is in.
+        let here = if plan.zb > 0.0 { 0 } else { plan.next };
+        // On the GPU, the frame's buffers stay there from here on; `gpu_has` says which ones hold
+        // newer data than the CPU's copies, and a CPU pass fetches what it needs. Each world is
+        // drawn over its own pixels with its own parameters.
         // Post on the GPU needs the palette, its levels and the grade first (finding them can render
         // frames of its own).
         #[cfg(feature = "gpu")]
-        let mut gpu_look = if self.gpu.is_some() && gpu_world(&ctxs, &soft).is_some() {
+        let gpu_ok = self.gpu.is_some() && ctxs.len() <= super::gpu::MAX_WORLDS;
+        #[cfg(feature = "gpu")]
+        let mut gpu_look = if gpu_ok {
             let base = worlds[plan.look].base_dir.clone();
             let look_opts = RenderOptions { base_dir: base.clone(), ..opts.clone() };
             let lut = look_opts.palette.clone().or_else(|| self.palette_for(look, &look_opts));
@@ -1118,24 +1149,42 @@ impl WorldRenderer {
         #[cfg(feature = "gpu")]
         let gpu_arc = self.gpu.clone();
         #[cfg(feature = "gpu")]
-        let mut gf = match (&gpu_arc, gpu_world(&ctxs, &soft)) {
-            (Some(g), Some(ctx)) => {
-                let tiles = tile_lights(std::slice::from_ref(ctx), &gbuf);
-                let mut p = gpu_params(ctx, &layers);
-                if let Some(t) = &tiles { p.tiles_on = 1; p.tile_cols = t.cols as u32; }
-                let mut f = g.frame(&p);
+        let mut gf = match &gpu_arc {
+            Some(g) if gpu_ok => {
+                let tiles = if gpu_geom { None } else { tile_lights(&ctxs, &gbuf) };
+                let mut light_base = 0;
+                let mut params: Vec<_> = ctxs.iter().enumerate().map(|(r, ctx)| {
+                    let mut p = gpu_params(ctx, &layers);
+                    gpu_world_extras(&mut p, ctx, &ctxs);
+                    (p.realm, p.tex_base, p.light_base, p.multi) = (r as u32, 8 * r as u32, light_base, (n > 1) as u32);
+                    light_base += (ctx.lights.len() + ctx.sky_lights.len()) as u32;
+                    p
+                }).collect();
+                if let Some(t) = &tiles { params[0].tiles_on = 1; params[0].tile_cols = t.cols as u32; }
+                // Lamp tiles made by the geometry pass (the same rule as `tile_lights`).
+                if gpu_geom && ctxs[0].lights.len() >= 4 {
+                    (params[0].tiles_on, params[0].tile_cols, params[0].tile_cap) = (2, bw.div_ceil(LIGHT_TILE) as u32, ctxs[0].lights.len() as u32);
+                }
+                let mut f = g.frame(&params);
                 f.profile = self.profile;
+                (f.here, f.look) = (here, plan.look);
                 // Whether any pixel can reflect (shade gives gloss only to these).
-                let reflects = p.path_gloss > 0.0 || p.verge_gloss > 0.0 || p.deck_gloss > 0.0 || (p.bridge_on != 0 && p.br_bottom == 1) || p.wx_wet > 0.0 || p.wx_puddles > 0.0;
+                let reflects = params.iter().any(|p| p.path_gloss > 0.0 || p.verge_gloss > 0.0 || p.deck_gloss > 0.0 || (p.bridge_on != 0 && p.br_bottom == 1) || p.wx_wet > 0.0 || p.wx_puddles > 0.0);
                 Some((f, GpuHas { reflects, ..GpuHas::default() }, tiles))
             }
             _ => None,
         };
         #[cfg(feature = "gpu")]
         if let Some((f, has, tiles)) = gf.as_mut() {
-            f.put_gbuf(&gbuf);
-            f.put_masks(&sun_mask, &ao_mask);
-            gpu_shade(f, &ctxs[0], tiles.take());
+            if gpu_geom {
+                f.geometry(&gpu_geom_input(&ctxs[0], &prepared, &bills, &layers));
+                has.gbuf = true;
+            } else {
+                f.put_gbuf(&gbuf);
+                f.put_masks(&sun_mask, &ao_mask);
+                f.put_soft(&soft);
+            }
+            gpu_shade(f, &ctxs, tiles.take());
             has.hdr = true;
             has.refl = true;
         }
@@ -1145,16 +1194,28 @@ impl WorldRenderer {
         let on_gpu = false;
         if !on_gpu { shade(&ctxs, &plan.sky_w, &soft, &gbuf, &sun_mask, &ao_mask, &layers, &mut hdr, &mut refl); }
         prof.mark("shade");
-        let here = if plan.zb > 0.0 { 0 } else { plan.next };
         let bank_t = ctxs[here].bank_t(ctxs[here].far);
-        // One world on the GPU: the sky, the veil and the bank are drawn there in one pass.
+        // On the GPU the sky, the veil and the bank are drawn in one pass per world: one world's over
+        // the sky shading, several worlds' each weighted by how much it counts at each column.
         #[cfg(feature = "gpu")]
         if let Some((f, _, _)) = gf.as_mut() {
-            let draw = layers.sky && plan.sky_w.any(0) && worlds[0].scene.sky.enabled;
             let bank = (bank_t < 1.0).then(|| (bank_t, ctxs[here].fog_col));
-            if draw || bank.is_some() {
-                let strike = match &strikes[0] { (_, Some(s), flash) => Some((s, *flash)), _ => None };
-                f.sky(&gpu_sky(&ctxs[0], draw, strike, bank));
+            let strike = |r: usize| match &strikes[r] { (_, Some(s), flash) => Some((s, *flash)), _ => None };
+            if n == 1 {
+                let draw = layers.sky && plan.sky_w.any(0) && worlds[0].scene.sky.enabled;
+                if draw || bank.is_some() { f.sky(&gpu_sky(&ctxs[0], draw, strike(0), bank), 0); }
+            } else {
+                for r in 0..n {
+                    let draw = layers.sky && plan.sky_w.any(r) && worlds[r].scene.sky.enabled;
+                    let mut input = gpu_sky(&ctxs[r], draw, strike(r), if r + 1 == n { bank } else { None });
+                    let p = &mut input.params;
+                    p.mode = if r == 0 { 1 } else { 2 };
+                    match &plan.sky_w.fork {
+                        Some(fs) => (p.w_fork, p.w_center, p.w_focal, p.w_split, p.w_near, p.w_keep) = (1, fs.center, fs.focal, fs.split, fs.near, fs.keep),
+                        None => p.w_base = plan.sky_w.base.get(r).copied().unwrap_or(0.0),
+                    }
+                    f.sky(&input, r);
+                }
             }
         }
         if layers.sky && !on_gpu {
@@ -1163,6 +1224,7 @@ impl WorldRenderer {
                 draw_sky_bodies(&ctxs[r], &gbuf, hdr);
                 if let (_, Some(s), flash) = &strikes[r] { draw_lightning(&ctxs[r], s, *flash, &gbuf, hdr); }
                 weather::veil_sky(&ctxs[r], &gbuf, hdr);
+                space::draw_tunnel(&ctxs[r], &gbuf, hdr);
             };
             if n == 1 {
                 if !skies.is_empty() { draw(0, &mut hdr); }
@@ -1287,32 +1349,41 @@ impl WorldRenderer {
             // Reflections in glossy floors, now that everything they could show is drawn.
             if has.reflects { f.reflect(); }
             has.refl = false;
-            // The air: mist over everything low.
-            let m = &ctxs[0].scene.weather.mist;
-            if layers.particles && m.enabled && m.density > 0.0 {
-                let travel = if ctxs[0].scene.weather.wind.enabled { ctxs[0].scene.weather.wind.speed * 0.5 } else { 0.4 } * ctxs[0].scene.motion.loop_seconds();
-                f.mist(&super::gpu::AirParams {
-                    mist_on: 1, density: m.density, top: m.height.max(0.05), patch: m.patchiness, travel, seed: m.seed,
-                    mist: rgb_lin(m.color), pad: [0; 3],
-                });
+            // The air: mist over everything low, each world's over its own pixels.
+            if layers.particles {
+                let airs: Vec<_> = ctxs.iter().map(|c| {
+                    let m = &c.scene.weather.mist;
+                    (m.enabled && m.density > 0.0).then(|| {
+                        let travel = if c.scene.weather.wind.enabled { c.scene.weather.wind.speed * 0.5 } else { 0.4 } * c.scene.motion.loop_seconds();
+                        super::gpu::AirParams { mist_on: 1, density: m.density, top: m.height.max(0.05), patch: m.patchiness, travel, seed: m.seed, mist: rgb_lin(m.color), pad: [0; 3] }
+                    })
+                }).collect();
+                f.mist(&airs);
             }
             // Then light scattered in it.
             if layers.particles {
-                if let Some(su) = weather::shaft_setup(&ctxs, if plan.zb > 0.0 { 0 } else { plan.next }) {
-                    let mut sp = super::gpu::ShaftParams { mw: su.mw as u32, mh: su.mh as u32, hy: ctxs[0].view.horizon_px.max(2.0), ..Default::default() };
+                if let Some(su) = weather::shaft_setup(&ctxs, here) {
+                    let mut sp = super::gpu::ShaftParams { mw: su.mw as u32, mh: su.mh as u32, hy: ctxs[here].view.horizon_px.max(2.0), ..Default::default() };
                     if let Some((sx, sy, glow_r, k, col)) = su.sun { (sp.sun_on, sp.sx, sp.sy, sp.glow_r, sp.k_sun, sp.sun) = (1, sx, sy, glow_r, k, col); }
+                    let lamps: Vec<[f32; 8]> = ctxs.iter().flat_map(|c| c.lights.iter()).map(|l| [l.pos[0], l.pos[1], l.pos[2], l.radius, l.color[0], l.color[1], l.color[2], 0.0]).collect();
                     let lists = match su.lamps {
-                        Some((k, tc, lists)) => { (sp.lamps_on, sp.k_lamp, sp.tc, sp.n_lights) = (1, k, tc as u32, ctxs[0].lights.len() as u32); lists }
+                        Some((k, tc, lists)) => { (sp.lamps_on, sp.k_lamp, sp.tc, sp.n_lights) = (1, k, tc as u32, lamps.len() as u32); lists }
                         None => Vec::new(),
                     };
-                    f.shafts(&sp, &lists);
+                    f.shafts(&sp, &lists, &lamps);
                 }
             }
             // Post and style too, when its buffers fit: then only the finished frame comes back.
+            // In a frame of several worlds, lenses of both worlds at once and pick ids (each world
+            // names its own ground) are left to the CPU.
             let fits = f.post_words(w, h, layers.post && look.style.paint >= 0.5).is_some();
-            if let (true, Some((lut, levels, grade))) = (fits, gpu_look.take()) {
-                let fv = ctxs[0].view.frame();
-                let input = gpu_post_params(&ctxs[0], &fv, look, &layers, opts, (gl, gt, w, h, out_w, out_h, px), crisp, has.cards, lut.as_deref(), levels, grade.as_deref());
+            let lens_of = |r: usize, k: f32| { let l = &ctxs[r].scene.weather.lens; (layers.post && l.enabled && l.amount > 0.0 && k > 0.0).then_some((&ctxs[r], k)) };
+            let lenses: Vec<(&Ctx, f32)> = if n > 1 { [lens_of(0, 1.0 - plan.cam_t), lens_of(plan.next, plan.cam_t)].into_iter().flatten().collect() } else { lens_of(0, 1.0).into_iter().collect() };
+            let multi_ok = n == 1 || (!opts.pick && lenses.len() <= 1);
+            if let (true, true, Some((lut, levels, grade))) = (fits, multi_ok, gpu_look.take()) {
+                let li = plan.look;
+                let fv = ctxs[li].view.frame();
+                let input = gpu_post_params(&ctxs[li], &ctxs, &fv, post_scene, lenses.first().copied(), &layers, opts, (gl, gt, w, h, out_w, out_h, px), crisp, has.cards, lut.as_deref(), levels, grade.as_deref());
                 let out = f.post(input);
                 prof.mark("gpu post");
                 if self.profile { prof.out.extend(f.pass_times()); }
@@ -1322,7 +1393,7 @@ impl WorldRenderer {
                     if fv.lens_curve.abs() > 0.001 { super::post::lens_warp_depth(&mut d, w, h, fv.horizon_px, fv.lens_curve); }
                     super::post::upscale_depth(&d, w, h, px, out_w, out_h)
                 });
-                img.stats = out.stats.map(|rows| stats_from_rows(&ctxs[0], &rows, w * h, bills.len()));
+                img.stats = out.stats.map(|rows| stats_from_rows(&ctxs[li], &rows, w * h, bills.len()));
                 for (name, ms) in prof.out {
                     match self.stages.iter_mut().find(|(n, _)| *n == name) { Some(e) => e.1 += ms, None => self.stages.push((name, ms)) }
                 }
@@ -1388,20 +1459,7 @@ impl WorldRenderer {
 
         // Post and style, in the look of one world (post settings blend as the camera crosses).
         let li = plan.look;
-        let post_scene;
-        let scene: &Scene = if n > 1 {
-            let (a, b) = (&worlds[0].scene.post, &worlds[plan.next].scene.post);
-            let t = plan.cam_t;
-            let mix = |x: f32, y: f32| x + (y - x) * t;
-            let mut s = look.clone();
-            s.post = Post {
-                exposure: mix(a.exposure, b.exposure), contrast: mix(a.contrast, b.contrast), saturation: mix(a.saturation, b.saturation),
-                bloom: mix(a.bloom, b.bloom), vignette: mix(a.vignette, b.vignette), grain: mix(a.grain, b.grain),
-                tint: [0, 1, 2].map(|k| mix(a.tint[k] as f32, b.tint[k] as f32).round() as u8),
-            };
-            post_scene = s;
-            &post_scene
-        } else { look };
+        let scene: &Scene = post_scene;
         let look_opts = RenderOptions { base_dir: worlds[li].base_dir.clone(), ..opts.clone() };
         let ctx = &ctxs[li];
         let tphase = ctx.tphase;
@@ -1507,7 +1565,7 @@ impl WorldRenderer {
             },
             deck_tile: snap_to_loop(scene.path.bridge.deck.tile_size, loop_len),
             bottom_tile: snap_to_loop(if scene.verge.enabled { scene.verge.material.tile_size } else { scene.path.material.tile_size }, loop_len),
-            ambient: add3(scale3(rgb_lin(scene.light.ambient_color), scene.light.ambient.max(0.0)), scale3(flash, 0.12)),
+            ambient: add3(add3(scale3(rgb_lin(scene.light.ambient_color), scene.light.ambient.max(0.0)), scale3(flash, 0.12)), add3(weather::aurora_glow(&scene.sky.aurora), add3(space::tunnel_glow(&scene.sky), blackhole::bh_glow(&scene.sky)))),
             sky_lights, lights: Vec::new(), fog, fog_col, void_lin: rgb_lin(scene.light.void_color),
             realm, bounds, facade: None, opening: None, portal: None, front: None, verge_beyond: None, gain: 1.0, wx,
         };
@@ -1525,6 +1583,9 @@ impl WorldRenderer {
         let opts = RenderOptions { size: Some((54, 96)), base_dir, ..RenderOptions::default() };
         let mut acc = [0.0f32; 3];
         let mut count = 0.0f32;
+        // Frames this small are quicker on the CPU than a trip to the GPU and back.
+        #[cfg(feature = "gpu")]
+        let gpu = self.gpu.take();
         for k in 0..4 {
             let img = self.render(&full, full.motion.loop_length * k as f32 / 4.0, &opts);
             for c in img.rgba.chunks_exact(4) {
@@ -1532,6 +1593,8 @@ impl WorldRenderer {
                 count += 1.0;
             }
         }
+        #[cfg(feature = "gpu")]
+        { self.gpu = gpu; }
         let m = scale3(acc, 1.0 / count.max(1.0));
         if self.means.len() > 32 { self.means.clear(); }
         self.means.insert(key, m);
@@ -1748,6 +1811,48 @@ impl WorldRenderer {
         }
     }
 
+    /// Things flying along with the camera (`Companion`): at a fixed distance ahead, so they keep
+    /// their place in the frame and follow the path round its bends.
+    fn collect_companions(&mut self, ctx: &mut Ctx, opts: &RenderOptions, bills: &mut Vec<Billboard>) {
+        let scene = ctx.scene;
+        for (ci, c) in scene.companions.iter().enumerate().filter(|(_, c)| c.enabled && c.size > 0.0) {
+            let ph = hf(c.seed ^ 0xC0, ci as i64) * TAU;
+            let x = c.offset[0] + c.weave * (TAU * c.weave_cycles as f32 * ctx.tphase + ph).sin();
+            let y = c.offset[1] + c.bob * (TAU * c.bob_cycles as f32 * ctx.tphase + 1.7 * ph).sin();
+            let d = c.offset[2];
+            if d < NEAR + 0.2 || !ctx.owns(x, y, d) { continue; }
+            let file = c.sprite.path.trim();
+            let drawn = if file.is_empty() { None } else {
+                let p = std::path::Path::new(file);
+                let full = match opts.base_dir.as_deref() { Some(b) if p.is_relative() => b.join(p), _ => p.to_path_buf() };
+                if c.glow_from > 0.0 { self.sprites.file_glowing(&full, true, c.glow_from, 1.5) } else { self.sprites.file_at(&full, true) }
+            };
+            // The engines' height on the card, as a share of its height.
+            let (sprite, height, engines_at) = match drawn {
+                Some(sp) => (sp, c.size, 0.4),
+                None => match self.sprites.shape(&ship_parts(c)) {
+                    Some((sp, h)) => (sp, h, 0.27 * c.size * 0.5 / h),
+                    None => continue,
+                },
+            };
+            let base = y - height * engines_at;
+            let mut own_light = None;
+            if c.light > 0.0 {
+                own_light = Some(ctx.lights.len());
+                ctx.lights.push(PointLight {
+                    pos: ctx.view.to_cam(x, y, d - 0.4),
+                    color: scale3(rgb_lin(c.engine), 2.0 * c.light),
+                    radius: 5.0 + 3.0 * c.light,
+                });
+            }
+            let z = ctx.view.to_cam(x, base, d)[2];
+            bills.push(Billboard {
+                z, world: [x, base, d], height, sprite, flip: c.sprite.flip_x, nearest: c.sprite.pixelated, id: id::PROP,
+                emissive: 0.0, shadow: 0.0, own_light, source: PICK_COMPANIONS | ci as u16, realm: ctx.realm, sway: 0.0,
+            });
+        }
+    }
+
     fn collect_props(&mut self, ctx: &mut Ctx, opts: &RenderOptions, bills: &mut Vec<Billboard>) {
         let scene = ctx.scene;
         let far = ctx.far.min(150.0);
@@ -1779,19 +1884,27 @@ impl WorldRenderer {
                         let edge = ctx.view.path_half_width(d);
                         let x = if sign == 0.0 { p.lateral + jit } else { sign * (edge + p.lateral + row as f32 * p.row_spacing + jit) };
                         // Nothing stands beside the deck of a bridge: the ground there has fallen away.
-                        if ctx.on_bridge(d) && x.abs() > edge - 0.05 { continue; }
+                        let floating = p.float > 0.0;
+                        if ctx.on_bridge(d) && x.abs() > edge - 0.05 && !floating { continue; }
                         // Nor on a branch path, nor in the mouth of a side passage.
                         if ctx.on_fork(x, d) { continue; }
                         if !ctx.owns(x, 0.0, d) { continue; }
                         let sc = p.scale.max(0.01) * (1.0 + (hf(seed ^ 0x5C, ikey) * 2.0 - 1.0) * p.scale_var.clamp(0.0, 0.95));
                         let height = look.height * sc;
                         let variant = hash(seed ^ 0x7E, ikey);
-                        let sprite = if look.sprites.is_empty() {
+                        let floating_rock = floating && matches!(look.kind, PropKind::Rock | PropKind::Boulder);
+                        let sprite = if look.sprites.is_empty() && floating_rock {
+                            self.sprites.asteroid(look.tint, variant)
+                        } else if look.sprites.is_empty() {
                             self.sprites.prop(look.kind, look.tint, variant)
                         } else {
                             look.sprites[(variant as usize) % look.sprites.len()].clone()
                         };
-                        let base = match ceiling { Some(top) if hanging => top - height, _ => -p.sink.clamp(0.0, 0.9) * height };
+                        let base = match ceiling {
+                            Some(top) if hanging => top - height,
+                            _ if floating => p.float + (hf(seed ^ 0xF1, ikey) * 2.0 - 1.0) * p.float_var.max(0.0) - 0.5 * height,
+                            _ => -p.sink.clamp(0.0, 0.9) * height,
+                        };
                         let mut own_light = None;
                         if let Some(l) = light {
                             // Lamps far down the path light nothing the camera can make out.
@@ -1812,7 +1925,7 @@ impl WorldRenderer {
                             z, world: [x, base, d], height, sprite, sway,
                             flip: if look.from_files { look.flip_x } else { variant & 0x100 != 0 },
                             nearest: look.pixelated, id: id::PROP, emissive: look.glow,
-                            shadow: if p.shadow && !hanging { p.shadow_opacity.clamp(0.0, 1.0) } else { 0.0 }, own_light, source: PICK_PROPS | li as u16, realm: ctx.realm });
+                            shadow: if p.shadow && !hanging && !floating { p.shadow_opacity.clamp(0.0, 1.0) } else { 0.0 }, own_light, source: PICK_PROPS | li as u16, realm: ctx.realm });
                     }
                 }
             }
@@ -1857,6 +1970,38 @@ fn crop<T: Clone>(buf: &[T], bw: usize, x0: usize, y0: usize, w: usize, h: usize
     let mut out = Vec::with_capacity(w * h);
     for y in y0..y0 + h { out.extend_from_slice(&buf[y * bw + x0..y * bw + x0 + w]); }
     out
+}
+
+/// The drawn ship of a `Companion`, seen from behind: swept wings, hull, fin, canopy, two engines
+/// and the wingtip lights. In metres, wingspan `size`.
+fn ship_parts(c: &crate::scene::Companion) -> Vec<crate::scene::ShapePart> {
+    use crate::scene::{Shape, ShapePart};
+    let k = c.size * 0.5;
+    let q = |x: f32, y: f32| [x * k, y * k];
+    let dim = |c: Rgb, f: f32| [(c[0] as f32 * f) as u8, (c[1] as f32 * f) as u8, (c[2] as f32 * f) as u8];
+    let part = |shape: Shape, color: Rgb, shade: f32, glow: f32| ShapePart { shape, color, shade, cut: false, glow };
+    let ell = |x: f32, y: f32, rx: f32, ry: f32| Shape::Ellipse { center: q(x, y), radius: [rx * k, ry * k] };
+    let poly = |pts: &[(f32, f32)]| Shape::Poly { points: pts.iter().map(|&(x, y)| q(x, y)).collect() };
+    let mut parts = Vec::new();
+    for sx in [-1.0f32, 1.0] {
+        parts.push(part(poly(&[(sx * 1.0, 0.18), (sx * 0.18, 0.40), (sx * 0.18, 0.26), (sx * 0.95, 0.10)]), dim(c.color, 0.85), 0.4, 0.0));
+        parts.push(part(poly(&[(sx * 0.85, 0.16), (sx * 0.5, 0.25), (sx * 0.5, 0.21), (sx * 0.84, 0.13)]), c.accent, 0.3, 0.0));
+    }
+    parts.push(part(poly(&[(-0.04, 0.46), (0.04, 0.46), (0.02, 0.78), (-0.01, 0.78)]), dim(c.color, 0.9), 0.5, 0.0));
+    parts.push(part(ell(0.0, 0.32, 0.24, 0.2), c.color, 0.8, 0.0));
+    // The belly in its own shadow, and a seam across the hull.
+    parts.push(part(ell(0.0, 0.22, 0.2, 0.09), dim(c.color, 0.55), 0.3, 0.0));
+    parts.push(part(Shape::Rect { min: q(-0.23, 0.355), max: q(0.23, 0.365) }, dim(c.color, 0.6), 0.0, 0.0));
+    parts.push(part(ell(0.0, 0.44, 0.13, 0.08), c.accent, 0.6, 0.3));
+    for sx in [-1.0f32, 1.0] {
+        parts.push(part(ell(sx * 0.11, 0.27, 0.085, 0.075), [34, 37, 44], 0.3, 0.0));
+        // A hot core inside a softer ring of exhaust.
+        parts.push(part(ell(sx * 0.11, 0.27, 0.065, 0.057), dim(c.engine, 0.7), 0.0, 0.6));
+        parts.push(part(ell(sx * 0.11, 0.27, 0.04, 0.035), c.engine, 0.0, 1.2));
+    }
+    parts.push(part(ell(-0.97, 0.15, 0.025, 0.025), [255, 60, 50], 0.0, 1.5));
+    parts.push(part(ell(0.97, 0.15, 0.025, 0.025), [60, 255, 120], 0.0, 1.5));
+    parts
 }
 
 fn post_billboard(ctx: &Ctx, x: f32, top: f32, d: f32, size: f32) -> Billboard {
@@ -2028,6 +2173,9 @@ fn passage_dark(ctx: &Ctx, g: &GPixel) -> f32 {
 fn build_geometry(ctx: &Ctx, layers: &Layers) -> Vec<Tri> {
     let v = &ctx.view;
     let s = ctx.scene;
+    // Open flight: no ground at all, so nothing of the path, its verge or its bridges is built.
+    let ground_layer = Layers { ground: layers.ground && s.path.surface, ..*layers };
+    let layers = &ground_layer;
     let mut ds = vec![NEAR];
     while *ds.last().unwrap() < ctx.far {
         let d = *ds.last().unwrap();
@@ -2466,6 +2614,18 @@ fn shade_px(ctx: &Ctx, g: &GPixel, gbuf: &[GPixel], i: usize, x: usize, y: usize
     }
     let texture = match tex { 0 => &ctx.path_tex, 1 => &ctx.verge_tex, 2 => &ctx.wall_tex, 3 => &ctx.ceil_tex, 4 | 7 => &ctx.deck_tex, 6 => &ctx.facade.as_ref().unwrap().0, _ => &ctx.bottom_tex };
     let mut albedo = texture.sample(u, v, fp.min(4.0));
+    // Glowing parts of the texture shine in their own colour; railings take only its grain.
+    let mut glow_c = if tex == 7 { [0.0; 3] } else { scale3(albedo, texture.sample_emit(u, v, fp.min(4.0)) * GLOW_K) };
+    if let Some(k) = edge_k(ctx).filter(|_| g.id == id::GROUND && (tex == 0 || tex == 4) && !ctx.on_fork(g.x, g.d)) {
+        let (mut px_x, mut px_d) = (0.0f32, 0.0f32);
+        for j in [if x > 0 { i - 1 } else { i + 1 }, if x + 1 < w { i + 1 } else { i - 1 }] {
+            if gbuf[j].id == id::GROUND { px_x = px_x.max((gbuf[j].x - g.x).abs()); }
+        }
+        for j in [if y > 0 { i - w } else { i + w }, if y + 1 < h { i + w } else { i - w }] {
+            if gbuf[j].id == id::GROUND { px_d = px_d.max((gbuf[j].d - g.d).abs()); }
+        }
+        glow_c = add3(glow_c, edge_light(&k, ctx.path_edge(g.d).max(0.05), g.x, ctx.scroll + g.d, px_x, px_d, albedo));
+    }
     if tex == 7 {
         let b = &scene.path.bridge;
         let luma = |c: [f32; 3]| 0.3 * c[0] + 0.59 * c[1] + 0.11 * c[2];
@@ -2597,21 +2757,86 @@ fn shade_px(ctx: &Ctx, g: &GPixel, gbuf: &[GPixel], i: usize, x: usize, y: usize
         c = add3(add3(scale3(c, 1.0 - r), scale3(env, r)), spec);
         rf = Refl { r: r * ctx.fog_t(g.depth), env: scale3(env, ctx.gain), rough, sx };
     }
-    Some((ctx.apply_fog(c, g.depth), rf))
+    Some((ctx.apply_fog(add3(c, glow_c), g.depth), rf))
 }
 
-/// The one world a frame's GPU passes can draw: one world, no boundary, no patches mixed in from
-/// another. Crossings and forks run on the CPU until their GPU form exists.
+/// A texel glowing 1 (Material.glow 1 on a lit part) shines this many times its own colour.
+const GLOW_K: f32 = 2.5;
+
+/// The geometry pass's input for a frame of one world: its triangles set up and binned, the shadow
+/// casters, cloud shade and (with enough lamps to be worth it) the lamps to sort into tiles.
 #[cfg(feature = "gpu")]
-fn gpu_world<'c, 'a>(ctxs: &'c [Ctx<'a>], soft: &[(u8, f32)]) -> Option<&'c Ctx<'a>> {
-    let c = ctxs.first()?;
-    (ctxs.len() == 1 && soft.is_empty() && c.facade.is_none() && c.portal.is_none() && c.front.is_none() && c.bounds.is_none()
-        && c.verge_beyond.is_none() && c.view.split.is_none() && c.view.shear.is_none()).then_some(c)
+fn gpu_geom_input(ctx: &Ctx, prepared: &[raster::Prepared], bills: &[Billboard], layers: &Layers) -> super::gpu::GeomIn {
+    use super::gpu::{bin_tiles, CasterGpu, CasterIn, TriGpu};
+    let (w, h) = (ctx.view.width, ctx.view.height);
+    let tris: Vec<TriGpu> = prepared.par_iter().map(TriGpu::new).collect();
+    // Small triangles run one thread each on the GPU; the rest are binned into tiles.
+    let small_tri = std::env::var("PF_SMALL_TRI").ok().and_then(|v| v.parse().ok()).unwrap_or(raster::SMALL_TRI);
+    let skip: Vec<bool> = prepared.iter().map(|t| t.max_x - t.min_x < small_tri && t.max_y - t.min_y < small_tri).collect();
+    let tri_bins = super::gpu::bin_triangles(w, h, prepared, &skip);
+    let small: Vec<u32> = skip.iter().enumerate().filter(|(_, &s)| s).map(|(i, _)| i as u32).collect();
+    let (sun, list) = if layers.ground { shadow_casters(ctx, bills) } else { (None, Vec::new()) };
+    let bits = |v: usize| f32::from_bits(v as u32);
+    let mut cboxes = Vec::with_capacity(list.len());
+    let casters: Vec<CasterIn> = list.iter().map(|c| {
+        let b = c.b;
+        let mut f = [0.0f32; 24];
+        (f[0], f[1], f[2], f[3], f[4], f[5], f[6]) = (b.world[0], b.world[2], c.rx, c.rd, c.half_w, b.shadow, b.height);
+        f[7] = f32::from_bits(b.flip as u32);
+        let (mut x0, mut y0, mut x1, mut y1) = (i64::MAX, i64::MAX, i64::MIN, i64::MIN);
+        let mut grow = |r: (usize, usize, usize, usize)| { x0 = x0.min(r.0 as i64); y0 = y0.min(r.1 as i64); x1 = x1.max(r.2 as i64); y1 = y1.max(r.3 as i64); };
+        if let Some(r) = c.contact { f[8] = bits(1); (f[9], f[10], f[11], f[12]) = (bits(r.0), bits(r.1), bits(r.2), bits(r.3)); grow(r); }
+        if let (Some(_), Some((r, scale))) = (sun, c.sun) { f[13] = bits(1); (f[14], f[15], f[16], f[17], f[18]) = (bits(r.0), bits(r.1), bits(r.2), bits(r.3), scale); grow(r); }
+        cboxes.push(if x0 <= x1 { (x0, y0, x1, y1) } else { (1, 1, 0, 0) });
+        CasterIn { c: CasterGpu { f }, lod: b.sprite.lod(192.0), sprite: b.sprite.clone() }
+    }).collect();
+    let cast_bins = bin_tiles(w, h, &cboxes);
+    let clouds = weather::cloud_params(ctx);
+    let lamps = (ctx.lights.len() >= 4).then(|| ctx.lights.iter().map(|l| [l.pos[0], l.pos[1], l.pos[2], l.radius, l.color[0], l.color[1], l.color[2], 0.0]).collect());
+    super::gpu::GeomIn { tris, tri_bins, small, casters, cast_bins, sun, clouds, lamps }
+}
+
+/// What a world adds to the GPU's parameters in a frame of several: the boundary its view joins
+/// across, the branches' shear, the first world's air in front of it, light through a threshold,
+/// the face round it, and the ground between a fork's branches.
+#[cfg(feature = "gpu")]
+fn gpu_world_extras(p: &mut super::gpu::WorldParams, ctx: &Ctx, ctxs: &[Ctx]) {
+    let v = &ctx.view;
+    if let Some(sp) = &v.split {
+        (p.sp_on, p.sp_zb, p.sp_hw_b, p.sp_flare_b, p.sp_taper) = (1, sp.zb, sp.half_width_b, sp.flare_b, sp.taper);
+        if let Some(st) = sp.stairs_a { (p.sa_on, p.sa_period, p.sa_run, p.sa_rise, p.sa_steps, p.sa_offset) = (1, st.period, st.run, st.rise, st.steps as f32, st.offset); }
+        if let Some(st) = sp.stairs_b { (p.sb_on, p.sb_period, p.sb_run, p.sb_rise, p.sb_steps, p.sb_offset) = (1, st.period, st.run, st.rise, st.steps as f32, st.offset); }
+        (p.sa_scroll, p.sb_scroll) = (sp.scroll_a, sp.scroll_b);
+    }
+    for (r, c) in ctxs.iter().enumerate().take(super::gpu::MAX_WORLDS) {
+        if let Some((z0, k)) = c.view.shear { (p.sh_z0[r], p.sh_k[r]) = (z0, k); }
+    }
+    if let Some(fa) = &ctx.front {
+        (p.fa_on, p.fa_zb, p.fa_col, p.fa_gain) = (1, fa.zb, fa.fog_col, fa.gain);
+        if let Some((_, dist)) = fa.fog { (p.fa_fog_on, p.fa_fog_dist) = (1, dist); }
+    }
+    if let Some(pt) = &ctx.portal {
+        (p.pt_on, p.pt_zb, p.pt_front, p.pt_rad) = (1, pt.zb, pt.front as u32, pt.radiance);
+        for (k, c) in pt.corners.iter().enumerate() { p.pt_c[k * 3..k * 3 + 3].copy_from_slice(c); }
+    }
+    if let Some(op) = &ctx.opening {
+        (p.op_on, p.op_hw, p.op_top, p.op_arch, p.op_rim, p.op_seed) = (1, op.hw, op.top, op.arch, op.rim, op.seed);
+        (p.op_outer_hw, p.op_outer_top, p.op_hill) = (op.outer_hw, op.outer_top, op.hill);
+    }
+    if let Some((_, tile)) = &ctx.facade { p.fac_tile = *tile; }
+    if let (Some(z), Some(b)) = (ctx.verge_beyond, ctx.bounds) {
+        // Past the junction the first world's region is its one piece there: the wedge.
+        if let Some(wedge) = b.realms[0].get(1).filter(|w| w.len() == 4) {
+            (p.vb_on, p.vb_z) = (1, z);
+            for (k, h) in wedge.iter().enumerate() { p.wedge[k * 3..k * 3 + 3].copy_from_slice(&[h.0, h.1, h.2]); }
+        }
+    }
 }
 
 /// The world's parameters as the GPU passes read them (gpu::WorldParams, `World` in common.wgsl).
 #[cfg(feature = "gpu")]
 fn gpu_params(ctx: &Ctx, layers: &Layers) -> super::gpu::WorldParams {
+    let el = edge_k(ctx);
     let (s, v) = (ctx.scene, &ctx.view);
     let b = &s.path.bridge;
     let fb = &s.weather.fog_banks;
@@ -2649,8 +2874,44 @@ fn gpu_params(ctx: &Ctx, layers: &Layers) -> super::gpu::WorldParams {
         wx_wet: ctx.wx.wet, wx_puddles: ctx.wx.puddles, wx_snow: ctx.wx.snow, wx_track: ctx.wx.track, wx_rings: ctx.wx.rings,
         precip_seed: s.weather.precipitation.seed, loop_seconds: s.motion.loop_seconds(),
         n_lights: ctx.lights.len() as u32, n_sky: ctx.sky_lights.len() as u32, tiles_on: 0, tile_cols: 0,
-        zero: 0, fk_style: fk.map_or(0, |f| f.split as u32), fk_noise: fk.map_or(0.0, |f| f.noise), pad: 0,
+        zero: 0, fk_style: fk.map_or(0, |f| f.split as u32), fk_noise: fk.map_or(0.0, |f| f.noise), tile_cap: 0,
+        el_on: el.is_some() as u32, el_col: el.map_or([0.0; 3], |e| e.col), el_hw: el.map_or(0.0, |e| e.hw), el_inset: el.map_or(0.0, |e| e.inset),
+        el_period: el.map_or(0.0, |e| e.period), el_phase: el.map_or(0.0, |e| e.phase),
+        ..bytemuck::Zeroable::zeroed()
     }
+}
+
+/// The path's edge lights for a frame (`EdgeLights`), as both renderers use them.
+#[derive(Clone, Copy, Debug)]
+struct EdgeK { col: [f32; 3], hw: f32, inset: f32, period: f32, phase: f32 }
+
+fn edge_k(ctx: &Ctx) -> Option<EdgeK> {
+    let e = &ctx.scene.path.edge_lights;
+    if !e.enabled || e.strength <= 0.0 { return None; }
+    Some(EdgeK {
+        col: scale3(rgb_lin(e.color), e.strength),
+        hw: e.width.max(0.005) * 0.5,
+        inset: e.inset,
+        period: if e.dash > 0.0 { snap_to_loop(e.dash, ctx.loop_len) } else { 0.0 },
+        phase: e.flow as f32 * ctx.tphase,
+    })
+}
+
+/// Light from the edge lights at a ground pixel: the lines themselves and the floor they light.
+/// `px_x` and `px_d` are how far a pixel reaches across and along the path, metres.
+fn edge_light(k: &EdgeK, edge: f32, x: f32, dw: f32, px_x: f32, px_d: f32, albedo: [f32; 3]) -> [f32; 3] {
+    let d = (x.abs() - (edge - k.inset)).abs();
+    // A line narrower than the pixel widens to it and dims to match.
+    let wd = k.hw.max(px_x);
+    let line = (k.hw / wd) * smoothstep(wd, 0.0, d);
+    let mut dash = 1.0;
+    if k.period > 0.0 {
+        let f = (dw / k.period - k.phase).rem_euclid(1.0);
+        let on = smoothstep(0.0, 0.08, f) * (1.0 - smoothstep(0.5, 0.58, f));
+        dash = on + (0.5 - on) * smoothstep(0.25, 0.6, px_d / k.period);
+    }
+    let spill = 0.8 * (-d / 0.3).exp() * (0.5 + 0.5 * dash);
+    add3(scale3(k.col, 2.0 * line * dash), mul3(albedo, scale3(k.col, spill)))
 }
 
 /// Which of a GPU frame's buffers hold newer data than the CPU's copies.
@@ -2660,21 +2921,21 @@ struct GpuHas { hdr: bool, refl: bool, gbuf: bool, cards: bool, reflects: bool }
 
 /// render::shade on the GPU for one world (the G-buffer and masks are already there).
 #[cfg(feature = "gpu")]
-fn gpu_shade(f: &mut super::gpu::Frame, ctx: &Ctx, tiles: Option<TileLights>) {
-    let input = super::gpu::ShadeInput {
-        textures: [&ctx.path_tex, &ctx.verge_tex, &ctx.wall_tex, &ctx.ceil_tex, &ctx.deck_tex, &ctx.bottom_tex],
+fn gpu_shade(f: &mut super::gpu::Frame, ctxs: &[Ctx], mut tiles: Option<TileLights>) {
+    let inputs: Vec<_> = ctxs.iter().map(|ctx| super::gpu::ShadeInput {
+        textures: [&ctx.path_tex, &ctx.verge_tex, &ctx.wall_tex, &ctx.ceil_tex, &ctx.deck_tex, &ctx.bottom_tex, ctx.facade.as_ref().map_or(&ctx.path_tex, |f| &f.0)],
         lights: ctx.lights.iter().map(|l| [l.pos[0], l.pos[1], l.pos[2], l.radius, l.color[0], l.color[1], l.color[2], 0.0]).collect(),
         sky: ctx.sky_lights.iter().map(|l| [l.dir[0], l.dir[1], l.dir[2], 0.0, l.color[0], l.color[1], l.color[2], 0.0]).collect(),
-        tiles: tiles.map(|t| t.lists),
-    };
-    f.shade(&input);
+        tiles: tiles.take().map(|t| t.lists),
+    }).collect();
+    f.shade(&inputs);
 }
 
 /// Post and style's settings for the GPU, from the same scene values `render_worlds` reads.
 /// `dims` is (gl, gt, w, h, out_w, out_h, px); `fv` the view after the crop.
 #[cfg(feature = "gpu")]
 #[allow(clippy::too_many_arguments)]
-fn gpu_post_params<'a>(ctx: &Ctx, fv: &View, scene: &Scene, layers: &Layers, opts: &RenderOptions, dims: (usize, usize, usize, usize, usize, usize, usize),
+fn gpu_post_params<'a>(ctx: &Ctx, ctxs: &[Ctx], fv: &View, scene: &Scene, lens: Option<(&Ctx, f32)>, layers: &Layers, opts: &RenderOptions, dims: (usize, usize, usize, usize, usize, usize, usize),
                        crisp: bool, cards: bool, lut: Option<&'a PaletteLut>, levels: Option<(f32, f32)>, grade: Option<&'a super::looks::Grade>) -> super::gpu::PostIn<'a> {
     let (gl, gt, w, h, out_w, out_h, px) = dims;
     let mut p = super::gpu::PostParams { w: w as u32, h: h as u32, gl: gl as u32, gt: gt as u32, out_w: out_w as u32, out_h: out_h as u32, px: px as u32, ..Default::default() };
@@ -2682,21 +2943,35 @@ fn gpu_post_params<'a>(ctx: &Ctx, fv: &View, scene: &Scene, layers: &Layers, opt
     let _ = cards;
     p.hz = fv.horizon_px;
     p.unit = 854.0 / h as f32;
-    let ls = scene.motion.loop_seconds();
     let post_on = layers.post;
-    let hs = &scene.weather.heat_shimmer;
-    let shimmer = post_on && hs.enabled && hs.strength > 0.0;
-    if shimmer { (p.sh_on, p.sh_strength, p.sh_c1, p.sh_c2) = (1, hs.strength, cycles(1.1 * hs.speed.max(0.0), ls), cycles(1.9 * hs.speed.max(0.0), ls)); }
-    let l = &scene.weather.lens;
+    // Heat haze: each world's over its own pixels.
+    let haze = |c: &Ctx| {
+        let hs = &c.scene.weather.heat_shimmer;
+        let ls = c.scene.motion.loop_seconds();
+        (post_on && hs.enabled && hs.strength > 0.0).then(|| (hs.strength, cycles(1.1 * hs.speed.max(0.0), ls), cycles(1.9 * hs.speed.max(0.0), ls), c.tphase))
+    };
+    let hazes: Vec<_> = ctxs.iter().map(haze).collect();
+    let shimmer = hazes.iter().any(|h| h.is_some());
+    if shimmer {
+        p.sh_on = 1;
+        if let Some(Some((s0, a, b, t))) = hazes.first() { (p.sh_strength, p.sh_c1, p.sh_c2, p.sh_t0) = (*s0, *a, *b, *t); }
+        for r in 1..hazes.len().min(3) {
+            if let Some((s0, a, b, t)) = hazes[r] { (p.sh_s[r - 1], p.sh_a[r - 1], p.sh_b[r - 1], p.sh_t[r - 1]) = (s0, a, b, t); }
+        }
+    }
+    // The lens (raindrops or frost) of the world `lens` names, at its weight and on its clock.
     let mut drops = Vec::new();
-    if post_on && l.enabled && l.amount > 0.0 {
-        p.lens_weight = 1.0;
+    if let Some((lc, weight)) = lens {
+        let l = &lc.scene.weather.lens;
+        let lls = lc.scene.motion.loop_seconds();
+        p.lens_weight = weight;
         p.lens_seed = l.seed;
+        p.lens_tphase = lc.tphase;
         match l.kind {
-            LensKind::Drops => { p.lens_kind = 1; drops = weather::lens_drops(ctx, w, h, 1.0); }
+            LensKind::Drops => { p.lens_kind = 1; drops = weather::lens_drops(lc, w, h, weight); }
             LensKind::Frost => {
                 p.lens_kind = 2;
-                (p.th, p.tw, p.aspect) = (1.0 - 0.55 * l.amount.clamp(0.0, 1.0), cycles(0.5, ls), w as f32 / h as f32);
+                (p.th, p.tw, p.aspect) = (1.0 - 0.55 * l.amount.clamp(0.0, 1.0), cycles(0.5, lls), w as f32 / h as f32);
             }
         }
     }
@@ -2804,18 +3079,33 @@ fn gpu_sky(ctx: &Ctx, draw: bool, strike: Option<(&Strike, [f32; 3])>, bank: Opt
             for s in &stars { prims.extend([s.x as f32, s.y as f32, s.r, s.ri as f32, s.b, 0.0]); }
             bins.extend(bin_tiles(w, h, &boxes));
         }
-        let a = &sky.aurora;
-        if a.enabled && a.intensity > 0.0 {
-            let ls = ctx.scene.motion.loop_seconds();
-            let sp = a.speed.max(0.0);
+        if let Some(k) = weather::aurora_k(ctx) {
             p.au_on = 1;
-            p.au_c = [cycles(0.05 * sp, ls), cycles(0.09 * sp, ls), cycles(0.21 * sp, ls)];
-            p.au_t = TAU * ctx.tphase;
-            (p.au_lo, p.au_hi) = (rgb_lin(a.low), rgb_lin(a.high));
-            p.au_seed = a.seed as u32;
-            (p.au_p1, p.au_p2) = (hf(a.seed ^ 0x81, 0) * TAU, hf(a.seed ^ 0x82, 0) * TAU);
-            p.au_height = a.height.clamp(0.0, 1.0);
-            p.au_k = a.intensity.max(0.0) * 0.55;
+            (p.au_a, p.au_m, p.au_cx, p.au_unit) = (k.a, k.m, k.cx, k.unit);
+            (p.au_lo, p.au_hi, p.au_acc) = (k.lo, k.hi, k.acc);
+            (p.au_foot, p.au_arc, p.au_tall, p.au_rays, p.au_waves) = (k.foot, k.arc, k.tall, k.rays, k.waves);
+            (p.au_pres_lo, p.au_pres_hi, p.au_edge, p.au_k, p.au_so) = (k.pres_lo, k.pres_hi, k.edge, k.k, k.so);
+        }
+        if let Some(k) = space::space_k(ctx) {
+            (p.sp_on, p.sp_below, p.sp_scale, p.sp_stars, p.sp_sb) = (1, k.below as u32, k.scale, k.stars, k.sb);
+            (p.sp_cx, p.sp_unit, p.sp_top, p.sp_st, p.sp_sh) = (k.cx, k.unit, k.top, k.sky_top, k.sky_hor);
+            (p.sp_neb, p.sp_n1, p.sp_n2, p.sp_neb_f) = (k.neb, k.neb1, k.neb2, k.neb_f);
+            (p.sp_gal, p.sp_gc, p.sp_gal_c, p.sp_gal_s, p.sp_gal_w, p.sp_gal_h, p.sp_gal_core) = (k.gal, k.gal_col, k.gal_c, k.gal_s, k.gal_w, k.gal_h, k.gal_core);
+            p.sp_so = k.so;
+            p.sp_star_var = k.star_var;
+            let planets = space::planet_list(ctx);
+            (p.pl_n, p.pl_prims) = (planets.len() as u32, prims.len() as u32);
+            for pk in &planets { prims.extend(pk.pack()); }
+            if let Some(bk) = blackhole::bh_k(ctx) {
+                (p.bh_on, p.bh_prims) = (1, prims.len() as u32);
+                prims.extend(bk.pack());
+            }
+        }
+        p.s_air = if sky.space.enabled { 0.0 } else { 1.0 };
+        if let Some(k) = space::tunnel_k(ctx) {
+            (p.tn_on, p.tn_kind, p.tn_vx, p.tn_vy, p.tn_focal, p.tn_radius, p.tn_travel) = (1, k.kind, k.vx, k.vy, k.focal, k.radius, k.travel);
+            (p.tn_spin, p.tn_twist, p.tn_loop, p.tn_lanes, p.tn_period, p.tn_nx, p.tn_ny) = (k.spin, k.twist, k.loop_len, k.lanes, k.period, k.nx, k.ny);
+            (p.tn_c0, p.tn_c1, p.tn_c2, p.tn_k, p.tn_core, p.tn_scale, p.tn_fade) = (k.c0, k.c1, k.c2, k.k, k.core, k.scale, k.fade);
         }
         if sky.sun.enabled {
             let su = &sky.sun;
@@ -3126,13 +3416,15 @@ fn reflect_pass(ctx: &Ctx, gbuf: &[GPixel], refl: &[Refl], hdr: &mut [[f32; 3]])
 
 // ── Shadows ────────────────────────────────────────────────────────────────
 
-fn prop_shadows(ctx: &Ctx, bills: &[Billboard], gbuf: &[GPixel], sun_mask: &mut [f32], ao_mask: &mut [f32]) {
+/// A billboard's two shadow footprints on screen, worked out once: the contact ellipse, and the
+/// sun shadow (with the sun's slant: scale and tip).
+struct Caster<'b> { b: &'b Billboard, half_w: f32, rx: f32, rd: f32, contact: Option<(usize, usize, usize, usize)>, sun: Option<((usize, usize, usize, usize), f32)> }
+
+/// The sun's direction when it casts shadows here, and every caster of world `ctx`.
+fn shadow_casters<'b>(ctx: &Ctx, bills: &'b [Billboard]) -> (Option<[f32; 3]>, Vec<Caster<'b>>) {
     let v = &ctx.view;
     let (w, h) = (v.width, v.height);
     let sun = ctx.sky_lights.first().map(|s| s.dir).filter(|d| d[1] > 0.05 && !ctx.scene.ceiling.enabled);
-    // Each caster's two footprints on screen, worked out once: the contact ellipse, and the sun
-    // shadow (with the sun's slant: scale and tip).
-    struct Caster<'b> { b: &'b Billboard, half_w: f32, rx: f32, rd: f32, contact: Option<(usize, usize, usize, usize)>, sun: Option<((usize, usize, usize, usize), f32)> }
     let casters: Vec<Caster> = bills.iter().filter(|b| b.shadow > 0.0 && b.realm == ctx.realm).map(|b| {
         let [bx, _by, bd] = b.world;
         let half_w = b.height * b.sprite.aspect * 0.5;
@@ -3157,6 +3449,12 @@ fn prop_shadows(ctx: &Ctx, bills: &[Billboard], gbuf: &[GPixel], sun_mask: &mut 
         });
         Caster { b, half_w, rx, rd, contact, sun }
     }).collect();
+    (sun, casters)
+}
+
+fn prop_shadows(ctx: &Ctx, bills: &[Billboard], gbuf: &[GPixel], sun_mask: &mut [f32], ao_mask: &mut [f32]) {
+    let w = ctx.view.width;
+    let (sun, casters) = shadow_casters(ctx, bills);
     if casters.is_empty() { return; }
     // Drawn in bands of rows side by side, each caster in the same order as one after another.
     const BAND: usize = 8;
@@ -3518,6 +3816,7 @@ fn draw_sky_bodies(ctx: &Ctx, gbuf: &[GPixel], hdr: &mut [[f32; 3]]) {
     // The moon hides the stars behind it, its dark side too.
     let moon_disc = sky.moon.body.enabled.then(|| (ox + sky.moon.body.pos[0] * fw, oy + sky.moon.body.pos[1].clamp(0.0, 1.0) * fhy, sky.moon.body.radius * fhy));
     let behind_moon = |x: i64, y: i64| moon_disc.is_some_and(|(cx, cy, r)| (x as f32 + 0.5 - cx).powi(2) + (y as f32 + 0.5 - cy).powi(2) < r * r);
+    space::draw_backdrop(ctx, gbuf, hdr);
     for st in star_list(ctx) {
         let (sx, sy, r, ri, b) = (st.x, st.y, st.r, st.ri, st.b);
         for oy in -ri..=ri { for ox in -ri..=ri {
@@ -3536,13 +3835,15 @@ fn draw_sky_bodies(ctx: &Ctx, gbuf: &[GPixel], hdr: &mut [[f32; 3]]) {
         let fog = ctx.fog.map_or(0.0, |(_, d)| (40.0 / d).min(1.5));
         let spread = 1.0 + 2.5 * ctx.wx.veil + fog;
         let focal = v.focal_px.max(1.0);
+        // Seen from space there is no air to light: only the glare round the disc.
+        let air = if sky.space.enabled { 0.0 } else { 1.0 };
         hdr.par_chunks_mut(w).enumerate().for_each(|(y, row)| {
             if y as f32 >= hy { return; }
             for (x, p) in row.iter_mut().enumerate() {
                 if gbuf[y * w + x].id != id::NONE { continue; }
                 let dd = ((x as f32 + 0.5 - cx).powi(2) + (y as f32 + 0.5 - cy).powi(2)).sqrt();
                 let th = dd / focal;
-                let glow = 0.45 * (-th / (0.05 * spread)).exp() + 0.1 * (-th / (0.35 * spread)).exp();
+                let glow = air * (0.45 * (-th / (0.05 * spread)).exp() + 0.1 * (-th / (0.35 * spread)).exp()) + (1.0 - air) * 0.5 * (-th / 0.01).exp();
                 *p = add3(*p, scale3(c, glow));
                 if dd < r + 0.5 {
                     let mu = (1.0 - (dd / r).min(1.0).powi(2)).sqrt();
@@ -3585,6 +3886,8 @@ fn draw_sky_bodies(ctx: &Ctx, gbuf: &[GPixel], hdr: &mut [[f32; 3]]) {
             }
         }}
     }
+    space::draw_planets(ctx, gbuf, hdr);
+    blackhole::draw_infall(ctx, gbuf, hdr);
     if let Some(cs) = cloud_list(ctx) {
         for bl in &cs.blobs {
             let (bx, by, rx, ry, life) = (bl.x, bl.y, bl.rx, bl.ry, bl.life);
@@ -3701,7 +4004,7 @@ impl<'a> Card<'a> {
                 let c = if plain { mix3(fog_c, lit, fog_t) } else { add3(scale3(lit, fog_mul), fog_add) };
                 hdr[i] = mix3(hdr[i], c, a);
                 if a >= 0.5 {
-                    gbuf[i] = GPixel { depth: self.z, id: b.id, x, y, d, realm: b.realm };
+                    gbuf[i] = GPixel { depth: self.z, id: b.id, x, y, d, realm: b.realm, pad: 0 };
                     if let Some(p) = pick.as_deref_mut() { p[i] = b.source; }
                 }
             }
@@ -4363,11 +4666,11 @@ mod tests {
             for x in 0..w {
                 let i = y * w + x;
                 if (20..40).contains(&x) && yc >= top_row && yc < base_row {
-                    gbuf[i] = raster::GPixel { depth: zc, id: id::PROP, x: 0.0, y: eye - (yc - hz) * zc / f, d: zc, realm: 0 };
+                    gbuf[i] = raster::GPixel { depth: zc, id: id::PROP, x: 0.0, y: eye - (yc - hz) * zc / f, d: zc, realm: 0, pad: 0 };
                     src[i] = [1.0, 0.0, 0.0];
                 } else if yc > hz + 0.5 {
                     let d = f * eye / (yc - hz);
-                    gbuf[i] = raster::GPixel { depth: d, id: id::GROUND, x: 0.0, y: 0.0, d, realm: 0 };
+                    gbuf[i] = raster::GPixel { depth: d, id: id::GROUND, x: 0.0, y: 0.0, d, realm: 0, pad: 0 };
                     // Shading has already put the assumed sky (blue) into a fully reflective pixel.
                     src[i] = [0.0, 0.0, 1.0];
                     refl[i] = Refl { r: 1.0, env: [0.0, 0.0, 1.0], rough: 0.0, sx: 0.0 };
@@ -4428,11 +4731,11 @@ mod tests {
                 for x in 0..bw {
                     let i = y * bw + x;
                     if (10..30).contains(&x) && yc >= top_row && yc < base_row {
-                        gbuf[i] = raster::GPixel { depth: zc, id: id::PROP, x: 0.0, y: eye - (yc - hz) * zc / f, d: zc, realm: 0 };
+                        gbuf[i] = raster::GPixel { depth: zc, id: id::PROP, x: 0.0, y: eye - (yc - hz) * zc / f, d: zc, realm: 0, pad: 0 };
                         out[i] = [1.0, 0.0, 0.0];
                     } else if yc > hz + 0.5 {
                         let d = f * eye / (yc - hz);
-                        gbuf[i] = raster::GPixel { depth: d, id: id::GROUND, x: 0.0, y: 0.0, d, realm: 0 };
+                        gbuf[i] = raster::GPixel { depth: d, id: id::GROUND, x: 0.0, y: 0.0, d, realm: 0, pad: 0 };
                         out[i] = [0.0, 0.0, 1.0];
                         refl[i] = Refl { r: 1.0, env: [0.0, 0.0, 1.0], rough: 0.0, sx: 0.0 };
                     }

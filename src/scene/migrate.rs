@@ -64,6 +64,8 @@ pub fn from_v2(o: &PathForgeSettings, name: &str) -> Scene {
         },
         stairs: Stairs::default(),
         bridge: Bridge::default(),
+        edge_lights: EdgeLights::default(),
+        surface: true,
         fork: Fork::default(),
     };
 
@@ -149,7 +151,7 @@ pub fn from_v2(o: &PathForgeSettings, name: &str) -> Scene {
             enabled: p.enabled, kind, side, lateral: (p.wx.abs() * 0.8 - half_width + 0.5).max(0.3),
             spacing: (p.z_spacing * TILE_M).max(0.5), offset: p.pos_z * TILE_M, rows: p.tree_row_count.max(1),
             row_spacing: (p.tree_row_spacing * TILE_M).max(1.0), jitter: (p.x_jitter * 2.0).min(3.0), density: 1.0,
-            scale: p.scale, scale_var: p.scale_var.min(0.9), tint: p.tint, sink: (p.y_sink * 0.04).min(0.3),
+            scale: p.scale, scale_var: p.scale_var.min(0.9), tint: p.tint, sink: (p.y_sink * 0.04).min(0.3), float: 0.0, float_var: 0.0,
             shadow: p.casts_shadow, shadow_opacity: (p.shadow_opacity * 0.7).clamp(0.0, 1.0),
             sprite: sprite(&p.sprite_path, &p.sprite_pool_paths, p.sprite_pool_enabled, p.sprite_flip_x),
             seed: p.seed, def: String::new(),
@@ -172,7 +174,7 @@ pub fn from_v2(o: &PathForgeSettings, name: &str) -> Scene {
         sky,
         light,
         fixtures,
-        props, set_pieces: Vec::new(), weather: Weather::default(), prop_defs: Default::default(),
+        props, set_pieces: Vec::new(), companions: Vec::new(), weather: Weather::default(), prop_defs: Default::default(),
         particles,
         post: Post {
             exposure: 1.0, contrast: 1.0,

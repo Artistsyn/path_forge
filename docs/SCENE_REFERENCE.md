@@ -21,6 +21,7 @@ See [MANUAL.md](MANUAL.md) for what each part does and how to use it.
 | `fixtures` | list of [Fixture](#fixture) | (see the type) |  |
 | `props` | list of [PropLayer](#proplayer) | `[]` |  |
 | `set_pieces` | list of [SetPiece](#setpiece) | `[]` | Structures that span the path at intervals: archways, gates, banners. |
+| `companions` | list of [Companion](#companion) | `[]` | Things travelling along with the camera: a ship flying beside the path, a drone, a bird. |
 | `particles` | list of [Particles](#particles) | (see the type) |  |
 | `weather` | [Weather](#weather) | (see the type) | Lightning and fog banks. |
 | `prop_defs` | map of name → [PropDef](#propdef) |  | Props described by data, by name: a prop layer uses one with `def: "<name>"`. Kits (folders with a kit.json) hold more, used as `def: "<folder>#<name>"`. |
@@ -95,11 +96,52 @@ Where a prop is fixed.
 | Field | Type | Default | Meaning |
 |---|---|---|---|
 | `enabled` | boolean | `false` |  |
-| `intensity` | number | `0.8` |  |
-| `low` | integer × 3 | `[70,255,150]` | Colour at the foot of the curtains. |
-| `high` | integer × 3 | `[170,90,255]` | Colour at their tops. |
-| `height` | number | `0.45` | Where the curtains hang: 0 high in the sky .. 1 down at the horizon. |
-| `speed` | number | `1.0` | How fast the curtains ripple. |
+| `intensity` | number | `1.0` |  |
+| `low` | integer × 3 | `[70,255,150]` | Colour of the bright lower edge, the glow over it and the rays rising from it. |
+| `high` | integer × 3 | `[225,130,255]` | Colour of the diffuse veil high above the edge. |
+| `accent` | integer × 3 | `[255,170,245]` | Colour of the bright knots that flare along the edge. |
+| `height` | number | `0.6` | Where the lower edge hangs: 0 high in the sky .. 1 down at the horizon. |
+| `tall` | number | `1.0` | How far the veil rises above the edge (1 = about the height of the sky). |
+| `speed` | number | `1.0` | How fast the light drifts and flows along the band. |
+| `coverage` | number | `0.5` | How much of the band is lit at once: 0 a few patches .. 1 nearly all of it. |
+| `rays` | number | `1.0` | Fine vertical rays in the curtain: 0 a smooth glow .. 1 natural .. 2 strongly rayed. |
+| `waves` | number | `0.5` | How much the lower edge swells and folds: 0 a straight band. |
+| `arc` | number | `1.0` | How much the band bows up in the middle, as the far arc of the auroral oval does. |
+| `edge` | number | `1.0` | Brightness of the thin lower edge against the rest. |
+| `ground_glow` | number | `0.5` | How much the aurora lights the ground green (a faint, even glow). |
+| `seed` | integer | `0` |  |
+
+### BlackHole
+
+A black hole in the space sky. Its gravity bends light: the stars and nebulae behind it are
+lensed into arcs round it, and the far side of its accretion disk shows over the top and under
+the bottom of the dark shadow, ringed by a thin bright photon ring. The disk's side turning
+towards you is brighter and bluer. Matter drifts in from both sides of the frame, speeds up,
+swirls into the disk's plane and falls in, stretching and reddening. Planets are not lensed:
+keep them clear of it.
+
+| Field | Type | Default | Meaning |
+|---|---|---|---|
+| `enabled` | boolean | `false` |  |
+| `pos` | number × 2 | `[0.5,0.45]` | Centre: x 0..1 across the frame, y 0 (top) .. 1 (horizon). |
+| `size` | number | `0.12` | Radius of the dark shadow, as a share of the sky's height. |
+| `tilt` | number | `84.0` | How edge-on the disk is seen, degrees: 0 face-on, 90 edge-on. |
+| `roll` | number | `-8.0` | The disk's roll on screen, degrees (positive turns it anticlockwise). |
+| `disk_inner` | number | `3.0` | The disk's inner and outer edge, in horizon radii (3 is the innermost stable orbit). |
+| `disk_outer` | number | `11.0` |  |
+| `disk_colors` | integer × 3 × 3 | `[[255,246,228],[255,176,96],[190,64,26]]` | The disk's colour from hot (inner) through warm to cool (outer). |
+| `brightness` | number | `1.0` |  |
+| `doppler` | number | `0.9` | How much brighter and bluer the side turning towards you is: 0 even .. 1 physical. |
+| `spin` | integer | `4` | Turns the disk's inner edge makes in one loop (the outer part turns slower). Whole turns keep the loop seamless; negative spins it the other way. |
+| `lensing` | number | `1.0` | How strongly it bends the light behind it: 1 natural, 0 none. |
+| `infall` | integer | `18` | How many streaks of matter are falling in at once, from both sides (0 none, at most 48). |
+| `infall_speed` | integer | `1` | Whole trips each streak makes per loop, at least (some make one more). |
+| `infall_color` | integer × 3 | `[255,214,170]` |  |
+| `nodes` | integer | `0` | How many nodes like ball_swing_game's hook nodes fall in too (0 none): smaller and dimmer than the real ones, shrinking as they recede and stretched along their way near the end. |
+| `node_size` | number | `0.018` | A node's width as it comes in, as a share of the frame's width (the game's real nodes are about 0.03). |
+| `node_colors` | integer × 3 × 3 | `[[22,34,66],[90,230,210],[156,126,250]]` | The nodes' dark body and their two glowing rings. |
+| `distance` | number | `30.0` | How many times further away the hole is than the nodes start (they float in at play depth, then are pulled back to it, shrinking with distance). |
+| `light` | number | `0.5` | How much its disk lights the scene, in its warm colour (0 none). |
 | `seed` | integer | `0` |  |
 
 ### Branch
@@ -175,6 +217,29 @@ Output size in pixels. Portrait by default, like a phone held upright.
 | `shadows` | number | `0.0` | Shadows of clouds drifting over the ground (0..1; needs a light-giving sun). They drift with the wind when there is one, and work with the clouds themselves switched off too. |
 | `seed` | integer | `0` |  |
 
+### Companion
+
+Something travelling along with the camera at the walk's own speed, so it keeps its place in
+the frame: a ship flying beside the path. It follows the path round bends, bobs and weaves in
+whole cycles per loop, and its engines light what is near.
+
+| Field | Type | Default | Meaning |
+|---|---|---|---|
+| `enabled` | boolean | `true` |  |
+| `offset` | number × 3 | `[-2.4,2.4,10.0]` | Where it flies, metres: sideways from the path's centre (right positive), height above the path, and distance ahead of the camera. |
+| `size` | number | `3.2` | Its wingspan, metres (with a sprite: its height). |
+| `color` | integer × 3 | `[128,134,146]` | The drawn ship's hull, trim and engine-glow colours. |
+| `accent` | integer × 3 | `[56,104,180]` |  |
+| `engine` | integer × 3 | `[110,180,255]` |  |
+| `bob` | number | `0.25` | How far it rises and falls (metres), and how many times per loop. |
+| `bob_cycles` | integer | `2` |  |
+| `weave` | number | `0.4` | How far it drifts sideways (metres), and how many times per loop. |
+| `weave_cycles` | integer | `1` |  |
+| `light` | number | `1.0` | How strongly its engines light what is near (0 not at all). |
+| `sprite` | [SpriteRef](#spriteref) | (see the type) | An image used instead of the drawn ship (seen from behind, as it flies ahead). |
+| `glow_from` | number | `0.8` | With a sprite: texels at least this light (0..1) glow, as engines and windows do (0 none). |
+| `seed` | integer | `0` |  |
+
 ### Dither
 
 One of `None` \| `Bayer2` \| `Bayer4` \| `Bayer8`.
@@ -189,6 +254,21 @@ Drops falling from the ceiling, or from the tops of the walls where there is no 
 | `rate` | number | `1.0` | Drips per metre of path per loop. |
 | `color` | integer × 3 | `[190,205,220]` |  |
 | `seed` | integer | `0` |  |
+
+### EdgeLights
+
+Lines of light set into the path along both its edges. They glow, and light the floor round
+them; far away they widen to a pixel and dim to match, so they do not flicker.
+
+| Field | Type | Default | Meaning |
+|---|---|---|---|
+| `enabled` | boolean | `false` |  |
+| `color` | integer × 3 | `[80,210,255]` |  |
+| `strength` | number | `1.0` | Brightness: 1 bright. |
+| `width` | number | `0.05` | Width of each line, metres. |
+| `inset` | number | `0.08` | How far in from the path's edge, metres. |
+| `dash` | number | `0.0` | Dashes: one dash and one gap every this many metres (snapped to divide the loop); 0 an unbroken line. |
+| `flow` | integer | `0` | How many dashes the lights run ahead in one loop, on top of the walk (negative: toward the camera). Whole numbers keep the loop seamless. |
 
 ### Fixture
 
@@ -355,6 +435,7 @@ A tiling surface material generated procedurally.
 | `brightness` | number | `1.0` | Albedo multiplier. |
 | `gloss` | number | `0.0` | How mirror-like a floor is: 0 matte, about 0.3-0.5 wet stone, 0.6 ice, 1 still water. Reflections are traced against the finished frame, so lamps, trees and the sky show in it. |
 | `ripples` | number | `0.0` | Ripples (water) or roughness (wet stone) that break reflections up: 0 glassy .. 1 choppy. |
+| `glow` | number | `0.0` | How brightly the lit parts of a futuristic pattern shine (Panels' light bars, Grid lines, Hex seams, Circuit traces, in the `mortar` colour): 0 they are only inlays, 1 bright. |
 
 ### Mist
 
@@ -449,10 +530,45 @@ when there is one. For weather that soaks or covers the ground, use `weather.pre
 | `stairs` | [Stairs](#stairs) | (see the type) | Flights of steps the walk climbs (or descends) for ever. |
 | `bridge` | [Bridge](#bridge) | (see the type) | Stretches where the ground beside the path falls away and the path crosses on a bridge. |
 | `fork` | [Fork](#fork) | (see the type) | Side paths that branch off (open ground), or side passages (between walls). |
+| `edge_lights` | [EdgeLights](#edgelights) | (see the type) | Glowing lines along both edges of the path (and a bridge's deck): a lit walkway. |
+| `surface` | boolean | `true` | Draw the path at all. Off, there is no ground, verge or bridge: the camera flies the route through open air or space (a ship's flight path), and with `sky.space.below` or a tunnel the sky fills everything round it. |
 
 ### Pattern
 
-One of `Cobblestone` \| `Brick` \| `StoneBlock` \| `Sand` \| `Dirt` \| `Grass` \| `Bark` \| `RockFace` \| `Hedge` \| `Planks` \| `Water` \| `Ice` \| `Plain`.
+One of `Cobblestone` \| `Brick` \| `StoneBlock` \| `Sand` \| `Dirt` \| `Grass` \| `Bark` \| `RockFace` \| `Hedge` \| `Planks` \| `Water` \| `Ice` \| `Plain` \| `Panels` \| `Grid` \| `Hex` \| `Circuit`.
+
+### Planet
+
+| Field | Type | Default | Meaning |
+|---|---|---|---|
+| `enabled` | boolean | `true` |  |
+| `kind` | [PlanetKind](#planetkind) | `"Rocky"` |  |
+| `pos` | number × 2 | `[0.7,0.4]` | Centre: x 0..1 across the frame, y 0 (top) .. 1 (horizon); past 1 it sits below the horizon, which shows only with `space.below`. |
+| `radius` | number | `0.25` | Radius as a share of the sky's height. |
+| `color` | integer × 3 | `[150,130,115]` |  |
+| `color2` | integer × 3 | `[205,190,170]` |  |
+| `atmosphere` | integer × 3 | `[120,170,255]` | The glow of its air round the rim, and how strong (0 airless). |
+| `atmosphere_strength` | number | `0.0` |  |
+| `light_angle` | number | `30.0` | Where its sunlight comes from across the frame, in degrees: 0 from the right, 90 from above. |
+| `night` | number | `0.4` | How much of the face is in night: 0 fully lit .. 0.5 half .. 1 a thin crescent. |
+| `tilt` | number | `15.0` | Tilt of its axis (and its bands), degrees. |
+| `spin` | integer | `0` | Whole turns it spins in one loop (0 still; it must be whole for the loop to close). |
+| `clouds` | number | `0.5` | Earth and gas giants: how much white cloud. |
+| `city_lights` | number | `0.0` | Earth: city lights on the night side. |
+| `rings` | [Rings](#rings) | (see the type) |  |
+| `seed` | integer | `0` |  |
+
+### PlanetKind
+
+What a planet's surface is made of.
+
+| Value | Meaning |
+|---|---|
+| `Rocky` | Cratered rock: `color` lowlands, `color2` highlands. |
+| `Gas` | A gas giant in bands of `color` and `color2`, with a storm. |
+| `Earth` | Oceans (`color`), land (`color2`), ice caps and white cloud; city lights on the night side. |
+| `Ice` | Pale ice (`color`) with bright cracks (`color2`). |
+| `Lava` | Dark crust (`color`) split by glowing lava (`color2`), which glows on the night side too. |
 
 ### Post
 
@@ -535,6 +651,8 @@ A repeating row (or several rows) of props beside the path.
 | `scale_var` | number | `0.2` |  |
 | `tint` | integer × 3 | `[40,110,34]` | Colour of procedural props. Left out of a scene file, it is the kind's own colour. |
 | `sink` | number | `0.02` | How far the base sinks into the ground, as a fraction of height. |
+| `float` | number | `0.0` | Floating props (asteroids, drifting islands, lanterns): height above the ground, metres, and a random spread either way. Floating props hang over a bridge's drop too, and cast no sun shadow. |
+| `float_var` | number | `0.0` |  |
 | `shadow` | boolean | `true` |  |
 | `shadow_opacity` | number | `0.6` |  |
 | `sprite` | [SpriteRef](#spriteref) | (see the type) |  |
@@ -576,6 +694,20 @@ A rainbow: an arc round the point opposite the sun, with a faint second bow outs
 | `x` | number | `0.5` | Where its centre is across the sky (0 left .. 1 right). |
 | `size` | number | `1.0` | Size: 1 spans the frame's width (a real 42-degree bow is wider than a portrait view). |
 | `double` | boolean | `true` | Draw the fainter second bow outside the first. |
+
+### Rings
+
+A ring system round a planet, its near half in front of the planet and its far half behind.
+
+| Field | Type | Default | Meaning |
+|---|---|---|---|
+| `enabled` | boolean | `false` |  |
+| `inner` | number | `1.35` | Inner and outer edge, in planet radii. |
+| `outer` | number | `2.3` |  |
+| `open` | number | `0.25` | How far open they are seen: 0 edge-on .. 1 face-on. |
+| `angle` | number | `-12.0` | Tilt of the ring plane across the frame, degrees. |
+| `color` | integer × 3 | `[220,200,170]` |  |
+| `opacity` | number | `0.8` |  |
 
 ### Sandstorm
 
@@ -657,6 +789,8 @@ One of `Both` \| `Left` \| `Right` \| `Center`.
 | `clouds` | [Clouds](#clouds) | (see the type) |  |
 | `aurora` | [Aurora](#aurora) | (see the type) | Northern lights: curtains of green and violet light rippling across the sky. |
 | `rainbow` | [Rainbow](#rainbow) | (see the type) |  |
+| `space` | [Space](#space) | (see the type) | Deep space: a dense starfield, nebulae, a galaxy band and planets. |
+| `tunnel` | [Tunnel](#tunnel) | (see the type) | A tunnel all round the path in place of the sky: hyperspace or a wormhole. |
 
 ### SkyBody
 
@@ -668,6 +802,30 @@ One of `Both` \| `Left` \| `Right` \| `Center`.
 | `color` | integer × 3 | `[255,236,190]` |  |
 | `emits_light` | boolean | `true` | Lights the world and casts shadows. |
 | `intensity` | number | `1.0` |  |
+
+### Space
+
+The sky seen from space. It sits at infinity, so it stays put while the camera walks.
+
+| Field | Type | Default | Meaning |
+|---|---|---|---|
+| `enabled` | boolean | `false` |  |
+| `below` | boolean | `true` | Space all round: where nothing is drawn below the horizon (a bridge's bottomless drop, the gaps beside a floating walkway) shows space too, instead of the void colour. The sky's `top`..`horizon` gradient is mirrored below the horizon. |
+| `stars` | number | `1.0` | The dense field of faint stars: 0 none .. 1 a rich field .. 2 a crowded one. |
+| `star_brightness` | number | `1.0` |  |
+| `star_colors` | number | `1.0` | The stars' colours: 1 hot blue-white to cool orange; 0 all the faint blue-white of ball_swing_game's starfield. |
+| `nebula` | number | `0.6` | Glowing gas clouds: strength 0 .. 2, two colours, and size (1 about a sky's height across). |
+| `nebula_colors` | integer × 3 × 2 | `[[190,70,200],[60,120,255]]` |  |
+| `nebula_scale` | number | `1.0` |  |
+| `galaxy` | number | `0.7` | The band of a galaxy seen edge-on, with dark dust lanes and a brighter core. |
+| `galaxy_color` | integer × 3 | `[235,225,255]` |  |
+| `galaxy_angle` | number | `18.0` | Tilt of the band in degrees (0 level, positive rising to the right). |
+| `galaxy_width` | number | `0.22` | Its width, as a share of the sky's height. |
+| `galaxy_height` | number | `0.55` | Where the band crosses the middle of the frame, in sky heights above the horizon. |
+| `galaxy_core` | number | `0.25` | Where its bright core sits along the band: -1 left .. 1 right. |
+| `planets` | list of [Planet](#planet) | `[]` | Up to three planets, drawn in order (later ones in front). |
+| `black_hole` | [BlackHole](#blackhole) | (see the type) | A black hole: its shadow, a glowing disk lensed round it, and matter falling in. |
+| `seed` | integer | `0` |  |
 
 ### SpriteRef
 
@@ -744,6 +902,34 @@ walker (smoothly over each flight), and the loop still closes: the view one flig
 | `CaveMouth` | A rough, rounded opening in rock, in a hillside when the first world is open. |
 | `Gate` | A doorway with a gatehouse standing in it. |
 | `Portal` | A glowing ring; the worlds meet sharply inside it. |
+
+### Tunnel
+
+A tube all round the path, filling everything the world does not draw (sky, and below the
+horizon too): the walk runs down its middle and its walls rush past. It hides the rest of the
+sky. Use it with a path over a drop (`path.bridge`, `bottom: Void`) so it shows below as well.
+
+| Field | Type | Default | Meaning |
+|---|---|---|---|
+| `enabled` | boolean | `false` |  |
+| `kind` | [TunnelKind](#tunnelkind) | `"Hyperspace"` |  |
+| `radius` | number | `6.0` | The tube's radius, metres: small for a tight tunnel, large for an open one. |
+| `colors` | integer × 3 × 3 | `[[6,10,30],[170,210,255],[235,245,255]]` | The walls' deep colour, the streaks or bands, and the light at the far end. |
+| `intensity` | number | `1.0` |  |
+| `rush` | integer | `3` | How much faster than the walk the walls rush past: extra loop lengths per loop (whole). |
+| `twist` | integer | `0` | Whole turns the pattern winds round the tube along one loop length (a corkscrew). |
+| `spin` | integer | `0` | Whole turns the whole tunnel spins in one loop. |
+| `density` | number | `1.0` | Hyperspace: how many streaks; Wormhole: how fine the bands. 1 is natural. |
+| `core` | number | `1.0` | Brightness of the light at the far end. |
+| `light` | number | `0.5` | How much it lights the path in its colour (0 none). |
+| `seed` | integer | `0` |  |
+
+### TunnelKind
+
+| Value | Meaning |
+|---|---|
+| `Hyperspace` | Streaks of starlight stretched past at light speed. |
+| `Wormhole` | Swirling bands of glowing gas spiralling down a throat to a bright far end. |
 
 ### Verge
 

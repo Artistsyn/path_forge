@@ -74,9 +74,16 @@ impl GpuContext {
     }
 
     fn compute(&self, module: &wgpu::ShaderModule, layout: &wgpu::PipelineLayout, entry: &str) -> Result<wgpu::ComputePipeline, String> {
+        self.compute_with(module, layout, entry, true)
+    }
+    /// `multi` false: the pipeline for frames of one world, with everything only several worlds
+    /// need compiled out (the `MULTI` override in common.wgsl).
+    fn compute_with(&self, module: &wgpu::ShaderModule, layout: &wgpu::PipelineLayout, entry: &str, multi: bool) -> Result<wgpu::ComputePipeline, String> {
         self.device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let constants = [("MULTI", if multi { 1.0 } else { 0.0 })];
         let p = self.device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-            label: Some(entry), layout: Some(layout), module, entry_point: Some(entry), compilation_options: Default::default(), cache: None,
+            label: Some(entry), layout: Some(layout), module, entry_point: Some(entry),
+            compilation_options: wgpu::PipelineCompilationOptions { constants: &constants, ..Default::default() }, cache: None,
         });
         match pollster::block_on(self.device.pop_error_scope()) {
             Some(e) => Err(format!("{entry}: {e}")),
@@ -116,7 +123,28 @@ pub(crate) struct WorldParams {
     pub wx_wet: f32, pub wx_puddles: f32, pub wx_snow: f32, pub wx_track: f32, pub wx_rings: f32,
     pub precip_seed: u32, pub loop_seconds: f32,
     pub n_lights: u32, pub n_sky: u32, pub tiles_on: u32, pub tile_cols: u32,
-    pub zero: u32, pub fk_style: u32, pub fk_noise: f32, pub pad: u32,
+    pub zero: u32, pub fk_style: u32, pub fk_noise: f32, pub tile_cap: u32,
+    // A frame of several worlds: which one this is (its pixels carry it as their realm), where its
+    // textures and lights start in the shared buffers, and whether the frame has several.
+    pub realm: u32, pub tex_base: u32, pub light_base: u32, pub multi: u32,
+    // View::split: the boundary, the path beyond it, and each side's stairs.
+    pub sp_on: u32, pub sp_zb: f32, pub sp_hw_b: f32, pub sp_flare_b: f32, pub sp_taper: f32,
+    pub sa_on: u32, pub sa_period: f32, pub sa_run: f32, pub sa_rise: f32, pub sa_steps: f32, pub sa_offset: f32, pub sa_scroll: f32,
+    pub sb_on: u32, pub sb_period: f32, pub sb_run: f32, pub sb_rise: f32, pub sb_steps: f32, pub sb_offset: f32, pub sb_scroll: f32,
+    // View::shear of every world in the frame (a soft patch moves a pixel from one to another).
+    pub sh_z0: [f32; 3], pub sh_k: [f32; 3],
+    // FrontAir: the first world's air in front of the boundary.
+    pub fa_on: u32, pub fa_zb: f32, pub fa_fog_on: u32, pub fa_fog_dist: f32, pub fa_col: [f32; 3], pub fa_gain: f32,
+    // Portal: light from the other world through the opening (corners in camera space).
+    pub pt_on: u32, pub pt_zb: f32, pub pt_front: u32, pub pt_rad: [f32; 3], pub pt_c: [f32; 12],
+    // Opening: the face round a threshold's opening, and its texture's tile size.
+    pub op_on: u32, pub op_hw: f32, pub op_top: f32, pub op_arch: f32, pub op_rim: f32, pub op_seed: u32, pub op_outer_hw: f32, pub op_outer_top: f32, pub op_hill: f32,
+    pub fac_tile: f32,
+    // Ctx::verge_beyond, and the first world's region past it (Bounds::region_of): four half-planes.
+    pub vb_on: u32, pub vb_z: f32, pub wedge: [f32; 12],
+    // Path edge lights (render::EdgeK).
+    pub el_on: u32, pub el_col: [f32; 3], pub el_hw: f32, pub el_inset: f32, pub el_period: f32, pub el_phase: f32,
+    pub pad_end: u32,
 }
 
 /// The sky pass's parameters; `Sky` in sky.wgsl, field for field.
@@ -128,9 +156,10 @@ pub(crate) struct SkyParams {
     pub fhy: f32, pub tile_cols: u32, pub pad0: u32, pub pad1: u32,
     pub stars_on: u32, pub star_bins: u32, pub star_prims: u32, pub md_on: u32,
     pub md: [f32; 3],
-    pub au_on: u32, pub au_c: [f32; 3], pub au_t: f32,
-    pub au_lo: [f32; 3], pub au_hi: [f32; 3],
-    pub au_seed: u32, pub au_p1: f32, pub au_p2: f32, pub au_height: f32, pub au_k: f32,
+    pub au_on: u32, pub au_a: f32, pub au_m: f32, pub au_cx: f32,
+    pub au_unit: f32, pub au_lo: [f32; 3], pub au_hi: [f32; 3], pub au_acc: [f32; 3],
+    pub au_foot: f32, pub au_arc: f32, pub au_tall: f32, pub au_rays: f32, pub au_waves: f32,
+    pub au_pres_lo: f32, pub au_pres_hi: f32, pub au_edge: f32, pub au_k: f32, pub au_so: f32,
     pub sun_on: u32, pub s_x: f32, pub s_y: f32, pub s_r: f32, pub s_c: [f32; 3], pub s_spread: f32, pub s_focal: f32,
     pub moon_on: u32, pub m_c: [f32; 3], pub m_gr: f32, pub m_sx: f32, pub m_sy: f32, pub m_litf: f32, pub m_op: f32, pub m_craters: u32,
     pub cl_on: u32, pub cl_col: [f32; 3], pub cl_sun: u32, pub cl_sx: f32, pub cl_sy: f32, pub cl_sc: [f32; 3],
@@ -140,7 +169,16 @@ pub(crate) struct SkyParams {
     pub bolt_on: u32, pub b_gain: f32, pub b_core: [f32; 3], pub b_tint: [f32; 3],
     pub b_glow: f32, pub b_scale: f32, pub b_xa: u32, pub b_xb: u32, pub b_yb: u32, pub b_nsegs: u32, pub b_prims: u32,
     pub veil: f32, pub bank_on: u32, pub bank_t: f32, pub bank: [f32; 3],
-    pub pad: [u32; 3],
+    pub sp_on: u32, pub sp_below: u32, pub sp_scale: f32, pub sp_stars: f32, pub sp_sb: f32, pub sp_cx: f32, pub sp_unit: f32, pub sp_top: f32,
+    pub sp_st: [f32; 3], pub sp_sh: [f32; 3],
+    pub sp_neb: f32, pub sp_n1: [f32; 3], pub sp_n2: [f32; 3], pub sp_neb_f: f32,
+    pub sp_gal: f32, pub sp_gc: [f32; 3], pub sp_gal_c: f32, pub sp_gal_s: f32, pub sp_gal_w: f32, pub sp_gal_h: f32, pub sp_gal_core: f32,
+    pub sp_so: f32, pub pl_n: u32, pub pl_prims: u32, pub s_air: f32, pub bh_on: u32,
+    pub tn_on: u32, pub tn_kind: f32, pub tn_vx: f32, pub tn_vy: f32, pub tn_focal: f32, pub tn_radius: f32, pub tn_travel: f32,
+    pub tn_spin: f32, pub tn_twist: f32, pub tn_loop: f32, pub tn_lanes: f32, pub tn_period: f32, pub tn_nx: f32, pub tn_ny: f32,
+    pub tn_c0: [f32; 3], pub tn_c1: [f32; 3], pub tn_c2: [f32; 3], pub tn_k: f32, pub tn_core: f32, pub tn_scale: f32, pub tn_fade: f32, pub bh_prims: u32,
+    pub mode: u32, pub w_fork: u32, pub w_base: f32,
+    pub w_center: f32, pub w_focal: f32, pub w_split: f32, pub w_near: f32, pub w_keep: [f32; 2], pub sp_star_var: f32, pub pad5: u32,
 }
 
 /// The sky pass's input: parameters, primitives (stars, blobs, bolt segments; 6 floats each) and
@@ -163,6 +201,32 @@ pub(crate) fn bin_tiles(w: usize, h: usize, boxes: &[(i64, i64, i64, i64)]) -> V
     for l in &lists { out.push(off); off += l.len() as u32; }
     out.push(off);
     for l in lists { out.extend(l); }
+    out
+}
+
+/// Per-tile triangle lists in `bin_tiles`' layout, each triangle listed only in the tiles it can
+/// draw into (`raster::tiles_touched`), in triangle order (depth ties go to the first).
+/// Triangles marked in `skip` are listed nowhere.
+pub(crate) fn bin_triangles(w: usize, h: usize, prepared: &[crate::world::raster::Prepared], skip: &[bool]) -> Vec<u32> {
+    use rayon::prelude::*;
+    let (cols, rows) = (w.div_ceil(16), h.div_ceil(16));
+    let touched: Vec<Vec<u32>> = prepared.par_iter().zip(skip).map(|(t, &s)| {
+        let mut v = Vec::new();
+        if !s { crate::world::raster::tiles_touched(t, cols, &mut v); }
+        v
+    }).collect();
+    let mut count = vec![0u32; cols * rows + 1];
+    for v in &touched { for &k in v { count[k as usize + 1] += 1; } }
+    for k in 1..count.len() { count[k] += count[k - 1]; }
+    let mut out = count.clone();
+    out.resize(cols * rows + 1 + count[cols * rows] as usize, 0);
+    let mut fill = count;
+    for (i, v) in touched.iter().enumerate() {
+        for &k in v {
+            out[cols * rows + 1 + fill[k as usize] as usize] = i as u32;
+            fill[k as usize] += 1;
+        }
+    }
     out
 }
 
@@ -226,6 +290,54 @@ pub(crate) struct SplatGpu { pub kind: u32, pub z: f32, pub gx: i32, pub gy: i32
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct SplatPassParams { tile_cols: u32, n: u32, pad: [u32; 2] }
 
+/// A triangle set up on the CPU (raster::Prepared), as geom.wgsl's `Tri` reads it.
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+pub(crate) struct TriGpu { pub f: [f32; 36] }
+
+impl TriGpu {
+    pub fn new(t: &super::raster::Prepared) -> TriGpu {
+        let mut f = [0.0f32; 36];
+        for (k, q) in t.p.iter().enumerate() { f[k * 2] = q[0]; f[k * 2 + 1] = q[1]; }
+        f[6..9].copy_from_slice(&t.inv_z);
+        for (k, w) in t.w_over_z.iter().enumerate() { f[9 + k * 3..12 + k * 3].copy_from_slice(w); }
+        for (k, v) in [t.min_x, t.max_x, t.min_y, t.max_y].into_iter().enumerate() { f[18 + k] = f32::from_bits(v as u32); }
+        f[22] = 1.0 / t.area;
+        f[23] = f32::from_bits(t.id as u32 | (t.realm as u32) << 8);
+        for (k, e) in t.edges().iter().enumerate() { f[24 + k * 3..27 + k * 3].copy_from_slice(e); }
+        TriGpu { f }
+    }
+}
+
+/// A billboard's shadow footprints (render::prop_shadows), as geom.wgsl's `Caster` reads it; the
+/// sprite level's place in the sprite store is filled in by `Frame::geometry`.
+#[repr(C)]
+#[derive(Clone, Copy, Default, bytemuck::Pod, bytemuck::Zeroable)]
+pub(crate) struct CasterGpu { pub f: [f32; 24] }
+pub(crate) struct CasterIn { pub c: CasterGpu, pub sprite: Arc<super::sprites::Sprite>, pub lod: usize }
+
+/// geom.wgsl's `Geom`.
+#[repr(C)]
+#[derive(Clone, Copy, Default, bytemuck::Pod, bytemuck::Zeroable)]
+pub(crate) struct GeomParams {
+    pub tile_cols: u32, pub cast_bins: u32, pub sun_on: u32, pub n_lights: u32,
+    pub sun: [f32; 3], pub clouds: f32,
+    pub cloud_travel: f32, pub cloud_seed: u32, pub tiles_on: u32, pub cap: u32,
+    pub small_off: u32, pub n_small: u32, pub pad: [u32; 2],
+}
+
+/// What the geometry pass draws: the triangles and their per-tile lists, the shadow casters and
+/// theirs, the sun (when it casts), cloud shade (amount, travel, seed), and the lamps to sort into
+/// tiles (None: shading looks at every lamp).
+pub(crate) struct GeomIn {
+    pub tris: Vec<TriGpu>, pub tri_bins: Vec<u32>,
+    /// Triangles rasterised one thread each instead of from the tile lists (`raster::SMALL_TRI`).
+    pub small: Vec<u32>,
+    pub casters: Vec<CasterIn>, pub cast_bins: Vec<u32>,
+    pub sun: Option<[f32; 3]>, pub clouds: Option<(f32, f32, u32)>,
+    pub lamps: Option<Vec<[f32; 8]>>,
+}
+
 /// Download targets: any of the frame's buffers, fetched in one wait.
 #[derive(Default)]
 pub(crate) struct Down<'a> {
@@ -237,8 +349,8 @@ pub(crate) struct Down<'a> {
 
 /// What the shading pass reads besides the G-buffer and masks.
 pub(crate) struct ShadeInput<'a> {
-    /// Path, verge, wall, ceiling, deck, bottom.
-    pub textures: [&'a Arc<Texture>; 6],
+    /// Path, verge, wall, ceiling, deck, bottom, facade.
+    pub textures: [&'a Arc<Texture>; 7],
     /// Point lights: pos (camera space), radius, colour.
     pub lights: Vec<[f32; 8]>,
     /// Sky lights: direction, colour.
@@ -247,21 +359,19 @@ pub(crate) struct ShadeInput<'a> {
     pub tiles: Option<Vec<Vec<u16>>>,
 }
 
-/// The CPU G-buffer pixel packed as the GPU reads it.
-#[repr(C)]
-#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
-pub(crate) struct GPixGpu { pub depth: f32, pub x: f32, pub y: f32, pub d: f32, pub idr: u32 }
 
 struct Sized {
     w: usize, h: usize,
     gbuf: wgpu::Buffer, masks: wgpu::Buffer, uvs: wgpu::Buffer, hdr: wgpu::Buffer, refl: wgpu::Buffer,
     pick: wgpu::Buffer,
+    /// The raster's meeting place: per pixel the least depth bits, small winner, big winner.
+    racc: wgpu::Buffer,
     /// The reflection pass's per-column tables.
     q2s: wgpu::Buffer, mins: wgpu::Buffer, ends: wgpu::Buffer, blocks: wgpu::Buffer,
     read: wgpu::Buffer,
 }
 
-struct SkyPass { layout: wgpu::BindGroupLayout, pipe: wgpu::ComputePipeline, params: wgpu::Buffer, prims: Mutex<Option<wgpu::Buffer>>, bins: Mutex<Option<wgpu::Buffer>> }
+struct SkyPass { layout: wgpu::BindGroupLayout, pipe: [wgpu::ComputePipeline; 2], params: wgpu::Buffer, prims: Mutex<Option<wgpu::Buffer>>, bins: Mutex<Option<wgpu::Buffer>> }
 
 struct CardPass { layout: wgpu::BindGroupLayout, pipe: wgpu::ComputePipeline, params: wgpu::Buffer, cards: Mutex<Option<wgpu::Buffer>>, bins: Mutex<Option<wgpu::Buffer>>, store: Mutex<SpriteStore> }
 
@@ -281,7 +391,7 @@ pub(crate) struct ShaftParams {
     pub tc: u32, pub n_lights: u32, pub hy: f32, pub pad: u32,
 }
 
-struct ShaftPass { layout: wgpu::BindGroupLayout, mask: wgpu::ComputePipeline, add: wgpu::ComputePipeline, apply: wgpu::ComputePipeline, params: wgpu::Buffer, lists: Mutex<Option<wgpu::Buffer>>, cells: Mutex<Option<wgpu::Buffer>> }
+struct ShaftPass { layout: wgpu::BindGroupLayout, mask: wgpu::ComputePipeline, add: wgpu::ComputePipeline, apply: wgpu::ComputePipeline, params: wgpu::Buffer, lists: Mutex<Option<wgpu::Buffer>>, cells: Mutex<Option<wgpu::Buffer>>, lamps: Mutex<Option<wgpu::Buffer>> }
 
 /// Post and style's settings and buffer plan; `Post` in post.wgsl, field for field.
 #[repr(C)]
@@ -307,7 +417,10 @@ pub(crate) struct PostParams {
     pub ramp_k: f32, pub q_on: u32, pub q_bits: u32, pub q_amp: f32,
     pub dither: u32, pub paper: f32, pub scan: f32, pub stats_on: u32,
     pub sky_enabled: u32, pub verge_enabled: u32, pub t_lut: u32, pub t_col: u32,
-    pub t_cube: u32, pub t_drops: u32, pub pad1: u32, pub pad2: u32,
+    pub t_cube: u32, pub t_drops: u32, pub lens_tphase: f32, pub pad2: u32,
+    // Heat haze per world of the frame (each pixel its own world's): the clock of world 0 (whose
+    // strength and cycles are sh_strength, sh_c1, sh_c2), then worlds 1 and 2's.
+    pub sh_t0: f32, pub sh_s: [f32; 2], pub sh_a: [f32; 2], pub sh_b: [f32; 2], pub sh_t: [f32; 2], pub pad3: [u32; 3],
 }
 
 /// What post needs besides its settings: the lens drops, the palette and grade tables (cached by
@@ -335,15 +448,29 @@ struct PostPass {
     tables: Mutex<Option<(usize, wgpu::Buffer, u32, u32, u32)>>,
 }
 
+struct GeomPass {
+    layout: wgpu::BindGroupLayout, raster_layout: wgpu::BindGroupLayout,
+    small_z: wgpu::ComputePipeline, small_pick: wgpu::ComputePipeline, resolve: wgpu::ComputePipeline,
+    raster: wgpu::ComputePipeline, shadow: wgpu::ComputePipeline, tiles: wgpu::ComputePipeline,
+    params: wgpu::Buffer, tris: Mutex<Option<wgpu::Buffer>>, bins: Mutex<Option<wgpu::Buffer>>, casters: Mutex<Option<wgpu::Buffer>>,
+    lamps: Mutex<Option<wgpu::Buffer>>, lists: Mutex<Option<wgpu::Buffer>>,
+}
 struct ReflectPass { layout: wgpu::BindGroupLayout, colsum_a: wgpu::ComputePipeline, colsum_b: wgpu::ComputePipeline, reflect: wgpu::ComputePipeline }
 
 struct ShadePass {
     layout: wgpu::BindGroupLayout,
-    uvs: wgpu::ComputePipeline,
-    shade: wgpu::ComputePipeline,
-    mist: wgpu::ComputePipeline,
+    /// [one world, several worlds] each.
+    uvs: [wgpu::ComputePipeline; 2],
+    shade: [wgpu::ComputePipeline; 2],
+    soft: wgpu::ComputePipeline,
+    mist: [wgpu::ComputePipeline; 2],
+    /// One `AirParams` per world, AIR_STRIDE apart.
     air: wgpu::Buffer,
 }
+
+/// The most worlds one frame draws (a fork: the road and its two branches).
+pub(crate) const MAX_WORLDS: usize = 3;
+const AIR_STRIDE: u64 = 256;
 
 /// The air's settings for the mist pass; `Air` in shade.wgsl.
 #[repr(C)]
@@ -353,9 +480,35 @@ pub(crate) struct AirParams {
     pub travel: f32, pub seed: u32, pub mist: [f32; 3], pub pad: [u32; 3],
 }
 
+/// Textures kept on the GPU (see `Gpu::texel_buffer`): each held texture and where its levels
+/// start in the texel data (offset in floats, side), `used` of `cap` words taken.
+struct TexStore { buf: wgpu::Buffer, cap: u64, used: u64, held: Vec<(Arc<Texture>, Vec<(u32, u32)>)> }
+
+impl TexStore {
+    /// Three floats a texel, or four when it glows (its glow after its colour).
+    fn stride(t: &Arc<Texture>) -> u64 { if t.emit.is_empty() { 3 } else { 4 } }
+    fn words(t: &Arc<Texture>) -> u64 { t.levels.iter().take(8).map(|(_, l)| l.len() as u64 * Self::stride(t)).sum() }
+    fn find(&self, t: &Arc<Texture>) -> Option<usize> { self.held.iter().position(|h| Arc::ptr_eq(&h.0, t)) }
+    fn add(&mut self, queue: &wgpu::Queue, t: &Arc<Texture>) -> usize {
+        let mut levels = Vec::new();
+        for (l, (side, texels)) in t.levels.iter().take(8).enumerate() {
+            let data: Vec<f32> = match t.emit.get(l) {
+                Some(e) => texels.iter().zip(e).flat_map(|(c, g)| [c[0], c[1], c[2], *g]).collect(),
+                None => texels.iter().flat_map(|c| c.iter().copied()).collect(),
+            };
+            queue.write_buffer(&self.buf, (544 + self.used) * 4, bytemuck::cast_slice(&data));
+            levels.push((self.used as u32, *side as u32));
+            self.used += data.len() as u64;
+        }
+        self.held.push((t.clone(), levels));
+        self.held.len() - 1
+    }
+}
+
 /// The GPU side of a `WorldRenderer`: pipelines, cached textures, and buffers for the frame size.
 pub struct Gpu {
     pub ctx: Arc<GpuContext>,
+    geom: GeomPass,
     shade: ShadePass,
     sky: SkyPass,
     cards: CardPass,
@@ -364,10 +517,12 @@ pub struct Gpu {
     shafts: ShaftPass,
     post: PostPass,
     ts: Option<Timestamps>,
+    /// One `WorldParams` per world of the frame, `wstride` apart (bound with a dynamic offset).
     params: wgpu::Buffer,
+    wstride: u64,
     sized: Mutex<Option<Sized>>,
     /// Texel buffer and the textures it holds (by pointer).
-    textures: Mutex<Option<(Vec<usize>, wgpu::Buffer)>>,
+    textures: Mutex<Option<TexStore>>,
     lights: Mutex<Option<wgpu::Buffer>>,
     tiles: Mutex<Option<wgpu::Buffer>>,
 }
@@ -376,6 +531,21 @@ fn storage(binding: u32, read_only: bool) -> wgpu::BindGroupLayoutEntry {
     wgpu::BindGroupLayoutEntry {
         binding, visibility: wgpu::ShaderStages::COMPUTE,
         ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only }, has_dynamic_offset: false, min_binding_size: None },
+        count: None,
+    }
+}
+/// The world's parameters, at the dynamic offset of the world a dispatch draws.
+fn world_uniform(binding: u32) -> wgpu::BindGroupLayoutEntry {
+    wgpu::BindGroupLayoutEntry {
+        binding, visibility: wgpu::ShaderStages::COMPUTE,
+        ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Uniform, has_dynamic_offset: true, min_binding_size: wgpu::BufferSize::new(std::mem::size_of::<WorldParams>() as u64) },
+        count: None,
+    }
+}
+fn air_uniform(binding: u32) -> wgpu::BindGroupLayoutEntry {
+    wgpu::BindGroupLayoutEntry {
+        binding, visibility: wgpu::ShaderStages::COMPUTE,
+        ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Uniform, has_dynamic_offset: true, min_binding_size: wgpu::BufferSize::new(std::mem::size_of::<AirParams>() as u64) },
         count: None,
     }
 }
@@ -393,22 +563,48 @@ impl Gpu {
         let d = &ctx.device;
         let layout = d.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("shade"),
-            entries: &[uniform(0), storage(1, true), storage(2, true), storage(3, true), storage(4, true), storage(5, true), storage(6, false), storage(7, false), storage(8, false), uniform(9)],
+            entries: &[world_uniform(0), storage(1, true), storage(2, true), storage(3, true), storage(4, true), storage(5, true), storage(6, false), storage(7, false), storage(8, false), air_uniform(9)],
         });
         let pl = d.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: Some("shade"), bind_group_layouts: &[&layout], push_constant_ranges: &[] });
         let m = ctx.module("shade.wgsl", include_str!("shade.wgsl"))?;
         let air = d.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("air params"), size: std::mem::size_of::<AirParams>() as u64,
+            label: Some("air params"), size: AIR_STRIDE * MAX_WORLDS as u64,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false,
         });
-        let shade = ShadePass { uvs: ctx.compute(&m, &pl, "uvs_main")?, shade: ctx.compute(&m, &pl, "shade_main")?, mist: ctx.compute(&m, &pl, "mist_main")?, layout, air };
+        let both = |e: &str| -> Result<[wgpu::ComputePipeline; 2], String> { Ok([ctx.compute_with(&m, &pl, e, false)?, ctx.compute_with(&m, &pl, e, true)?]) };
+        let shade = ShadePass { uvs: both("uvs_main")?, shade: both("shade_main")?, soft: ctx.compute(&m, &pl, "soft_main")?, mist: both("mist_main")?, layout, air };
+        let geom = {
+            let layout = d.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("geom"),
+                entries: &[world_uniform(0), storage(1, false), storage(2, true), storage(3, true), storage(4, false), storage(5, true), storage(6, true), storage(7, false), storage(8, true), uniform(9)],
+            });
+            let pl = d.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: Some("geom"), bind_group_layouts: &[&layout], push_constant_ranges: &[] });
+            let m = ctx.module("geom.wgsl", include_str!("geom.wgsl"))?;
+            // The raster passes on their own: the shadow and tile passes already use the eight
+            // storage buffers a stage may bind by default.
+            let raster_layout = d.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("raster"),
+                entries: &[world_uniform(0), storage(1, false), storage(2, true), storage(3, true), uniform(9), storage(10, false)],
+            });
+            let rpl = d.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: Some("raster"), bind_group_layouts: &[&raster_layout], push_constant_ranges: &[] });
+            let params = d.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("geom params"), size: std::mem::size_of::<GeomParams>() as u64,
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false,
+            });
+            GeomPass {
+                raster: ctx.compute_with(&m, &rpl, "raster_main", false)?, small_z: ctx.compute_with(&m, &rpl, "small_z_main", false)?,
+                small_pick: ctx.compute_with(&m, &rpl, "small_pick_main", false)?, resolve: ctx.compute_with(&m, &rpl, "resolve_main", false)?,
+                raster_layout, shadow: ctx.compute_with(&m, &pl, "shadow_main", false)?, tiles: ctx.compute_with(&m, &pl, "tiles_main", false)?,
+                layout, params, tris: Mutex::new(None), bins: Mutex::new(None), casters: Mutex::new(None), lamps: Mutex::new(None), lists: Mutex::new(None),
+            }
+        };
         let sky = {
             let layout = d.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                label: Some("sky"), entries: &[uniform(0), uniform(1), storage(2, true), storage(3, false), storage(4, true), storage(5, true)],
+                label: Some("sky"), entries: &[world_uniform(0), uniform(1), storage(2, true), storage(3, false), storage(4, true), storage(5, true)],
             });
             let pl = d.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: Some("sky"), bind_group_layouts: &[&layout], push_constant_ranges: &[] });
             let m = ctx.module("sky.wgsl", include_str!("sky.wgsl"))?;
-            let pipe = ctx.compute(&m, &pl, "sky_main")?;
+            let pipe = [ctx.compute_with(&m, &pl, "sky_main", false)?, ctx.compute_with(&m, &pl, "sky_main", true)?];
             let params = d.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("sky params"), size: std::mem::size_of::<SkyParams>() as u64,
                 usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false,
@@ -417,7 +613,7 @@ impl Gpu {
         };
         let cards = {
             let layout = d.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                label: Some("cards"), entries: &[uniform(0), storage(1, false), storage(2, false), storage(3, true), storage(4, true), storage(5, true), storage(6, false), uniform(7)],
+                label: Some("cards"), entries: &[world_uniform(0), storage(1, false), storage(2, false), storage(3, true), storage(4, true), storage(5, true), storage(6, false), uniform(7)],
             });
             let pl = d.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: Some("cards"), bind_group_layouts: &[&layout], push_constant_ranges: &[] });
             let m = ctx.module("cards.wgsl", include_str!("cards.wgsl"))?;
@@ -429,7 +625,7 @@ impl Gpu {
         };
         let splat = {
             let layout = d.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                label: Some("splats"), entries: &[uniform(0), storage(1, false), storage(2, false), storage(3, true), storage(4, true), uniform(5)],
+                label: Some("splats"), entries: &[world_uniform(0), storage(1, false), storage(2, false), storage(3, true), storage(4, true), uniform(5)],
             });
             let pl = d.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: Some("splats"), bind_group_layouts: &[&layout], push_constant_ranges: &[] });
             let m = ctx.module("splat.wgsl", include_str!("splat.wgsl"))?;
@@ -441,7 +637,7 @@ impl Gpu {
         };
         let reflect = {
             let layout = d.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                label: Some("reflect"), entries: &[uniform(0), storage(1, true), storage(2, false), storage(3, true), storage(4, false), storage(5, false), storage(6, false), storage(7, false)],
+                label: Some("reflect"), entries: &[world_uniform(0), storage(1, true), storage(2, false), storage(3, true), storage(4, false), storage(5, false), storage(6, false), storage(7, false)],
             });
             let pl = d.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: Some("reflect"), bind_group_layouts: &[&layout], push_constant_ranges: &[] });
             let m = ctx.module("reflect.wgsl", include_str!("reflect.wgsl"))?;
@@ -449,7 +645,7 @@ impl Gpu {
         };
         let shafts = {
             let layout = d.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                label: Some("shafts"), entries: &[uniform(0), storage(1, true), storage(2, false), storage(3, true), storage(4, true), storage(5, false), uniform(6)],
+                label: Some("shafts"), entries: &[world_uniform(0), storage(1, true), storage(2, false), storage(3, true), storage(4, true), storage(5, false), uniform(6)],
             });
             let pl = d.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: Some("shafts"), bind_group_layouts: &[&layout], push_constant_ranges: &[] });
             let m = ctx.module("shafts.wgsl", include_str!("shafts.wgsl"))?;
@@ -459,12 +655,12 @@ impl Gpu {
             });
             ShaftPass {
                 mask: ctx.compute(&m, &pl, "shaft_mask")?, add: ctx.compute(&m, &pl, "shaft_add")?, apply: ctx.compute(&m, &pl, "shaft_apply")?,
-                layout, params, lists: Mutex::new(None), cells: Mutex::new(None),
+                layout, params, lists: Mutex::new(None), cells: Mutex::new(None), lamps: Mutex::new(None),
             }
         };
         let post = {
             let layout = d.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                label: Some("post"), entries: &[uniform(0), uniform(1), storage(2, true), storage(3, true), storage(4, true), storage(5, false), storage(6, true), storage(7, false)],
+                label: Some("post"), entries: &[world_uniform(0), uniform(1), storage(2, true), storage(3, true), storage(4, true), storage(5, false), storage(6, true), storage(7, false)],
             });
             let pl = d.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: Some("post"), bind_group_layouts: &[&layout], push_constant_ranges: &[] });
             let m = ctx.module("post.wgsl", include_str!("post.wgsl"))?;
@@ -479,8 +675,11 @@ impl Gpu {
             });
             PostPass { layout, pipes, params, scratch: Mutex::new(None), out: Mutex::new(None), read: Mutex::new(None), tables: Mutex::new(None) }
         };
+        let align = d.limits().min_uniform_buffer_offset_alignment.max(16) as u64;
+        let wstride = (std::mem::size_of::<WorldParams>() as u64).next_multiple_of(align);
+        assert!(AIR_STRIDE % align == 0 && std::mem::size_of::<AirParams>() as u64 <= AIR_STRIDE);
         let params = d.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("world params"), size: std::mem::size_of::<WorldParams>() as u64,
+            label: Some("world params"), size: wstride * MAX_WORLDS as u64,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false,
         });
         let ts = d.features().contains(wgpu::Features::TIMESTAMP_QUERY).then(|| Timestamps {
@@ -488,7 +687,7 @@ impl Gpu {
             resolve: d.create_buffer(&wgpu::BufferDescriptor { label: Some("pass times"), size: (TS_PASSES * 16) as u64, usage: wgpu::BufferUsages::QUERY_RESOLVE | wgpu::BufferUsages::COPY_SRC, mapped_at_creation: false }),
             read: d.create_buffer(&wgpu::BufferDescriptor { label: Some("pass times read"), size: (TS_PASSES * 16) as u64, usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false }),
         });
-        Ok(Gpu { ctx, shade, sky, cards, splat, reflect, shafts, post, ts, params, sized: Mutex::new(None), textures: Mutex::new(None), lights: Mutex::new(None), tiles: Mutex::new(None) })
+        Ok(Gpu { ctx, geom, shade, sky, cards, splat, reflect, shafts, post, ts, params, wstride, sized: Mutex::new(None), textures: Mutex::new(None), lights: Mutex::new(None), tiles: Mutex::new(None) })
     }
 
     fn buffer(&self, label: &str, size: u64, usage: wgpu::BufferUsages) -> wgpu::Buffer {
@@ -504,11 +703,13 @@ impl Gpu {
             *s = Some(Sized {
                 w, h,
                 gbuf: self.buffer("gbuf", n * 20, st),
-                masks: self.buffer("masks", n * 8, st),
+                // Sun mask, ambient-occlusion mask, then (several worlds) the soft patch edges.
+                masks: self.buffer("masks", n * 16, st),
                 uvs: self.buffer("uvs", n * 12, st),
                 hdr: self.buffer("hdr", n * 12, st),
                 refl: self.buffer("refl", n * 24, st),
                 pick: self.buffer("pick", n * 4, st),
+                racc: self.buffer("raster meet", n * 12, U::STORAGE),
                 q2s: self.buffer("column sums", (w * (h + 1) * 3 * 8) as u64, st),
                 mins: self.buffer("column minima", (w * (h.div_ceil(8) + h.div_ceil(64)) * 4) as u64, st),
                 ends: self.buffer("column ends", (w * 12 * 4) as u64, st),
@@ -535,36 +736,49 @@ impl Gpu {
         b
     }
 
-    /// The six textures as one texel buffer: a header of (offset, side) per slot and level and the
-    /// level counts, then every level's linear RGB. Rebuilt only when a texture changes.
-    fn texel_buffer(&self, textures: [&Arc<Texture>; 6]) -> wgpu::Buffer {
-        let key: Vec<usize> = textures.iter().map(|t| Arc::as_ptr(t) as usize).collect();
-        let mut s = self.textures.lock().unwrap();
-        if let Some((k, b)) = s.as_ref() { if *k == key { return b.clone(); } }
-        let mut header = vec![0u32; 136];
-        let mut data: Vec<f32> = Vec::new();
-        for (slot, t) in textures.iter().enumerate() {
-            header[128 + slot] = t.levels.len().min(8) as u32;
-            for (l, (side, texels)) in t.levels.iter().take(8).enumerate() {
-                header[(slot * 8 + l) * 2] = data.len() as u32;
-                header[(slot * 8 + l) * 2 + 1] = *side as u32;
-                data.extend(texels.iter().flat_map(|c| c.iter().copied()));
-            }
-        }
-        let mut words: Vec<u32> = header;
-        words.extend(data.iter().map(|f| f.to_bits()));
-        let b = self.buffer("texels", words.len() as u64 * 4, wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST);
-        self.ctx.queue.write_buffer(&b, 0, bytemuck::cast_slice(&words));
-        *s = Some((key, b.clone()));
-        b
+    fn world_binding(&self) -> wgpu::BindingResource<'_> {
+        wgpu::BindingResource::Buffer(wgpu::BufferBinding { buffer: &self.params, offset: 0, size: wgpu::BufferSize::new(std::mem::size_of::<WorldParams>() as u64) })
     }
 
-    /// Start a frame on the GPU: its buffers, and the world's parameters.
-    pub(crate) fn frame(&self, params: &WorldParams) -> Frame<'_> {
-        let (w, h) = (params.width as usize, params.height as usize);
+    /// Every world's textures in one texel buffer: a header of (offset, side) per slot (8 per
+    /// world, 7 used) and level, and the level counts, then the textures' levels as linear RGB.
+    /// Textures stay in the buffer once added (held, so their pointers stay theirs), so frames that
+    /// change which worlds they draw only rewrite the header.
+    fn texel_buffer(&self, worlds: &[[&Arc<Texture>; 7]]) -> wgpu::Buffer {
+        let mut guard = self.textures.lock().unwrap();
+        let fits = |st: &TexStore| worlds.iter().flatten().map(|t| if st.find(t).is_some() { 0 } else { TexStore::words(t) }).sum::<u64>() + st.used <= st.cap;
+        if !guard.as_ref().is_some_and(|st| fits(st) && st.held.len() < 64) {
+            // Start again with room for these and more: everything in it is uploaded anew.
+            let keep: Vec<Arc<Texture>> = guard.as_ref().filter(|st| st.held.len() < 64).map(|st| st.held.iter().map(|h| h.0.clone()).collect()).unwrap_or_default();
+            let need: u64 = keep.iter().chain(worlds.iter().flatten().map(|t| *t)).map(TexStore::words).sum::<u64>();
+            let cap = (need * 2).max(1 << 20);
+            let buf = self.buffer("texels", (544 + cap) * 4, wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST);
+            let mut st = TexStore { buf, cap, used: 0, held: Vec::new() };
+            for t in &keep { st.add(&self.ctx.queue, t); }
+            *guard = Some(st);
+        }
+        let st = guard.as_mut().unwrap();
+        let mut header = vec![0u32; 544];
+        for (slot, t) in worlds.iter().enumerate().flat_map(|(r, w)| w.iter().enumerate().map(move |(k, t)| (r * 8 + k, *t))) {
+            let k = match st.find(t) { Some(k) => k, None => st.add(&self.ctx.queue, t) };
+            // The level count, and 0x100 when texels carry their glow (four floats each).
+            header[512 + slot] = t.levels.len().min(8) as u32 | if t.emit.is_empty() { 0 } else { 0x100 };
+            for (l, &(off, side)) in st.held[k].1.iter().enumerate() {
+                header[(slot * 8 + l) * 2] = off;
+                header[(slot * 8 + l) * 2 + 1] = side;
+            }
+        }
+        self.ctx.queue.write_buffer(&st.buf, 0, bytemuck::cast_slice(&header));
+        st.buf.clone()
+    }
+
+    /// Start a frame on the GPU: its buffers, and each world's parameters (one for most frames).
+    pub(crate) fn frame(&self, worlds: &[WorldParams]) -> Frame<'_> {
+        assert!(!worlds.is_empty() && worlds.len() <= MAX_WORLDS);
+        let (w, h) = (worlds[0].width as usize, worlds[0].height as usize);
         let sz = self.sized(w, h);
-        self.ctx.queue.write_buffer(&self.params, 0, bytemuck::bytes_of(params));
-        Frame { g: self, sz, w, h, enc: None, profile: false, passes: Vec::new(), shade_bg: None, last: None }
+        for (r, p) in worlds.iter().enumerate() { self.ctx.queue.write_buffer(&self.params, r as u64 * self.wstride, bytemuck::bytes_of(p)); }
+        Frame { g: self, sz, w, h, worlds: worlds.len(), here: 0, look: 0, enc: None, profile: false, passes: Vec::new(), shade_bg: None, soft: false, gpu_tiles: None, last: None }
     }
 
         /// Map `buf` and hand its first `len` bytes to `f` (zeros if the map failed).
@@ -605,16 +819,26 @@ pub(crate) struct Frame<'g> {
     sz: std::sync::MutexGuard<'g, Option<Sized>>,
     w: usize,
     h: usize,
+    /// How many worlds the frame draws; the one whose air the shafts light, and whose look post takes.
+    worlds: usize,
+    pub here: usize,
+    pub look: usize,
     enc: Option<wgpu::CommandEncoder>,
     /// Time each pass on the GPU (where the adapter can); `passes` names them in order.
     pub profile: bool,
     passes: Vec<&'static str>,
     shade_bg: Option<wgpu::BindGroup>,
+    /// Whether `put_soft` gave this frame soft patch edges.
+    soft: bool,
+    /// Per-tile lamp lists made by the geometry pass, for shading to read.
+    gpu_tiles: Option<wgpu::Buffer>,
     last: Option<wgpu::SubmissionIndex>,
 }
 
 impl<'g> Frame<'g> {
     fn n(&self) -> usize { self.w * self.h }
+    /// The dynamic offset of world r's parameters.
+    fn wo(&self, r: usize) -> u32 { (r as u64 * self.g.wstride) as u32 }
     fn bufs(&self) -> &Sized { self.sz.as_ref().unwrap() }
     fn enc(&mut self) -> &mut wgpu::CommandEncoder {
         let d = &self.g.ctx.device;
@@ -637,24 +861,26 @@ impl<'g> Frame<'g> {
     }
 
     pub fn put_gbuf(&mut self, gbuf: &[super::raster::GPixel]) {
-        use rayon::prelude::*;
-        let packed: Vec<GPixGpu> = gbuf.par_iter().map(|p| GPixGpu { depth: p.depth, x: p.x, y: p.y, d: p.d, idr: p.id as u32 | (p.realm as u32) << 8 }).collect();
         let b = self.bufs().gbuf.clone();
-        self.write(&b, 0, bytemuck::cast_slice(&packed));
+        self.write(&b, 0, bytemuck::cast_slice(gbuf));
     }
     pub fn get_gbuf(&mut self, gbuf: &mut [super::raster::GPixel]) {
-        use rayon::prelude::*;
         let b = self.bufs().gbuf.clone();
         let bytes = self.read(&b, (self.n() * 20) as u64);
-        let packed: &[GPixGpu] = bytemuck::cast_slice(&bytes);
-        gbuf.par_iter_mut().zip(packed.par_iter()).for_each(|(p, q)| {
-            *p = super::raster::GPixel { depth: q.depth, id: (q.idr & 0xFF) as u8, x: q.x, y: q.y, d: q.d, realm: (q.idr >> 8) as u8 };
-        });
+        bytemuck::cast_slice_mut::<_, u8>(gbuf).copy_from_slice(&bytes);
     }
     pub fn put_masks(&mut self, sun_mask: &[f32], ao_mask: &[f32]) {
         let (b, n) = (self.bufs().masks.clone(), self.n());
         self.write(&b, 0, bytemuck::cast_slice(sun_mask));
         self.g.ctx.queue.write_buffer(&b, (n * 4) as u64, bytemuck::cast_slice(ao_mask));
+    }
+    /// Soft patch edges between worlds (render::shade's `soft`), when the frame has any.
+    pub fn put_soft(&mut self, soft: &[(u8, f32)]) {
+        if soft.is_empty() { self.soft = false; return; }
+        let words: Vec<u32> = soft.iter().flat_map(|&(o, k)| [o as u32, k.to_bits()]).collect();
+        let (b, n) = (self.bufs().masks.clone(), self.n());
+        self.write(&b, (n * 8) as u64, bytemuck::cast_slice(&words));
+        self.soft = true;
     }
     pub fn put_hdr(&mut self, hdr: &[[f32; 3]]) {
         let b = self.bufs().hdr.clone();
@@ -691,12 +917,7 @@ impl<'g> Frame<'g> {
         self.g.read_with(&read, at, self.last.clone(), |bytes| {
             use rayon::prelude::*;
             let part = |k: usize| { let (o, l) = parts[k]; &bytes[o as usize..(o + l) as usize] };
-            if let Some(g) = gbuf {
-                let packed: &[GPixGpu] = bytemuck::cast_slice(part(0));
-                g.par_iter_mut().zip(packed.par_iter()).for_each(|(p, q)| {
-                    *p = super::raster::GPixel { depth: q.depth, id: (q.idr & 0xFF) as u8, x: q.x, y: q.y, d: q.d, realm: (q.idr >> 8) as u8 };
-                });
-            }
+            if let Some(g) = gbuf { bytemuck::cast_slice_mut::<_, u8>(g).copy_from_slice(part(0)); }
             if let Some(h) = hdr { bytemuck::cast_slice_mut::<_, u8>(h).copy_from_slice(part(1)); }
             if let Some(r) = refl { bytemuck::cast_slice_mut::<_, u8>(r).copy_from_slice(part(2)); }
             if let Some(p) = pick {
@@ -704,6 +925,125 @@ impl<'g> Frame<'g> {
                 p.par_iter_mut().zip(src.par_iter()).for_each(|(a, b)| *a = *b as u16);
             }
         });
+    }
+
+    /// The sprite store's texels on the GPU, uploaded again if sprites were added since.
+    fn sprite_texels(&mut self, st: &mut SpriteStore) -> wgpu::Buffer {
+        if st.dirty || st.buf.is_none() {
+            let mut t = st.texels.clone();
+            if t.is_empty() { t.push([0.0; 4]); }
+            let b = self.g.buffer("sprites", (t.len() * 16) as u64, wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST);
+            self.submit();
+            self.g.ctx.queue.write_buffer(&b, 0, bytemuck::cast_slice(&t));
+            st.buf = Some(b);
+            st.dirty = false;
+        }
+        st.buf.clone().unwrap()
+    }
+
+    /// The G-buffer drawn from triangles, then the shadow masks and per-tile lamp lists from it
+    /// (a frame of one world; its parameters say whether shading reads those lists).
+    pub fn geometry(&mut self, gi: &GeomIn) {
+        let g = self.g;
+        let mut cs: Vec<CasterGpu> = Vec::with_capacity(gi.casters.len().max(1));
+        let texels = {
+            let mut st = g.cards.store.lock().unwrap();
+            for c in &gi.casters {
+                let mut cd = c.c;
+                let (w, h, off) = st.level(&c.sprite, c.lod);
+                (cd.f[19], cd.f[20], cd.f[21]) = (f32::from_bits(off), f32::from_bits(w), f32::from_bits(h));
+                cs.push(cd);
+            }
+            self.sprite_texels(&mut st)
+        };
+        if cs.is_empty() { cs.push(CasterGpu::default()); }
+        let mut tris = gi.tris.clone();
+        if tris.is_empty() { tris.push(TriGpu { f: [0.0; 36] }); }
+        let mut bins = gi.tri_bins.clone();
+        let cast_off = bins.len() as u32;
+        bins.extend_from_slice(&gi.cast_bins);
+        let small_off = bins.len() as u32;
+        bins.extend_from_slice(&gi.small);
+        let tc = (self.w as u32).div_ceil(16);
+        let ntiles = (tc * (self.h as u32).div_ceil(16)) as usize;
+        let lamps = gi.lamps.clone().unwrap_or_default();
+        let cap = lamps.len() as u32;
+        let mut p = GeomParams { tile_cols: tc, cast_bins: cast_off, n_lights: cap, cap, tiles_on: gi.lamps.is_some() as u32, small_off, n_small: gi.small.len() as u32, ..Default::default() };
+        if let Some(l) = gi.sun { (p.sun_on, p.sun) = (1, l); }
+        if let Some((k, t, seed)) = gi.clouds { (p.clouds, p.cloud_travel, p.cloud_seed) = (k, t, seed); }
+        self.submit();
+        g.ctx.queue.write_buffer(&g.geom.params, 0, bytemuck::bytes_of(&p));
+        let tb = g.upload(&g.geom.tris, "triangles", bytemuck::cast_slice(&tris));
+        let bb = g.upload(&g.geom.bins, "geom bins", bytemuck::cast_slice(&bins));
+        let cb = g.upload(&g.geom.casters, "casters", bytemuck::cast_slice(&cs));
+        let mut lw: Vec<f32> = lamps.iter().flat_map(|l| l.iter().copied()).collect();
+        if lw.is_empty() { lw.push(0.0); }
+        let lb = g.upload(&g.geom.lamps, "geom lamps", bytemuck::cast_slice(&lw));
+        let lists = {
+            let mut l = g.geom.lists.lock().unwrap();
+            let need = (ntiles as u64 * (cap as u64 + 1) * 4).max(16);
+            if !l.as_ref().is_some_and(|b| b.size() >= need) { *l = Some(g.buffer("tile lamps", need, wgpu::BufferUsages::STORAGE)); }
+            l.clone().unwrap()
+        };
+        let sz = self.bufs();
+        let bg = g.ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("geom"), layout: &g.geom.layout,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: g.world_binding() },
+                wgpu::BindGroupEntry { binding: 1, resource: sz.gbuf.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 2, resource: tb.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 3, resource: bb.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 4, resource: sz.masks.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 5, resource: cb.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 6, resource: texels.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 7, resource: lists.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 8, resource: lb.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 9, resource: g.geom.params.as_entire_binding() },
+            ],
+        });
+        let rbg = g.ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("raster"), layout: &g.geom.raster_layout,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: g.world_binding() },
+                wgpu::BindGroupEntry { binding: 1, resource: sz.gbuf.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 2, resource: tb.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 3, resource: bb.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 9, resource: g.geom.params.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 10, resource: sz.racc.as_entire_binding() },
+            ],
+        });
+        let (gx, gy) = self.groups();
+        let tiles = gi.lamps.is_some();
+        let th = (self.h as u32).div_ceil(16);
+        // Big triangles per pixel, then (when there are small ones) their depth, their winner,
+        // and the pixels they won.
+        let sg = (gi.small.len() as u32).div_ceil(64);
+        let small = (sg.min(65535), sg.div_ceil(65535));
+        let raster = [
+            ("g.raster", &g.geom.raster, (gx, gy)),
+            ("g.raster.z", &g.geom.small_z, small),
+            ("g.raster.pick", &g.geom.small_pick, small),
+            ("g.raster.resolve", &g.geom.resolve, (gx, gy)),
+        ];
+        for (name, pipe, (x, y)) in raster.into_iter().take(if sg > 0 { 4 } else { 1 }) {
+            let mut cp = self.pass(name);
+            cp.set_bind_group(0, &rbg, &[0]);
+            cp.set_pipeline(pipe);
+            cp.dispatch_workgroups(x, y, 1);
+        }
+        {
+            let mut cp = self.pass("g.shadows");
+            cp.set_bind_group(0, &bg, &[0]);
+            cp.set_pipeline(&g.geom.shadow);
+            cp.dispatch_workgroups(gx, gy, 1);
+        }
+        if tiles {
+            let mut cp = self.pass("g.tiles");
+            cp.set_bind_group(0, &bg, &[0]);
+            cp.set_pipeline(&g.geom.tiles);
+            cp.dispatch_workgroups(tc, th, 1);
+        }
+        self.gpu_tiles = tiles.then_some(lists);
     }
 
     /// Billboards drawn far to near (hdr, gbuf and, with `pick`, the pick ids, in place).
@@ -718,16 +1058,7 @@ impl<'g> Frame<'g> {
                 (cd.gw, cd.gh, cd.goff) = match &c.glow { Some((gs, lod)) => st.level(gs, *lod), None => (1, 1, u32::MAX) };
                 cs.push(cd);
             }
-            if st.dirty || st.buf.is_none() {
-                let mut t = st.texels.clone();
-                if t.is_empty() { t.push([0.0; 4]); }
-                let b = g.buffer("sprites", (t.len() * 16) as u64, wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST);
-                self.submit();
-                g.ctx.queue.write_buffer(&b, 0, bytemuck::cast_slice(&t));
-                st.buf = Some(b);
-                st.dirty = false;
-            }
-            st.buf.clone().unwrap()
+            self.sprite_texels(&mut st)
         };
         if cs.is_empty() { cs.push(CardGpu::default()); }
         self.submit();
@@ -740,7 +1071,7 @@ impl<'g> Frame<'g> {
         let bg = g.ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("cards"), layout: &g.cards.layout,
             entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: g.params.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 0, resource: g.world_binding() },
                 wgpu::BindGroupEntry { binding: 1, resource: gb.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 2, resource: hd.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 3, resource: texels.as_entire_binding() },
@@ -754,7 +1085,7 @@ impl<'g> Frame<'g> {
         let e = self.enc();
         if pick { e.clear_buffer(&pk, 0, None); }
         let mut p = self.pass("g.cards");
-        p.set_bind_group(0, &bg, &[]);
+        p.set_bind_group(0, &bg, &[0]);
         p.set_pipeline(&g.cards.pipe);
         p.dispatch_workgroups(gx, gy, 1);
     }
@@ -774,7 +1105,7 @@ impl<'g> Frame<'g> {
         let bg = g.ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("splats"), layout: &g.splat.layout,
             entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: g.params.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 0, resource: g.world_binding() },
                 wgpu::BindGroupEntry { binding: 1, resource: gb.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 2, resource: hd.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 3, resource: sp.as_entire_binding() },
@@ -784,7 +1115,7 @@ impl<'g> Frame<'g> {
         });
         let (gx, gy) = self.groups();
         let mut p = self.pass(if slot == 0 { "g.blades" } else { "g.splats" });
-        p.set_bind_group(0, &bg, &[]);
+        p.set_bind_group(0, &bg, &[0]);
         p.set_pipeline(&g.splat.pipe);
         p.dispatch_workgroups(gx, gy, 1);
     }
@@ -796,7 +1127,7 @@ impl<'g> Frame<'g> {
         let bg = g.ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("reflect"), layout: &g.reflect.layout,
             entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: g.params.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 0, resource: g.world_binding() },
                 wgpu::BindGroupEntry { binding: 1, resource: sz.gbuf.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 2, resource: sz.hdr.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 3, resource: sz.refl.as_entire_binding() },
@@ -810,34 +1141,42 @@ impl<'g> Frame<'g> {
         let (cols, blks) = ((self.w as u32).div_ceil(64), (self.h as u32).div_ceil(64));
         {
             let mut p = self.pass("g.colsum");
-            p.set_bind_group(0, &bg, &[]);
+            p.set_bind_group(0, &bg, &[0]);
             p.set_pipeline(&g.reflect.colsum_a);
             p.dispatch_workgroups(cols, blks, 1);
             p.set_pipeline(&g.reflect.colsum_b);
             p.dispatch_workgroups(cols, 1, 1);
         }
         let mut p = self.pass("g.reflect");
-        p.set_bind_group(0, &bg, &[]);
+        p.set_bind_group(0, &bg, &[0]);
         p.set_pipeline(&g.reflect.reflect);
         p.dispatch_workgroups(gx, gy, 1);
     }
 
-    /// Mist over the ground (hdr in place). Needs `shade` to have run this frame (its lights).
-    pub fn mist(&mut self, air: &AirParams) {
+    /// Mist over the ground (hdr in place), each world's over its own pixels (None: no mist in
+    /// that world). Needs `shade` to have run this frame (its lights).
+    pub fn mist(&mut self, airs: &[Option<AirParams>]) {
         let g = self.g;
         let Some(bg) = self.shade_bg.clone() else { return };
+        if airs.iter().all(|a| a.is_none()) { return; }
         self.submit();
-        g.ctx.queue.write_buffer(&g.shade.air, 0, bytemuck::bytes_of(air));
+        for (r, a) in airs.iter().enumerate() {
+            if let Some(a) = a { g.ctx.queue.write_buffer(&g.shade.air, r as u64 * AIR_STRIDE, bytemuck::bytes_of(a)); }
+        }
         let (gx, gy) = self.groups();
+        let offs: Vec<(u32, u32)> = airs.iter().enumerate().filter(|(_, a)| a.is_some()).map(|(r, _)| (self.wo(r), (r as u64 * AIR_STRIDE) as u32)).collect();
+        let k = (self.worlds > 1) as usize;
         let mut p = self.pass("g.mist");
-        p.set_bind_group(0, &bg, &[]);
-        p.set_pipeline(&g.shade.mist);
-        p.dispatch_workgroups(gx, gy, 1);
+        p.set_pipeline(&g.shade.mist[k]);
+        for (wo, ao) in offs {
+            p.set_bind_group(0, &bg, &[wo, ao]);
+            p.dispatch_workgroups(gx, gy, 1);
+        }
     }
 
-    /// Light shafts (hdr in place). `lists`: per tile of 16 x 16 cells, the lamps that can light it.
-    /// Needs `shade` to have run this frame (its lights).
-    pub fn shafts(&mut self, sp: &ShaftParams, lists: &[Vec<u16>]) {
+    /// Light shafts (hdr in place), in the air of world `here`. `lists`: per tile of 16 x 16 cells,
+    /// the lamps (indices into `lamps`: every world's point lights) that can light it.
+    pub fn shafts(&mut self, sp: &ShaftParams, lists: &[Vec<u16>], lamps: &[[f32; 8]]) {
         let g = self.g;
         self.submit();
         g.ctx.queue.write_buffer(&g.shafts.params, 0, bytemuck::bytes_of(sp));
@@ -855,12 +1194,12 @@ impl<'g> Frame<'g> {
             }
             c.clone().unwrap()
         };
-        let lights = g.lights.lock().unwrap().clone().unwrap_or_else(|| g.buffer("no lights", 16, wgpu::BufferUsages::STORAGE));
+        let lights = g.upload(&g.shafts.lamps, "shaft lamps", bytemuck::cast_slice(lamps));
         let sz = self.bufs();
         let bg = g.ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("shafts"), layout: &g.shafts.layout,
             entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: g.params.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 0, resource: g.world_binding() },
                 wgpu::BindGroupEntry { binding: 1, resource: sz.gbuf.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 2, resource: sz.hdr.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 3, resource: lights.as_entire_binding() },
@@ -871,8 +1210,9 @@ impl<'g> Frame<'g> {
         });
         let (gx, gy) = self.groups();
         let (cx, cy) = (sp.mw.div_ceil(8), sp.mh.div_ceil(8));
+        let wo = self.wo(self.here);
         let mut p = self.pass("g.shafts");
-        p.set_bind_group(0, &bg, &[]);
+        p.set_bind_group(0, &bg, &[wo]);
         p.set_pipeline(&g.shafts.mask);
         p.dispatch_workgroups(cx, cy, 1);
         p.set_pipeline(&g.shafts.add);
@@ -963,7 +1303,7 @@ impl<'g> Frame<'g> {
         let bg = g.ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("post"), layout: &g.post.layout,
             entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: g.params.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 0, resource: g.world_binding() },
                 wgpu::BindGroupEntry { binding: 1, resource: g.post.params.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 2, resource: sz.hdr.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 3, resource: sz.gbuf.as_entire_binding() },
@@ -994,8 +1334,9 @@ impl<'g> Frame<'g> {
         if params.stats_on != 0 { steps.push(("post_stats", (rows, 1))); }
         steps.push(("post_out", ((params.out_w).div_ceil(8), (params.out_h).div_ceil(8))));
         {
+            let wo = self.wo(self.look);
             let mut cp = self.pass("g.post");
-            cp.set_bind_group(0, &bg, &[]);
+            cp.set_bind_group(0, &bg, &[wo]);
             for (e, (x, y)) in steps {
                 cp.set_pipeline(&g.post.pipes[e]);
                 cp.dispatch_workgroups(x, y, 1);
@@ -1077,8 +1418,8 @@ impl<'g> Frame<'g> {
 
     fn groups(&self) -> (u32, u32) { ((self.w as u32).div_ceil(8), (self.h as u32).div_ceil(8)) }
 
-    /// The sky over every pixel where nothing is drawn (hdr in place).
-    pub fn sky(&mut self, input: &SkyInput) {
+    /// The sky over every pixel where nothing is drawn (hdr in place), as world `r` sees it.
+    pub fn sky(&mut self, input: &SkyInput, r: usize) {
         let g = self.g;
         self.submit();
         g.ctx.queue.write_buffer(&g.sky.params, 0, bytemuck::bytes_of(&input.params));
@@ -1092,7 +1433,7 @@ impl<'g> Frame<'g> {
         let bg = g.ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("sky"), layout: &g.sky.layout,
             entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: g.params.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 0, resource: g.world_binding() },
                 wgpu::BindGroupEntry { binding: 1, resource: g.sky.params.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 2, resource: sz.gbuf.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 3, resource: sz.hdr.as_entire_binding() },
@@ -1101,35 +1442,38 @@ impl<'g> Frame<'g> {
             ],
         });
         let (gx, gy) = self.groups();
+        let (wo, k) = (self.wo(r), (self.worlds > 1) as usize);
         let mut p = self.pass("g.sky");
-        p.set_bind_group(0, &bg, &[]);
-        p.set_pipeline(&g.sky.pipe);
+        p.set_bind_group(0, &bg, &[wo]);
+        p.set_pipeline(&g.sky.pipe[k]);
         p.dispatch_workgroups(gx, gy, 1);
     }
 
-    /// render::shade for one world: the G-buffer and masks (already on the GPU) to colour and
-    /// reflection data.
-    pub fn shade(&mut self, input: &ShadeInput) {
+    /// render::shade: the G-buffer and masks (already on the GPU) to colour and reflection data,
+    /// each world over its own pixels (inputs in world order; their lights in this order are what
+    /// `light_base` counts), then the soft patch edges between them.
+    pub fn shade(&mut self, inputs: &[ShadeInput]) {
         let g = self.g;
-        let texels = g.texel_buffer(input.textures);
-        let mut lw: Vec<f32> = input.lights.iter().chain(input.sky.iter()).flat_map(|l| l.iter().copied()).collect();
+        let texs: Vec<[&Arc<Texture>; 7]> = inputs.iter().map(|i| i.textures).collect();
+        let texels = g.texel_buffer(&texs);
+        let mut lw: Vec<f32> = inputs.iter().flat_map(|i| i.lights.iter().chain(i.sky.iter())).flat_map(|l| l.iter().copied()).collect();
         if lw.is_empty() { lw.push(0.0); }
         self.submit();
         let lights = g.upload(&g.lights, "lights", bytemuck::cast_slice(&lw));
         let mut tw: Vec<u32> = Vec::new();
-        if let Some(t) = &input.tiles {
+        if let Some(t) = inputs.first().and_then(|i| i.tiles.as_ref()) {
             let mut off = 0u32;
             for l in t { tw.push(off); off += l.len() as u32; }
             tw.push(off);
             for l in t { tw.extend(l.iter().map(|&k| k as u32)); }
         }
         if tw.is_empty() { tw.push(0); }
-        let tiles = g.upload(&g.tiles, "tiles", bytemuck::cast_slice(&tw));
+        let tiles = match self.gpu_tiles.clone() { Some(t) => t, None => g.upload(&g.tiles, "tiles", bytemuck::cast_slice(&tw)) };
         let sz = self.bufs();
         let bg = g.ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("shade"), layout: &g.shade.layout,
             entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: g.params.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 0, resource: g.world_binding() },
                 wgpu::BindGroupEntry { binding: 1, resource: sz.gbuf.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 2, resource: texels.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 3, resource: lights.as_entire_binding() },
@@ -1138,17 +1482,23 @@ impl<'g> Frame<'g> {
                 wgpu::BindGroupEntry { binding: 6, resource: sz.uvs.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 7, resource: sz.hdr.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 8, resource: sz.refl.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 9, resource: g.shade.air.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 9, resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding { buffer: &g.shade.air, offset: 0, size: wgpu::BufferSize::new(std::mem::size_of::<AirParams>() as u64) }) },
             ],
         });
         self.shade_bg = Some(bg.clone());
         let (gx, gy) = self.groups();
+        let offs: Vec<u32> = (0..self.worlds).map(|r| self.wo(r)).collect();
+        let soft = self.soft;
+        let k = (self.worlds > 1) as usize;
         let mut p = self.pass("g.shade");
-        p.set_bind_group(0, &bg, &[]);
-        p.set_pipeline(&g.shade.uvs);
-        p.dispatch_workgroups(gx, gy, 1);
-        p.set_pipeline(&g.shade.shade);
-        p.dispatch_workgroups(gx, gy, 1);
+        p.set_pipeline(&g.shade.uvs[k]);
+        for &o in &offs { p.set_bind_group(0, &bg, &[o, 0]); p.dispatch_workgroups(gx, gy, 1); }
+        p.set_pipeline(&g.shade.shade[k]);
+        for &o in &offs { p.set_bind_group(0, &bg, &[o, 0]); p.dispatch_workgroups(gx, gy, 1); }
+        if soft {
+            p.set_pipeline(&g.shade.soft);
+            for &o in &offs { p.set_bind_group(0, &bg, &[o, 0]); p.dispatch_workgroups(gx, gy, 1); }
+        }
     }
 }
 
@@ -1160,12 +1510,12 @@ mod tests {
     fn world_params_match_the_wgsl_struct_size() {
         // A uniform block's size is a multiple of 16; the WGSL struct has the same fields.
         assert_eq!(std::mem::size_of::<WorldParams>() % 16, 0);
-        assert_eq!(std::mem::size_of::<WorldParams>(), 4 * 108);
+        assert_eq!(std::mem::size_of::<WorldParams>(), 4 * 196);
         assert_eq!(std::mem::size_of::<CardGpu>(), 4 * 42);
         assert_eq!(std::mem::size_of::<SplatGpu>(), 4 * 24);
         assert_eq!(std::mem::size_of::<AirParams>(), 48);
         assert_eq!(std::mem::size_of::<ShaftParams>(), 64);
-        assert_eq!(std::mem::size_of::<PostParams>(), 336);
+        assert_eq!(std::mem::size_of::<PostParams>(), 384);
         assert_eq!(std::mem::size_of::<SkyParams>() % 16, 0, "SkyParams is {} bytes", std::mem::size_of::<SkyParams>());
     }
 

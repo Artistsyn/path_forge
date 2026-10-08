@@ -84,15 +84,22 @@ fn srgb_table_matches_the_curve() {
 pub struct Texture {
     /// levels[0] is full size; each level halves.
     pub levels: Vec<(usize, Vec<[f32; 3]>)>,
+    /// How much each texel glows in its own colour, level by level like `levels`; empty when
+    /// nothing glows.
+    pub emit: Vec<Vec<f32>>,
 }
 
 impl Texture {
     pub fn from_material(m: &Material) -> Texture {
         let size = 192usize;
+        let mut glow: Option<Vec<f32>> = None;
         let rgb: Vec<u8> = if m.pattern == Pattern::Plain {
             let mut v = Vec::with_capacity(size * size * 3);
             for _ in 0..size * size { v.extend_from_slice(&m.base); }
             v
+        } else if let Some((rgb, mask)) = super::scifi::gen(m.pattern, m.base, m.mortar, m.noise, m.damage, 11 + m.seed) {
+            if m.glow > 0.0 { glow = Some(mask.iter().map(|g| g * m.glow).collect()); }
+            rgb
         } else {
             crate::tiles::gen_tile(m.pattern.name(), m.base, m.mortar, m.noise, m.damage, 11 + m.seed)
         };
@@ -119,7 +126,32 @@ impl Texture {
             }
             levels.push((n, next));
         }
-        Texture { levels }
+        let mut emit = Vec::new();
+        if let Some(g) = glow {
+            emit.push(g);
+            for (s, _) in levels.iter().skip(1) {
+                let (ps, prev) = (s * 2, emit.last().unwrap());
+                let next: Vec<f32> = (0..s * s).map(|i| {
+                    let (x, y) = (i % s, i / s);
+                    0.25 * (prev[(y * 2) * ps + x * 2] + prev[(y * 2) * ps + x * 2 + 1] + prev[(y * 2 + 1) * ps + x * 2] + prev[(y * 2 + 1) * ps + x * 2 + 1])
+                }).collect();
+                emit.push(next);
+            }
+        }
+        Texture { levels, emit }
+    }
+
+    /// How much the texel `sample` reads glows (0 when nothing does).
+    #[inline]
+    pub fn sample_emit(&self, u: f32, v: f32, footprint: f32) -> f32 {
+        if self.emit.is_empty() { return 0.0; }
+        let base = self.levels[0].0 as f32;
+        let texels = (footprint * base).max(1e-6);
+        let lod = (texels.log2().max(0.0) as usize).min(self.levels.len() - 1);
+        let s = self.levels[lod].0;
+        let x = ((u.rem_euclid(1.0)) * s as f32) as usize % s;
+        let y = ((v.rem_euclid(1.0)) * s as f32) as usize % s;
+        self.emit[lod][y * s + x]
     }
 
     /// Sample at texture coordinates in repeats (1.0 = one full tile), with a footprint in repeats per pixel.
@@ -143,7 +175,7 @@ pub struct TextureCache {
 
 impl TextureCache {
     pub fn get(&mut self, m: &Material) -> std::sync::Arc<Texture> {
-        let key = format!("{:?}{:?}{:?}{}{}{}{}", m.pattern, m.base, m.mortar, m.noise, m.damage, m.seed, m.brightness);
+        let key = format!("{:?}{:?}{:?}{}{}{}{}/{}", m.pattern, m.base, m.mortar, m.noise, m.damage, m.seed, m.brightness, m.glow);
         if self.map.len() > 64 { self.map.clear(); }
         self.map.entry(key).or_insert_with(|| std::sync::Arc::new(Texture::from_material(m))).clone()
     }

@@ -36,7 +36,9 @@ struct Post {
     ramp_k: f32, q_on: u32, q_bits: u32, q_amp: f32,
     dither: u32, paper: f32, scan: f32, stats_on: u32,
     sky_enabled: u32, verge_enabled: u32, t_lut: u32, t_col: u32,
-    t_cube: u32, t_drops: u32, pad1: u32, pad2: u32,
+    t_cube: u32, t_drops: u32, lens_tphase: f32, pad2: u32,
+    sh_t0: f32, sh_s1: f32, sh_s2: f32, sh_a1: f32, sh_a2: f32, sh_b1: f32, sh_b2: f32, sh_t1: f32, sh_t2: f32,
+    pad3: u32, pad4: u32, pad5: u32,
 }
 
 @group(0) @binding(1) var<uniform> P: Post;
@@ -106,12 +108,17 @@ fn post_shimmer(@builtin(global_invocation_id) gid: vec3<u32>) {
     let band = smoothstep_r(hy - 0.07 * hf_, hy - 0.01 * hf_, yf) * (1.0 - smoothstep_r(hy + 0.02 * hf_, hy + 0.3 * hf_, yf));
     var far = 1.0;
     if pg_id(i) != ID_NONE { far = smoothstep_r(5.0, 35.0, pg_depth(i)); }
-    let amp = P.sh_strength * 2.5 / P.unit * band * far;
+    // Each pixel wavers with its own world's haze.
+    let realm = (bitcast<u32>(scratch[P.o_pg + i * 5u + 4u]) >> 8u) & 0xFFu;
+    var st = P.sh_strength; var c1 = P.sh_c1; var c2 = P.sh_c2; var tp = P.sh_t0;
+    if realm == 1u { st = P.sh_s1; c1 = P.sh_a1; c2 = P.sh_b1; tp = P.sh_t1; }
+    else if realm == 2u { st = P.sh_s2; c1 = P.sh_a2; c2 = P.sh_b2; tp = P.sh_t2; }
+    let amp = st * 2.5 / P.unit * band * far;
     if amp >= 0.03 {
-        let t = TAU * W.tphase;
+        let t = TAU * tp;
         let fx = f32(x) * P.unit; let fy = yf * P.unit;
-        let dx = amp * (0.6 * sin(0.31 * fy + 0.05 * fx + P.sh_c1 * t) + 0.4 * sin(0.77 * fy - 0.09 * fx - P.sh_c2 * t + 1.3));
-        let dy = amp * 0.3 * sin(0.21 * fx + 0.45 * fy + P.sh_c2 * t);
+        let dx = amp * (0.6 * sin(0.31 * fy + 0.05 * fx + c1 * t) + 0.4 * sin(0.77 * fy - 0.09 * fx - c2 * t + 1.3));
+        let dy = amp * 0.3 * sin(0.21 * fx + 0.45 * fy + c2 * t);
         c = bilinear(P.h_crop, f32(x) + dx, f32(y) + dy);
     }
     wr3(P.h_shim, i, c);
@@ -178,7 +185,7 @@ fn post_lens(@builtin(global_invocation_id) gid: vec3<u32>) {
             var ice = blur * 0.7 + frost * (0.35 + 0.45 * fine);
             if fine > 0.9 {
                 let ph = hf(P.lens_seed ^ 0x49u, i32(x) * 7919 + i32(y)) * TAU;
-                let s = max(sin(TAU * P.tw * W.tphase + ph), 0.0);
+                let s = max(sin(TAU * P.tw * P.lens_tphase + ph), 0.0);
                 let s2 = s * s; let s4 = s2 * s2;
                 ice += frost * (1.5 * s4 * s4);
             }
