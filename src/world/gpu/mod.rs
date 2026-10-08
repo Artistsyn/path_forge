@@ -144,7 +144,10 @@ pub(crate) struct WorldParams {
     pub vb_on: u32, pub vb_z: f32, pub wedge: [f32; 12],
     // Path edge lights (render::EdgeK).
     pub el_on: u32, pub el_col: [f32; 3], pub el_hw: f32, pub el_inset: f32, pub el_period: f32, pub el_phase: f32,
-    pub pad_end: u32,
+    /// The path as a waterway (render::water::WaterK).
+    pub ww_on: u32, pub ww_shift: f32, pub ww_foam: f32, pub ww_foam_col: [f32; 3], pub ww_foam_w: f32,
+    pub ww_lap_ph: f32, pub ww_lap_k: f32, pub ww_k1: f32, pub ww_k2: f32, pub ww_wet: f32,
+    pub ww_kind: u32, pub ww_dens: f32, pub ww_fcol: [f32; 3], pub ww_fsize: f32, pub ww_period: f32, pub ww_cs: f32, pub ww_seed: u32,
 }
 
 /// The sky pass's parameters; `Sky` in sky.wgsl, field for field.
@@ -477,7 +480,11 @@ const AIR_STRIDE: u64 = 256;
 #[derive(Clone, Copy, Default, bytemuck::Pod, bytemuck::Zeroable)]
 pub(crate) struct AirParams {
     pub mist_on: u32, pub density: f32, pub top: f32, pub patch: f32,
-    pub travel: f32, pub seed: u32, pub mist: [f32; 3], pub pad: [u32; 3],
+    pub travel: f32, pub seed: u32, pub mist: [f32; 3],
+    /// weather::apply_mist: thinning with height, over the path only (1) reaching `spread` past
+    /// its edges, and the glow towards the sun (at sun_x/sun_y, sky `fhy` pixels tall).
+    pub soft: f32, pub over: u32, pub spread: f32, pub glow_on: u32,
+    pub sun_x: f32, pub sun_y: f32, pub fhy: f32, pub sun: [f32; 3], pub pad: u32,
 }
 
 /// Textures kept on the GPU (see `Gpu::texel_buffer`): each held texture and where its levels
@@ -761,8 +768,9 @@ impl Gpu {
         let mut header = vec![0u32; 544];
         for (slot, t) in worlds.iter().enumerate().flat_map(|(r, w)| w.iter().enumerate().map(move |(k, t)| (r * 8 + k, *t))) {
             let k = match st.find(t) { Some(k) => k, None => st.add(&self.ctx.queue, t) };
-            // The level count, and 0x100 when texels carry their glow (four floats each).
-            header[512 + slot] = t.levels.len().min(8) as u32 | if t.emit.is_empty() { 0 } else { 0x100 };
+            // The level count, 0x100 when texels carry their glow (four floats each), and 0x200 when
+            // read between texels (Texture::smooth).
+            header[512 + slot] = t.levels.len().min(8) as u32 | if t.emit.is_empty() { 0 } else { 0x100 } | if t.smooth { 0x200 } else { 0 };
             for (l, &(off, side)) in st.held[k].1.iter().enumerate() {
                 header[(slot * 8 + l) * 2] = off;
                 header[(slot * 8 + l) * 2 + 1] = side;
@@ -1510,10 +1518,10 @@ mod tests {
     fn world_params_match_the_wgsl_struct_size() {
         // A uniform block's size is a multiple of 16; the WGSL struct has the same fields.
         assert_eq!(std::mem::size_of::<WorldParams>() % 16, 0);
-        assert_eq!(std::mem::size_of::<WorldParams>(), 4 * 196);
+        assert_eq!(std::mem::size_of::<WorldParams>(), 4 * 216);
         assert_eq!(std::mem::size_of::<CardGpu>(), 4 * 42);
         assert_eq!(std::mem::size_of::<SplatGpu>(), 4 * 24);
-        assert_eq!(std::mem::size_of::<AirParams>(), 48);
+        assert_eq!(std::mem::size_of::<AirParams>(), 80);
         assert_eq!(std::mem::size_of::<ShaftParams>(), 64);
         assert_eq!(std::mem::size_of::<PostParams>(), 384);
         assert_eq!(std::mem::size_of::<SkyParams>() % 16, 0, "SkyParams is {} bytes", std::mem::size_of::<SkyParams>());

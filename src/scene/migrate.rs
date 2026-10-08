@@ -66,6 +66,7 @@ pub fn from_v2(o: &PathForgeSettings, name: &str) -> Scene {
         bridge: Bridge::default(),
         edge_lights: EdgeLights::default(),
         surface: true,
+        waterway: Default::default(),
         fork: Fork::default(),
     };
 

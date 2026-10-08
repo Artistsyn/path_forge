@@ -108,6 +108,13 @@ depth layers or a depth map).
   The ground beside the path falls away and walls carry on down into the gap; trees and rocks
   stop at the edge and standing lamps move onto the railing. In a walled corridor the walls must
   stand back from the path (`walls.gap` 1.5 m or more) or there is no gap to cross; pf_analyze warns.
+- **Waterways:** `path.waterway` (`enabled`, `flow` whole tiles of current per loop, `foam` and
+  `foam_width` lapping the banks `lap` times a loop, `wet` bank, `floating` "Foam" / "Leaves" /
+  "LilyPads" with `float_density`, `float_size`, `float_color`). The path becomes a river or canal
+  for boat or swimmer games; give it a glossy `Water` material. Boat eye 1-1.3 m, swimmer eye
+  ~0.3 m with `camera.horizon` ~0.42. No verge plus walls at `gap` 0 makes a canal. Keep
+  `light_shafts` off under an open sky (they haze the whole frame) and keep leaves small (0.15 m)
+  and dull. Presets River Run, Canal Lanterns, Jungle River, Lagoon Swim, Frozen Channel.
 - **Forks:** `path.fork` (`spacing`, `side` "Left" / "Right" / "Alternate" / "Both", `style`,
   `angle`, `half_width`). On open ground `style` "Side" (the default) sends a branch path off
   through a gap in the road's edge; "Split" divides the road itself: it widens into one paved
@@ -138,6 +145,9 @@ depth layers or a depth map).
   - `weather.sandstorm`: streaming sand, a sand-coloured haze that hides the distance, the sun a
     dim disc. Pair with wind.
   - `weather.mist`: low mist (`height` m, `density` per metre, `patchiness`, `wisps` rising).
+    For morning ground fog use `soft` 1 (thins with height, no flat top), `density` 0.07-0.14
+    with the eye above most of it, `glow` 0.7-1 with a low sun ahead; `over: "Path"` and `spread`
+    keep it over a river or road (presets Misty River, Dawn Road).
     Keep `density` around 0.1-0.2: it thickens with distance, so near ground stays clear.
   - `weather.light_shafts`: `sun` rays streaming past trees, walls and arches near a sun in the
     sky (stronger with fog or mist), and `lamps` haloes in the air round every light.

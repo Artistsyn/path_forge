@@ -50,8 +50,16 @@ fn shaft_add(@builtin(global_invocation_id) gid: vec3<u32>) {
         var x = px; var y = py; var wgt = 1.0; var acc = 0.0;
         for (var k = 0; k < 48; k++) {
             x = rnd(x + dx); y = rnd(y + dy);
-            let ix = i32(x); let iy = i32(y);
-            if ix >= 0 && iy >= 0 && u32(ix) < mw && u32(iy) < mh { acc = rnd(acc + rnd(cells[u32(iy) * mw + u32(ix)] * wgt)); }
+            // The mask read between cells: read cell by cell, the long steps far from the sun
+            // gathered the same cells for whole blocks of pixels, and smooth surfaces showed them.
+            let fx = x - 0.5; let fy = y - 0.5;
+            let x0 = floor(fx); let y0 = floor(fy);
+            let tx = fx - x0; let ty = fy - y0;
+            let ix = i32(x0); let iy = i32(y0);
+            let c00 = mask_at(ix, iy); let c10 = mask_at(ix + 1, iy); let c01 = mask_at(ix, iy + 1); let c11 = mask_at(ix + 1, iy + 1);
+            let top = rnd(c00 + rnd((c10 - c00) * tx)); let bot = rnd(c01 + rnd((c11 - c01) * tx));
+            let m = rnd(top + rnd((bot - top) * ty));
+            acc = rnd(acc + rnd(m * wgt));
             wgt = rnd(wgt * 0.975);
         }
         o += vec3<f32>(S.sun_r, S.sun_g, S.sun_b) * ((1.0 - exp(-acc * 0.04)) * S.k_sun);
@@ -84,6 +92,10 @@ fn shaft_add(@builtin(global_invocation_id) gid: vec3<u32>) {
     cells[a] = o.x; cells[a + 1u] = o.y; cells[a + 2u] = o.z;
 }
 
+fn mask_at(ix: i32, iy: i32) -> f32 {
+    if ix < 0 || iy < 0 || u32(ix) >= S.mw || u32(iy) >= S.mh { return 0.0; }
+    return cells[u32(iy) * S.mw + u32(ix)];
+}
 fn cell_add(x: u32, y: u32) -> vec3<f32> { let a = S.mw * S.mh + (y * S.mw + x) * 3u; return vec3<f32>(cells[a], cells[a + 1u], cells[a + 2u]); }
 
 @compute @workgroup_size(8, 8)

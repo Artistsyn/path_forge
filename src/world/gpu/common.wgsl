@@ -56,7 +56,10 @@ struct World {
     vb_on: u32, vb_z: f32,
     wg0a: f32, wg0b: f32, wg0c: f32, wg1a: f32, wg1b: f32, wg1c: f32, wg2a: f32, wg2b: f32, wg2c: f32, wg3a: f32, wg3b: f32, wg3c: f32,
     el_on: u32, el_r: f32, el_g: f32, el_b: f32, el_hw: f32, el_inset: f32, el_period: f32, el_phase: f32,
-    pad_end: u32,
+    // The path as a waterway (render::water::WaterK).
+    ww_on: u32, ww_shift: f32, ww_foam: f32, ww_foam_r: f32, ww_foam_g: f32, ww_foam_b: f32, ww_foam_w: f32,
+    ww_lap_ph: f32, ww_lap_k: f32, ww_k1: f32, ww_k2: f32, ww_wet: f32,
+    ww_kind: u32, ww_dens: f32, ww_fr: f32, ww_fg: f32, ww_fb: f32, ww_fsize: f32, ww_period: f32, ww_cs: f32, ww_seed: u32,
 }
 
 // Every pass binds the world's parameters here.
