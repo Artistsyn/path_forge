@@ -143,7 +143,35 @@ depth layers or a depth map).
     sky (stronger with fog or mist), and `lamps` haloes in the air round every light.
   - `sky.clouds.shadows`: cloud shadows drifting over the ground (needs a light-giving sun).
   - `weather.heat_shimmer`: the distance wavers above the horizon (deserts, lava).
-  - `sky.aurora` (curtains in a night sky: `low`/`high` colours, `height`, `speed`) and
+  - `sky.aurora` (a band of curtains in a night sky: `low` edge and rays, `high` veil and
+    `accent` knot colours; `height`, `tall`, `speed`; `coverage` how much is lit, `rays`,
+    `waves` how much the edge folds, `arc` its bow, `edge` its brightness, `ground_glow`). Turn
+    `sky.stars` on with it: over an empty dark sky the folded edge reads as a hill line.
+  - `sky.space` (deep space: `stars`, `nebula`, `galaxy`, up to three `planets` of kind Rocky,
+    Gas, Earth, Ice or Lava with `rings`, `atmosphere`, `night`, whole-turn `spin`). With `below`,
+    space fills the drop under a `path.bridge` with `bottom: Void`: one bridge per loop, `length`
+    = `spacing` = loop length, and the path material matching the deck, gives an endless walkway
+    in space (preset Star Bridge). Turn fog off for space.
+  - `companions` (a ship flying along at `offset` [sideways, height, ahead] metres, `bob` and
+    `weave` in whole cycles per loop; `sprite` swaps in any image seen from behind) and prop
+    layers with `float` (asteroids beside the deck).
+  - Futuristic floors: `material.pattern` Panels, Grid, Hex or Circuit, with `mortar` as the
+    light colour and `material.glow` (about 1) to make those parts shine; `path.edge_lights`
+    (`dash` metres, `flow` whole dashes per loop running ahead).
+  - `sky.tunnel` (kind Hyperspace or Wormhole: a tube round the path instead of the sky; use a
+    Void bridge so it shows below too; keep `path.bend` near 0, as the tube runs straight;
+    presets Hyperspace Run, Wormhole).
+  - `sky.space.black_hole`: a lensed black hole (shadow, photon ring, the disk's far side bent
+    over the top; `tilt` ~85 for the classic look, `size` the shadow's radius, `infall` streaks
+    of matter falling in, `spin` whole turns per loop). Keep planets clear of it: they are not
+    lensed. Things in the sky stay put while the camera moves, so fake no speed with a huge
+    near planet; show speed with floating props and dust (presets Event Horizon, Starship Flight).
+    For a game backdrop that sits in pixel art, Black Hole Arena shows the recipe: 16:9 canvas,
+    `path.surface: false`, `style.pixel_size` 4 and a `Custom` palette of the game's colours.
+  - Open flight, no walkway: `path.surface: false` draws no ground; the camera follows the route
+    (a ship's flight path). Put a `companions` ship just ahead (offset ~[0, 0.9, 9]) to chase it,
+    floating props with a wide `float_var` above and below, and `sky.space` (with `below`) or a
+    `sky.tunnel` all round (presets Starship Flight, Hyperspace Jump). And
     `sky.rainbow` (`x` across the sky, `size` 1 spans the frame, `double`).
   - `weather.lens`: `kind` Drops (rain landing on and running down the lens) or Frost (creeping
     in from the edges).

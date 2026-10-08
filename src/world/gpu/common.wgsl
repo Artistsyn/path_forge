@@ -41,11 +41,29 @@ struct World {
     precip_seed: u32, loop_seconds: f32,
     // Lights: counts, and whether per-tile lists are used (cols of 16 x 16 tiles).
     n_lights: u32, n_sky: u32, tiles_on: u32, tile_cols: u32,
-    zero: u32, fk_style: u32, fk_noise: f32, pad3: u32,
+    zero: u32, fk_style: u32, fk_noise: f32, tile_cap: u32,
+    // A frame of several worlds (WorldParams).
+    realm: u32, tex_base: u32, light_base: u32, multi: u32,
+    sp_on: u32, sp_zb: f32, sp_hw_b: f32, sp_flare_b: f32, sp_taper: f32,
+    sa_on: u32, sa_period: f32, sa_run: f32, sa_rise: f32, sa_steps: f32, sa_offset: f32, sa_scroll: f32,
+    sb_on: u32, sb_period: f32, sb_run: f32, sb_rise: f32, sb_steps: f32, sb_offset: f32, sb_scroll: f32,
+    sh_z0_0: f32, sh_z0_1: f32, sh_z0_2: f32, sh_k_0: f32, sh_k_1: f32, sh_k_2: f32,
+    fa_on: u32, fa_zb: f32, fa_fog_on: u32, fa_fog_dist: f32, fa_r: f32, fa_g: f32, fa_b: f32, fa_gain: f32,
+    pt_on: u32, pt_zb: f32, pt_front: u32, pt_r: f32, pt_g: f32, pt_b: f32,
+    pt0x: f32, pt0y: f32, pt0z: f32, pt1x: f32, pt1y: f32, pt1z: f32, pt2x: f32, pt2y: f32, pt2z: f32, pt3x: f32, pt3y: f32, pt3z: f32,
+    op_on: u32, op_hw: f32, op_top: f32, op_arch: f32, op_rim: f32, op_seed: u32, op_outer_hw: f32, op_outer_top: f32, op_hill: f32,
+    fac_tile: f32,
+    vb_on: u32, vb_z: f32,
+    wg0a: f32, wg0b: f32, wg0c: f32, wg1a: f32, wg1b: f32, wg1c: f32, wg2a: f32, wg2b: f32, wg2c: f32, wg3a: f32, wg3b: f32, wg3c: f32,
+    el_on: u32, el_r: f32, el_g: f32, el_b: f32, el_hw: f32, el_inset: f32, el_period: f32, el_phase: f32,
+    pad_end: u32,
 }
 
 // Every pass binds the world's parameters here.
 @group(0) @binding(0) var<uniform> W: World;
+// Whether the pipeline draws frames of several worlds; false compiles out what only those need
+// (boundaries, branches' shear, the air in front of a boundary, light through a threshold).
+override MULTI: bool = true;
 
 // One G-buffer pixel, as raster::GPixel: depth, world x, y, d, and id | realm << 8.
 struct GPix { depth: f32, x: f32, y: f32, d: f32, idr: u32 }
@@ -171,21 +189,40 @@ fn noise2(x: f32, w: f32, cell: f32, loop_len: f32, seed: u32) -> f32 {
     return top + (bot - top) * fw;
 }
 
+// weather::drifting_noise
+fn drifting_noise(x: f32, w: f32, cell: f32, travel: f32, seed: u32) -> f32 {
+    var n = 0.0;
+    for (var j = 0u; j < 2u; j++) {
+        let ph = rem_e(W.tphase + f32(j) * 0.5, 1.0);
+        let sn = sin(PI * ph);
+        let wt = sn * sn;
+        let xo = x - rnd(travel * (ph - 0.5)) + f32(j) * 53.0;
+        n += wt * (0.7 * noise2(xo, w, cell, W.loop_len, seed ^ 0x51u ^ j) + 0.3 * noise2(xo, w, rnd(cell * 0.37), W.loop_len, seed ^ 0x53u ^ j));
+    }
+    return n;
+}
+
 // ── The view (view.rs) ──────────────────────────────────────────────────
 
-fn st_split(w: f32) -> vec2<f32> {
-    let y = w - W.st_offset;
-    let k = floor(div(y, W.st_period));
-    return vec2<f32>(k, y - k * W.st_period);
+// StairProfile (period, run, rise, steps, offset) for any of a frame's stairs.
+struct Stairs { period: f32, run: f32, rise: f32, steps: f32, offset: f32 }
+fn stp_split(s: Stairs, w: f32) -> vec2<f32> {
+    let y = w - s.offset;
+    let k = floor(div(y, s.period));
+    return vec2<f32>(k, y - k * s.period);
 }
-fn st_ground(w: f32) -> f32 {
-    let ku = st_split(w);
-    return ku.x * W.st_steps * W.st_rise + W.st_rise * min(floor(div(ku.y, W.st_run)) + 1.0, W.st_steps);
+fn stp_ground(s: Stairs, w: f32) -> f32 {
+    let ku = stp_split(s, w);
+    return ku.x * s.steps * s.rise + s.rise * min(floor(div(ku.y, s.run)) + 1.0, s.steps);
 }
-fn st_ramp(w: f32) -> f32 {
-    let ku = st_split(w);
-    return ku.x * W.st_steps * W.st_rise + W.st_steps * W.st_rise * clamp(ku.y / (W.st_steps * W.st_run), 0.0, 1.0);
+fn stp_ramp(s: Stairs, w: f32) -> f32 {
+    let ku = stp_split(s, w);
+    return ku.x * s.steps * s.rise + s.steps * s.rise * clamp(ku.y / (s.steps * s.run), 0.0, 1.0);
 }
+fn own_stairs() -> Stairs { return Stairs(W.st_period, W.st_run, W.st_rise, W.st_steps, W.st_offset); }
+fn st_split(w: f32) -> vec2<f32> { return stp_split(own_stairs(), w); }
+fn st_ground(w: f32) -> f32 { return stp_ground(own_stairs(), w); }
+fn st_ramp(w: f32) -> f32 { return stp_ramp(own_stairs(), w); }
 fn st_since_riser(w: f32) -> f32 {
     let u = st_split(w).y;
     let flight = W.st_steps * W.st_run;
@@ -196,18 +233,53 @@ fn st_to_next_riser(w: f32) -> f32 {
     let flight = W.st_steps * W.st_run;
     return select(W.st_period - u, W.st_run - rem_e(u, W.st_run), u < flight - W.st_run);
 }
+// Split: the ground of the worlds either side of a boundary, joined (Split::lift).
+fn split_ga(w: f32) -> f32 { if W.sa_on == 0u { return 0.0; } return stp_ground(Stairs(W.sa_period, W.sa_run, W.sa_rise, W.sa_steps, W.sa_offset), w); }
+fn split_gb(w: f32) -> f32 { if W.sb_on == 0u { return 0.0; } return stp_ground(Stairs(W.sb_period, W.sb_run, W.sb_rise, W.sb_steps, W.sb_offset), w); }
+fn split_lift(d: f32) -> f32 {
+    let c = split_ga(W.sa_scroll + W.sp_zb) - split_gb(W.sb_scroll + W.sp_zb);
+    var g: f32;
+    if d < W.sp_zb { g = split_ga(W.sa_scroll + d); } else { g = split_gb(W.sb_scroll + d) + c; }
+    var eye = 0.0;
+    if W.sp_zb > 0.0 {
+        if W.sa_on != 0u { eye = stp_ramp(Stairs(W.sa_period, W.sa_run, W.sa_rise, W.sa_steps, W.sa_offset), W.sa_scroll); }
+    } else {
+        if W.sb_on != 0u { eye = stp_ramp(Stairs(W.sb_period, W.sb_run, W.sb_rise, W.sb_steps, W.sb_offset), W.sb_scroll); }
+        eye += c;
+    }
+    return g - eye;
+}
 fn lift(d: f32) -> f32 {
+    if MULTI && W.sp_on != 0u { return split_lift(d); }
     if W.stairs_on == 0u { return 0.0; }
     return st_ground(W.scroll + d) - st_ramp(W.scroll);
 }
 fn bend_x(d: f32) -> f32 { return W.bend * 0.012 * d * d; }
 fn hill_y(d: f32) -> f32 { return W.hill * 0.006 * d * d; }
+// View::shear_x for world r of the frame.
+fn shear_of(r: u32, d: f32) -> f32 {
+    var z0 = W.sh_z0_0; var k = W.sh_k_0;
+    if r == 1u { z0 = W.sh_z0_1; k = W.sh_k_1; } else if r == 2u { z0 = W.sh_z0_2; k = W.sh_k_2; }
+    return k * max(d - z0, 0.0);
+}
+fn shear_x(d: f32) -> f32 { if !MULTI { return 0.0; } return shear_of(W.realm, d); }
+fn flared(hw: f32, flare: f32, d: f32) -> f32 {
+    if flare <= 0.0 { return hw; }
+    return hw * pow(max(d, W.near_ground) / W.near_ground, flare);
+}
 fn path_half_width(d: f32) -> f32 {
-    if W.flare <= 0.0 { return W.half_width; }
-    return W.half_width * pow(max(d, W.near_ground) / W.near_ground, W.flare);
+    let a = flared(W.half_width, W.flare, d);
+    if !MULTI || W.sp_on == 0u { return a; }
+    var t: f32;
+    if W.sp_taper > 0.0 {
+        let u = clamp((d - W.sp_zb + W.sp_taper) / (2.0 * W.sp_taper), 0.0, 1.0);
+        t = u * u * (3.0 - 2.0 * u);
+    } else { t = select(1.0, 0.0, d < W.sp_zb); }
+    if t <= 0.0 { return a; }
+    return a + (flared(W.sp_hw_b, W.sp_flare_b, d) - a) * t;
 }
 fn to_cam(x: f32, y: f32, d: f32) -> vec3<f32> {
-    return vec3<f32>(x + bend_x(d), y - W.eye_height + hill_y(d) + lift(d), d);
+    return vec3<f32>(x + bend_x(d) + shear_x(d), y - W.eye_height + hill_y(d) + lift(d), d);
 }
 
 // ── Ctx helpers (render.rs) ─────────────────────────────────────────────
@@ -332,7 +404,7 @@ fn passage_dark(x: f32, d: f32) -> f32 {
     return select(1.0, 0.15 + 0.85 * exp(-beyond / 1.2), beyond > 0.0);
 }
 
-// ── Fog (one world: no boundary air in front) ─────────────────────────────
+// ── Fog (and a frame of several worlds' air in front of a boundary) ─────────────────
 
 fn bank_transmittance(z: f32) -> f32 {
     if W.fb_on == 0u || W.fb_density <= 0.0 { return 1.0; }
@@ -345,17 +417,44 @@ fn bank_transmittance(z: f32) -> f32 {
     return exp(-W.fb_density * (c1 - c0));
 }
 fn bank_t(z: f32) -> f32 { return bank_transmittance(clamp(z, 0.0, W.far)); }
-// Ctx::fog_t (own_fog_t(z, 0) for one world).
-fn fog_t(z: f32) -> f32 {
+// Ctx::own_fog_t
+fn own_fog_t(len: f32, start: f32) -> f32 {
     var even = 1.0;
-    if W.fog_on != 0u { even = exp(-min(z, 1.0e4) / W.fog_dist); }
-    return even * bank_t(z);
+    if W.fog_on != 0u { even = exp(-min(len, 1.0e4) / W.fog_dist); }
+    var banks: f32;
+    if start > 0.0 { banks = bank_t(start + len) / max(bank_t(start), 1e-6); } else { banks = bank_t(len); }
+    return even * banks;
+}
+fn front_on() -> bool { return MULTI && W.fa_on != 0u && W.fa_zb > 0.0; }
+fn front_t(near: f32) -> f32 { if W.fa_fog_on != 0u { return exp(-near / W.fa_fog_dist); } return 1.0; }
+fn front_col() -> vec3<f32> { return vec3<f32>(W.fa_r, W.fa_g, W.fa_b) * W.fa_gain; }
+// Ctx::fog_t
+fn fog_t(z: f32) -> f32 {
+    if !front_on() { return own_fog_t(z, 0.0); }
+    let near = min(z, W.fa_zb);
+    return front_t(near) * own_fog_t(z - near, near);
 }
 fn fog_col() -> vec3<f32> { return vec3<f32>(W.fog_r, W.fog_g, W.fog_b); }
+// Ctx::apply_fog
 fn apply_fog(c: vec3<f32>, z: f32) -> vec3<f32> {
-    let t = fog_t(z);
-    if t >= 1.0 { return c * W.gain; }
-    return mix3(fog_col() * W.gain, c * W.gain, t);
+    if !front_on() {
+        let t = fog_t(z);
+        if t >= 1.0 { return c * W.gain; }
+        return mix3(fog_col() * W.gain, c * W.gain, t);
+    }
+    let near = min(z, W.fa_zb);
+    let own = own_fog_t(z - near, near);
+    var c2 = c * W.gain;
+    if own < 1.0 { c2 = mix3(fog_col() * W.gain, c * W.gain, own); }
+    let t = front_t(near);
+    if t >= 1.0 { return c2; }
+    return mix3(front_col(), c2, t);
+}
+// render::sky_seen: a world's sky at its adaptation, through the first world's air.
+fn sky_seen(c: vec3<f32>) -> vec3<f32> {
+    let g = c * W.gain;
+    if front_on() && W.fa_fog_on != 0u { return mix3(front_col(), g, exp(-W.fa_zb / W.fa_fog_dist)); }
+    return g;
 }
 
 // render::sky_base for one world.
@@ -369,6 +468,40 @@ fn sky_base(y: f32) -> vec3<f32> {
         return sh;
     }
     return vec3<f32>(W.void_r, W.void_g, W.void_b);
+}
+
+// render::noise1
+fn noise1(seed: u32, x: f32) -> f32 {
+    let i = i32(floor(x));
+    var f = x - f32(i);
+    f = f * f * (3.0 - 2.0 * f);
+    let a = hf(seed, i); let b = hf(seed, i + 1);
+    return (a + (b - a) * f) * 2.0 - 1.0;
+}
+
+// Opening (a threshold's opening in its face): half_width, top_at, rim_distance.
+fn op_half_width() -> f32 { return W.op_hw * (1.0 - 0.1 * W.op_rim); }
+fn op_top_at(x: f32) -> f32 {
+    let hw = op_half_width();
+    if abs(x) >= hw { return 0.0; }
+    let u = x / hw;
+    let arch = pow(max(1.0 - u * u, 0.0), 0.45);
+    let t = W.op_top * ((1.0 - W.op_arch) + W.op_arch * arch);
+    let rough = 1.0 + W.op_rim * (0.08 * noise1(W.op_seed ^ 0x51u, x * 2.2) + 0.04 * noise1(W.op_seed ^ 0x52u, x * 7.0));
+    return t * rough;
+}
+fn op_rim_distance(x: f32, y: f32) -> f32 {
+    let hw = op_half_width();
+    if abs(x) < hw { return max(y - op_top_at(x), 0.0); }
+    let edge_top = op_top_at(sign(x) * (hw - 1e-3));
+    let dy = max(y - edge_top, 0.0);
+    return sqrt((abs(x) - hw) * (abs(x) - hw) + dy * dy);
+}
+
+// Bounds::region_of(x, z) == 0 past a fork's junction: inside the wedge's four half-planes.
+fn in_wedge(x: f32, z: f32) -> bool {
+    return W.wg0a * x + W.wg0b * z + W.wg0c >= 0.0 && W.wg1a * x + W.wg1b * z + W.wg1c >= 0.0
+        && W.wg2a * x + W.wg2b * z + W.wg2c >= 0.0 && W.wg3a * x + W.wg3b * z + W.wg3c >= 0.0;
 }
 
 // looks::hash2 / value_noise

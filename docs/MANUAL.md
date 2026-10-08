@@ -58,9 +58,10 @@ pf presets
 pf render --preset "Forest Path" -o forest.png
 ```
 
-There are 19 presets: Stone Dungeon, Stone Crypt, Mossy Sewer, Forest Path, Desert Canyon, Night
+There are 26 presets: Stone Dungeon, Stone Crypt, Mossy Sewer, Forest Path, Desert Canyon, Night
 Road, Magic Cavern, Ice Dungeon, Ruins Path, Dark Street, Mountain Pass, Volcanic Rift, Haunted
-Forest, Ruined Castle, Fiery Dungeon, Tower Stair, Bog Boardwalk, Desert Ruins and Ice Cave.
+Forest, Ruined Castle, Fiery Dungeon, Tower Stair, Bog Boardwalk, Desert Ruins, Ice Cave, Star Bridge,
+Hyperspace Run, Wormhole, Starship Flight, Event Horizon, Black Hole Arena and Hyperspace Jump.
 Every one loops without a seam (`pf seam` checks them all).
 
 ## 2. Scenes
@@ -73,15 +74,16 @@ times in seconds.
 |---|---|
 | `canvas` | Output size in pixels (default 480 × 854, portrait). |
 | `camera` | Eye height, horizon position, zoom, lens curve. |
-| `path` | The road: width, flare, bend (curving left or right), hill (rising or dipping), ragged edges, material and pattern (cobblestone, brick, stone block, sand, dirt, grass, planks, water, ice…), stairs, bridges, and side paths, roads that divide in two or three, or side passages that branch off as scenery. |
+| `path` | The road: width, flare, bend (curving left or right), hill (rising or dipping), ragged edges, material and pattern (cobblestone, brick, stone block, sand, dirt, grass, planks, water, ice, and the futuristic panels, grid, hex and circuit, whose lit parts glow with `material.glow`), stairs, bridges, side paths, roads that divide in two or three, side passages that branch off as scenery, and `edge_lights` (glowing lines along both edges, solid or dashed, the dashes running ahead with `flow`). `surface: false` draws no ground at all: the camera flies the route through open space (Starship Flight, Hyperspace Jump), with floating props, companions and the sky all round. |
 | `verge` | The ground beside an open path: its material and grass tufts. Off, the path edge drops into void (walls usually cover it). |
 | `walls` | Walls either side (a corridor, a canyon, a street) and their material. |
 | `ceiling` | A roof at a height, with its material. |
-| `sky` | Sky gradient (top and horizon colours), sun (with the bright aureole round it), moon (with phase and craters), stars, clouds (with drift and shadows on the ground), aurora, rainbow. |
+| `sky` | Sky gradient (top and horizon colours), sun (with the bright aureole round it), moon (with phase and craters), stars, clouds (with drift and shadows on the ground), aurora, rainbow, and deep space (starfield, nebulae, a galaxy band, planets with rings). |
 | `light` | Ambient light and its colour, the colour of the far distance, fog, and cel-shaded light bands. |
 | `fixtures` | Repeating lights: torches, lanterns, candles, braziers, crystals, fireflies, magic, green fire, ice wisps, mounted on walls, the ground or the ceiling, or floating. |
-| `props` | Layers of repeating objects: trees, pillars, rocks, barrels, banners, or data-defined props (§5). |
+| `props` | Layers of repeating objects: trees, pillars, rocks, barrels, banners, or data-defined props (§5). `float` lifts a layer off the ground (asteroids, drifting islands, lanterns), over a bridge's drop too. |
 | `set_pieces` | Structures spanning the path at intervals: archways, gates, banners. |
+| `companions` | Things travelling along with the camera at a fixed place in the frame: a ship flying beside the path (drawn, or any image seen from behind via `sprite`), following its bends, bobbing and weaving in whole cycles per loop, its engines lighting what is near. |
 | `particles` | Dust, embers, fireflies, rain, snow, leaves, ash, spores, sand, petals. They drift with the wind. |
 | `weather` | Rain, snow, sleet and hail with what they do to the ground, drips, wind, sandstorms, mist, light shafts, heat shimmer, drops or frost on the lens, lightning and fog banks. See [Weather and the air](#weather-and-the-air). |
 | `prop_defs` | Props described by data, named for the scene's prop layers to use. |
@@ -139,7 +141,11 @@ falling. Each is off until `enabled`. Field by field, see
 | Light shafts | `weather.light_shafts` | `sun`: rays streaming past trees, walls and arches near the sun. `lamps`: glowing haloes in the air round every light. Both are stronger in fog, mist and haze. |
 | Cloud shadows | `sky.clouds.shadows` | Shadows drifting over the ground and walls, with the wind if there is one. They need a sun that gives light, and work with the clouds themselves switched off. |
 | Heat shimmer | `weather.heat_shimmer` | The distance wavers just above the horizon. Deserts, lava fields. |
-| Aurora | `sky.aurora` | Curtains of light rippling across a night sky, from `low` to `high` colour. |
+| Aurora | `sky.aurora` | A band of curtains across a night sky: a thin bright folding edge (`low`), rays rising from it, a violet veil above (`high`) and pink knots (`accent`), each part fading in and out on its own. `coverage`, `rays`, `waves`, `arc`, `tall`, `edge` shape it; `ground_glow` tints the ground. |
+| Deep space | `sky.space` | A sky with no air: a dense starfield (`stars`), glowing nebulae (`nebula`, two `nebula_colors`), a galaxy band with dust lanes and a bright core (`galaxy_*`), and up to three `planets`. With `below` on, space also fills everything below the horizon where nothing is drawn, such as a bridge's bottomless drop (`path.bridge.bottom: Void`), so a walkway floats in space. The sun loses its glow in the air and keeps only a tight glare. |
+| Planets | `sky.space.planets[]` | `kind` Rocky, Gas (bands and a storm), Earth (oceans, land, ice caps, cloud, city lights on the night side), Ice or Lava (glowing cracks); `pos`, `radius`, two colours, `atmosphere` glow round the rim, `light_angle` and `night` for where the sunlight falls, `tilt`, `spin` in whole turns per loop, and `rings` (near half in front, far half behind, the planet's shadow across them). |
+| Black hole | `sky.space.black_hole` | A black hole that bends the light round it: the stars, nebulae and galaxy behind are lensed into arcs, and the far side of its accretion disk shows over the top and under the bottom of the dark shadow, edged by a thin photon ring. `pos`, `size` (the shadow's radius), `tilt` (0 face-on, about 85 the classic edge-on look) and `roll`; the disk's `disk_inner`/`disk_outer` (in horizon radii), three `disk_colors` (hot inner to cool outer), `brightness`, `doppler` (the side turning towards you brighter and bluer), `spin` (whole turns of its inner edge per loop; the outer part turns slower); `lensing`; `infall` streaks of gas spiralling in from beyond the disk's edge, and `nodes` shaped like ball_swing_game's hook nodes (`node_size` as a share of the frame's width, `node_colors`): each floats in slowly and level from its side at play depth, untouched until it nears the middle, then is pulled back towards the hole `distance` times further off, shrinking in perspective to a speck and crawling on screen as it recedes (which is what says the hole is far away), settling into the disk's plane, reddening and fading at the rim. Every trip rolls its own side, height, size and pace, with pauses between (`infall_speed` trips per loop, `infall_color`); `light` on the scene. Planets are not lensed, so keep them clear of it (Event Horizon, Starship Flight, Black Hole Arena). `sky.space.star_colors` 0 makes every star the faint blue-white of the game's starfield. |
+| Tunnel | `sky.tunnel` | A tube all round the path in place of the sky, filling everything not drawn (below the horizon too): `kind` Hyperspace (streaks of starlight rushing past) or Wormhole (swirling bands spiralling to a bright throat). `radius`, three `colors` (walls, streaks or bands, the far end's light), `rush` (extra loop lengths per loop), `twist` and `spin` (whole turns), `density`, `core`, `light` (tints the path). Pair it with a bridge over a void, as Hyperspace Run and Wormhole do. |
 | Rainbow | `sky.rainbow` | An arc with a fainter, reversed second bow. `size` 1 spans the frame: a real 42-degree bow is wider than a portrait view. |
 | On the lens | `weather.lens` | `Drops`: raindrops land on the lens, each showing the scene upside down, linger and run down. `Frost`: crystals creeping in from the edges. |
 | Lightning | `weather.lightning` | Flashes that light the scene from the sky, and bolts where the sky shows. The export metadata gives each strike's frame, for thunder. |
@@ -588,8 +594,13 @@ pf skill --install .
   renders, so you can tell an encoding problem from a scene problem.
 - `pf animsheet --file X.webp -o sheet.png` lays out an export's frames, as decoded, in a sheet.
 - `pf bench` times rendering. `--stages` adds where each frame's time goes (shading,
-  reflections, mist, post…, loudest first). `--studio` renders as the studio preview does (with
-  frame stats and click-to-select ids).
+  reflections, mist, post…, loudest first; `g.*` are GPU passes). `--studio` renders as the
+  studio preview does (with frame stats and click-to-select ids). `pf transition ... --stages`
+  does the same for a walk across a transition or fork.
+- Rendering runs on the GPU when there is one, the CPU renderer otherwise; `--engine cpu` (or
+  `PF_ENGINE=cpu`) forces the CPU, and export metadata names the engine. `pf parity --engine gpu`
+  checks the two draw the same picture (every preset, or `--scene FILE`); add `--walks` for
+  frames of transitions and forks.
 - `pf_analyze` (MCP) warns about scenes that usually look wrong: too dark, blown out, props or
   lights out of view, a path that does not read against its verge.
 

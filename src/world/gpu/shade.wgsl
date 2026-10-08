@@ -1,7 +1,9 @@
 // Deferred shading of the G-buffer: render::surface_uv, shade_px, light_among, gloss_of,
-// ripple_slope and weather::surface/rain_rings, for one world. Two entry points: `uvs` works out
-// every pixel's texture coordinates (shading reads its neighbours' for the footprint), `shade`
-// lights each pixel and writes its colour and what the reflection pass needs.
+// ripple_slope and weather::surface/rain_rings. Each entry point runs once per world of the frame
+// (W is that world's) and touches only that world's pixels: `uvs` works out every pixel's texture
+// coordinates (shading reads its neighbours' for the footprint), `shade` lights each pixel and
+// writes its colour and what the reflection pass needs, `soft` mixes in this world where a patch
+// of it reaches into another's pixels (render::shade's soft edges).
 
 @group(0) @binding(1) var<storage, read> gbuf: array<GPix>;
 // Texture slots: a header of (offset, side) per slot and level, then linear RGB texels.
@@ -10,7 +12,9 @@
 @group(0) @binding(3) var<storage, read> lights: array<f32>;
 // Per-tile light lists: (n tiles + 1) offsets, then light indices.
 @group(0) @binding(4) var<storage, read> tiles: array<u32>;
-// Sun mask, then ambient-occlusion mask, one float per pixel each.
+// Sun mask, then ambient-occlusion mask, one float per pixel each; then, in a frame of several
+// worlds, per pixel the other world a soft patch edge mixes in (as bits) and how much
+// (render::shade's `soft`).
 @group(0) @binding(5) var<storage, read> masks: array<f32>;
 // u, v, texture (-1: nothing drawn) per pixel.
 @group(0) @binding(6) var<storage, read_write> uvs: array<f32>;
@@ -26,10 +30,19 @@ struct Air {
 }
 @group(0) @binding(9) var<uniform> A: Air;
 
-const TEX_HEADER: u32 = 136u; // 8 slots x 8 levels x (offset, side), then 8 level counts.
+// 32 slots (8 per world: path, verge, wall, ceiling, deck, bottom, facade) x 8 levels x
+// (offset, side), then 32 level counts.
+const TEX_HEADER: u32 = 544u;
+// render::GLOW_K: a texel glowing 1 shines this many times its colour.
+const GLOW_K: f32 = 2.5;
 
-fn tex_sample(slot: u32, u: f32, v: f32, footprint: f32) -> vec3<f32> {
-    let levels = tex_words[128u + slot];
+// Colour and glow (Texture::sample, sample_emit): texels are three floats, or four when the
+// level-count word carries 0x100 (the glow after the colour).
+fn tex_sample(slot_in: u32, u: f32, v: f32, footprint: f32) -> vec4<f32> {
+    let slot = W.tex_base + slot_in;
+    let lw = tex_words[512u + slot];
+    let levels = lw & 0xFFu;
+    let stride = select(3u, 4u, (lw & 0x100u) != 0u);
     let base = f32(tex_words[(slot * 8u) * 2u + 1u]);
     let texels = max(footprint * base, 1e-6);
     let lod = min(u32(max(log2(texels), 0.0)), levels - 1u);
@@ -38,8 +51,10 @@ fn tex_sample(slot: u32, u: f32, v: f32, footprint: f32) -> vec3<f32> {
     let s = tex_words[e + 1u];
     let x = u32(rem_e(u, 1.0) * f32(s)) % s;
     let y = u32(rem_e(v, 1.0) * f32(s)) % s;
-    let k = TEX_HEADER + off + (y * s + x) * 3u;
-    return vec3<f32>(bitcast<f32>(tex_words[k]), bitcast<f32>(tex_words[k + 1u]), bitcast<f32>(tex_words[k + 2u]));
+    let k = TEX_HEADER + off + (y * s + x) * stride;
+    var g = 0.0;
+    if stride == 4u { g = bitcast<f32>(tex_words[k + 3u]); }
+    return vec4<f32>(bitcast<f32>(tex_words[k]), bitcast<f32>(tex_words[k + 1u]), bitcast<f32>(tex_words[k + 2u]), g);
 }
 
 fn rot(bit: u32, u: f32, v: f32) -> vec2<f32> {
@@ -72,10 +87,16 @@ fn surface_uv(g: GPix) -> vec3<f32> {
         } else if m == RAIL_WOOD { tex = 4.0; }
         return vec3<f32>(div(uv.x, tile), div(uv.y, tile), tex);
     }
+    if id == ID_FACADE {
+        if W.fac_tile <= 0.0 { return vec3<f32>(0.0, 0.0, -1.0); }
+        return vec3<f32>(div(g.x, W.fac_tile), div(-g.y, W.fac_tile), 6.0);
+    }
     if id == ID_GROUND || id == ID_RISER {
         var along = dw;
         if id == ID_RISER { along = dw + g.y; }
-        let on_path = W.verge_on == 0u || abs(g.x) < path_edge(g.d) || on_fork(g.x, g.d);
+        // Only the ground left between a fork's branches turns to verge.
+        let between = MULTI && W.verge_on != 0u && W.vb_on != 0u && g.d > W.vb_z && in_wedge(to_cam(g.x, g.y, g.d).x, g.d);
+        let on_path = !between && (W.verge_on == 0u || abs(g.x) < path_edge(g.d) || on_fork(g.x, g.d));
         if on_path { return vec3<f32>(rot(1u, div(g.x, W.path_tile), div(along, W.path_tile)), 0.0); }
         return vec3<f32>(rot(2u, div(g.x, W.verge_tile), div(along, W.verge_tile)), 1.0);
     }
@@ -92,6 +113,7 @@ fn surface_uv(g: GPix) -> vec3<f32> {
 fn uvs_main(@builtin(global_invocation_id) id: vec3<u32>) {
     if id.x >= W.width || id.y >= W.height { return; }
     let i = id.y * W.width + id.x;
+    if (gbuf[i].idr >> 8u) != W.realm { return; }
     let s = surface_uv(gbuf[i]);
     uvs[i * 3u] = s.x; uvs[i * 3u + 1u] = s.y; uvs[i * 3u + 2u] = s.z;
 }
@@ -241,21 +263,60 @@ fn sky_visibility(x: f32, y: f32, d: f32, dir: vec3<f32>, skip: u32) -> f32 {
     return 1.0;
 }
 
-fn light_pos(k: u32) -> vec4<f32> { return vec4<f32>(lights[k * 8u], lights[k * 8u + 1u], lights[k * 8u + 2u], lights[k * 8u + 3u]); }
-fn light_col(k: u32) -> vec3<f32> { return vec3<f32>(lights[k * 8u + 4u], lights[k * 8u + 5u], lights[k * 8u + 6u]); }
-fn sky_dir(k: u32) -> vec3<f32> { let b = (W.n_lights + k) * 8u; return vec3<f32>(lights[b], lights[b + 1u], lights[b + 2u]); }
-fn sky_col(k: u32) -> vec3<f32> { let b = (W.n_lights + k) * 8u; return vec3<f32>(lights[b + 4u], lights[b + 5u], lights[b + 6u]); }
+fn light_pos(k: u32) -> vec4<f32> { let b = (W.light_base + k) * 8u; return vec4<f32>(lights[b], lights[b + 1u], lights[b + 2u], lights[b + 3u]); }
+fn light_col(k: u32) -> vec3<f32> { let b = (W.light_base + k) * 8u; return vec3<f32>(lights[b + 4u], lights[b + 5u], lights[b + 6u]); }
+fn sky_dir(k: u32) -> vec3<f32> { let b = (W.light_base + W.n_lights + k) * 8u; return vec3<f32>(lights[b], lights[b + 1u], lights[b + 2u]); }
+fn sky_col(k: u32) -> vec3<f32> { let b = (W.light_base + W.n_lights + k) * 8u; return vec3<f32>(lights[b + 4u], lights[b + 5u], lights[b + 6u]); }
 
-// The point lights this pixel looks at: the tile's list, or all of them.
+// render::polygon_light
+fn pt_corner(k: u32) -> vec3<f32> {
+    if k == 0u { return vec3<f32>(W.pt0x, W.pt0y, W.pt0z); }
+    if k == 1u { return vec3<f32>(W.pt1x, W.pt1y, W.pt1z); }
+    if k == 2u { return vec3<f32>(W.pt2x, W.pt2y, W.pt2z); }
+    return vec3<f32>(W.pt3x, W.pt3y, W.pt3z);
+}
+fn unit3(v: vec3<f32>) -> vec3<f32> { return v / max(sqrt(dot(v, v)), 1e-6); }
+fn polygon_light(p: vec3<f32>, n: vec3<f32>) -> f32 {
+    var sum = 0.0;
+    for (var i = 0u; i < 4u; i++) {
+        let a = unit3(pt_corner(i) - p);
+        let b = unit3(pt_corner((i + 1u) % 4u) - p);
+        let th = acos(clamp(dot(a, b), -1.0, 1.0));
+        let c = cross(a, b);
+        let l = sqrt(dot(c, c));
+        if l > 1e-6 { sum += th * dot(c, n) / l; }
+    }
+    return min(abs(sum / TAU), 1.0);
+}
+// Light through a threshold's opening (the Portal part of Ctx::light_among); `n` of length 0 for
+// the air (no surface).
+fn portal_light(x: f32, y: f32, d: f32, n: vec3<f32>) -> vec3<f32> {
+    if !MULTI || W.pt_on == 0u { return vec3<f32>(0.0); }
+    var p = to_cam(x, y, d);
+    let front = W.pt_front != 0u;
+    if (p.z < W.pt_zb) != front { return vec3<f32>(0.0); }
+    if front { p.z = min(p.z, W.pt_zb - 0.35); } else { p.z = max(p.z, W.pt_zb + 0.35); }
+    let mid = (pt_corner(0u) + pt_corner(1u) + (pt_corner(2u) + pt_corner(3u))) * 0.25;
+    let to = mid - p;
+    var nn = n; var k = 1.0;
+    if dot(n, n) == 0.0 { nn = to / max(sqrt(dot(to, to)), 1e-4); k = 0.6; }
+    if dot(nn, to) <= 0.0 { return vec3<f32>(0.0); }
+    return vec3<f32>(W.pt_r, W.pt_g, W.pt_b) * (k * polygon_light(p, nn));
+}
+
+// The point lights this pixel looks at: the tile's list, or all of them. Lists come from the CPU
+// (tiles_on 1: offsets, then indices) or from geom.wgsl's tiles_main (2: per tile a count and up to
+// tile_cap indices); either way the range is of positions in `tiles`.
 fn tile_range(px: u32, py: u32) -> vec2<u32> {
     if W.tiles_on == 0u { return vec2<u32>(0u, W.n_lights); }
     let t = (py / 16u) * W.tile_cols + px / 16u;
-    return vec2<u32>(tiles[t], tiles[t + 1u]);
+    if W.tiles_on == 2u { let b = t * (W.tile_cap + 1u); return vec2<u32>(b + 1u, b + 1u + tiles[b]); }
+    let ntiles = W.tile_cols * ((W.height + 15u) / 16u);
+    return vec2<u32>(ntiles + 1u + tiles[t], ntiles + 1u + tiles[t + 1u]);
 }
 fn light_index(k: u32) -> u32 {
     if W.tiles_on == 0u { return k; }
-    let ntiles = W.tile_cols * ((W.height + 15u) / 16u);
-    return tiles[ntiles + 1u + k];
+    return tiles[k];
 }
 
 // Ctx::light_among for a surface with normal n (the portal is a crossing's, not one world's).
@@ -284,6 +345,7 @@ fn light_at(x: f32, y: f32, d: f32, n: vec3<f32>, skip: u32, sun_mask: f32, px: 
             l += light_col(li) * (att * ndl);
         }
     }
+    l += portal_light(x, y, d, n);
     if W.bands >= 2u {
         let lum = 0.3 * l.x + 0.55 * l.y + 0.15 * l.z;
         if lum > 1e-5 {
@@ -297,23 +359,37 @@ fn light_at(x: f32, y: f32, d: f32, n: vec3<f32>, skip: u32, sun_mask: f32, px: 
 
 fn fres(c: f32) -> f32 { let m = max(1.0 - c, 0.0); return 0.02 + 0.98 * m * m * m * m * m; }
 
-@compute @workgroup_size(8, 8)
-fn shade_main(@builtin(global_invocation_id) gid: vec3<u32>) {
-    if gid.x >= W.width || gid.y >= W.height { return; }
+struct Shaded { c: vec3<f32>, r: f32, env: vec3<f32>, rough: f32, sx: f32, drawn: bool }
+
+// render::shade_px for pixel i seen as `g` (its own G-buffer pixel when `own`, whose texture
+// coordinates are already in `uvs`; or moved into this world by a soft patch edge).
+// render::edge_light.
+fn edge_light(edge: f32, x: f32, dw: f32, px_x: f32, px_d: f32, albedo: vec3<f32>) -> vec3<f32> {
+    let col = vec3<f32>(W.el_r, W.el_g, W.el_b);
+    let d = abs(abs(x) - (edge - W.el_inset));
+    let wd = max(W.el_hw, px_x);
+    let line = (W.el_hw / wd) * smoothstep_r(wd, 0.0, d);
+    var dash = 1.0;
+    if W.el_period > 0.0 {
+        let f = rem_e(dw / W.el_period - W.el_phase, 1.0);
+        let on = smoothstep_r(0.0, 0.08, f) * (1.0 - smoothstep_r(0.5, 0.58, f));
+        dash = on + (0.5 - on) * smoothstep_r(0.25, 0.6, px_d / W.el_period);
+    }
+    let spill = 0.8 * exp(-d / 0.3) * (0.5 + 0.5 * dash);
+    return col * (2.0 * line * dash) + albedo * col * spill;
+}
+
+fn shade_px(g: GPix, i: u32, x: u32, y: u32, own: bool) -> Shaded {
+    var out = Shaded(vec3<f32>(0.0), 0.0, vec3<f32>(0.0), 0.0, 0.0, false);
     let w = W.width; let h = W.height;
-    let x = gid.x; let y = gid.y;
-    let i = y * w + x;
-    let g = gbuf[i];
     let id = g.idr & 0xFFu;
     let realm = g.idr >> 8u;
-    for (var k = 0u; k < 6u; k++) { refl[i * 6u + k] = 0.0; }
-    let texf = uvs[i * 3u + 2u];
-    if texf < 0.0 {
-        let c = sky_base(f32(y));
-        hdr[i * 3u] = c.x; hdr[i * 3u + 1u] = c.y; hdr[i * 3u + 2u] = c.z;
-        return;
-    }
-    let u = uvs[i * 3u]; let v = uvs[i * 3u + 1u];
+    var suv: vec3<f32>;
+    if own { suv = vec3<f32>(uvs[i * 3u], uvs[i * 3u + 1u], uvs[i * 3u + 2u]); } else { suv = surface_uv(g); }
+    let texf = suv.z;
+    if texf < 0.0 { return out; }
+    out.drawn = true;
+    let u = suv.x; let v = suv.y;
     let tex = u32(texf);
     // Footprint from neighbouring pixels on the same surface, like GPU derivatives.
     var fp = 0.0;
@@ -327,7 +403,23 @@ fn shade_main(@builtin(global_invocation_id) gid: vec3<u32>) {
         }
     }
     let slot = select(tex, 4u, tex == 7u);
-    var albedo = tex_sample(slot, u, v, min(fp, 4.0));
+    // (The facade's texture is slot 6, like its tex.)
+    let ts = tex_sample(slot, u, v, min(fp, 4.0));
+    var albedo = ts.xyz;
+    // Glowing parts of the texture shine in their own colour; railings take only its grain.
+    var glow_c = select(albedo * (ts.w * GLOW_K), vec3<f32>(0.0), tex == 7u);
+    if W.el_on != 0u && id == ID_GROUND && (tex == 0u || tex == 4u) && !on_fork(g.x, g.d) {
+        var px_x = 0.0; var px_d = 0.0;
+        var jx = array<u32, 2>(select(i + 1u, i - 1u, x > 0u), select(i - 1u, i + 1u, x + 1u < w));
+        var jy = array<u32, 2>(select(i + w, i - w, y > 0u), select(i - w, i + w, y + 1u < h));
+        for (var k = 0; k < 2; k++) {
+            let ga = gbuf[jx[k]];
+            if (ga.idr & 0xFFu) == ID_GROUND { px_x = max(px_x, abs(ga.x - g.x)); }
+            let gb = gbuf[jy[k]];
+            if (gb.idr & 0xFFu) == ID_GROUND { px_d = max(px_d, abs(gb.d - g.d)); }
+        }
+        glow_c += edge_light(max(path_edge(g.d), 0.05), g.x, W.scroll + g.d, px_x, px_d, albedo);
+    }
     if tex == 7u {
         let lw = vec3<f32>(0.3, 0.59, 0.11);
         let grain = clamp(dot(albedo, lw) / max(dot(vec3<f32>(W.deck_base_r, W.deck_base_g, W.deck_base_b), lw), 1e-3), 0.6, 1.3);
@@ -386,6 +478,11 @@ fn shade_main(@builtin(global_invocation_id) gid: vec3<u32>) {
         else if face == FACE_TOP { normal = vec3<f32>(0.0, 1.0, 0.0); }
         else { normal = vec3<f32>(0.0, 0.0, -1.0); }
         skip = 0u;
+    } else if id == ID_FACADE {
+        // The face darkens into the opening's reveal and toward its foot.
+        if W.op_on != 0u { ao *= 0.5 + 0.5 * smoothstep_r(0.0, 0.35, op_rim_distance(g.x, g.y)); }
+        ao *= 1.0 - 0.3 * exp(-g.y / 0.6);
+        normal = vec3<f32>(0.0, 0.0, -1.0); skip = 0u;
     } else if id == ID_WALL_L {
         ao *= 1.0 - clamp(W.base_shadow, 0.0, 1.0) * exp(-g.y / 0.5);
         normal = vec3<f32>(1.0, 0.0, 0.0); skip = ID_WALL_L;
@@ -452,29 +549,65 @@ fn shade_main(@builtin(global_invocation_id) gid: vec3<u32>) {
             spec += sky_col(k) * (norm * pow(max(dot(n, hv), 0.0), e) * fres(max(dot(hv, vv), 0.0)) * ndl * gloss * sun);
         }
         c = c * (1.0 - r) + env * r + spec;
-        refl[i * 6u] = r * fog_t(g.depth);
-        refl[i * 6u + 1u] = env.x * W.gain; refl[i * 6u + 2u] = env.y * W.gain; refl[i * 6u + 3u] = env.z * W.gain;
-        refl[i * 6u + 4u] = rough;
-        refl[i * 6u + 5u] = rs.x;
+        out.r = r * fog_t(g.depth);
+        out.env = env * W.gain;
+        out.rough = rough;
+        out.sx = rs.x;
     }
-    let o = apply_fog(c, g.depth);
-    hdr[i * 3u] = o.x; hdr[i * 3u + 1u] = o.y; hdr[i * 3u + 2u] = o.z;
+    out.c = apply_fog(c + glow_c, g.depth);
+    return out;
+}
+
+@compute @workgroup_size(8, 8)
+fn shade_main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    if gid.x >= W.width || gid.y >= W.height { return; }
+    let i = gid.y * W.width + gid.x;
+    let g = gbuf[i];
+    if (g.idr >> 8u) != W.realm { return; }
+    for (var k = 0u; k < 6u; k++) { refl[i * 6u + k] = 0.0; }
+    let s = shade_px(g, i, gid.x, gid.y, true);
+    if !s.drawn {
+        // A frame of several worlds mixes their skies in the sky pass.
+        if W.multi != 0u { return; }
+        let c = sky_base(f32(gid.y));
+        hdr[i * 3u] = c.x; hdr[i * 3u + 1u] = c.y; hdr[i * 3u + 2u] = c.z;
+        return;
+    }
+    hdr[i * 3u] = s.c.x; hdr[i * 3u + 1u] = s.c.y; hdr[i * 3u + 2u] = s.c.z;
+    if s.r != 0.0 || s.rough != 0.0 {
+        refl[i * 6u] = s.r;
+        refl[i * 6u + 1u] = s.env.x; refl[i * 6u + 2u] = s.env.y; refl[i * 6u + 3u] = s.env.z;
+        refl[i * 6u + 4u] = s.rough;
+        refl[i * 6u + 5u] = s.sx;
+    }
+}
+
+// Where a patch of this world reaches into another's pixels: a little of each (render::shade).
+@compute @workgroup_size(8, 8)
+fn soft_main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    if gid.x >= W.width || gid.y >= W.height { return; }
+    let i = gid.y * W.width + gid.x;
+    let n = W.width * W.height;
+    let k = masks[2u * n + i * 2u + 1u];
+    if k <= 0.0 || bitcast<u32>(masks[2u * n + i * 2u]) != W.realm { return; }
+    let g0 = gbuf[i];
+    let src = g0.idr >> 8u;
+    let cam_x = g0.x + bend_x(g0.d) + shear_of(src, g0.d);
+    let g = GPix(g0.depth, cam_x - bend_x(g0.d) - shear_x(g0.d), g0.y, g0.d, (g0.idr & 0xFFu) | (W.realm << 8u));
+    let s = shade_px(g, i, gid.x, gid.y, false);
+    if !s.drawn { return; }
+    let c = mix3(vec3<f32>(hdr[i * 3u], hdr[i * 3u + 1u], hdr[i * 3u + 2u]), s.c, k);
+    hdr[i * 3u] = c.x; hdr[i * 3u + 1u] = c.y; hdr[i * 3u + 2u] = c.z;
+    if s.r > refl[i * 6u] {
+        refl[i * 6u] = s.r;
+        refl[i * 6u + 1u] = s.env.x; refl[i * 6u + 2u] = s.env.y; refl[i * 6u + 3u] = s.env.z;
+        refl[i * 6u + 4u] = s.rough;
+        refl[i * 6u + 5u] = s.sx;
+    }
 }
 
 // ── Mist (weather::apply_mist) ─────────────────────────────────────────────
 
-// weather::drifting_noise
-fn drifting_noise(x: f32, w: f32, cell: f32, travel: f32, seed: u32) -> f32 {
-    var n = 0.0;
-    for (var j = 0u; j < 2u; j++) {
-        let ph = rem_e(W.tphase + f32(j) * 0.5, 1.0);
-        let sn = sin(PI * ph);
-        let wt = sn * sn;
-        let xo = x - rnd(travel * (ph - 0.5)) + f32(j) * 53.0;
-        n += wt * (0.7 * noise2(xo, w, cell, W.loop_len, seed ^ 0x51u ^ j) + 0.3 * noise2(xo, w, rnd(cell * 0.37), W.loop_len, seed ^ 0x53u ^ j));
-    }
-    return n;
-}
 
 // weather::mist_patch
 fn mist_patch(x: f32, d: f32) -> f32 {
@@ -513,6 +646,7 @@ fn air_light(x: f32, y: f32, d: f32) -> vec3<f32> {
             l += light_col(li) * (att * 0.8);
         }
     }
+    l += portal_light(x, y, d, vec3<f32>(0.0));
     if W.bands >= 2u {
         let lum = 0.3 * l.x + 0.55 * l.y + 0.15 * l.z;
         if lum > 1e-5 {
@@ -530,6 +664,7 @@ fn mist_main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let x = gid.x; let row = gid.y;
     let i = row * W.width + x;
     let g = gbuf[i];
+    if (g.idr >> 8u) != W.realm { return; }
     let none = (g.idr & 0xFFu) == ID_NONE;
     let eye = W.eye_height;
     let top = A.top;

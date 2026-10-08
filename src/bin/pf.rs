@@ -353,7 +353,81 @@ fn parity_gpu(args: &Args) -> Result<(), String> {
     if failed > 0 { Err(format!("{failed} frame(s) over the parity gate")) } else { Ok(()) }
 }
 
+/// Frames of several worlds on both engines: crossings through each kind of threshold and forks
+/// taking either branch, at points along each walk (`pf parity --engine gpu --walks`).
+fn parity_walks(args: &Args) -> Result<(), String> {
+    use path_forge::journey::{CrossWalk, ForkWalk, Place};
+    use path_forge::scene::transition::{self as tr, Branch, ForkChoice, Threshold, Transition};
+    let mut cpu = WorldRenderer::default();
+    let mut gpu = WorldRenderer::default();
+    gpu.set_gpu(Some(world_gpu()?));
+    let preset = |n: &str| scene::presets::ALL.iter().find(|(m, _)| norm(m) == norm(n)).map(|p| p.1()).ok_or(format!("no preset {n}"));
+    let opts = RenderOptions::default();
+    let frames: usize = opt(args, "frames", 7usize)?.max(2);
+    println!("{:<44} {:>5} {:>8} {:>7} {:>5}  {}", "walk", "at", "mean", "p99.9", "max", "verdict");
+    let mut failed = 0;
+    let mut check = |name: &str, at: f32, c: &path_forge::world::Image, g: &path_forge::world::Image| -> Result<(), String> {
+        let w = c.width;
+        let mut per: Vec<u8> = c.rgba.chunks_exact(4).zip(g.rgba.chunks_exact(4)).map(|(a, b)| (0..3).map(|k| a[k].abs_diff(b[k])).max().unwrap()).collect();
+        let mean = c.rgba.chunks_exact(4).zip(g.rgba.chunks_exact(4)).map(|(a, b)| (0..3).map(|k| a[k].abs_diff(b[k]) as f64).sum::<f64>() / 3.0).sum::<f64>() / per.len().max(1) as f64;
+        let worst = per.iter().enumerate().max_by_key(|(_, d)| **d).map(|(i, d)| (i % w, i / w, *d)).unwrap_or((0, 0, 0));
+        per.sort_unstable();
+        let p999 = per[((per.len() as f64 * 0.999) as usize).min(per.len() - 1)];
+        let ok = mean <= 0.5 && p999 <= 4;
+        if !ok { failed += 1; }
+        println!("{:<44} {:>5.2} {:>8.3} {:>7} {:>5}  {} (worst at {},{})", name, at, mean, p999, worst.2, if ok { "ok" } else { "OVER" }, worst.0, worst.1);
+        if let Some(dir) = args.opts.get("o") {
+            let base = format!("{dir}/{}_{at:.2}", name.replace([' ', '/', '>', '(', ')'], "_"));
+            save_png(&format!("{base}_cpu.png"), w, c.height, &c.rgba)?;
+            save_png(&format!("{base}_gpu.png"), w, c.height, &g.rgba)?;
+        }
+        Ok(())
+    };
+    let crossings = [
+        ("Forest Path", "Mountain Pass", Threshold::Open), ("Forest Path", "Stone Dungeon", Threshold::Doorway),
+        ("Mountain Pass", "Ice Cave", Threshold::CaveMouth), ("Dark Street", "Ruined Castle", Threshold::Gate),
+        ("Night Road", "Magic Cavern", Threshold::Portal), ("Bog Boardwalk", "Desert Ruins", Threshold::Auto),
+        ("Stone Crypt", "Haunted Forest", Threshold::Auto),
+    ];
+    for (a, b, th) in crossings {
+        let (sa, sb) = (preset(a)?, preset(b)?);
+        let c = tr::plan(&sa, &sb, &Transition { threshold: th, ..Transition::default() });
+        let name = format!("{a} > {b} ({})", c.threshold.name());
+        let walk = CrossWalk::new(c, 0.0, 0.0);
+        let len = walk.length();
+        for i in 0..frames {
+            let travel = len * i as f32 / (frames - 1) as f32;
+            let t = travel / sa.motion.speed.max(0.01);
+            let (pa, pb) = (Place { scene: &sa, dir: None }, Place { scene: &sb, dir: None });
+            let ci = walk.frame(&mut cpu, pa, pb, travel, t, t, &opts);
+            let gi = walk.frame(&mut gpu, pa, pb, travel, t, t, &opts);
+            check(&name, travel / len, &ci, &gi)?;
+        }
+    }
+    let forks = [("Forest Path", "Mountain Pass", "Desert Canyon", Branch::Left), ("Forest Path", "Mountain Pass", "Desert Canyon", Branch::Right),
+                 ("Ruins Path", "Haunted Forest", "Night Road", Branch::Right)];
+    for (a, l, r, take) in forks {
+        let (sa, sl, sr) = (preset(a)?, preset(l)?, preset(r)?);
+        let plan = tr::plan_fork(&sa, &sl, &sr, &ForkChoice::default());
+        let name = format!("{a} < {l} | {r} ({})", if take == Branch::Left { "left" } else { "right" });
+        let mut walk = ForkWalk::new(plan, 0.0, [0.0, 0.0]);
+        let len = walk.length();
+        let at = walk.decide_by() * 0.5;
+        for i in 0..frames {
+            let travel = len * i as f32 / (frames - 1) as f32;
+            if travel >= at { walk.choose(take, at); }
+            let t = travel / sa.motion.speed.max(0.01);
+            let (pa, pl, pr) = (Place { scene: &sa, dir: None }, Place { scene: &sl, dir: None }, Place { scene: &sr, dir: None });
+            let ci = walk.frame(&mut cpu, pa, pl, pr, travel, [t, t, t], &opts);
+            let gi = walk.frame(&mut gpu, pa, pl, pr, travel, [t, t, t], &opts);
+            check(&name, travel / len, &ci, &gi)?;
+        }
+    }
+    if failed > 0 { Err(format!("{failed} frame(s) over the parity gate")) } else { Ok(()) }
+}
+
 fn cmd_parity(args: &Args) -> Result<(), String> {
+    if args.opts.get("engine").is_some_and(|e| e == "gpu") && args.opts.contains_key("walks") { return parity_walks(args); }
     if args.opts.get("engine").is_some_and(|e| e == "gpu") { return parity_gpu(args); }
     let mut cpu = Renderers::new(false);
     let mut gpu = Renderers::new(true);
@@ -669,6 +743,8 @@ fn cmd_transition(args: &Args) -> Result<(), String> {
     let size = ((a.canvas.width as f32 * scale).round().max(16.0) as u32, (a.canvas.height as f32 * scale).round().max(16.0) as u32);
     let opts = RenderOptions { size: Some(size), ..RenderOptions::default() };
     let mut r = world_for(args)?;
+    r.profile = args.opts.contains_key("stages");
+    let t0 = Instant::now();
     let mut imgs = Vec::new();
     let say = |notes: &[String], warnings: &[String]| {
         for n in notes { println!("  plan: {n}"); }
@@ -719,6 +795,14 @@ fn cmd_transition(args: &Args) -> Result<(), String> {
             let t = travel / a.motion.speed.max(0.01);
             imgs.push(walk.frame(&mut r, pa, Place { scene: &b, dir: bd.as_deref() }, travel, t, t, &opts));
         }
+    }
+    if r.profile {
+        // Where the walk's time went, loudest first (per frame).
+        println!("  {:.1} ms a frame", t0.elapsed().as_secs_f64() * 1000.0 / frames as f64);
+        let mut st = r.stages.clone();
+        st.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+        let line: Vec<String> = st.iter().filter(|(_, ms)| *ms / frames as f64 >= 0.05).map(|(n, ms)| format!("{n} {:.1}", ms / frames as f64)).collect();
+        println!("    {}", line.join(" | "));
     }
     if let Some(k) = args.opts.get("frame") {
         // One frame of the walk, by its index among --frames.

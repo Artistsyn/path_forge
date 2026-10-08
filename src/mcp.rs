@@ -410,6 +410,10 @@ fn summary(s: &Scene) -> String {
     let sp: Vec<&str> = s.set_pieces.iter().filter(|p| p.enabled).map(|p| p.kind.name()).collect();
     if !sp.is_empty() { out += &format!("; set pieces: {}", sp.join(", ")); }
     if !pa.is_empty() { out += &format!("; particles: {}", pa.join(", ")); }
+    let pl: Vec<String> = s.sky.space.planets.iter().filter(|p| p.enabled && s.sky.space.enabled).map(|p| format!("{:?}{}", p.kind, if p.rings.enabled { " ringed" } else { "" }).to_lowercase()).collect();
+    if !pl.is_empty() { out += &format!("; planets: {}", pl.join(", ")); }
+    let co = s.companions.iter().filter(|c| c.enabled).count();
+    if co > 0 { out += &format!("; {co} companion(s) flying along"); }
     let strikes = crate::world::lightning_times(s);
     if !strikes.is_empty() {
         let at: Vec<String> = strikes.iter().map(|p| format!("{:.2}s", p * s.motion.loop_seconds())).collect();
@@ -433,7 +437,7 @@ fn summary(s: &Scene) -> String {
     if w.drips.enabled { out += "; drips"; }
     if w.wind.enabled { out += &format!("; wind {} m/s", w.wind.speed); }
     for (on, name) in [(w.sandstorm.enabled, "sandstorm"), (w.mist.enabled, "ground mist"), (w.light_shafts.enabled, "light shafts"), (w.heat_shimmer.enabled, "heat shimmer"),
-        (s.sky.clouds.shadows > 0.0, "cloud shadows"), (s.sky.aurora.enabled, "aurora"), (s.sky.rainbow.enabled, "rainbow")] {
+        (s.sky.clouds.shadows > 0.0, "cloud shadows"), (s.sky.aurora.enabled, "aurora"), (s.sky.rainbow.enabled, "rainbow"), (s.sky.space.enabled, "deep space"), (s.sky.space.enabled && s.sky.space.black_hole.enabled, "black hole"), (s.sky.tunnel.enabled, "tunnel"), (s.path.edge_lights.enabled, "edge lights")] {
         if on { out += &format!("; {name}"); }
     }
     if w.lens.enabled { out += &format!("; {:?} on the lens", w.lens.kind).to_lowercase(); }

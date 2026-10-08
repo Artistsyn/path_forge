@@ -60,7 +60,7 @@ fn scene(name: &str) -> Scene {
     Scene {
         version: SCENE_VERSION, name: name.to_owned(), canvas: Canvas::default(), camera: Camera::default(),
         path: PathShape::default(), verge: Verge::default(), walls: Walls::default(), ceiling: Ceiling::default(),
-        sky: no_sky([0, 0, 0]), light: indoor_light(0.25, [0, 0, 0], 20.0), fixtures: vec![], props: vec![], set_pieces: vec![], weather: Weather::default(), prop_defs: Default::default(),
+        sky: no_sky([0, 0, 0]), light: indoor_light(0.25, [0, 0, 0], 20.0), fixtures: vec![], props: vec![], set_pieces: vec![], companions: vec![], weather: Weather::default(), prop_defs: Default::default(),
         particles: vec![], post: Post::default(), style: Style::default(), motion: Motion::default(),
     }
 }
@@ -106,6 +106,257 @@ pub fn bog_boardwalk() -> Scene {
     s.weather.fog_banks = FogBanks { enabled: true, spacing: 12.0, length: 4.0, density: 0.22, offset: 6.0 };
     s.weather.mist = Mist { enabled: true, height: 0.5, density: 0.14, color: [150, 180, 170], patchiness: 0.6, wisps: 0.6, ..Mist::default() };
     s.motion.speed = 3.2;
+    s
+}
+
+/// A walkway through deep space: dark planks and iron rails over nothing at all, a ringed gas giant
+/// and a blue world in a starfield, asteroids drifting past, and a ship flying alongside.
+pub fn star_bridge() -> Scene {
+    let mut s = scene("Star Bridge");
+    s.camera.horizon = 0.4;
+    s.path.half_width = 0.9;
+    s.path.bend = -0.3;
+    s.path.hill = 0.15;
+    s.path.edge_noise = 0.0;
+    s.path.edge_dark = 0.2;
+    let deck = Material { gloss: 0.15, ..mat(Pattern::Planks, [78, 68, 62], [22, 18, 16], 1.2) };
+    s.path.material = Material { rotate: false, ..deck.clone() };
+    // One bridge per loop as long as the loop: a deck with no end.
+    s.path.bridge = Bridge {
+        enabled: true, spacing: 40.0, length: 40.0, offset: 0.0, depth: 400.0, bottom: BridgeBottom::Void, deck,
+        railing: Railing::Iron, rail_height: 1.0, end_pillars: false, rail_color: [74, 82, 98], ..Bridge::default()
+    };
+    s.verge.enabled = false;
+    s.walls.enabled = false;
+    s.sky = Sky {
+        enabled: true, top: [2, 3, 9], horizon: [12, 14, 34],
+        sun: SkyBody { enabled: true, pos: [0.88, 0.1], radius: 0.025, color: [255, 244, 226], intensity: 1.1, ..SkyBody::default() },
+        space: Space {
+            enabled: true,
+            planets: vec![
+                Planet {
+                    kind: PlanetKind::Gas, pos: [0.3, 0.42], radius: 0.3, color: [196, 150, 104], color2: [240, 222, 186],
+                    light_angle: 22.0, night: 0.42, tilt: -12.0, rings: Rings { enabled: true, ..Rings::default() }, seed: 3, ..Planet::default()
+                },
+                Planet {
+                    kind: PlanetKind::Earth, pos: [0.84, 0.64], radius: 0.1, color: [20, 58, 140], color2: [72, 108, 52],
+                    atmosphere: [110, 170, 255], atmosphere_strength: 0.8, light_angle: 22.0, night: 0.55, city_lights: 1.0, clouds: 0.5,
+                    spin: 1, seed: 5, ..Planet::default()
+                },
+                Planet { kind: PlanetKind::Rocky, pos: [0.62, 0.17], radius: 0.035, light_angle: 22.0, night: 0.3, seed: 7, ..Planet::default() },
+            ],
+            ..Space::default()
+        },
+        ..Sky::default()
+    };
+    s.light = Lighting {
+        ambient: 0.16, ambient_color: [120, 130, 175], void_color: [2, 3, 9],
+        fog: Fog { enabled: false, color: [2, 3, 9], distance: 200.0, match_sky: false }, bands: 0,
+    };
+    // Asteroids drifting either side of the deck, near and far.
+    s.props = vec![
+        PropLayer { rows: 2, row_spacing: 7.0, jitter: 2.5, density: 0.3, scale_var: 0.6, float: 0.5, float_var: 3.5, shadow: false, tint: [100, 92, 84], ..props(PropKind::Boulder, 3.5, 10.0, 0.9, 81) },
+        PropLayer { rows: 1, jitter: 3.0, density: 0.3, scale_var: 0.5, float: 3.0, float_var: 4.0, shadow: false, tint: [86, 80, 76], ..props(PropKind::Rock, 7.0, 8.0, 2.2, 83) },
+    ];
+    s.companions = vec![Companion::default()];
+    s.motion = Motion { loop_length: 40.0, speed: 5.0, fps: 24 };
+    s
+}
+
+/// An endless deck floating in a tunnel: one bridge per loop as long as the loop, over nothing,
+/// with iron rails, the path material matching the deck, no fog and a dark void.
+fn tunnel_deck(name: &str, deck: Material, rail: Rgb) -> Scene {
+    let mut s = scene(name);
+    s.camera.horizon = 0.45;
+    s.path.half_width = 1.0;
+    s.path.edge_noise = 0.0;
+    s.path.edge_dark = 0.15;
+    s.path.material = Material { rotate: false, ..deck.clone() };
+    s.path.bridge = Bridge {
+        enabled: true, spacing: 40.0, length: 40.0, offset: 0.0, depth: 400.0, bottom: BridgeBottom::Void, deck,
+        railing: Railing::Iron, rail_height: 1.0, end_pillars: false, rail_color: rail, ..Bridge::default()
+    };
+    s.verge.enabled = false;
+    s.walls.enabled = false;
+    s.light = Lighting {
+        ambient: 0.2, ambient_color: [140, 150, 190], void_color: [2, 3, 9],
+        fog: Fog { enabled: false, color: [2, 3, 9], distance: 200.0, match_sky: false }, bands: 0,
+    };
+    s.sky = Sky { enabled: true, top: [2, 3, 9], horizon: [6, 8, 20], ..Sky::default() };
+    s.post.bloom = 0.6;
+    s.motion = Motion { loop_length: 40.0, speed: 6.0, fps: 24 };
+    s
+}
+
+/// A metal deck with lit panels racing down a hyperspace tunnel of stretched starlight, cyan lights
+/// running ahead along its edges and a ship keeping pace.
+pub fn hyperspace_run() -> Scene {
+    let deck = Material { gloss: 0.3, glow: 1.0, noise: 6, damage: 0.1, ..mat(Pattern::Panels, [92, 98, 110], [120, 220, 255], 1.8) };
+    let mut s = tunnel_deck("Hyperspace Run", deck, [70, 90, 110]);
+    s.path.edge_lights = EdgeLights { enabled: true, color: [80, 210, 255], dash: 2.0, flow: 8, ..EdgeLights::default() };
+    s.sky.tunnel = Tunnel { enabled: true, kind: TunnelKind::Hyperspace, colors: [[4, 10, 44], [170, 210, 255], [235, 245, 255]], rush: 4, ..Tunnel::default() };
+    s.companions = vec![Companion { offset: [-2.2, 2.2, 9.0], ..Companion::default() }];
+    s
+}
+
+/// Dark hex plates with glowing pink seams on a deck spiralling down the throat of a wormhole.
+pub fn wormhole() -> Scene {
+    let deck = Material { gloss: 0.35, glow: 0.9, noise: 4, damage: 0.05, ..mat(Pattern::Hex, [44, 40, 58], [255, 110, 200], 1.6) };
+    let mut s = tunnel_deck("Wormhole", deck, [90, 60, 110]);
+    s.path.edge_lights = EdgeLights { enabled: true, color: [255, 120, 220], width: 0.04, ..EdgeLights::default() };
+    s.sky.tunnel = Tunnel {
+        enabled: true, kind: TunnelKind::Wormhole, radius: 7.0, colors: [[30, 6, 50], [255, 120, 220], [255, 240, 220]],
+        rush: 2, twist: 1, spin: 1, light: 0.6, ..Tunnel::default()
+    };
+    s.light.ambient_color = [190, 150, 210];
+    s
+}
+
+/// The black hole from ball_swing_game's boss arena, as a walk: a deck over nothing heading
+/// straight for it. Its shadow hangs over the path's end, ringed by light, the far side of its
+/// disk bent over the top and under the bottom, the stars smeared into arcs round it, and matter
+/// streaming in from both sides.
+pub fn event_horizon() -> Scene {
+    let mut s = scene("Event Horizon");
+    s.camera.horizon = 0.62;
+    s.path.half_width = 0.9;
+    s.path.hill = 0.1;
+    s.path.edge_noise = 0.0;
+    s.path.edge_dark = 0.25;
+    let deck = Material { gloss: 0.3, ..mat(Pattern::Planks, [58, 52, 50], [16, 13, 12], 1.2) };
+    s.path.material = Material { rotate: false, ..deck.clone() };
+    s.path.bridge = Bridge {
+        enabled: true, spacing: 40.0, length: 40.0, offset: 0.0, depth: 400.0, bottom: BridgeBottom::Void, deck,
+        railing: Railing::Iron, rail_height: 1.0, end_pillars: false, rail_color: [70, 64, 66], ..Bridge::default()
+    };
+    s.verge.enabled = false;
+    s.walls.enabled = false;
+    s.sky = Sky {
+        enabled: true, top: [1, 1, 4], horizon: [5, 4, 12],
+        space: Space {
+            enabled: true, stars: 1.0, nebula: 0.35, nebula_colors: [[150, 60, 120], [70, 60, 170]],
+            galaxy: 0.5, galaxy_angle: -14.0, galaxy_height: 0.7, galaxy_core: -0.6,
+            black_hole: BlackHole { enabled: true, pos: [0.5, 0.5], size: 0.12, tilt: 85.0, light: 1.2, ..BlackHole::default() },
+            seed: 4,
+            ..Space::default()
+        },
+        ..Sky::default()
+    };
+    s.light = Lighting {
+        ambient: 0.22, ambient_color: [150, 120, 110], void_color: [1, 1, 4],
+        fog: Fog { enabled: false, color: [1, 1, 4], distance: 200.0, match_sky: false }, bands: 0,
+    };
+    s.props = vec![
+        PropLayer { rows: 2, row_spacing: 7.0, jitter: 2.5, density: 0.25, scale_var: 0.6, float: 0.5, float_var: 3.5, shadow: false, tint: [90, 80, 74], ..props(PropKind::Boulder, 3.5, 10.0, 0.9, 85) },
+    ];
+    s.post.bloom = 0.35;
+    s.motion = Motion { loop_length: 40.0, speed: 4.0, fps: 24 };
+    s
+}
+
+/// ball_swing_game's black-hole boss arena backdrop, drawn to sit in the game rather than in a
+/// film: landscape 16:9 (half the game's 3840 x 2160 canvas), pixel art at a quarter scale (about
+/// the game's sprites' pixel size once the game scales it up), in the game's own colours: its
+/// deep-space blue-black, the violets and magenta of its black holes and the Gravity Weaver, and
+/// the cyan of its nodes. The disk's far side arches over the shadow, the side coming towards you
+/// glows cyan-white, the sparse starfield bends round it, and nodes like the game's hook nodes
+/// (smaller and dimmer than the real ones) drift in from both sides, swirl in faster, then redden
+/// and fade at the rim, with a few streaks of gas.
+pub fn black_hole_arena() -> Scene {
+    let mut s = scene("Black Hole Arena");
+    s.canvas = Canvas { width: 1920, height: 1080 };
+    s.camera.horizon = 0.5;
+    s.path.surface = false;
+    s.verge.enabled = false;
+    s.walls.enabled = false;
+    s.sky = Sky {
+        enabled: true, top: [5, 5, 15], horizon: [5, 5, 15],
+        space: Space {
+            enabled: true, stars: 0.03, star_brightness: 2.2, star_colors: 0.0, nebula: 0.0, galaxy: 0.0,
+            black_hole: BlackHole {
+                enabled: true, pos: [0.5, 0.92], size: 0.24, tilt: 82.0, roll: -6.0,
+                disk_colors: [[210, 255, 245], [200, 90, 240], [70, 30, 150]], brightness: 0.9, doppler: 0.6, spin: 3,
+                infall: 10, infall_color: [140, 255, 235], nodes: 9, node_size: 0.024, light: 0.0, ..BlackHole::default()
+            },
+            seed: 7,
+            ..Space::default()
+        },
+        ..Sky::default()
+    };
+    s.light = Lighting {
+        ambient: 0.2, ambient_color: [150, 140, 170], void_color: [5, 5, 15],
+        fog: Fog { enabled: false, color: [5, 5, 15], distance: 200.0, match_sky: false }, bands: 0,
+    };
+    s.props = Vec::new();
+    s.particles = Vec::new();
+    s.post.bloom = 0.25;
+    // The game's colours, art pixels four screen pixels across.
+    s.style = Style {
+        pixel_size: 4,
+        palette: Palette::Custom(vec![
+            [5, 5, 15], [18, 10, 34], [22, 34, 66], [40, 22, 84], [70, 30, 150], [106, 78, 210], [156, 126, 250],
+            [214, 194, 255], [200, 90, 240], [255, 130, 225], [90, 230, 210], [140, 255, 235], [210, 255, 245], [255, 255, 255],
+        ]),
+        ..Style::default()
+    };
+    s.motion = Motion { loop_length: 24.0, speed: 2.0, fps: 24 };
+    s
+}
+
+/// Open flight with no ground: the camera follows a ship along its route. No fog, a dark void, and
+/// the ship flying just ahead and below, chased from behind.
+fn flight(name: &str) -> Scene {
+    let mut s = scene(name);
+    s.camera.horizon = 0.45;
+    s.path.surface = false;
+    s.path.bend = 0.15;
+    s.verge.enabled = false;
+    s.walls.enabled = false;
+    s.light = Lighting {
+        ambient: 0.22, ambient_color: [140, 150, 190], void_color: [2, 3, 9],
+        fog: Fog { enabled: false, color: [2, 3, 9], distance: 200.0, match_sky: false }, bands: 0,
+    };
+    s.companions = vec![Companion { offset: [0.0, 0.9, 9.0], bob: 0.2, weave: 0.6, ..Companion::default() }];
+    s.post.bloom = 0.5;
+    s.motion = Motion { loop_length: 80.0, speed: 16.0, fps: 24 };
+    s
+}
+
+/// A ship's route through open space, chased from behind, straight for a black hole: its disk and
+/// lensed ring ahead, matter streaming in, a small ringed giant far off, and asteroids and dust
+/// rushing past above, below and beside. Everything in the sky is far enough away to stay put;
+/// the speed shows in what streams by.
+pub fn starship_flight() -> Scene {
+    let mut s = flight("Starship Flight");
+    s.sky = Sky {
+        enabled: true, top: [2, 2, 7], horizon: [6, 6, 18],
+        space: Space {
+            enabled: true, nebula: 0.5, nebula_colors: [[160, 70, 150], [60, 90, 200]], galaxy: 0.6, galaxy_angle: 12.0, galaxy_height: 0.8,
+            planets: vec![
+                Planet {
+                    kind: PlanetKind::Gas, pos: [0.84, 0.2], radius: 0.05, color: [196, 150, 104], color2: [240, 222, 186],
+                    light_angle: 200.0, night: 0.45, tilt: -10.0, rings: Rings { enabled: true, ..Rings::default() }, seed: 3, ..Planet::default()
+                },
+            ],
+            black_hole: BlackHole { enabled: true, pos: [0.5, 0.62], size: 0.09, tilt: 85.0, roll: 6.0, infall: 24, light: 1.0, ..BlackHole::default() },
+            ..Space::default()
+        },
+        ..Sky::default()
+    };
+    s.props = vec![
+        PropLayer { rows: 3, row_spacing: 9.0, jitter: 4.0, density: 0.35, scale_var: 0.6, float: 1.0, float_var: 9.0, shadow: false, tint: [100, 92, 84], ..props(PropKind::Boulder, 4.0, 14.0, 1.4, 91) },
+        PropLayer { rows: 2, row_spacing: 12.0, jitter: 5.0, density: 0.4, scale_var: 0.5, float: 1.0, float_var: 12.0, shadow: false, tint: [86, 80, 76], ..props(PropKind::Rock, 8.0, 10.0, 3.0, 93) },
+    ];
+    s.particles = vec![Particles { count: 160, color: [200, 210, 235], ..dust(ParticleKind::Dust, 160) }];
+    s
+}
+
+/// The same chase at light speed: the ship ahead down a tunnel of stretched starlight.
+pub fn hyperspace_jump() -> Scene {
+    let mut s = flight("Hyperspace Jump");
+    s.path.bend = 0.0;
+    s.sky = Sky { enabled: true, top: [2, 3, 9], horizon: [6, 8, 20], ..Sky::default() };
+    s.sky.tunnel = Tunnel { enabled: true, kind: TunnelKind::Hyperspace, radius: 8.0, colors: [[4, 10, 44], [170, 210, 255], [235, 245, 255]], rush: 6, light: 0.8, ..Tunnel::default() };
     s
 }
 
@@ -443,4 +694,11 @@ pub const ALL: &[(&str, fn() -> Scene)] = &[
 ("Bog Boardwalk", bog_boardwalk),
 ("Desert Ruins", desert_ruins),
 ("Ice Cave", ice_cave),
+("Star Bridge", star_bridge),
+("Hyperspace Run", hyperspace_run),
+("Wormhole", wormhole),
+("Starship Flight", starship_flight),
+    ("Event Horizon", event_horizon),
+    ("Black Hole Arena", black_hole_arena),
+("Hyperspace Jump", hyperspace_jump),
 ];

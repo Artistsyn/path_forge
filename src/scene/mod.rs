@@ -35,6 +35,8 @@ pub struct Scene {
     pub props: Vec<PropLayer>,
     /// Structures that span the path at intervals: archways, gates, banners.
     pub set_pieces: Vec<SetPiece>,
+    /// Things travelling along with the camera: a ship flying beside the path, a drone, a bird.
+    pub companions: Vec<Companion>,
     pub particles: Vec<Particles>,
     /// Lightning and fog banks.
     pub weather: Weather,
@@ -100,6 +102,12 @@ pub struct PathShape {
     pub bridge: Bridge,
     /// Side paths that branch off (open ground), or side passages (between walls).
     pub fork: Fork,
+    /// Glowing lines along both edges of the path (and a bridge's deck): a lit walkway.
+    pub edge_lights: EdgeLights,
+    /// Draw the path at all. Off, there is no ground, verge or bridge: the camera flies the route
+    /// through open air or space (a ship's flight path), and with `sky.space.below` or a tunnel
+    /// the sky fills everything round it.
+    pub surface: bool,
 }
 
 /// Forks. On open ground a branch path splits off at `angle` and runs away into the distance; between
@@ -244,11 +252,36 @@ pub struct Stairs {
 impl Default for Stairs {
     fn default() -> Self { Stairs { enabled: false, spacing: 12.0, steps: 8, rise: 0.17, run: 0.32, offset: 3.0, descending: false } }
 }
+/// Lines of light set into the path along both its edges. They glow, and light the floor round
+/// them; far away they widen to a pixel and dim to match, so they do not flicker.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
+pub struct EdgeLights {
+    pub enabled: bool,
+    pub color: Rgb,
+    /// Brightness: 1 bright.
+    pub strength: f32,
+    /// Width of each line, metres.
+    pub width: f32,
+    /// How far in from the path's edge, metres.
+    pub inset: f32,
+    /// Dashes: one dash and one gap every this many metres (snapped to divide the loop); 0 an
+    /// unbroken line.
+    pub dash: f32,
+    /// How many dashes the lights run ahead in one loop, on top of the walk (negative: toward the
+    /// camera). Whole numbers keep the loop seamless.
+    pub flow: i32,
+}
+impl Default for EdgeLights {
+    fn default() -> Self { EdgeLights { enabled: false, color: [80, 210, 255], strength: 1.0, width: 0.05, inset: 0.08, dash: 0.0, flow: 0 } }
+}
+
 impl Default for PathShape {
     fn default() -> Self {
         Self {
             half_width: 1.1, flare: 0.0, bend: 0.0, hill: 0.0, edge_noise: 0.12, edge_dark: 0.35,
             material: Material::default(), stairs: Stairs::default(), bridge: Bridge::default(), fork: Fork::default(),
+            edge_lights: EdgeLights::default(), surface: true,
         }
     }
 }
@@ -310,18 +343,20 @@ impl Default for Ceiling {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
-pub enum Pattern { Cobblestone, Brick, StoneBlock, Sand, Dirt, Grass, Bark, RockFace, Hedge, Planks, Water, Ice, Plain }
+pub enum Pattern { Cobblestone, Brick, StoneBlock, Sand, Dirt, Grass, Bark, RockFace, Hedge, Planks, Water, Ice, Plain, Panels, Grid, Hex, Circuit }
 
 impl Pattern {
-    pub const ALL: [Pattern; 13] = [
+    pub const ALL: [Pattern; 17] = [
         Pattern::Cobblestone, Pattern::Brick, Pattern::StoneBlock, Pattern::Sand, Pattern::Dirt,
         Pattern::Grass, Pattern::Bark, Pattern::RockFace, Pattern::Hedge, Pattern::Planks, Pattern::Water, Pattern::Ice, Pattern::Plain,
+        Pattern::Panels, Pattern::Grid, Pattern::Hex, Pattern::Circuit,
     ];
     pub fn name(self) -> &'static str {
         match self {
             Pattern::Cobblestone => "Cobblestone", Pattern::Brick => "Brick", Pattern::StoneBlock => "Stone Block",
             Pattern::Sand => "Sand", Pattern::Dirt => "Dirt", Pattern::Grass => "Grass", Pattern::Bark => "Bark",
             Pattern::RockFace => "Rock Face", Pattern::Hedge => "Hedge", Pattern::Planks => "Planks", Pattern::Water => "Water", Pattern::Ice => "Ice", Pattern::Plain => "Plain",
+            Pattern::Panels => "Panels", Pattern::Grid => "Grid", Pattern::Hex => "Hex", Pattern::Circuit => "Circuit",
         }
     }
 }
@@ -346,12 +381,15 @@ pub struct Material {
     pub gloss: f32,
     /// Ripples (water) or roughness (wet stone) that break reflections up: 0 glassy .. 1 choppy.
     pub ripples: f32,
+    /// How brightly the lit parts of a futuristic pattern shine (Panels' light bars, Grid lines,
+    /// Hex seams, Circuit traces, in the `mortar` colour): 0 they are only inlays, 1 bright.
+    pub glow: f32,
 }
 impl Default for Material {
     fn default() -> Self {
         Self {
             pattern: Pattern::Cobblestone, base: [80, 72, 62], mortar: [34, 30, 26], noise: 10, damage: 0.2,
-            seed: 0, tile_size: 2.4, rotate: false, brightness: 1.0, gloss: 0.0, ripples: 0.0,
+            seed: 0, tile_size: 2.4, rotate: false, brightness: 1.0, gloss: 0.0, ripples: 0.0, glow: 0.0,
         }
     }
 }
@@ -369,15 +407,249 @@ pub struct Sky {
     /// Northern lights: curtains of green and violet light rippling across the sky.
     pub aurora: Aurora,
     pub rainbow: Rainbow,
+    /// Deep space: a dense starfield, nebulae, a galaxy band and planets.
+    pub space: Space,
+    /// A tunnel all round the path in place of the sky: hyperspace or a wormhole.
+    pub tunnel: Tunnel,
 }
 impl Default for Sky {
     fn default() -> Self {
         Self {
             enabled: true, top: [70, 110, 170], horizon: [200, 190, 160],
             sun: SkyBody::default(), moon: Moon::default(), stars: Stars::default(), clouds: Clouds::default(),
-            aurora: Aurora::default(), rainbow: Rainbow::default(),
+            aurora: Aurora::default(), rainbow: Rainbow::default(), space: Space::default(), tunnel: Tunnel::default(),
         }
     }
+}
+
+/// A tube all round the path, filling everything the world does not draw (sky, and below the
+/// horizon too): the walk runs down its middle and its walls rush past. It hides the rest of the
+/// sky. Use it with a path over a drop (`path.bridge`, `bottom: Void`) so it shows below as well.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
+pub struct Tunnel {
+    pub enabled: bool,
+    pub kind: TunnelKind,
+    /// The tube's radius, metres: small for a tight tunnel, large for an open one.
+    pub radius: f32,
+    /// The walls' deep colour, the streaks or bands, and the light at the far end.
+    pub colors: [Rgb; 3],
+    pub intensity: f32,
+    /// How much faster than the walk the walls rush past: extra loop lengths per loop (whole).
+    pub rush: u32,
+    /// Whole turns the pattern winds round the tube along one loop length (a corkscrew).
+    pub twist: i32,
+    /// Whole turns the whole tunnel spins in one loop.
+    pub spin: i32,
+    /// Hyperspace: how many streaks; Wormhole: how fine the bands. 1 is natural.
+    pub density: f32,
+    /// Brightness of the light at the far end.
+    pub core: f32,
+    /// How much it lights the path in its colour (0 none).
+    pub light: f32,
+    pub seed: u32,
+}
+impl Default for Tunnel {
+    fn default() -> Self {
+        Tunnel {
+            enabled: false, kind: TunnelKind::Hyperspace, radius: 6.0, colors: [[6, 10, 30], [170, 210, 255], [235, 245, 255]],
+            intensity: 1.0, rush: 3, twist: 0, spin: 0, density: 1.0, core: 1.0, light: 0.5, seed: 0,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub enum TunnelKind {
+    /// Streaks of starlight stretched past at light speed.
+    #[default]
+    Hyperspace,
+    /// Swirling bands of glowing gas spiralling down a throat to a bright far end.
+    Wormhole,
+}
+
+/// The sky seen from space. It sits at infinity, so it stays put while the camera walks.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
+pub struct Space {
+    pub enabled: bool,
+    /// Space all round: where nothing is drawn below the horizon (a bridge's bottomless drop, the
+    /// gaps beside a floating walkway) shows space too, instead of the void colour. The sky's
+    /// `top`..`horizon` gradient is mirrored below the horizon.
+    pub below: bool,
+    /// The dense field of faint stars: 0 none .. 1 a rich field .. 2 a crowded one.
+    pub stars: f32,
+    pub star_brightness: f32,
+    /// The stars' colours: 1 hot blue-white to cool orange; 0 all the faint blue-white of
+    /// ball_swing_game's starfield.
+    pub star_colors: f32,
+    /// Glowing gas clouds: strength 0 .. 2, two colours, and size (1 about a sky's height across).
+    pub nebula: f32,
+    pub nebula_colors: [Rgb; 2],
+    pub nebula_scale: f32,
+    /// The band of a galaxy seen edge-on, with dark dust lanes and a brighter core.
+    pub galaxy: f32,
+    pub galaxy_color: Rgb,
+    /// Tilt of the band in degrees (0 level, positive rising to the right).
+    pub galaxy_angle: f32,
+    /// Its width, as a share of the sky's height.
+    pub galaxy_width: f32,
+    /// Where the band crosses the middle of the frame, in sky heights above the horizon.
+    pub galaxy_height: f32,
+    /// Where its bright core sits along the band: -1 left .. 1 right.
+    pub galaxy_core: f32,
+    /// Up to three planets, drawn in order (later ones in front).
+    pub planets: Vec<Planet>,
+    /// A black hole: its shadow, a glowing disk lensed round it, and matter falling in.
+    pub black_hole: BlackHole,
+    pub seed: u32,
+}
+impl Default for Space {
+    fn default() -> Self {
+        Space {
+            enabled: false, below: true, stars: 1.0, star_brightness: 1.0, star_colors: 1.0,
+            nebula: 0.6, nebula_colors: [[190, 70, 200], [60, 120, 255]], nebula_scale: 1.0,
+            galaxy: 0.7, galaxy_color: [235, 225, 255], galaxy_angle: 18.0, galaxy_width: 0.22, galaxy_height: 0.55, galaxy_core: 0.25,
+            planets: Vec::new(), black_hole: BlackHole::default(), seed: 0,
+        }
+    }
+}
+
+/// A black hole in the space sky. Its gravity bends light: the stars and nebulae behind it are
+/// lensed into arcs round it, and the far side of its accretion disk shows over the top and under
+/// the bottom of the dark shadow, ringed by a thin bright photon ring. The disk's side turning
+/// towards you is brighter and bluer. Matter drifts in from both sides of the frame, speeds up,
+/// swirls into the disk's plane and falls in, stretching and reddening. Planets are not lensed:
+/// keep them clear of it.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
+pub struct BlackHole {
+    pub enabled: bool,
+    /// Centre: x 0..1 across the frame, y 0 (top) .. 1 (horizon).
+    pub pos: [f32; 2],
+    /// Radius of the dark shadow, as a share of the sky's height.
+    pub size: f32,
+    /// How edge-on the disk is seen, degrees: 0 face-on, 90 edge-on.
+    pub tilt: f32,
+    /// The disk's roll on screen, degrees (positive turns it anticlockwise).
+    pub roll: f32,
+    /// The disk's inner and outer edge, in horizon radii (3 is the innermost stable orbit).
+    pub disk_inner: f32,
+    pub disk_outer: f32,
+    /// The disk's colour from hot (inner) through warm to cool (outer).
+    pub disk_colors: [Rgb; 3],
+    pub brightness: f32,
+    /// How much brighter and bluer the side turning towards you is: 0 even .. 1 physical.
+    pub doppler: f32,
+    /// Turns the disk's inner edge makes in one loop (the outer part turns slower). Whole turns
+    /// keep the loop seamless; negative spins it the other way.
+    pub spin: i32,
+    /// How strongly it bends the light behind it: 1 natural, 0 none.
+    pub lensing: f32,
+    /// How many streaks of matter are falling in at once, from both sides (0 none, at most 48).
+    pub infall: u32,
+    /// Whole trips each streak makes per loop, at least (some make one more).
+    pub infall_speed: u32,
+    pub infall_color: Rgb,
+    /// How many nodes like ball_swing_game's hook nodes fall in too (0 none): smaller and dimmer
+    /// than the real ones, shrinking as they recede and stretched along their way near the end.
+    pub nodes: u32,
+    /// A node's width as it comes in, as a share of the frame's width (the game's real nodes are
+    /// about 0.03).
+    pub node_size: f32,
+    /// The nodes' dark body and their two glowing rings.
+    pub node_colors: [Rgb; 3],
+    /// How many times further away the hole is than the nodes start (they float in at play
+    /// depth, then are pulled back to it, shrinking with distance).
+    pub distance: f32,
+    /// How much its disk lights the scene, in its warm colour (0 none).
+    pub light: f32,
+    pub seed: u32,
+}
+impl Default for BlackHole {
+    fn default() -> Self {
+        BlackHole {
+            enabled: false, pos: [0.5, 0.45], size: 0.12, tilt: 84.0, roll: -8.0, disk_inner: 3.0, disk_outer: 11.0,
+            disk_colors: [[255, 246, 228], [255, 176, 96], [190, 64, 26]], brightness: 1.0, doppler: 0.9, spin: 4,
+            lensing: 1.0, infall: 18, infall_speed: 1, infall_color: [255, 214, 170],
+            nodes: 0, node_size: 0.018, node_colors: [[22, 34, 66], [90, 230, 210], [156, 126, 250]], distance: 30.0, light: 0.5, seed: 0,
+        }
+    }
+}
+
+/// What a planet's surface is made of.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub enum PlanetKind {
+    /// Cratered rock: `color` lowlands, `color2` highlands.
+    #[default]
+    Rocky,
+    /// A gas giant in bands of `color` and `color2`, with a storm.
+    Gas,
+    /// Oceans (`color`), land (`color2`), ice caps and white cloud; city lights on the night side.
+    Earth,
+    /// Pale ice (`color`) with bright cracks (`color2`).
+    Ice,
+    /// Dark crust (`color`) split by glowing lava (`color2`), which glows on the night side too.
+    Lava,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
+pub struct Planet {
+    pub enabled: bool,
+    pub kind: PlanetKind,
+    /// Centre: x 0..1 across the frame, y 0 (top) .. 1 (horizon); past 1 it sits below the
+    /// horizon, which shows only with `space.below`.
+    pub pos: [f32; 2],
+    /// Radius as a share of the sky's height.
+    pub radius: f32,
+    pub color: Rgb,
+    pub color2: Rgb,
+    /// The glow of its air round the rim, and how strong (0 airless).
+    pub atmosphere: Rgb,
+    pub atmosphere_strength: f32,
+    /// Where its sunlight comes from across the frame, in degrees: 0 from the right, 90 from above.
+    pub light_angle: f32,
+    /// How much of the face is in night: 0 fully lit .. 0.5 half .. 1 a thin crescent.
+    pub night: f32,
+    /// Tilt of its axis (and its bands), degrees.
+    pub tilt: f32,
+    /// Whole turns it spins in one loop (0 still; it must be whole for the loop to close).
+    pub spin: i32,
+    /// Earth and gas giants: how much white cloud.
+    pub clouds: f32,
+    /// Earth: city lights on the night side.
+    pub city_lights: f32,
+    pub rings: Rings,
+    pub seed: u32,
+}
+impl Default for Planet {
+    fn default() -> Self {
+        Planet {
+            enabled: true, kind: PlanetKind::Rocky, pos: [0.7, 0.4], radius: 0.25,
+            color: [150, 130, 115], color2: [205, 190, 170], atmosphere: [120, 170, 255], atmosphere_strength: 0.0,
+            light_angle: 30.0, night: 0.4, tilt: 15.0, spin: 0, clouds: 0.5, city_lights: 0.0,
+            rings: Rings::default(), seed: 0,
+        }
+    }
+}
+
+/// A ring system round a planet, its near half in front of the planet and its far half behind.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
+pub struct Rings {
+    pub enabled: bool,
+    /// Inner and outer edge, in planet radii.
+    pub inner: f32,
+    pub outer: f32,
+    /// How far open they are seen: 0 edge-on .. 1 face-on.
+    pub open: f32,
+    /// Tilt of the ring plane across the frame, degrees.
+    pub angle: f32,
+    pub color: Rgb,
+    pub opacity: f32,
+}
+impl Default for Rings {
+    fn default() -> Self { Rings { enabled: false, inner: 1.35, outer: 2.3, open: 0.25, angle: -12.0, color: [220, 200, 170], opacity: 0.8 } }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -385,18 +657,40 @@ impl Default for Sky {
 pub struct Aurora {
     pub enabled: bool,
     pub intensity: f32,
-    /// Colour at the foot of the curtains.
+    /// Colour of the bright lower edge, the glow over it and the rays rising from it.
     pub low: Rgb,
-    /// Colour at their tops.
+    /// Colour of the diffuse veil high above the edge.
     pub high: Rgb,
-    /// Where the curtains hang: 0 high in the sky .. 1 down at the horizon.
+    /// Colour of the bright knots that flare along the edge.
+    pub accent: Rgb,
+    /// Where the lower edge hangs: 0 high in the sky .. 1 down at the horizon.
     pub height: f32,
-    /// How fast the curtains ripple.
+    /// How far the veil rises above the edge (1 = about the height of the sky).
+    pub tall: f32,
+    /// How fast the light drifts and flows along the band.
     pub speed: f32,
+    /// How much of the band is lit at once: 0 a few patches .. 1 nearly all of it.
+    pub coverage: f32,
+    /// Fine vertical rays in the curtain: 0 a smooth glow .. 1 natural .. 2 strongly rayed.
+    pub rays: f32,
+    /// How much the lower edge swells and folds: 0 a straight band.
+    pub waves: f32,
+    /// How much the band bows up in the middle, as the far arc of the auroral oval does.
+    pub arc: f32,
+    /// Brightness of the thin lower edge against the rest.
+    pub edge: f32,
+    /// How much the aurora lights the ground green (a faint, even glow).
+    pub ground_glow: f32,
     pub seed: u32,
 }
 impl Default for Aurora {
-    fn default() -> Self { Aurora { enabled: false, intensity: 0.8, low: [70, 255, 150], high: [170, 90, 255], height: 0.45, speed: 1.0, seed: 0 } }
+    fn default() -> Self {
+        Aurora {
+            enabled: false, intensity: 1.0, low: [70, 255, 150], high: [225, 130, 255], accent: [255, 170, 245],
+            height: 0.6, tall: 1.0, speed: 1.0, coverage: 0.5, rays: 1.0, waves: 0.5, arc: 1.0, edge: 1.0,
+            ground_glow: 0.5, seed: 0,
+        }
+    }
 }
 
 /// A rainbow: an arc round the point opposite the sun, with a faint second bow outside it.
@@ -633,6 +927,45 @@ impl Default for SetPiece {
         SetPiece {
             enabled: true, kind: SetPieceKind::Archway, spacing: 24.0, offset: 12.0, width: 0.0, height: 3.4,
             tint: [118, 110, 100], accent: [150, 30, 36], shadow: 0.6, sprite: SpriteRef::default(), seed: 0,
+        }
+    }
+}
+
+/// Something travelling along with the camera at the walk's own speed, so it keeps its place in
+/// the frame: a ship flying beside the path. It follows the path round bends, bobs and weaves in
+/// whole cycles per loop, and its engines light what is near.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
+pub struct Companion {
+    pub enabled: bool,
+    /// Where it flies, metres: sideways from the path's centre (right positive), height above the
+    /// path, and distance ahead of the camera.
+    pub offset: [f32; 3],
+    /// Its wingspan, metres (with a sprite: its height).
+    pub size: f32,
+    /// The drawn ship's hull, trim and engine-glow colours.
+    pub color: Rgb,
+    pub accent: Rgb,
+    pub engine: Rgb,
+    /// How far it rises and falls (metres), and how many times per loop.
+    pub bob: f32,
+    pub bob_cycles: u32,
+    /// How far it drifts sideways (metres), and how many times per loop.
+    pub weave: f32,
+    pub weave_cycles: u32,
+    /// How strongly its engines light what is near (0 not at all).
+    pub light: f32,
+    /// An image used instead of the drawn ship (seen from behind, as it flies ahead).
+    pub sprite: SpriteRef,
+    /// With a sprite: texels at least this light (0..1) glow, as engines and windows do (0 none).
+    pub glow_from: f32,
+    pub seed: u32,
+}
+impl Default for Companion {
+    fn default() -> Self {
+        Companion {
+            enabled: true, offset: [-2.4, 2.4, 10.0], size: 3.2, color: [128, 134, 146], accent: [56, 104, 180], engine: [110, 180, 255],
+            bob: 0.25, bob_cycles: 2, weave: 0.4, weave_cycles: 1, light: 1.0, sprite: SpriteRef::default(), glow_from: 0.8, seed: 0,
         }
     }
 }
@@ -968,6 +1301,11 @@ pub struct PropLayer {
     pub tint: Rgb,
     /// How far the base sinks into the ground, as a fraction of height.
     pub sink: f32,
+    /// Floating props (asteroids, drifting islands, lanterns): height above the ground, metres,
+    /// and a random spread either way. Floating props hang over a bridge's drop too, and cast no
+    /// sun shadow.
+    pub float: f32,
+    pub float_var: f32,
     pub shadow: bool,
     pub shadow_opacity: f32,
     pub sprite: SpriteRef,
@@ -983,7 +1321,7 @@ impl Default for PropLayer {
         Self {
             enabled: true, kind: PropKind::Tree, side: Side::Both, lateral: 1.5, spacing: 6.0, offset: 0.0, rows: 1,
             row_spacing: 3.0, jitter: 0.5, density: 1.0, scale: 1.0, scale_var: 0.2, tint: PropKind::Tree.default_tint(),
-            sink: 0.02, shadow: true, shadow_opacity: 0.6, sprite: SpriteRef::default(), seed: 1, def: String::new(),
+            sink: 0.02, float: 0.0, float_var: 0.0, shadow: true, shadow_opacity: 0.6, sprite: SpriteRef::default(), seed: 1, def: String::new(),
         }
     }
 }

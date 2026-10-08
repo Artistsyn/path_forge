@@ -4,6 +4,7 @@
 pub mod view;
 pub mod raster;
 pub mod texture;
+pub mod scifi;
 pub mod sprites;
 pub mod propdefs;
 pub mod palette;

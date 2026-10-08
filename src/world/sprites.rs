@@ -223,6 +223,29 @@ impl Rng {
 }
 
 /// Paint one variant of a procedural prop in `tint`.
+/// A lumpy rock all round, lit from the upper left, with a few craters.
+fn paint_asteroid(tint: Rgb, variant: u32) -> Sprite {
+    let t = rgb_lin(tint);
+    let mut r = Rng(variant.wrapping_mul(2_654_435_761).wrapping_add(0xA57) | 1);
+    let mut c = Canvas::new(160, 128);
+    let n = 14;
+    let (ax, ay) = (r.range(66.0, 76.0), r.range(52.0, 60.0));
+    let pts: Vec<[f32; 2]> = (0..n).map(|i| {
+        let a = i as f32 / n as f32 * std::f32::consts::TAU;
+        let rad = r.range(0.8, 1.0);
+        [80.0 + a.cos() * ax * rad, 64.0 + a.sin() * ay * rad]
+    }).collect();
+    c.poly(&pts, mul(t, 0.7), 1.0);
+    c.ellipse(80.0 - r.range(10.0, 22.0), 64.0 - r.range(10.0, 20.0), r.range(30.0, 40.0), r.range(22.0, 30.0), mul(t, 1.05), 0.6);
+    c.ellipse(80.0 + r.range(18.0, 28.0), 64.0 + r.range(14.0, 22.0), r.range(28.0, 38.0), r.range(18.0, 26.0), mul(t, 0.45), 0.5);
+    for _ in 0..4 {
+        let (x, y, rr) = (r.range(40.0, 120.0), r.range(34.0, 94.0), r.range(4.0, 10.0));
+        c.ellipse(x, y, rr, rr * 0.8, mul(t, 0.45), 0.8);
+        c.ellipse(x - rr * 0.3, y - rr * 0.3, rr * 0.6, rr * 0.45, mul(t, 0.95), 0.4);
+    }
+    c.finish()
+}
+
 pub fn paint_prop(kind: PropKind, tint: Rgb, variant: u32) -> Sprite {
     let t = rgb_lin(tint);
     let mut r = Rng(variant.wrapping_mul(2_654_435_761).wrapping_add(0x9e37) | 1);
@@ -780,7 +803,15 @@ impl SpriteCache {
         self.procedural.entry(key).or_insert_with(|| Arc::new(paint_prop(kind, tint, variant % VARIANTS))).clone()
     }
 
-    pub fn set_piece(&mut self, kind: SetPieceKind, tint: Rgb, accent: Rgb, ow: f32, oh: f32, variant: u32) -> (Arc<Sprite>, f32, f32) {
+    /// A whole rock for one floating in space (`PropLayer.float`): the ground rocks are domes with
+/// a flat base, which reads as a cut edge in mid-air.
+pub fn asteroid(&mut self, tint: Rgb, variant: u32) -> Arc<Sprite> {
+    let key = (0xA5, tint, variant % VARIANTS);
+    if self.procedural.len() > 256 { self.procedural.clear(); }
+    self.procedural.entry(key).or_insert_with(|| Arc::new(paint_asteroid(tint, variant % VARIANTS))).clone()
+}
+
+pub fn set_piece(&mut self, kind: SetPieceKind, tint: Rgb, accent: Rgb, ow: f32, oh: f32, variant: u32) -> (Arc<Sprite>, f32, f32) {
         let key = (kind as u8, tint, accent, (ow * 10.0).round() as u32, (oh * 10.0).round() as u32, variant % VARIANTS);
         if self.pieces.len() > 64 { self.pieces.clear(); }
         self.pieces.entry(key).or_insert_with(|| {
