@@ -58,10 +58,11 @@ pf presets
 pf render --preset "Forest Path" -o forest.png
 ```
 
-There are 26 presets: Stone Dungeon, Stone Crypt, Mossy Sewer, Forest Path, Desert Canyon, Night
+There are 31 presets: Stone Dungeon, Stone Crypt, Mossy Sewer, Forest Path, Desert Canyon, Night
 Road, Magic Cavern, Ice Dungeon, Ruins Path, Dark Street, Mountain Pass, Volcanic Rift, Haunted
 Forest, Ruined Castle, Fiery Dungeon, Tower Stair, Bog Boardwalk, Desert Ruins, Ice Cave, Star Bridge,
-Hyperspace Run, Wormhole, Starship Flight, Event Horizon, Black Hole Arena and Hyperspace Jump.
+Hyperspace Run, Wormhole, Starship Flight, Event Horizon, Black Hole Arena, River Run, Canal Lanterns,
+Jungle River, Lagoon Swim, Frozen Channel and Hyperspace Jump.
 Every one loops without a seam (`pf seam` checks them all).
 
 ## 2. Scenes
@@ -104,6 +105,18 @@ speed, and each cloud forms, drifts and dissolves once per loop, so the loop sti
 **The moon** is drawn as a lit sphere. `phase` runs from −1 to 1: 0 is full, and the lit part
 shrinks towards new at either end (negative on the waning side, positive on the waxing side). The unlit part shows the sky and the stars behind it, plus a
 faint earthshine.
+
+**Waterways** (`path.waterway`). With `enabled` the path is water to travel on by boat or swimming
+(give it a `Water` material with high `gloss`). The current carries the water's pattern towards the
+camera at `flow` whole tiles per loop (negative runs away; 0 is still). `foam` laps the banks, or the
+walls when there is no verge, in a band `foam_width` metres wide that swells `lap` times a loop, in
+`foam_color`; the bank or wall is darkened and glossy where the water wets it, up to `wet` metres
+out. `floating` sets what drifts down on the current: `Foam` (patches or ice floes), `Leaves` or
+`LilyPads` (a few in flower), at `float_density` per cell, `float_size` metres across, in
+`float_color`. Rain rings the water instead of wetting it, and snow does not lie on it. For a
+swimmer, put `camera.eye_height` near 0.3 and the horizon low (Lagoon Swim); for a boat, 1-1.3 m.
+Light shafts fill the whole air under an open sky, so leave them off unless trees or walls break
+the sun up.
 
 **Bridges** (`path.bridge`). Every `spacing` metres the ground beside the path drops away for
 `length` metres and the path crosses on a `deck`. Below it is `bottom`: ground `depth` metres down,

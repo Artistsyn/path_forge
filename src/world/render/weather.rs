@@ -166,11 +166,15 @@ pub(super) fn haze(scene: &Scene, fog: Option<([f32; 3], f32)>, wx: &mut Wx) -> 
 pub(super) fn surface(ctx: &Ctx, g: &GPixel, tex: u8, albedo: [f32; 3], gloss: f32, ripples: f32) -> ([f32; 3], f32, f32, (f32, f32)) {
     let wx = &ctx.wx;
     let (mut a, mut gl, mut rp, mut ring) = (albedo, gloss, ripples, (0.0, 0.0));
-    let floor = matches!(g.id, id::GROUND | id::RISER) && matches!(tex, 0 | 1 | 4);
+    // Rain does not wet a waterway and snow does not lie on it; the rain rings it instead.
+    let water = ctx.water.is_some() && g.id == id::GROUND && tex == 0;
+    let floor = !water && matches!(g.id, id::GROUND | id::RISER) && matches!(tex, 0 | 1 | 4);
     let w = ctx.scroll + g.d;
     let seed = ctx.scene.weather.precipitation.seed;
     if wx.wet > 0.0 {
-        if floor {
+        if water {
+            if wx.rings > 0.0 { ring = rain_rings(ctx, g.x, w); }
+        } else if floor {
             a = scale3(a, 1.0 - if tex == 1 { 0.25 } else { 0.4 } * wx.wet);
             gl = gl.max(0.32 * wx.wet);
             rp = rp.max(0.35 * wx.wet);
@@ -739,8 +743,16 @@ pub(super) fn light_shafts(ctxs: &[Ctx], here: usize, gbuf: &[GPixel], hdr: &mut
             for _ in 0..steps {
                 x += dx;
                 y += dy;
-                let (ix, iy) = (x as i64, y as i64);
-                if ix >= 0 && iy >= 0 && (ix as usize) < mw && (iy as usize) < mh { acc += mask[iy as usize * mw + ix as usize] * wgt; }
+                // The mask read between cells: read cell by cell, the long steps far from the sun
+                // gathered the same cells for whole blocks of pixels, and smooth surfaces showed them.
+                let at = |ix: i64, iy: i64| if ix >= 0 && iy >= 0 && (ix as usize) < mw && (iy as usize) < mh { mask[iy as usize * mw + ix as usize] } else { 0.0 };
+                let (fx, fy) = (x - 0.5, y - 0.5);
+                let (x0, y0) = (fx.floor(), fy.floor());
+                let (tx, ty) = (fx - x0, fy - y0);
+                let (ix, iy) = (x0 as i64, y0 as i64);
+                let top = at(ix, iy) + (at(ix + 1, iy) - at(ix, iy)) * tx;
+                let bot = at(ix, iy + 1) + (at(ix + 1, iy + 1) - at(ix, iy + 1)) * tx;
+                acc += (top + (bot - top) * ty) * wgt;
                 wgt *= 0.975;
             }
             // Light gathered along the way, saturating softly toward the sun's own glare.

@@ -108,6 +108,13 @@ depth layers or a depth map).
   The ground beside the path falls away and walls carry on down into the gap; trees and rocks
   stop at the edge and standing lamps move onto the railing. In a walled corridor the walls must
   stand back from the path (`walls.gap` 1.5 m or more) or there is no gap to cross; pf_analyze warns.
+- **Waterways:** `path.waterway` (`enabled`, `flow` whole tiles of current per loop, `foam` and
+  `foam_width` lapping the banks `lap` times a loop, `wet` bank, `floating` "Foam" / "Leaves" /
+  "LilyPads" with `float_density`, `float_size`, `float_color`). The path becomes a river or canal
+  for boat or swimmer games; give it a glossy `Water` material. Boat eye 1-1.3 m, swimmer eye
+  ~0.3 m with `camera.horizon` ~0.42. No verge plus walls at `gap` 0 makes a canal. Keep
+  `light_shafts` off under an open sky (they haze the whole frame) and keep leaves small (0.15 m)
+  and dull. Presets River Run, Canal Lanterns, Jungle River, Lagoon Swim, Frozen Channel.
 - **Forks:** `path.fork` (`spacing`, `side` "Left" / "Right" / "Alternate" / "Both", `style`,
   `angle`, `half_width`). On open ground `style` "Side" (the default) sends a branch path off
   through a gap in the road's edge; "Split" divides the road itself: it widens into one paved

@@ -44,6 +44,8 @@ m("path.bridge.spacing", 4.0, 96.0, " m"), m("path.bridge.length", 0.5, 64.0, " 
 m("path.bridge.depth", 0.5, 120.0, " m"), m("path.bridge.rail_height", 0.2, 2.0, " m"), m("path.bridge.water_level", 0.1, 120.0, " m"),
 m("path.fork.spacing", 4.0, 96.0, " m"), m("path.fork.offset", 0.0, 96.0, " m"), m("path.fork.angle", 5.0, 85.0, "°"),
 m("path.fork.half_width", 0.2, 4.0, " m"), m("path.fork.depth", 0.5, 30.0, " m"), m("path.fork.height", 0.5, 6.0, " m"),
+m("path.waterway.flow", -8.0, 8.0, ""), m("path.waterway.foam", 0.0, 1.0, ""), m("path.waterway.foam_width", 0.01, 2.0, " m"), m("path.waterway.lap", 0.0, 12.0, ""),
+m("path.waterway.wet", 0.0, 2.0, " m"), m("path.waterway.float_density", 0.0, 1.0, ""), m("path.waterway.float_size", 0.05, 2.0, " m"),
 m("*.gloss", 0.0, 1.0, ""), m("*.ripples", 0.0, 1.0, ""),
 m("weather.lightning.strikes", 0.0, 16.0, " per loop"), m("weather.lightning.intensity", 0.0, 4.0, "×"),
 m("weather.fog_banks.spacing", 4.0, 96.0, " m"), m("weather.fog_banks.length", 0.5, 48.0, " m"), m("weather.fog_banks.density", 0.0, 3.0, "/m"),

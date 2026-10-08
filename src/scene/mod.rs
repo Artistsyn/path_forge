@@ -108,6 +108,59 @@ pub struct PathShape {
     /// through open air or space (a ship's flight path), and with `sky.space.below` or a tunnel
     /// the sky fills everything round it.
     pub surface: bool,
+    /// The path as a waterway, for boats and swimmers (give `material` the Water pattern).
+    pub waterway: Waterway,
+}
+
+/// The path as a waterway, for games where the player steers a boat or swims: a current, foam
+/// lapping at the banks or walls, the bank wet where the water reaches it, and things floating on
+/// the surface. Give `path.material` the Water pattern (gloss 1, some ripples); with no verge the
+/// water runs to the walls, as a canal's does.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
+pub struct Waterway {
+    pub enabled: bool,
+    /// The current, towards the camera: whole tiles of the water's pattern carried past per loop
+    /// (0 still water, negative flows away). Floating things drift with it.
+    pub flow: i32,
+    /// Foam where the water laps the banks or walls: 0 none .. 1.
+    pub foam: f32,
+    pub foam_color: Rgb,
+    /// How far out from the bank the foam reaches, metres.
+    pub foam_width: f32,
+    /// Times the water laps up the bank in one loop (whole).
+    pub lap: u32,
+    /// How far up the bank (or the walls) the water wets it, darker and glistening, metres.
+    pub wet: f32,
+    /// What floats on the water, drifting with the current.
+    pub floating: Floating,
+    /// How much of the water they cover, 0 .. 1.
+    pub float_density: f32,
+    pub float_color: Rgb,
+    /// How big each one is, metres across.
+    pub float_size: f32,
+    pub seed: u32,
+}
+impl Default for Waterway {
+    fn default() -> Self {
+        Waterway {
+            enabled: false, flow: 2, foam: 0.5, foam_color: [214, 226, 224], foam_width: 0.35, lap: 3, wet: 0.25,
+            floating: Floating::None, float_density: 0.3, float_color: [70, 110, 52], float_size: 0.5, seed: 0,
+        }
+    }
+}
+
+/// Things floating on a waterway.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub enum Floating {
+    #[default]
+    None,
+    /// Clumps of foam.
+    Foam,
+    /// Fallen leaves.
+    Leaves,
+    /// Lily pads, a few in flower.
+    LilyPads,
 }
 
 /// Forks. On open ground a branch path splits off at `angle` and runs away into the distance; between
@@ -281,7 +334,7 @@ impl Default for PathShape {
         Self {
             half_width: 1.1, flare: 0.0, bend: 0.0, hill: 0.0, edge_noise: 0.12, edge_dark: 0.35,
             material: Material::default(), stairs: Stairs::default(), bridge: Bridge::default(), fork: Fork::default(),
-            edge_lights: EdgeLights::default(), surface: true,
+            edge_lights: EdgeLights::default(), surface: true, waterway: Waterway::default(),
         }
     }
 }

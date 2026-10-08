@@ -212,6 +212,150 @@ pub fn wormhole() -> Scene {
     s
 }
 
+/// Water for a waterway path: glossy and rippled, its soft pattern carried by the current.
+fn water(base: Rgb, deep: Rgb, ripples: f32) -> Material {
+    Material { gloss: 1.0, ripples, noise: 3, damage: 0.0, rotate: false, ..mat(Pattern::Water, base, deep, 4.0) }
+}
+
+fn waterway(flow: i32, foam: f32) -> Waterway { Waterway { enabled: true, flow, foam, ..Waterway::default() } }
+
+/// A boat's-eye run down a summer river: grassy banks with reeds at the water, willows and woods
+/// behind, rocks breaking the surface, foam where it laps the banks, a few leaves carried along,
+/// and sunlight through the trees mirrored in the water.
+pub fn river_run() -> Scene {
+    let mut s = scene("River Run");
+    s.camera.horizon = 0.3;
+    s.camera.eye_height = 1.2;
+    s.path.half_width = 3.2;
+    s.path.bend = 0.25;
+    s.path.edge_noise = 0.35;
+    s.path.edge_dark = 0.15;
+    s.path.material = water([46, 78, 82], [26, 48, 52], 0.3);
+    s.path.waterway = Waterway { floating: Floating::Leaves, float_density: 0.08, float_color: [112, 82, 40], float_size: 0.16, ..waterway(3, 0.55) };
+    s.verge = Verge { enabled: true, material: mat(Pattern::Grass, [50, 86, 34], [32, 58, 22], 2.0), tufts: true, ..Verge::default() };
+    s.walls.enabled = false;
+    s.sky = day_sky([80, 136, 200], [200, 218, 210], [0.72, 0.38]);
+    s.light = outdoor_light(0.55, [160, 188, 182], 60.0);
+    s.props = vec![
+        PropLayer { density: 0.6, rows: 1, jitter: 0.3, tint: [92, 118, 58], ..props(PropKind::Reeds, 0.15, 2.0, 0.8, 61) },
+        PropLayer { density: 0.6, rows: 2, row_spacing: 4.0, jitter: 1.2, ..props(PropKind::Willow, 2.2, 9.0, 1.0, 63) },
+        PropLayer { rows: 3, row_spacing: 3.5, jitter: 1.2, density: 0.8, ..props(PropKind::Tree, 6.0, 5.0, 1.1, 67) },
+        PropLayer { density: 0.3, jitter: 0.5, sink: 0.45, shadow: false, tint: [118, 116, 108], ..props(PropKind::Rock, -0.9, 9.0, 0.7, 69) },
+    ];
+    s.particles = vec![dust(ParticleKind::Leaves, 20)];
+    s.weather.wind = Wind { enabled: true, speed: 2.0, gusts: 0.4, sway: 0.4, ..Wind::default() };
+    s.motion.speed = 4.5;
+    s
+}
+
+/// A gondola's glide down a canal at night: stone walls rising straight from the water, lanterns
+/// on both sides mirrored in it, stone bridges arching over, the walls dark and wet at the
+/// waterline, and a low mist on the water.
+pub fn canal_lanterns() -> Scene {
+    let mut s = scene("Canal Lanterns");
+    s.camera.horizon = 0.32;
+    s.camera.eye_height = 1.3;
+    s.path.half_width = 2.2;
+    s.path.edge_noise = 0.0;
+    s.path.edge_dark = 0.1;
+    s.path.material = water([20, 30, 38], [10, 16, 22], 0.18);
+    s.path.waterway = Waterway { foam_color: [150, 160, 160], foam_width: 0.25, wet: 0.7, ..waterway(1, 0.2) };
+    s.verge.enabled = false;
+    s.walls = Walls { enabled: true, gap: 0.0, height: 9.0, base_shadow: 0.3, material: mat(Pattern::StoneBlock, [96, 82, 66], [44, 36, 28], 2.2) };
+    s.sky = night_sky([6, 8, 22], [34, 28, 48]);
+    s.light = outdoor_light(0.16, [14, 14, 26], 40.0);
+    s.light.ambient_color = [150, 150, 190];
+    s.fixtures = vec![Fixture { kind: FixtureKind::Lantern, mount: Mount::Wall, height: 2.6, spacing: 7.0, radius: 8.0, intensity: 1.4, side: Side::Both, ..Fixture::default() }];
+    s.set_pieces = vec![SetPiece { kind: SetPieceKind::Archway, spacing: 32.0, offset: 14.0, height: 3.4, tint: [112, 98, 82], ..SetPiece::default() }];
+    s.weather.mist = Mist { enabled: true, height: 0.6, density: 0.08, color: [120, 120, 150], patchiness: 0.5, wisps: 0.4, ..Mist::default() };
+    s.motion.speed = 3.0;
+    s
+}
+
+/// Up a jungle river: palms and thick undergrowth crowding murky green water, lily pads drifting
+/// past, steamy haze, and shafts of sun breaking through.
+pub fn jungle_river() -> Scene {
+    let mut s = scene("Jungle River");
+    s.camera.horizon = 0.3;
+    s.camera.eye_height = 1.0;
+    s.path.half_width = 2.6;
+    s.path.bend = -0.35;
+    s.path.edge_noise = 0.45;
+    s.path.edge_dark = 0.2;
+    s.path.material = water([52, 64, 40], [30, 38, 22], 0.2);
+    s.path.waterway = Waterway {
+        foam_color: [180, 176, 150], floating: Floating::LilyPads, float_density: 0.14, float_color: [38, 72, 32], float_size: 0.5, wet: 0.35,
+        ..waterway(2, 0.25)
+    };
+    s.verge = Verge { enabled: true, material: mat(Pattern::Dirt, [70, 62, 40], [44, 38, 24], 2.0), tufts: true, tuft_color: [52, 96, 30], tuft_density: 1.4, ..Verge::default() };
+    s.walls.enabled = false;
+    s.sky = day_sky([84, 136, 150], [176, 198, 176], [0.35, 0.3]);
+    s.light = outdoor_light(0.45, [110, 136, 108], 55.0);
+    s.light.ambient_color = [190, 205, 165];
+    s.props = vec![
+        PropLayer { density: 0.7, rows: 2, row_spacing: 1.5, jitter: 0.5, tint: [70, 110, 40], ..props(PropKind::Bush, 0.4, 2.0, 1.1, 71) },
+        PropLayer { density: 0.75, rows: 3, row_spacing: 3.0, jitter: 1.4, ..props(PropKind::Palm, 1.8, 5.0, 1.2, 73) },
+        PropLayer { rows: 2, row_spacing: 4.0, jitter: 1.5, density: 0.8, tint: [52, 90, 40], ..props(PropKind::Tree, 6.0, 6.0, 1.4, 79) },
+    ];
+    s.particles = vec![dust(ParticleKind::Spores, 50)];
+    s.weather.mist = Mist { enabled: true, height: 0.5, density: 0.04, color: [168, 186, 160], patchiness: 0.6, wisps: 0.5, ..Mist::default() };
+    s.motion.speed = 3.5;
+    s
+}
+
+/// A swimmer's view across a tropical lagoon at sunset, eyes just above the water: turquoise
+/// swell, surf lapping white sand, palms leaning over, rocks awash.
+pub fn lagoon_swim() -> Scene {
+    let mut s = scene("Lagoon Swim");
+    s.camera.horizon = 0.42;
+    s.camera.eye_height = 0.32;
+    s.path.half_width = 4.5;
+    s.path.edge_noise = 0.5;
+    s.path.edge_dark = 0.1;
+    s.path.material = water([40, 150, 160], [20, 96, 120], 0.55);
+    s.path.waterway = Waterway { foam_color: [240, 244, 240], foam_width: 0.6, lap: 4, wet: 0.5, ..waterway(1, 0.7) };
+    s.verge = Verge { enabled: true, material: mat(Pattern::Sand, [214, 196, 150], [190, 170, 124], 2.0), tufts: false, ..Verge::default() };
+    s.walls.enabled = false;
+    s.sky = day_sky([70, 110, 190], [255, 190, 140], [0.5, 0.42]);
+    s.sky.sun.color = [255, 210, 160];
+    s.light = outdoor_light(0.5, [240, 190, 160], 70.0);
+    s.light.ambient_color = [255, 210, 190];
+    s.props = vec![
+        PropLayer { density: 0.6, rows: 2, row_spacing: 4.0, jitter: 1.5, ..props(PropKind::Palm, 2.5, 8.0, 1.2, 83) },
+        PropLayer { density: 0.2, jitter: 1.0, sink: 0.55, shadow: false, tint: [96, 88, 80], ..props(PropKind::Rock, -0.6, 10.0, 0.6, 89) },
+    ];
+    s.motion.speed = 1.6;
+    s
+}
+
+/// A channel through the ice under a pale winter sky: dark cold water between snowbanks, ice
+/// floes drifting down, spikes of ice and snowy pines along the shore, and light snow.
+pub fn frozen_channel() -> Scene {
+    let mut s = scene("Frozen Channel");
+    s.camera.horizon = 0.3;
+    s.camera.eye_height = 1.1;
+    s.path.half_width = 2.8;
+    s.path.bend = 0.2;
+    s.path.edge_noise = 0.4;
+    s.path.edge_dark = 0.1;
+    s.path.material = water([24, 40, 52], [12, 22, 30], 0.15);
+    s.path.waterway = Waterway {
+        foam_color: [200, 220, 230], floating: Floating::Foam, float_density: 0.18, float_color: [220, 232, 240], float_size: 0.8, wet: 0.2,
+        ..waterway(1, 0.35)
+    };
+    s.verge = Verge { enabled: true, material: mat(Pattern::Sand, [222, 228, 234], [196, 206, 216], 2.0), tufts: false, ..Verge::default() };
+    s.walls.enabled = false;
+    s.sky = day_sky([96, 130, 172], [214, 224, 234], [0.3, 0.5]);
+    s.light = outdoor_light(0.6, [200, 212, 224], 70.0);
+    s.props = vec![
+        PropLayer { density: 0.5, jitter: 0.6, tint: [170, 210, 230], ..props(PropKind::IceSpike, 0.8, 5.0, 0.8, 97) },
+        PropLayer { rows: 3, row_spacing: 3.5, jitter: 1.3, density: 0.8, tint: [60, 84, 76], ..props(PropKind::Pine, 3.5, 5.0, 1.1, 101) },
+    ];
+    s.weather.precipitation = Precipitation { enabled: true, kind: PrecipKind::Snow, intensity: 0.3, haze: 0.2, ..Precipitation::default() };
+    s.motion.speed = 3.2;
+    s
+}
+
 /// The black hole from ball_swing_game's boss arena, as a walk: a deck over nothing heading
 /// straight for it. Its shadow hangs over the path's end, ringed by light, the far side of its
 /// disk bent over the top and under the bottom, the stars smeared into arcs round it, and matter
@@ -700,5 +844,10 @@ pub const ALL: &[(&str, fn() -> Scene)] = &[
 ("Starship Flight", starship_flight),
     ("Event Horizon", event_horizon),
     ("Black Hole Arena", black_hole_arena),
+    ("River Run", river_run),
+    ("Canal Lanterns", canal_lanterns),
+    ("Jungle River", jungle_river),
+    ("Lagoon Swim", lagoon_swim),
+    ("Frozen Channel", frozen_channel),
 ("Hyperspace Jump", hyperspace_jump),
 ];

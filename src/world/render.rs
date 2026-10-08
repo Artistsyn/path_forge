@@ -23,6 +23,7 @@ mod weather;
 mod splat;
 mod space;
 mod blackhole;
+mod water;
 use splat::{Shape, Splat};
 
 /// Which parts of the world to draw, for layered exports.
@@ -251,6 +252,8 @@ struct Ctx<'a> {
     wall_tex: Arc<Texture>,
     ceil_tex: Arc<Texture>,
     path_tile: f32,
+    /// The path as a waterway: its current, foam and what floats on it.
+    water: Option<water::WaterK>,
     verge_tile: f32,
     wall_tile: f32,
     ceil_tile: f32,
@@ -1553,6 +1556,7 @@ impl WorldRenderer {
             wall_tex: self.textures.get(&scene.walls.material),
             ceil_tex: self.textures.get(&scene.ceiling.material),
             path_tile: snap_to_loop(scene.path.material.tile_size, loop_len),
+            water: water::water_k(scene, loop_len, snap_to_loop(scene.path.material.tile_size, loop_len), tphase),
             verge_tile: snap_to_loop(scene.verge.material.tile_size, loop_len),
             wall_tile: snap_to_loop(scene.walls.material.tile_size, loop_len),
             ceil_tile: snap_to_loop(scene.ceiling.material.tile_size, loop_len),
@@ -2501,6 +2505,8 @@ fn surface_uv(ctx: &Ctx, g: &GPixel) -> Option<(f32, f32, u8)> {
             });
             let on_path = !between && (!ctx.scene.verge.enabled || g.x.abs() < ctx.path_edge(g.d) || ctx.on_fork(g.x, g.d));
             if on_path {
+                // A waterway's current carries its pattern towards the camera.
+                let along = along + ctx.water.map_or(0.0, |k| k.shift);
                 let (u, v) = rot(&ctx.scene.path.material, g.x / ctx.path_tile, along / ctx.path_tile);
                 Some((u, v, 0))
             } else {
@@ -2632,6 +2638,22 @@ fn shade_px(ctx: &Ctx, g: &GPixel, gbuf: &[GPixel], i: usize, x: usize, y: usize
         let grain = (luma(albedo) / luma(rgb_lin(b.deck.base)).max(1e-3)).clamp(0.6, 1.3);
         albedo = scale3(rgb_lin(b.rail_color), grain);
     }
+    // A waterway: the foam and what floats on the water, and the bank or walls wet beside it.
+    let (mut gloss_k, mut wet_g) = (1.0f32, 0.0f32);
+    if let Some(k) = &ctx.water {
+        if g.id == id::GROUND && tex == 0 {
+            let px = g.depth / ctx.view.focal_px;
+            let (c, a) = water::water_cover(k, g.x, ctx.scroll + g.d, water::water_edge(ctx, g.d) - g.x.abs(), px);
+            albedo = mix3(albedo, c, a);
+            gloss_k = 1.0 - a;
+        } else if g.id == id::GROUND && tex == 1 {
+            let wt = water::wetness(k, g.x.abs() - water::water_edge(ctx, g.d));
+            albedo = scale3(albedo, 1.0 - 0.45 * wt);
+            wet_g = 0.35 * wt;
+        } else if g.id == id::WALL_L || g.id == id::WALL_R {
+            albedo = scale3(albedo, 1.0 - 0.45 * water::wetness(k, g.y));
+        }
+    }
     let mut ao = ao_mask[i];
     let (normal, skip) = match g.id {
         id::GROUND => {
@@ -2704,6 +2726,7 @@ fn shade_px(ctx: &Ctx, g: &GPixel, gbuf: &[GPixel], i: usize, x: usize, y: usize
         _ => { ao *= passage_dark(ctx, g); ([0.0, -1.0, 0.0], id::CEILING) }
     };
     let (gloss, ripples) = gloss_of(ctx, tex, g.id);
+    let gloss = (gloss * gloss_k).max(wet_g);
     // Rain darkens and wets, puddles mirror, snow covers.
     let (albedo, gloss, ripples, rings) = weather::surface(ctx, g, tex, albedo, gloss, ripples);
     let light = ctx.light_among(g.x, g.y, g.d, Some(normal), skip, sun_mask[i], None, near_lights);
@@ -2877,6 +2900,12 @@ fn gpu_params(ctx: &Ctx, layers: &Layers) -> super::gpu::WorldParams {
         zero: 0, fk_style: fk.map_or(0, |f| f.split as u32), fk_noise: fk.map_or(0.0, |f| f.noise), tile_cap: 0,
         el_on: el.is_some() as u32, el_col: el.map_or([0.0; 3], |e| e.col), el_hw: el.map_or(0.0, |e| e.hw), el_inset: el.map_or(0.0, |e| e.inset),
         el_period: el.map_or(0.0, |e| e.period), el_phase: el.map_or(0.0, |e| e.phase),
+        ww_on: ctx.water.is_some() as u32,
+        ww_shift: ctx.water.map_or(0.0, |k| k.shift), ww_foam: ctx.water.map_or(0.0, |k| k.foam), ww_foam_col: ctx.water.map_or([0.0; 3], |k| k.foam_col),
+        ww_foam_w: ctx.water.map_or(1.0, |k| k.foam_w), ww_lap_ph: ctx.water.map_or(0.0, |k| k.lap_ph), ww_lap_k: ctx.water.map_or(0.0, |k| k.lap_k),
+        ww_k1: ctx.water.map_or(0.0, |k| k.k1), ww_k2: ctx.water.map_or(0.0, |k| k.k2), ww_wet: ctx.water.map_or(0.0, |k| k.wet),
+        ww_kind: ctx.water.map_or(0, |k| k.kind), ww_dens: ctx.water.map_or(0.0, |k| k.dens), ww_fcol: ctx.water.map_or([0.0; 3], |k| k.fcol),
+        ww_fsize: ctx.water.map_or(1.0, |k| k.fsize), ww_period: ctx.water.map_or(1.0, |k| k.period), ww_cs: ctx.water.map_or(1.0, |k| k.cs), ww_seed: ctx.water.map_or(0, |k| k.seed),
         ..bytemuck::Zeroable::zeroed()
     }
 }
@@ -4364,7 +4393,7 @@ mod tests {
                 path_tile: 1.0, verge_tile: 1.0, wall_tile: 1.0, ceil_tile: 1.0,
                 bridge: Spans::new(&s.path.bridge, 24.0), fork: Forks::new(&s.path.fork, s.path.edge_noise, 24.0), deck_tex: r.textures.get(&s.path.bridge.deck), bottom_tex: r.textures.get(&s.verge.material),
                 deck_tile: 1.0, bottom_tile: 1.0, ambient: [0.0; 3],
-                sky_lights: vec![], lights: vec![], fog: None, fog_col: [0.0; 3], void_lin: [0.0; 3], realm: 0, bounds: None, facade: None, opening: None, portal: None, front: None, verge_beyond: None, gain: 1.0, wx: weather::Wx::default(),
+                sky_lights: vec![], lights: vec![], fog: None, fog_col: [0.0; 3], void_lin: [0.0; 3], realm: 0, bounds: None, facade: None, opening: None, portal: None, front: None, verge_beyond: None, gain: 1.0, wx: weather::Wx::default(), water: None,
             };
             let tris = build_geometry(&ctx, &opts.layers);
             let mut gbuf = vec![raster::GPixel::EMPTY; 90 * 160];
@@ -4484,7 +4513,7 @@ mod tests {
                 path_tile: 1.0, verge_tile: 1.0, wall_tile: 1.0, ceil_tile: 1.0,
                 bridge: Spans::new(&s.path.bridge, 24.0), fork: Forks::new(&s.path.fork, s.path.edge_noise, 24.0), deck_tex: r.textures.get(&s.path.bridge.deck), bottom_tex: r.textures.get(&s.verge.material),
                 deck_tile: 1.0, bottom_tile: 1.0, ambient: [0.0; 3],
-                sky_lights: vec![], lights: vec![], fog: None, fog_col: [0.0; 3], void_lin: [0.0; 3], realm: 0, bounds: None, facade: None, opening: None, portal: None, front: None, verge_beyond: None, gain: 1.0, wx: weather::Wx::default(),
+                sky_lights: vec![], lights: vec![], fog: None, fog_col: [0.0; 3], void_lin: [0.0; 3], realm: 0, bounds: None, facade: None, opening: None, portal: None, front: None, verge_beyond: None, gain: 1.0, wx: weather::Wx::default(), water: None,
             };
             let tris = build_geometry(&ctx, &Layers::default());
             let mut gbuf = vec![raster::GPixel::EMPTY; 90 * 160];
@@ -4528,7 +4557,7 @@ mod tests {
                 path_tile: 1.0, verge_tile: 1.0, wall_tile: 1.0, ceil_tile: 1.0,
                 bridge: Spans::new(&s.path.bridge, 24.0), fork: Forks::new(&s.path.fork, s.path.edge_noise, 24.0), deck_tex: r.textures.get(&s.path.bridge.deck), bottom_tex: r.textures.get(&s.verge.material),
                 deck_tile: 1.0, bottom_tile: 1.0, ambient: [0.0; 3],
-                sky_lights: vec![], lights: vec![], fog: None, fog_col: [0.0; 3], void_lin: [0.0; 3], realm: 0, bounds: None, facade: None, opening: None, portal: None, front: None, verge_beyond: None, gain: 1.0, wx: weather::Wx::default(),
+                sky_lights: vec![], lights: vec![], fog: None, fog_col: [0.0; 3], void_lin: [0.0; 3], realm: 0, bounds: None, facade: None, opening: None, portal: None, front: None, verge_beyond: None, gain: 1.0, wx: weather::Wx::default(), water: None,
             };
             let tris = build_geometry(&ctx, &Layers::default());
             let mut gbuf = vec![raster::GPixel::EMPTY; 90 * 160];
@@ -4561,7 +4590,7 @@ mod tests {
                 path_tile: 1.0, verge_tile: 1.0, wall_tile: 1.0, ceil_tile: 1.0,
                 bridge: None, fork: Forks::new(&s.path.fork, s.path.edge_noise, 24.0), deck_tex: r.textures.get(&s.path.bridge.deck), bottom_tex: r.textures.get(&s.verge.material),
                 deck_tile: 1.0, bottom_tile: 1.0, ambient: [0.0; 3],
-                sky_lights: vec![], lights: vec![], fog: None, fog_col: [0.0; 3], void_lin: [0.0; 3], realm: 0, bounds: None, facade: None, opening: None, portal: None, front: None, verge_beyond: None, gain: 1.0, wx: weather::Wx::default(),
+                sky_lights: vec![], lights: vec![], fog: None, fog_col: [0.0; 3], void_lin: [0.0; 3], realm: 0, bounds: None, facade: None, opening: None, portal: None, front: None, verge_beyond: None, gain: 1.0, wx: weather::Wx::default(), water: None,
             };
             let tris = build_geometry(&ctx, &Layers::default());
             let mut gbuf = vec![raster::GPixel::EMPTY; 120 * 214];
@@ -4653,7 +4682,7 @@ mod tests {
             path_tile: 1.0, verge_tile: 1.0, wall_tile: 1.0, ceil_tile: 1.0,
             bridge: None, fork: None, deck_tex: r.textures.get(&s.path.bridge.deck), bottom_tex: r.textures.get(&s.verge.material),
             deck_tile: 1.0, bottom_tile: 1.0, ambient: [0.0; 3],
-            sky_lights: vec![], lights: vec![], fog: None, fog_col: [0.0; 3], void_lin: [0.0; 3], realm: 0, bounds: None, facade: None, opening: None, portal: None, front: None, verge_beyond: None, gain: 1.0, wx: weather::Wx::default(),
+            sky_lights: vec![], lights: vec![], fog: None, fog_col: [0.0; 3], void_lin: [0.0; 3], realm: 0, bounds: None, facade: None, opening: None, portal: None, front: None, verge_beyond: None, gain: 1.0, wx: weather::Wx::default(), water: None,
         };
         let (zc, card_h) = (6.0f32, 1.2f32);
         let base_row = hz + f * eye / zc;
@@ -4720,7 +4749,7 @@ mod tests {
                 path_tile: 1.0, verge_tile: 1.0, wall_tile: 1.0, ceil_tile: 1.0,
                 bridge: None, fork: None, deck_tex: r.textures.get(&s.path.bridge.deck), bottom_tex: r.textures.get(&s.verge.material),
                 deck_tile: 1.0, bottom_tile: 1.0, ambient: [0.0; 3],
-                sky_lights: vec![], lights: vec![], fog: None, fog_col: [0.0; 3], void_lin: [0.0; 3], realm: 0, bounds: None, facade: None, opening: None, portal: None, front: None, verge_beyond: None, gain: 1.0, wx: weather::Wx::default(),
+                sky_lights: vec![], lights: vec![], fog: None, fog_col: [0.0; 3], void_lin: [0.0; 3], realm: 0, bounds: None, facade: None, opening: None, portal: None, front: None, verge_beyond: None, gain: 1.0, wx: weather::Wx::default(), water: None,
             };
             let (base_row, top_row) = (hz + f * eye / zc, hz + f * (eye - card_h) / zc);
             let mut gbuf = vec![raster::GPixel::EMPTY; bw * bh];

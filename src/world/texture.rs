@@ -87,6 +87,9 @@ pub struct Texture {
     /// How much each texel glows in its own colour, level by level like `levels`; empty when
     /// nothing glows.
     pub emit: Vec<Vec<f32>>,
+    /// Read between texels (bilinear) rather than texel by texel: water, whose soft mottling
+    /// broke into squares up close.
+    pub smooth: bool,
 }
 
 impl Texture {
@@ -138,7 +141,7 @@ impl Texture {
                 emit.push(next);
             }
         }
-        Texture { levels, emit }
+        Texture { levels, emit, smooth: m.pattern == Pattern::Water }
     }
 
     /// How much the texel `sample` reads glows (0 when nothing does).
@@ -161,6 +164,20 @@ impl Texture {
         let texels = (footprint * base).max(1e-6);
         let lod = (texels.log2().max(0.0) as usize).min(self.levels.len() - 1);
         let (s, data) = &self.levels[lod];
+        if self.smooth {
+            let sf = *s as f32;
+            let (fx, fy) = (u.rem_euclid(1.0) * sf - 0.5, v.rem_euclid(1.0) * sf - 0.5);
+            let (x0, y0) = (fx.floor(), fy.floor());
+            let (tx, ty) = (fx - x0, fy - y0);
+            let (xa, ya) = ((x0 as i64).rem_euclid(*s as i64) as usize, (y0 as i64).rem_euclid(*s as i64) as usize);
+            let (xb, yb) = ((xa + 1) % s, (ya + 1) % s);
+            let (a, b, c, d) = (data[ya * s + xa], data[ya * s + xb], data[yb * s + xa], data[yb * s + xb]);
+            return [0, 1, 2].map(|k| {
+                let top = a[k] + (b[k] - a[k]) * tx;
+                let bot = c[k] + (d[k] - c[k]) * tx;
+                top + (bot - top) * ty
+            });
+        }
         let x = ((u.rem_euclid(1.0)) * *s as f32) as usize % s;
         let y = ((v.rem_euclid(1.0)) * *s as f32) as usize % s;
         data[y * s + x]

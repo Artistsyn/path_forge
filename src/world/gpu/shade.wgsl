@@ -49,12 +49,90 @@ fn tex_sample(slot_in: u32, u: f32, v: f32, footprint: f32) -> vec4<f32> {
     let e = (slot * 8u + lod) * 2u;
     let off = tex_words[e];
     let s = tex_words[e + 1u];
+    if (lw & 0x200u) != 0u {
+        let sf = f32(s);
+        let fx = rem_e(u, 1.0) * sf - 0.5; let fy = rem_e(v, 1.0) * sf - 0.5;
+        let x0 = floor(fx); let y0 = floor(fy);
+        let tx = fx - x0; let ty = fy - y0;
+        let xa = u32(rem_ei(i32(x0), i32(s))); let ya = u32(rem_ei(i32(y0), i32(s)));
+        let xb = (xa + 1u) % s; let yb = (ya + 1u) % s;
+        let ka = TEX_HEADER + off + (ya * s + xa) * stride; let kb = TEX_HEADER + off + (ya * s + xb) * stride;
+        let kc = TEX_HEADER + off + (yb * s + xa) * stride; let kd = TEX_HEADER + off + (yb * s + xb) * stride;
+        let ta = vec3<f32>(bitcast<f32>(tex_words[ka]), bitcast<f32>(tex_words[ka + 1u]), bitcast<f32>(tex_words[ka + 2u]));
+        let tb = vec3<f32>(bitcast<f32>(tex_words[kb]), bitcast<f32>(tex_words[kb + 1u]), bitcast<f32>(tex_words[kb + 2u]));
+        let tc = vec3<f32>(bitcast<f32>(tex_words[kc]), bitcast<f32>(tex_words[kc + 1u]), bitcast<f32>(tex_words[kc + 2u]));
+        let td = vec3<f32>(bitcast<f32>(tex_words[kd]), bitcast<f32>(tex_words[kd + 1u]), bitcast<f32>(tex_words[kd + 2u]));
+        let top = ta + (tb - ta) * tx; let bot = tc + (td - tc) * tx;
+        return vec4<f32>(top + (bot - top) * ty, 0.0);
+    }
     let x = u32(rem_e(u, 1.0) * f32(s)) % s;
     let y = u32(rem_e(v, 1.0) * f32(s)) % s;
     let k = TEX_HEADER + off + (y * s + x) * stride;
     var g = 0.0;
     if stride == 4u { g = bitcast<f32>(tex_words[k + 3u]); }
     return vec4<f32>(bitcast<f32>(tex_words[k]), bitcast<f32>(tex_words[k + 1u]), bitcast<f32>(tex_words[k + 2u]), g);
+}
+
+// render/water.rs, step for step.
+fn water_edge(d: f32) -> f32 {
+    if W.verge_on == 0u && W.walls_on != 0u { return wall_x(d); }
+    return path_edge(d);
+}
+fn wetness(out: f32) -> f32 {
+    if W.ww_wet <= 0.0 { return 0.0; }
+    return 1.0 - smoothstep_r(0.0, W.ww_wet, max(out, 0.0));
+}
+fn water_cover(x: f32, w: f32, dist: f32, px: f32) -> vec4<f32> {
+    var col = vec3<f32>(0.0);
+    var a = 0.0;
+    if W.ww_foam > 0.0 {
+        let lap = W.ww_foam_w * (0.6 + 0.4 * sin(W.ww_lap_ph + w * W.ww_lap_k));
+        let n = 0.5 + 0.25 * sin(w * W.ww_k1 + 2.1 * x + 1.3) + 0.25 * sin(w * W.ww_k2 - 3.7 * x);
+        let band = 1.0 - smoothstep_r(0.0, lap, dist);
+        let line = 1.0 - smoothstep_r(0.0, max(px, 0.03), dist);
+        a = clamp(W.ww_foam * (band * (0.35 + 0.65 * n) + 0.5 * line), 0.0, 1.0);
+        col = vec3<f32>(W.ww_foam_r, W.ww_foam_g, W.ww_foam_b);
+    }
+    if W.ww_kind != 0u && W.ww_dens > 0.0 {
+        let wp = rem_e(w + W.ww_shift, W.ww_period);
+        let cs = W.ww_cs;
+        let ci = i32(floor(div(x, cs))); let cj = i32(floor(div(wp, cs)));
+        let key = ci * 7919 + cj * 104729;
+        if hf(W.ww_seed ^ 0xF10u, key) < W.ww_dens {
+            let r = 0.5 * W.ww_fsize * (0.7 + 0.5 * hf(W.ww_seed ^ 0xF11u, key));
+            let m = min(r / cs, 0.45);
+            let cx = (f32(ci) + m + (1.0 - 2.0 * m) * hf(W.ww_seed ^ 0xF12u, key)) * cs;
+            let cz = (f32(cj) + m + (1.0 - 2.0 * m) * hf(W.ww_seed ^ 0xF13u, key)) * cs;
+            let ang = 2.0 * PI * hf(W.ww_seed ^ 0xF14u, key);
+            let dx = x - cx; let dz = wp - cz;
+            let lx = dx * cos(ang) + dz * sin(ang); let lz = -dx * sin(ang) + dz * cos(ang);
+            let q = sqrt(lx * lx + lz * lz);
+            let th = atan2(lz, lx);
+            let tone = 0.8 + 0.4 * hf(W.ww_seed ^ 0xF15u, key);
+            let fc = vec3<f32>(W.ww_fr, W.ww_fg, W.ww_fb);
+            var sd: f32; var c: vec3<f32>;
+            if W.ww_kind == 1u {
+                sd = q - r * (1.0 + 0.25 * sin(3.0 * th + 2.0 * PI * hf(W.ww_seed ^ 0xF16u, key)));
+                c = fc;
+            } else if W.ww_kind == 2u {
+                let rz = 0.42 * r;
+                let e = sqrt((lx / r) * (lx / r) + (lz / rz) * (lz / rz));
+                let vein = select(1.0, 0.7, abs(lz) < 0.07 * rz);
+                sd = (e - 1.0) * rz; c = fc * (tone * vein);
+            } else {
+                sd = max(q - r, (0.3 - abs(th)) * q);
+                if hf(W.ww_seed ^ 0xF17u, key) < 0.15 && q < 0.22 * r { c = vec3<f32>(1.0, 0.45, 0.65); }
+                else { c = fc * (tone * (0.75 + 0.25 * smoothstep_r(r, 0.6 * r, q))); }
+            }
+            let cover = clamp(0.5 - sd / max(px, 1e-4), 0.0, 1.0) * smoothstep_r(0.0, 0.15, dist);
+            if cover > 0.0 {
+                let na = a + cover * (1.0 - a);
+                col = (col * (a * (1.0 - cover)) + c * cover) / na;
+                a = na;
+            }
+        }
+    }
+    return vec4<f32>(col, a);
 }
 
 fn rot(bit: u32, u: f32, v: f32) -> vec2<f32> {
@@ -97,7 +175,8 @@ fn surface_uv(g: GPix) -> vec3<f32> {
         // Only the ground left between a fork's branches turns to verge.
         let between = MULTI && W.verge_on != 0u && W.vb_on != 0u && g.d > W.vb_z && in_wedge(to_cam(g.x, g.y, g.d).x, g.d);
         let on_path = !between && (W.verge_on == 0u || abs(g.x) < path_edge(g.d) || on_fork(g.x, g.d));
-        if on_path { return vec3<f32>(rot(1u, div(g.x, W.path_tile), div(along, W.path_tile)), 0.0); }
+        // A waterway's current carries its pattern towards the camera.
+        if on_path { return vec3<f32>(rot(1u, div(g.x, W.path_tile), div(along + select(0.0, W.ww_shift, W.ww_on != 0u), W.path_tile)), 0.0); }
         return vec3<f32>(rot(2u, div(g.x, W.verge_tile), div(along, W.verge_tile)), 1.0);
     }
     if id == ID_WALL_L || id == ID_WALL_R {
@@ -189,11 +268,15 @@ struct Surf { albedo: vec3<f32>, gloss: f32, ripples: f32, rings: vec2<f32> }
 // weather::surface
 fn weather_surface(g: GPix, id: u32, tex: u32, albedo: vec3<f32>, gloss: f32, ripples: f32) -> Surf {
     var o = Surf(albedo, gloss, ripples, vec2<f32>(0.0));
-    let floor_px = (id == ID_GROUND || id == ID_RISER) && (tex == 0u || tex == 1u || tex == 4u);
+    // Rain does not wet a waterway and snow does not lie on it; the rain rings it instead.
+    let water = W.ww_on != 0u && id == ID_GROUND && tex == 0u;
+    let floor_px = !water && (id == ID_GROUND || id == ID_RISER) && (tex == 0u || tex == 1u || tex == 4u);
     let w = W.scroll + g.d;
     let seed = W.precip_seed;
     if W.wx_wet > 0.0 {
-        if floor_px {
+        if water {
+            if W.wx_rings > 0.0 { o.rings = rain_rings(g.x, w); }
+        } else if floor_px {
             o.albedo = o.albedo * (1.0 - select(0.4, 0.25, tex == 1u) * W.wx_wet);
             o.gloss = max(o.gloss, 0.32 * W.wx_wet);
             o.ripples = max(o.ripples, 0.35 * W.wx_wet);
@@ -425,6 +508,21 @@ fn shade_px(g: GPix, i: u32, x: u32, y: u32, own: bool) -> Shaded {
         let grain = clamp(dot(albedo, lw) / max(dot(vec3<f32>(W.deck_base_r, W.deck_base_g, W.deck_base_b), lw), 1e-3), 0.6, 1.3);
         albedo = vec3<f32>(W.rail_r, W.rail_g, W.rail_b) * grain;
     }
+    // A waterway: the foam and what floats on the water, and the bank or walls wet beside it.
+    var gloss_k = 1.0; var wet_g = 0.0;
+    if W.ww_on != 0u {
+        if id == ID_GROUND && tex == 0u {
+            let wc = water_cover(g.x, W.scroll + g.d, water_edge(g.d) - abs(g.x), g.depth / W.focal_px);
+            albedo = mix3(albedo, wc.xyz, wc.w);
+            gloss_k = 1.0 - wc.w;
+        } else if id == ID_GROUND && tex == 1u {
+            let wt = wetness(abs(g.x) - water_edge(g.d));
+            albedo = albedo * (1.0 - 0.45 * wt);
+            wet_g = 0.35 * wt;
+        } else if id == ID_WALL_L || id == ID_WALL_R {
+            albedo = albedo * (1.0 - 0.45 * wetness(g.y));
+        }
+    }
     var ao = masks[w * h + i];
     var normal = vec3<f32>(0.0, -1.0, 0.0);
     var skip = ID_CEILING;
@@ -492,7 +590,8 @@ fn shade_px(g: GPix, i: u32, x: u32, y: u32, own: bool) -> Shaded {
     } else {
         ao *= passage_dark(g.x, g.d);
     }
-    let gr = gloss_of(tex, id);
+    let gr0 = gloss_of(tex, id);
+    let gr = vec2<f32>(max(gr0.x * gloss_k, wet_g), gr0.y);
     let s = weather_surface(g, id, tex, albedo, gr.x, gr.y);
     let sun = masks[i];
     let light = light_at(g.x, g.y, g.d, normal, skip, sun, x, y);

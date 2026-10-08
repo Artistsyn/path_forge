@@ -297,6 +297,17 @@ A repeating light source along the path: torches, lanterns, fireflies, crystals.
 
 One of `Torch` \| `Lantern` \| `Candle` \| `Brazier` \| `Crystal` \| `Firefly` \| `Magic` \| `GreenFire` \| `IceWisp`.
 
+### Floating
+
+Things floating on a waterway.
+
+| Value | Meaning |
+|---|---|
+| `None` |  |
+| `Foam` | Clumps of foam. |
+| `Leaves` | Fallen leaves. |
+| `LilyPads` | Lily pads, a few in flower. |
+
 ### Fog
 
 | Field | Type | Default | Meaning |
@@ -532,6 +543,7 @@ when there is one. For weather that soaks or covers the ground, use `weather.pre
 | `fork` | [Fork](#fork) | (see the type) | Side paths that branch off (open ground), or side passages (between walls). |
 | `edge_lights` | [EdgeLights](#edgelights) | (see the type) | Glowing lines along both edges of the path (and a bridge's deck): a lit walkway. |
 | `surface` | boolean | `true` | Draw the path at all. Off, there is no ground, verge or bridge: the camera flies the route through open air or space (a ship's flight path), and with `sky.space.below` or a tunnel the sky fills everything round it. |
+| `waterway` | [Waterway](#waterway) | (see the type) | The path as a waterway, for boats and swimmers (give `material` the Water pattern). |
 
 ### Pattern
 
@@ -953,6 +965,28 @@ Ground beside the path. Disabled = void beyond the path edge (walls usually cove
 | `height` | number | `4.5` | Wall height, metres. 0 = taller than anything the camera can see. |
 | `base_shadow` | number | `0.55` | Darkening where the wall meets the ground (0..1). |
 | `material` | [Material](#material) | (see the type) |  |
+
+### Waterway
+
+The path as a waterway, for games where the player steers a boat or swims: a current, foam
+lapping at the banks or walls, the bank wet where the water reaches it, and things floating on
+the surface. Give `path.material` the Water pattern (gloss 1, some ripples); with no verge the
+water runs to the walls, as a canal's does.
+
+| Field | Type | Default | Meaning |
+|---|---|---|---|
+| `enabled` | boolean | `false` |  |
+| `flow` | integer | `2` | The current, towards the camera: whole tiles of the water's pattern carried past per loop (0 still water, negative flows away). Floating things drift with it. |
+| `foam` | number | `0.5` | Foam where the water laps the banks or walls: 0 none .. 1. |
+| `foam_color` | integer × 3 | `[214,226,224]` |  |
+| `foam_width` | number | `0.35` | How far out from the bank the foam reaches, metres. |
+| `lap` | integer | `3` | Times the water laps up the bank in one loop (whole). |
+| `wet` | number | `0.25` | How far up the bank (or the walls) the water wets it, darker and glistening, metres. |
+| `floating` | [Floating](#floating) | `"None"` | What floats on the water, drifting with the current. |
+| `float_density` | number | `0.3` | How much of the water they cover, 0 .. 1. |
+| `float_color` | integer × 3 | `[70,110,52]` |  |
+| `float_size` | number | `0.5` | How big each one is, metres across. |
+| `seed` | integer | `0` |  |
 
 ### Weather
 
