@@ -44,6 +44,9 @@ pub(super) fn dot(out: &mut Vec<Splat>, z: f32, (sx, sy): (f32, f32), r: f32, co
     out.push(Splat { z, gate: None, shape: Shape::Dot { sx, sy, r, col, alpha } });
 }
 
+/// How tight the bright heart of a lamp's halo is (as a share of its radius, squared).
+const HALO_CORE: f32 = 0.035;
+
 impl Splat {
     /// Whether the gate (if any) lets this splat draw.
     fn open(&self, gbuf: &[GPixel], w: usize) -> bool {
@@ -75,7 +78,9 @@ impl Splat {
                         let i = y as usize * w + x as usize;
                         if gbuf[i].depth < z - 0.3 { continue; }
                         let dd = ((x as f32 + 0.5 - sx).powi(2) + (y as f32 + 0.5 - sy).powi(2)).sqrt() / gr;
-                        if dd < 1.0 { hdr[i] = add3(hdr[i], scale3(glow, (1.0 - dd).powi(2))); }
+                        // Light scattered by the air round a lamp: brightest against it and falling away
+                        // fast, as the inverse square does, into a long faint tail.
+                        if dd < 1.0 { hdr[i] = add3(hdr[i], scale3(glow, (1.0 - dd).powi(2) * (HALO_CORE / (dd * dd + HALO_CORE)))); }
                     }
                 }
             }
@@ -85,7 +90,7 @@ impl Splat {
                     let i = y as usize * w + x as usize;
                     if gbuf[i].depth < z - 0.1 { continue; }
                     let dd = ((x as f32 + 0.5 - sx).powi(2) + (y as f32 + 0.5 - sy).powi(2)).sqrt() / r;
-                    if dd < 1.0 { hdr[i] = add3(hdr[i], scale3(glow, 3.0 * (1.0 - dd) * fade)); }
+                    if dd < 1.0 { hdr[i] = add3(hdr[i], scale3(glow, 6.0 * (1.0 - dd).powi(2) * fade)); }
                 }}
             }
             Shape::Body { sx, cy, rx, ry, lin, fade } => {
@@ -101,7 +106,8 @@ impl Splat {
                     let (col, a) = if dd < 0.35 { (mix3(lin[0], lin[1], dd / 0.35), 1.0) }
                         else if dd < 0.7 { (mix3(lin[1], lin[2], (dd - 0.35) / 0.35), 0.85) }
                         else { (mix3(lin[2], lin[3], (dd - 0.7) / 0.3), 0.85 * (1.0 - (dd - 0.7) / 0.3)) };
-                    hdr[i] = add3(hdr[i], scale3(col, a * 2.2 * fade));
+                    // A flame is far brighter at its heart than a screen can show: the bloom spreads it.
+                    hdr[i] = add3(hdr[i], scale3(col, a * 2.2 * (1.0 + 1.6 * (1.0 - dd).powi(2)) * fade));
                 }}
             }
             Shape::Wisp { sx, sy, rx, ry, x0, x1, y0, y1, lit, alpha } => {

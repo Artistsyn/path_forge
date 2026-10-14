@@ -213,7 +213,7 @@ pub(super) fn bh_k(ctx: &Ctx) -> Option<BhK> {
     let hy = v.horizon_px.max(2.0);
     let (ox, oy) = (v.left as f32, v.top as f32);
     let (fw, fhy) = (v.width as f32 - 2.0 * ox, (hy - oy).max(2.0));
-    let (cx, cy) = (ox + bh.pos[0] * fw, oy + bh.pos[1] * fhy);
+    let (cx, cy) = (ox + v.sky_dx() + bh.pos[0] * fw, oy + bh.pos[1] * fhy);
     let rpx = bh.size * fhy;
     let ppr = rpx / B_C;
     let r_in = bh.disk_inner.clamp(1.6, 20.0);

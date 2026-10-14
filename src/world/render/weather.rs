@@ -21,6 +21,12 @@ pub(super) struct Wx {
     sway: f32,
     lean: f32,
     sway_phase: f32,
+    /// How hard the wind stirs leaves now (0 = still), and the phases of the two waves that cross
+    /// a crown (whole cycles a loop; they run downwind).
+    flutter: f32,
+    fl_t1: f32,
+    fl_t2: f32,
+    fl_dir: f32,
     /// The sky is open (no ceiling): rain and snow reach the ground.
     pub open: bool,
     /// Ground wetness and puddle cover (rain and sleet), and lying snow, 0..1.
@@ -43,6 +49,36 @@ impl Wx {
         if self.sway <= 0.0 { return 0.0; }
         self.sway * (self.lean + 0.35 * (self.sway_phase + ph).sin())
     }
+
+    /// How far plants sway, the steady lean with the wind, and the swaying's phase (see `sway_at`).
+    pub(super) fn sway_parts(&self) -> (f32, f32, f32) { (self.sway, self.lean, self.sway_phase) }
+
+    /// How the picture of a prop of this kind stirs in the wind now, for one with phase `ph` and a
+    /// sprite `aspect` wide for its height. Stiff things do not stir at all.
+    pub(super) fn card_wind(&self, kind: PropKind, ph: f32, aspect: f32) -> CardWind {
+        if self.flutter <= 0.0 { return CardWind::default(); }
+        // (amplitude as a share of the card's width, how much of that is up and down, downwind
+        // trail, how fast the waves change with height, the heights the stirring fades between,
+        // the trunk's half width and where its bare foot starts.)
+        let (amp, vert, trail, kv, c0, c1, trunk, foot) = match kind {
+            // A willow is all hanging strands: still where they spring, swinging most at the tips,
+            // each strand nearly straight as it swings.
+            PropKind::Willow => (0.024, 0.1, 1.6, 0.3, 1.0, 0.12, 0.05, 0.8),
+            PropKind::Tree => (0.012, 0.5, 0.0, 1.0, 0.5, 0.68, 0.0, 0.0),
+            PropKind::Bush => (0.014, 0.5, 0.0, 1.0, 0.55, 1.0, 0.0, 0.0),
+            PropKind::Palm => (0.014, 0.5, 0.0, 1.0, 0.3, 0.5, 0.0, 0.0),
+            PropKind::Reeds => (0.016, 0.2, 0.0, 0.4, 0.4, 1.0, 0.0, 0.0),
+            PropKind::Pine => (0.006, 0.6, 0.0, 1.0, 0.7, 0.9, 0.0, 0.0),
+            PropKind::DeadTree => (0.003, 0.3, 0.0, 1.0, 0.3, 0.6, 0.0, 0.0),
+            _ => return CardWind::default(),
+        };
+        // No more than the picture can take without folding over itself.
+        let amp = (amp * self.flutter).min(0.03);
+        CardWind {
+            amp, v: amp * vert * aspect, lean: self.fl_dir * trail * amp, kv,
+            t1: self.fl_t1 + ph, t2: self.fl_t2 + 1.7 * ph, c0, c1, trunk, foot,
+        }
+    }
 }
 
 /// How much a kind of prop bends in the wind: its top's lean, as a share of its height, in a
@@ -50,7 +86,7 @@ impl Wx {
 pub(super) fn sway_factor(kind: PropKind) -> f32 {
     match kind {
         PropKind::Reeds => 0.14,
-        PropKind::Willow => 0.09,
+        PropKind::Willow => 0.04,
         PropKind::Palm => 0.08,
         PropKind::Tree => 0.06,
         PropKind::Bush => 0.05,
@@ -109,6 +145,11 @@ pub(super) fn conditions(scene: &Scene, tphase: f32, loop_seconds: f32) -> Wx {
         wx.sway = w.wind.sway.clamp(0.0, 1.0) * (w.wind.speed.abs() / 8.0).min(1.5);
         wx.lean = w.wind.speed.signum() * 0.6 * (1.0 + 0.6 * gusts * g);
         wx.sway_phase = TAU * cycles(0.45, loop_seconds) * tphase;
+        // Leaves stir in a light air long before a trunk bends.
+        wx.flutter = w.wind.flutter.clamp(0.0, 1.0) * (w.wind.speed.abs() / 6.0).sqrt().min(1.5) * (1.0 + 0.6 * gusts * g).max(0.2);
+        wx.fl_dir = if w.wind.speed < 0.0 { -1.0 } else { 1.0 };
+        wx.fl_t1 = wx.fl_dir * TAU * cycles(0.7, loop_seconds) * tphase;
+        wx.fl_t2 = wx.fl_dir * TAU * cycles(1.6, loop_seconds) * tphase;
     }
     let p = &w.precipitation;
     if p.enabled && wx.open {
@@ -622,7 +663,7 @@ pub(super) fn mist_sun(ctx: &Ctx) -> Option<(f32, f32, f32, [f32; 3])> {
     let v = &ctx.view;
     let (ox, oy) = (v.left as f32, v.top as f32);
     let (fw, fhy) = (v.width as f32 - 2.0 * ox, (v.horizon_px.max(2.0) - oy).max(2.0));
-    ctx.sky_lights.first().map(|s| (ox + sky.sun.pos[0] * fw, oy + sky.sun.pos[1].clamp(0.0, 1.0) * fhy, fhy, scale3(s.color, m.glow)))
+    ctx.sky_lights.first().map(|s| (ox + v.sky_dx() + sky.sun.pos[0] * fw, oy + sky.sun.pos[1].clamp(0.0, 1.0) * fhy, fhy, scale3(s.color, m.glow)))
 }
 
 /// Mist lying over the ground: each pixel takes as much of it as its line of sight passes
@@ -717,7 +758,7 @@ pub(super) fn shaft_setup(ctxs: &[Ctx], here: usize) -> Option<ShaftSetup> {
         (true, Some(sun_col)) => {
             let (ox, oy) = (v.left as f32, v.top as f32);
             let (fw, fhy) = (w as f32 - 2.0 * ox, (hy - oy).max(2.0));
-            let (sx, sy) = ((ox + sky.sun.pos[0] * fw) / q as f32, (oy + sky.sun.pos[1].clamp(0.0, 1.0) * fhy) / q as f32);
+            let (sx, sy) = ((ox + v.sky_dx() + sky.sun.pos[0] * fw) / q as f32, (oy + sky.sun.pos[1].clamp(0.0, 1.0) * fhy) / q as f32);
             // What the rays are made of: open sky, far brighter round the sun than anywhere else (as
             // the real sky is), so gaps in leaves or walls near the sun stream light.
             let glow_r = 0.28 * fhy / q as f32;
@@ -910,7 +951,7 @@ pub(super) fn aurora_k(ctx: &Ctx) -> Option<AuroraK> {
     Some(AuroraK {
         a: TAU * ctx.tphase * c,
         m: turns / c,
-        cx: ox + 0.5 * fw,
+        cx: ox + v.sky_dx() + 0.5 * fw,
         unit: fhy / 0.65,
         lo: rgb_lin(a.low),
         hi: rgb_lin(a.high),
@@ -1055,7 +1096,7 @@ pub(super) fn rainbow(ctx: &Ctx, gbuf: &[GPixel], hdr: &mut [[f32; 3]]) {
     // A real bow (42 degrees round the point opposite the sun) is wider than a portrait view, so
     // size 1 spans the frame instead; the band and the second bow keep their real proportions.
     let rad = 0.6 * fw * r.size.max(0.05);
-    let (cx, cy) = (ox + r.x * fw, hy + 0.12 * rad);
+    let (cx, cy) = (ox + v.sky_dx() + r.x * fw, hy + 0.12 * rad);
     let band = 0.06 * rad;
     let (rad2, band2) = (1.21 * rad, 1.7 * band);
     let sun = ctx.sky_lights.first().map_or(0.6, |s| lum(s.color).clamp(0.2, 2.0));
@@ -1114,7 +1155,7 @@ pub(super) fn heat_shimmer(ctxs: &[Ctx], gbuf: &[GPixel], hdr: &mut Vec<[f32; 3]
     });
 }
 
-fn bilinear(src: &[[f32; 3]], w: usize, h: usize, x: f32, y: f32) -> [f32; 3] {
+pub(super) fn bilinear(src: &[[f32; 3]], w: usize, h: usize, x: f32, y: f32) -> [f32; 3] {
     let x = x.clamp(0.0, w as f32 - 1.0);
     let y = y.clamp(0.0, h as f32 - 1.0);
     let (x0, y0) = (x.floor() as usize, y.floor() as usize);
@@ -1123,30 +1164,6 @@ fn bilinear(src: &[[f32; 3]], w: usize, h: usize, x: f32, y: f32) -> [f32; 3] {
     let top = mix3(src[y0 * w + x0], src[y0 * w + x1], tx);
     let bot = mix3(src[y1 * w + x0], src[y1 * w + x1], tx);
     mix3(top, bot, ty)
-}
-
-/// The raindrops on a w x h lens now: centre, radii and opacity, in drawing order.
-pub(super) fn lens_drops(ctx: &Ctx, w: usize, h: usize, weight: f32) -> Vec<[f32; 5]> {
-    let l = &ctx.scene.weather.lens;
-    let ls = ctx.scene.motion.loop_seconds();
-    let amount = l.amount.clamp(0.0, 1.0);
-    let cd = cycles(0.18, ls);
-    let n = (amount * 30.0).round().max(1.0) as i64;
-    let mut out = Vec::new();
-    for j in 0..n {
-        let tt = hf(l.seed ^ 0x41, j) + cd * ctx.tphase;
-        let a = tt - tt.floor();
-        let key = j * 1031 + (tt.floor() as i64).rem_euclid(cd as i64);
-        let r = (0.018 + 0.04 * hf(l.seed ^ 0x42, key)) * w as f32;
-        let cx = hf(l.seed ^ 0x43, key) * w as f32;
-        let mut cy = hf(l.seed ^ 0x44, key) * h as f32;
-        // Some grow heavy and run down the glass.
-        if hf(l.seed ^ 0x45, key) > 0.55 { cy += smoothstep(0.35, 1.0, a) * (0.15 + 0.3 * hf(l.seed ^ 0x46, key)) * h as f32; }
-        let alpha = smoothstep(0.0, 0.06, a) * (1.0 - smoothstep(0.8, 1.0, a)) * weight;
-        if alpha <= 0.0 { continue; }
-        out.push([cx, cy, r, r * 1.1, alpha]);
-    }
-    out
 }
 
 /// Raindrops or frost on the lens, `weight` 0..1 (a crossing hands the lens from one world to
@@ -1160,23 +1177,10 @@ pub(super) fn lens(ctx: &Ctx, weight: f32, hdr: &mut Vec<[f32; 3]>) {
     let amount = l.amount.clamp(0.0, 1.0);
     match l.kind {
         LensKind::Drops => {
-            for [cx, cy, r, ry, alpha] in lens_drops(ctx, w, h, weight) {
-                for py in (cy - ry).floor().max(0.0) as usize..=((cy + ry).ceil() as usize).min(h - 1) {
-                    for px in (cx - r).floor().max(0.0) as usize..=((cx + r).ceil() as usize).min(w - 1) {
-                        let (dx, dy) = ((px as f32 + 0.5 - cx) / r, (py as f32 + 0.5 - cy) / ry);
-                        let q = dx * dx + dy * dy;
-                        if q >= 1.0 { continue; }
-                        // A drop is a tiny fisheye: the scene upside down, squeezed, a little blurred.
-                        let (sx, sy) = (cx - dx * r * 2.4, cy - dy * ry * 2.4);
-                        let refr = scale3(add3(add3(bilinear(&src, w, h, sx - 1.0, sy), bilinear(&src, w, h, sx + 1.0, sy)), bilinear(&src, w, h, sx, sy + 1.0)), 1.0 / 3.0);
-                        let rim = smoothstep(0.55, 1.0, q.sqrt());
-                        let glint = (-((dx + 0.35).powi(2) + (dy + 0.4).powi(2)) / 0.02).exp();
-                        let c = add3(scale3(refr, 1.0 - 0.55 * rim), scale3(add3(refr, [0.25; 3]), glint * 0.8));
-                        let i = py * w + px;
-                        hdr[i] = mix3(hdr[i], c, alpha * (1.0 - 0.3 * rim));
-                    }
-                }
-            }
+            let k = super::lens::plan(ctx, w, h, weight);
+            hdr.par_chunks_mut(w).enumerate().for_each(|(y, row)| {
+                for (x, px) in row.iter_mut().enumerate() { *px = super::lens::rain_px(&k, &src, w, h, x, y); }
+            });
         }
         LensKind::Frost => {
             use super::super::looks::value_noise as vn;
@@ -1347,5 +1351,26 @@ mod tests {
         let windy = diff(&r.render(&s, 3.0, &opts(0.0)), &r.render(&s, 3.0, &opts(secs * 0.25)));
         assert!(windy > 0.2, "trees should sway: {windy}");
         assert!(sway_factor(PropKind::Rock) == 0.0 && sway_factor(PropKind::Reeds) > sway_factor(PropKind::Tree));
+    }
+
+    #[test]
+    fn wind_stirs_leaves_and_strands_but_not_trunks_or_stone() {
+        let mut s = preset("River Run");
+        s.weather.wind = Wind { enabled: true, speed: 7.0, sway: 0.0, flutter: 1.0, ..Wind::default() };
+        let secs = s.motion.loop_seconds();
+        let wx = conditions(&s, 0.3, secs);
+        assert_eq!(wx.card_wind(PropKind::Rock, 0.0, 1.0), CardWind::default());
+        let willow = wx.card_wind(PropKind::Willow, 0.0, 1.2);
+        // A strand's tip swings and trails downwind; where it springs from, and the trunk's foot, do not move.
+        assert!(willow.at(0.2, 0.95).0 > 0.0 && willow.at(0.2, 0.05) == (0.0, 0.0), "{willow:?}");
+        assert_eq!(willow.at(0.5, 0.95), (0.0, 0.0));
+        // A tree's crown stirs; its trunk stands.
+        let tree = wx.card_wind(PropKind::Tree, 1.0, 0.8);
+        assert!(tree.at(0.3, 0.2).0 != 0.0 && tree.at(0.5, 0.9) == (0.0, 0.0));
+        // The stirring comes back to where it started when the loop does, and is off when asked.
+        let (a, b) = (conditions(&s, 0.0, secs).card_wind(PropKind::Tree, 1.0, 0.8).at(0.3, 0.2), conditions(&s, 1.0, secs).card_wind(PropKind::Tree, 1.0, 0.8).at(0.3, 0.2));
+        assert!((a.0 - b.0).abs() < 1e-4 && (a.1 - b.1).abs() < 1e-4, "{a:?} {b:?}");
+        s.weather.wind.flutter = 0.0;
+        assert_eq!(conditions(&s, 0.3, secs).card_wind(PropKind::Willow, 0.0, 1.2), CardWind::default());
     }
 }

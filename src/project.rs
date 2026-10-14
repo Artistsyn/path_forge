@@ -153,6 +153,9 @@ fn copy_into(from: &Path, to: &Path) -> Result<(), String> {
         Ok(())
     } else {
         if let Some(d) = to.parent() { std::fs::create_dir_all(d).map_err(|e| format!("{}: {e}", d.display()))?; }
+        // An image's painted mask (what glows, what casts a shadow) travels with it.
+        let mask = crate::world::sprites::mask_path(from);
+        if mask.is_file() && !crate::world::sprites::is_mask(from) { let _ = std::fs::copy(&mask, crate::world::sprites::mask_path(to)); }
         std::fs::copy(from, to).map(|_| ()).map_err(|e| format!("{} -> {}: {e}", from.display(), to.display()))
     }
 }
@@ -231,6 +234,83 @@ pub fn adopt_file(picked: &Path, base: Option<&Path>) -> Result<String, String> 
     Ok(slash(dest.strip_prefix(base).unwrap_or(&dest)))
 }
 
+// ── Presets of your own ───────────────────────────────────────────────────
+
+/// A scene kept as a starting point: a folder under `<home>/presets` holding `preset.json` and
+/// every file the scene uses.
+#[derive(Clone, Debug, Serialize)]
+pub struct MyPreset {
+    pub name: String,
+    pub file: PathBuf,
+}
+
+/// A name as a folder name: lower case, letters and digits, everything else an underscore.
+fn slug(name: &str) -> String {
+    let s: String = name.trim().chars().map(|c| if c.is_alphanumeric() { c.to_ascii_lowercase() } else { '_' }).collect();
+    let s = s.split('_').filter(|p| !p.is_empty()).collect::<Vec<_>>().join("_");
+    if s.is_empty() { "preset".into() } else { s }
+}
+
+pub fn presets_dir(home: &Path) -> PathBuf { home.join("presets") }
+
+/// Your own presets, by name.
+pub fn my_presets(home: &Path) -> Vec<MyPreset> {
+    let mut out: Vec<MyPreset> = std::fs::read_dir(presets_dir(home)).into_iter().flatten().flatten().filter_map(|e| {
+        let file = e.path().join("preset.json");
+        let (scene, _) = crate::scene::load_file(&file).ok()?;
+        let name = if scene.name.trim().is_empty() { e.file_name().to_string_lossy().into_owned() } else { scene.name };
+        Some(MyPreset { name, file })
+    }).collect();
+    out.sort_by_key(|p| p.name.to_lowercase());
+    out
+}
+
+fn find_my_preset(home: &Path, name: &str) -> Result<MyPreset, String> {
+    let key = slug(name);
+    my_presets(home).into_iter()
+        .find(|p| slug(&p.name) == key || p.file.parent().and_then(|d| d.file_name()).is_some_and(|d| d.to_string_lossy() == key))
+        .ok_or_else(|| format!("no preset of yours named '{name}' in {}", presets_dir(home).display()))
+}
+
+/// Keep `scene` (its files named relative to `base`, if it has a folder) as a preset called `name`:
+/// the scene and every file it uses are copied into the preset's own folder, so the scene it came
+/// from can change or go without the preset noticing. A preset of the same name is replaced.
+pub fn save_preset(home: &Path, name: &str, scene: &Scene, base: Option<&Path>) -> Result<PathBuf, String> {
+    let name = name.trim();
+    if name.is_empty() { return Err("a preset needs a name".into()); }
+    if crate::scene::presets::ALL.iter().any(|(n, _)| slug(n) == slug(name)) {
+        return Err(format!("'{name}' is the name of a built-in preset: give yours another"));
+    }
+    let mut s = scene.clone();
+    s.name = name.to_owned();
+    Ok(pack(&s, base.unwrap_or(home), &presets_dir(home).join(slug(name)), "preset")?.scene)
+}
+
+/// One of your presets as a new scene. Its files are named by their full paths, so a scene started
+/// from it finds them before it has a folder of its own; saving and gathering brings them along.
+pub fn open_preset(home: &Path, name: &str) -> Result<Scene, String> {
+    let p = find_my_preset(home, name)?;
+    let (scene, _) = crate::scene::load_file(&p.file)?;
+    let base = p.file.parent().unwrap_or(home);
+    let mut v = serde_json::to_value(&scene).map_err(|e| e.to_string())?;
+    for a in assets(&scene, base) {
+        let old = v.pointer(&a.pointer).and_then(|x| x.as_str()).unwrap_or("").to_owned();
+        let full = slash(&a.path);
+        let new = if a.kind == AssetKind::Kit { format!("{full}#{}", old.split_once('#').map(|x| x.1).unwrap_or("")) } else { full };
+        set_pointer(&mut v, &a.pointer, new);
+    }
+    serde_json::from_value(v).map_err(|e| e.to_string())
+}
+
+/// Delete one of your presets: its folder and the copies of files in it.
+pub fn remove_preset(home: &Path, name: &str) -> Result<(), String> {
+    let p = find_my_preset(home, name)?;
+    let dir = p.file.parent().ok_or("preset has no folder")?;
+    // Only ever a folder directly inside the presets folder.
+    if dir.parent().map(normal) != Some(normal(&presets_dir(home))) { return Err(format!("{} is not inside the presets folder", dir.display())); }
+    std::fs::remove_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))
+}
+
 /// Make a project folder (scenes, assets, kits, exports) with one scene to start from.
 pub fn new_project(dir: &Path, preset: &str) -> Result<PathBuf, String> {
     for f in FOLDERS { std::fs::create_dir_all(dir.join(f)).map_err(|e| format!("{}: {e}", dir.join(f).display()))?; }
@@ -248,6 +328,31 @@ mod tests {
     use super::*;
     use crate::scene::{PropDef, PropLayer, Side, SpriteRef};
     use crate::world::{RenderOptions, WorldRenderer};
+
+    /// A scene kept as a preset takes its files with it, opens as a new scene that still finds
+    /// them, is listed by name, cannot take a built-in's name, and can be deleted.
+    #[test]
+    fn a_scene_kept_as_a_preset_takes_its_files_and_comes_back() {
+        let tmp = std::env::temp_dir().join(format!("pf_presets_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let (home, work) = (tmp.join("home"), tmp.join("work"));
+        std::fs::create_dir_all(work.join("art")).unwrap();
+        image::RgbaImage::from_pixel(8, 16, image::Rgba([200, 40, 40, 255])).save(work.join("art/post.png")).unwrap();
+        let mut s = crate::scene::presets::ALL[0].1();
+        s.props = vec![PropLayer { sprite: SpriteRef { path: "art/post.png".into(), ..SpriteRef::default() }, ..PropLayer::default() }];
+        assert!(save_preset(&home, "Forest Path", &s, Some(&work)).is_err(), "a built-in name");
+        let file = save_preset(&home, "My Red Posts", &s, Some(&work)).unwrap();
+        assert!(file.ends_with("presets/my_red_posts/preset.json") && file.parent().unwrap().join("art/post.png").is_file());
+        assert_eq!(my_presets(&home).iter().map(|p| p.name.as_str()).collect::<Vec<_>>(), ["My Red Posts"]);
+        // The original can go: the preset has its own copy, and names it in full.
+        std::fs::remove_dir_all(&work).unwrap();
+        let back = open_preset(&home, "my red posts").unwrap();
+        assert!(Path::new(&back.props[0].sprite.path).is_absolute() && Path::new(&back.props[0].sprite.path).is_file());
+        assert!(asset_warnings(&back, &tmp).is_empty());
+        remove_preset(&home, "My Red Posts").unwrap();
+        assert!(my_presets(&home).is_empty() && open_preset(&home, "My Red Posts").is_err());
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
 
     #[test]
     fn work_goes_to_a_user_folder_unless_told_otherwise() {

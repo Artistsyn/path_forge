@@ -113,7 +113,7 @@ impl PropDefs {
                 let fresh = matches!(self.dirs.get(&full), Some((ct, _)) if *ct == t);
                 if !fresh {
                     let mut files: Vec<PathBuf> = std::fs::read_dir(&full).map(|rd| rd.filter_map(|e| e.ok().map(|e| e.path()))
-                        .filter(|p| p.extension().is_some_and(|x| x.eq_ignore_ascii_case("png"))).collect()).unwrap_or_default();
+                        .filter(|p| p.extension().is_some_and(|x| x.eq_ignore_ascii_case("png")) && !super::sprites::is_mask(p)).collect()).unwrap_or_default();
                     files.sort();
                     self.dirs.insert(full.clone(), (t, files));
                 }

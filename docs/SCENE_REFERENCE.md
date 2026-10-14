@@ -14,6 +14,7 @@ See [MANUAL.md](MANUAL.md) for what each part does and how to use it.
 | `camera` | [Camera](#camera) | (see the type) |  |
 | `path` | [PathShape](#pathshape) | (see the type) |  |
 | `verge` | [Verge](#verge) | (see the type) |  |
+| `ground_cover` | list of [GroundCover](#groundcover) | `[]` | What grows on the ground: grass, tall grass and wildflowers standing on it, moss lying on it; over the verge, the path or both. Up to three layers. |
 | `walls` | [Walls](#walls) | (see the type) |  |
 | `ceiling` | [Ceiling](#ceiling) | (see the type) |  |
 | `sky` | [Sky](#sky) | (see the type) |  |
@@ -203,17 +204,38 @@ Output size in pixels. Portrait by default, like a phone held upright.
 | `height` | number | `3.6` |  |
 | `material` | [Material](#material) | (see the type) |  |
 
+### CloudKind
+
+What kind of cloud a layer is. Whatever the kind, cloud that rain or snow is falling from
+(`weather.precipitation`) is drawn heavier and darker.
+
+| Value | Meaning |
+|---|---|
+| `Cumulus` | Fair-weather heaps standing in rows on level bases: bright billowing tops, grey beneath. |
+| `Towering` | Tall heaps building up from the horizon, dark under them: the sky before a storm. |
+| `Stratus` | Long low bands lying along the horizon. |
+| `Mackerel` | A high sheet broken into ripples and small flakes: a mackerel sky. |
+| `Cirrus` | Thin bright streaks very high up, drawn out towards the horizon. |
+| `Overcast` | A grey deck over the whole sky, lighter and darker in patches. |
+| `Rain` | Rain cloud: a low dark deck, heavy-bellied and ragged underneath. |
+| `Snow` | Snow cloud: an even, pale, heavy sky with hardly a feature in it. |
+| `Storm` | Storm cloud: a black deck with ragged scud driving along under it. |
+| `Soft` | Soft round puffs with no detail, as PathForge drew every cloud before; suits flat and pixel-art styles. (The main layer only: in `cloud_layers` it reads as cumulus.) |
+
 ### Clouds
 
 | Field | Type | Default | Meaning |
 |---|---|---|---|
 | `enabled` | boolean | `false` |  |
-| `count` | integer | `10` |  |
+| `kind` | [CloudKind](#cloudkind) | `"Cumulus"` |  |
+| `cover` | number | `0.45` | How much of the sky they fill (0..1). (`Soft` clouds are counted instead: `count`.) |
+| `count` | integer | `10` | How many `Soft` clouds. |
 | `drift` | number | `1.0` | Drifts across the sky per loop. Whole numbers wrap each cloud round the sky; any other value (0.4, 1.5) keeps its exact speed, with each cloud forming and dissolving over one loop so the loop stays seamless. |
 | `scale` | number | `1.0` |  |
-| `opacity` | number | `0.4` |  |
+| `opacity` | number | `0.5` |  |
 | `tint` | integer × 3 | `[226,230,238]` |  |
-| `variation` | number | `0.55` |  |
+| `variation` | number | `0.55` | How ragged and billowing their outlines are (0..1). |
+| `shade` | number | `0.55` | How dark their thick parts and undersides are (0..1). |
 | `shadows` | number | `0.0` | Shadows of clouds drifting over the ground (0..1; needs a light-giving sun). They drift with the wind when there is one, and work with the clouds themselves switched off too. |
 | `seed` | integer | `0` |  |
 
@@ -239,6 +261,23 @@ whole cycles per loop, and its engines light what is near.
 | `sprite` | [SpriteRef](#spriteref) | (see the type) | An image used instead of the drawn ship (seen from behind, as it flies ahead). |
 | `glow_from` | number | `0.8` | With a sprite: texels at least this light (0..1) glow, as engines and windows do (0 none). |
 | `seed` | integer | `0` |  |
+
+### CoverKind
+
+What a layer of ground cover is.
+
+| Value | Meaning |
+|---|---|
+| `Grass` | Short grass: a lawn, a mown verge. |
+| `TallGrass` | Long grass in tall clumps: a meadow, a field gone wild. |
+| `Wildflowers` | Flowers on thin stems, in the flower colour, a related one and white. |
+| `Moss` | Moss lying on the ground in soft cushions (no height). |
+
+### CoverOn
+
+Where a layer of ground cover grows.
+
+One of `Verge` \| `Path` \| `Both`.
 
 ### Dither
 
@@ -289,13 +328,47 @@ A repeating light source along the path: torches, lanterns, fireflies, crystals.
 | `intensity` | number | `1.0` |  |
 | `radius` | number | `6.0` | Reach of the light, metres. |
 | `flicker` | number | `1.0` |  |
-| `jitter` | number | `0.0` | Random placement wobble, metres. |
+| `jitter` | number | `0.0` | Random placement wobble, metres: sideways by this much either way and up or down by half of it. Floating lights also drift about by it. |
+| `jitter_along` | number | `0.0` | Random shift along the path, as a fraction of the spacing (0 = an even row, 1 = anywhere between its neighbours). |
+| `height_var` | number | `0.0` | Random height, metres either way (on top of `jitter`'s): fireflies and wisps at every height. |
+| `size_var` | number | `0.0` | Random size, as a fraction either way (0.3 = from 0.7 to 1.3 of `size`). |
+| `intensity_var` | number | `0.0` | Random brightness, as a fraction either way. |
+| `color_var` | number | `0.0` | Random colour, 0..1: each one a little warmer or cooler than the next. |
+| `density` | number | `1.0` | Fraction of places that hold a light (1 = every place, 0.5 = half of them, at random). |
+| `cluster` | integer | `1` | How many stand at each place (1..8). They share the place's random settings, so with `jitter`, `jitter_along` and `height_var` they scatter into a loose swarm. Each is a light of its own: turn `light` off, or the spacing up, when there are many. |
+| `stagger` | number | `0.0` | With lights on both sides: how far the right-hand row is shifted along the path, as a fraction of the spacing (0 = in pairs, 0.5 = left and right take turns). |
+| `tint` | integer × 3 | `[255,255,255]` | Colour multiplied over the kind's own light and flame (white = as it is). |
+| `post` | [LampPost](#lamppost) | `"Auto"` | What it stands on or hangs from where there is no wall (ground mounts, and wall mounts in a scene without walls). |
+| `place` | [LightPlace](#lightplace) | `"Anywhere"` | Where along the path the row is allowed to stand. |
+| `set_piece` | integer | `0` | For `place: SetPieces`: which of `set_pieces` the lights go with (0 = the first). |
 | `sprite` | [SpriteRef](#spriteref) | (see the type) |  |
 | `seed` | integer | `0` |  |
 
 ### FixtureKind
 
-One of `Torch` \| `Lantern` \| `Candle` \| `Brazier` \| `Crystal` \| `Firefly` \| `Magic` \| `GreenFire` \| `IceWisp`.
+One of `Torch` \| `Lantern` \| `Candle` \| `Brazier` \| `Crystal` \| `Firefly` \| `Magic` \| `GreenFire` \| `IceWisp` \| `StreetLamp` \| `PaperLantern` \| `Campfire` \| `Glowshroom` \| `Beacon` \| `Chandelier`.
+
+### Flare
+
+Lens flare from the sun and bright lights.
+
+| Field | Type | Default | Meaning |
+|---|---|---|---|
+| `style` | [FlareStyle](#flarestyle) | `"None"` |  |
+| `amount` | number | `0.5` | Strength (0..2). |
+
+### FlareStyle
+
+The look of a lens flare.
+
+| Value | Meaning |
+|---|---|
+| `None` |  |
+| `Star` | Four fine rays from every bright light, as through a star filter or a stopped-down lens. |
+| `Starburst` | Six rays. |
+| `Anamorphic` | A long horizontal blue streak, as an anamorphic cinema lens makes. |
+| `Ghosts` | Faint coloured reflections of the light across the frame from it, and a wide ring. |
+| `Cinematic` | The streak and the ghosts together. |
 
 ### Floating
 
@@ -307,6 +380,7 @@ Things floating on a waterway.
 | `Foam` | Clumps of foam. |
 | `Leaves` | Fallen leaves. |
 | `LilyPads` | Lily pads, a few in flower. |
+| `Ice` | Ice floes: flat straight-sided plates, snow on top and bare blue ice round the rim. |
 
 ### Fog
 
@@ -364,6 +438,23 @@ How a branch leaves the road on open ground.
 | `Side` | A side path through a gap in the road's edge. |
 | `Split` | The road itself divides: it widens, stays one paved surface for a stretch, then parts round a grass point, each path running on alone. |
 
+### GroundCover
+
+One layer of ground cover. It stands on the ground itself (not at the path's edge only, as
+`verge.tufts` do): each blade has its place, hides what is behind it and leans in the wind.
+
+| Field | Type | Default | Meaning |
+|---|---|---|---|
+| `enabled` | boolean | `true` |  |
+| `kind` | [CoverKind](#coverkind) | `"Grass"` |  |
+| `on` | [CoverOn](#coveron) | `"Verge"` |  |
+| `density` | number | `0.8` | How much of the ground it takes (0..1). |
+| `height` | number | `0.12` | How tall it stands, metres (grass about 0.12, tall grass 0.45, flowers 0.3; not moss). |
+| `color` | integer × 3 | `[40,92,30]` | Its colour: blades and stems, or the moss. |
+| `color2` | integer × 3 | `[112,150,52]` | Grass: the colour of the tips. Wildflowers: the flowers. Moss: its second shade. |
+| `patchiness` | number | `0.2` | 0 grows evenly; towards 1 it grows in patches with bare ground between. |
+| `seed` | integer | `0` |  |
+
 ### HeatShimmer
 
 Heat haze: the picture wavers over the distant ground and just above the horizon.
@@ -374,6 +465,18 @@ Heat haze: the picture wavers over the distant ground and just above the horizon
 | `strength` | number | `0.5` | How far the picture wavers (0..1). |
 | `speed` | number | `1.0` | How fast it wavers. |
 
+### LampPost
+
+What a light stands on or hangs from where there is no wall for it.
+
+| Value | Meaning |
+|---|---|
+| `Auto` | The kind's own: a street lamp on a pole, a paper lantern from a crook, a wall light with no wall on a pole, anything else set above the ground on a stone pedestal. |
+| `Off` | Nothing: the light hangs in the air. |
+| `Pole` | A slim iron pole: under a lamp, or beside a torch or lantern at its bracket. |
+| `Crook` | A tall post with an arm curling over towards the path, the light hanging from its end. |
+| `Pedestal` | A stone pedestal under it. |
+
 ### Lens
 
 Something on the camera's lens.
@@ -382,14 +485,17 @@ Something on the camera's lens.
 |---|---|---|---|
 | `enabled` | boolean | `false` |  |
 | `kind` | [LensKind](#lenskind) | `"Drops"` |  |
-| `amount` | number | `0.5` | How many drops, or how far the frost reaches in (0..1). |
+| `amount` | number | `0.5` | How much rain is on the glass, or how far the frost reaches in (0..1). |
+| `size` | number | `1.0` | Size of the drops (1 = as on a camera lens; larger reads as a windscreen close to). |
+| `trails` | number | `0.6` | Share of the heavy drops that run down the glass and leave a trail (0..1). |
+| `blur` | number | `0.35` | How far out of focus the wet glass is between the drops and their trails (0 = clear). |
 | `seed` | integer | `0` |  |
 
 ### LensKind
 
 | Value | Meaning |
 |---|---|
-| `Drops` | Raindrops that land on the lens, linger and run down. |
+| `Drops` | Rain on the glass, as a lens or a windscreen shows it: beads gathering all over it, heavy drops that land, hang and run down leaving wet trails, each drop holding the scene upside down, and the wet glass between them a little out of focus. |
 | `Frost` | Frost creeping in from the edges. |
 
 ### Lighting
@@ -414,6 +520,17 @@ Lightning strikes: a flash that lights the whole scene, and a bolt in the sky.
 | `color` | integer × 3 | `[205,215,255]` |  |
 | `bolts` | boolean | `true` | Draw the bolt in the sky (needs the sky visible). |
 | `seed` | integer | `0` |  |
+
+### LightPlace
+
+Where along the path a row of lights is allowed to stand.
+
+| Value | Meaning |
+|---|---|
+| `Anywhere` |  |
+| `Bridges` | Only on the path's bridges (`path.bridge`). |
+| `OffBridges` | Everywhere but on the bridges. |
+| `SetPieces` | One at each repeat of a set piece (`set_piece` says which): torches on every arch, a lantern at every gate. The set piece's spacing replaces `spacing`, and `offset` is measured from it. |
 
 ### LightShafts
 
@@ -504,6 +621,24 @@ One of `Wall` \| `Ground` \| `Ceiling` \| `Floating`.
 | `{"Go": object}` | On to another stop, through a transition. |
 | `{"Fork": object}` | A fork: the player chooses the left or the right stop. |
 
+### Orbit
+
+Props set round the path instead of beside it: each stands on a ring about the path's line, the
+row winding round it like the thread of a screw, the whole of it turning - rocks and wreckage
+spiralling down a wormhole's throat. `side: Both` makes two strands opposite each other, `rows`
+more strands between; `spacing`, `density` and the rest work as they do for a row.
+
+| Field | Type | Default | Meaning |
+|---|---|---|---|
+| `enabled` | boolean | `false` |  |
+| `radius` | number | `4.0` | The ring's radius, metres. |
+| `radius_var` | number | `0.8` | Random spread of the radius, metres either way. |
+| `height` | number | `0.0` | Height of the ring's centre above the path, metres (0 = the camera's eye height, which is the middle of a tunnel). |
+| `twist` | integer | `1` | Whole turns each strand winds round the path along one loop length. |
+| `spin` | integer | `1` | Whole turns the ring makes in one loop. |
+| `stray` | number | `0.08` | How far each one strays from its strand, in turns either way (0 = a clean spiral, 0.5 = anywhere round the ring). |
+| `with_tunnel` | boolean | `true` | Take `twist` and `spin` from `sky.tunnel`, so the props wind and turn with the wormhole. |
+
 ### Outline
 
 | Field | Type | Default | Meaning |
@@ -547,6 +682,7 @@ when there is one. For weather that soaks or covers the ground, use `weather.pre
 | `half_width` | number | `1.1` | Half the path width near the camera, metres. |
 | `flare` | number | `0.0` | 0 = straight edges in true perspective; up to 0.9 widens the path into the distance (stylised). |
 | `bend` | number | `0.0` | Lateral curve of the road ahead (-1 left .. 1 right). |
+| `winding` | [Winding](#winding) | (see the type) | The path winding left and right as it goes, over and over. |
 | `hill` | number | `0.0` | Vertical curve of the road ahead (-1 dips away .. 1 rises). |
 | `edge_noise` | number | `0.12` | How ragged the path edge is, metres. |
 | `edge_dark` | number | `0.35` | Darkening toward the path edge (0..1). |
@@ -602,10 +738,11 @@ What a planet's surface is made of.
 | `exposure` | number | `1.0` |  |
 | `contrast` | number | `1.0` |  |
 | `saturation` | number | `1.0` |  |
-| `bloom` | number | `0.35` | Glow around bright light (0..1). |
+| `bloom` | number | `0.35` | Glow around bright light, as a lens scatters it: a tight glow round every flame, the sun, a glint or a lit panel, falling off into a wide soft veil (0..1; in the world only light brighter than white paper spreads, as exposed, so raising `exposure` makes more of it glow). Under a dark sky the moon, an aurora and the brighter stars glow too. |
 | `vignette` | number | `0.35` |  |
 | `grain` | number | `0.0` |  |
 | `tint` | integer × 3 | `[255,255,255]` | Colour multiplied over the final image. |
+| `flare` | [Flare](#flare) | `{"style":"None","amount":0.5}` | What bright light does in the lens besides bloom. |
 
 ### Precipitation
 
@@ -654,7 +791,7 @@ parts. Lives in `scene.prop_defs` or in a kit (a folder holding kit.json and its
 
 ### PropKind
 
-One of `Tree` \| `Pine` \| `Bush` \| `Rock` \| `Boulder` \| `Cactus` \| `DeadTree` \| `Mushroom` \| `Pillar` \| `Gravestone` \| `Crystal` \| `Stalagmite` \| `Reeds` \| `Willow` \| `Palm` \| `Obelisk` \| `Icicle` \| `IceSpike`.
+One of `Tree` \| `Pine` \| `Bush` \| `Rock` \| `Boulder` \| `Cactus` \| `DeadTree` \| `Mushroom` \| `Pillar` \| `Gravestone` \| `Crystal` \| `Stalagmite` \| `Reeds` \| `Willow` \| `Palm` \| `Obelisk` \| `Icicle` \| `IceSpike` \| `Asteroid` \| `Satellite` \| `Debris` \| `CargoPod` \| `Comet`.
 
 ### PropLayer
 
@@ -671,13 +808,18 @@ A repeating row (or several rows) of props beside the path.
 | `rows` | integer | `1` | Extra rows further from the path. |
 | `row_spacing` | number | `3.0` |  |
 | `jitter` | number | `0.5` | Random sideways placement, metres. |
+| `jitter_along` | number | `0.0` | Random shift along the path, as a fraction of the spacing (0 = an even row, 1 = anywhere between its neighbours). Rows beyond the first are always shifted by at least 0.8. |
+| `stagger` | number | `0.0` | With props on both sides: how far the right-hand side is shifted along the path, as a fraction of the spacing (0 = in pairs, 0.5 = left and right take turns). |
 | `density` | number | `1.0` | Share of slots that hold a prop (0..1), for natural gaps. |
 | `scale` | number | `1.0` |  |
 | `scale_var` | number | `0.2` |  |
+| `lean_var` | number | `0.0` | How far each one leans, at random to either side: its top moves by up to this fraction of its height, the trunk bowing over (0.04 is a natural stand of trees; rocks and pillars want 0). |
+| `tint_var` | number | `0.12` | How much each one's colour differs from its neighbours' (0 all alike, 0.12 natural, 0.4 strongly): some lighter or darker, some a little warmer or cooler. |
 | `tint` | integer × 3 | `[40,110,34]` | Colour of procedural props. Left out of a scene file, it is the kind's own colour. |
 | `sink` | number | `0.02` | How far the base sinks into the ground, as a fraction of height. |
 | `float` | number | `0.0` | Floating props (asteroids, drifting islands, lanterns): height above the ground, metres, and a random spread either way. Floating props hang over a bridge's drop too, and cast no sun shadow. |
 | `float_var` | number | `0.0` |  |
+| `orbit` | [Orbit](#orbit) | (see the type) | Set round the path in a ring instead of in rows beside it. |
 | `shadow` | boolean | `true` |  |
 | `shadow_opacity` | number | `0.6` |  |
 | `sprite` | [SpriteRef](#spriteref) | (see the type) |  |
@@ -812,6 +954,7 @@ One of `Both` \| `Left` \| `Right` \| `Center`.
 | `moon` | [Moon](#moon) | (see the type) |  |
 | `stars` | [Stars](#stars) | (see the type) |  |
 | `clouds` | [Clouds](#clouds) | (see the type) |  |
+| `cloud_layers` | list of [Clouds](#clouds) | `[]` | More layers of cloud over `clouds`, drawn in order (up to three): cirrus high over cumulus, heaps under an overcast. |
 | `aurora` | [Aurora](#aurora) | (see the type) | Northern lights: curtains of green and violet light rippling across the sky. |
 | `rainbow` | [Rainbow](#rainbow) | (see the type) |  |
 | `space` | [Space](#space) | (see the type) | Deep space: a dense starfield, nebulae, a galaxy band and planets. |
@@ -823,7 +966,7 @@ One of `Both` \| `Left` \| `Right` \| `Center`.
 |---|---|---|---|
 | `enabled` | boolean | `false` |  |
 | `pos` | number × 2 | `[0.72,0.35]` | Position in the sky: x 0..1 across, y 0 (top) .. 1 (horizon). |
-| `radius` | number | `0.08` | Radius as a fraction of the sky height. |
+| `radius` | number | `0.045` | Radius as a fraction of the sky height. |
 | `color` | integer × 3 | `[255,236,190]` |  |
 | `emits_light` | boolean | `true` | Lights the world and casts shadows. |
 | `intensity` | number | `1.0` |  |
@@ -999,6 +1142,7 @@ water runs to the walls, as a canal's does.
 | `float_density` | number | `0.3` | How much of the water they cover, 0 .. 1. |
 | `float_color` | integer × 3 | `[70,110,52]` |  |
 | `float_size` | number | `0.5` | How big each one is, metres across. |
+| `frozen` | number | `0.0` | How much of the water is frozen over (0..1): ice grows out from the banks, leaving a narrowing channel of open water down the middle, until at 1 it is ice from bank to bank. The ice is cracked, with snow lying on it in patches, and takes `foam_color`. |
 | `seed` | integer | `0` |  |
 
 ### Weather
@@ -1029,5 +1173,21 @@ Wind across the path.
 | `speed` | number | `3.0` | Wind speed, metres per second: positive blows to the right, negative to the left. |
 | `gusts` | number | `0.4` | How much it rises and falls in gusts (0 steady .. 1 squally). |
 | `sway` | number | `0.5` | How much trees, reeds, grass and banners sway (0..1). |
+| `flutter` | number | `0.6` | How much the wind stirs leaves and hanging strands (0..1): a tree's crown ripples, a willow's strands swing and trail downwind, while trunks stay put. |
 | `seed` | integer | `0` |  |
+
+### Winding
+
+A path that winds: it swings to one side and back to the other as it goes, and everything
+beside it (walls, verge, props, lights) follows. The bends come towards the camera as it
+walks; a whole number of them fits the loop.
+
+| Field | Type | Default | Meaning |
+|---|---|---|---|
+| `enabled` | boolean | `false` |  |
+| `amplitude` | number | `2.0` | How far the path swings to each side, metres. |
+| `length` | number | `40.0` | Distance from one bend to the next the same way, metres (snapped so the loop closes). |
+| `turn` | number | `0.6` | How much the view turns with the path (0..1). At 1 the camera always looks along the path under it, so the bends ahead swing well across the frame; at 0 it looks straight on and the path slides from side to side under it. The sky turns with the camera: the sun, moon, stars, clouds and aurora slide across the frame by as much as it has turned (and out of it on a sharp bend), and the sun's and moon's light swings round with them. |
+| `irregular` | number | `0.3` | How uneven the bends are (0..1): 0 an even wave, more makes some sharper, some gentler. |
+| `phase` | number | `0.0` | Where in a bend the loop starts (0..1 of a whole bend). |
 

@@ -9,6 +9,7 @@ pub mod inspector;
 pub mod worker;
 pub mod history;
 mod walk;
+mod mask;
 
 use crate::export::{ExportJob, ExportReport, Format};
 use crate::review::{self, LoopReport};
@@ -26,7 +27,15 @@ const SECTIONS: &[(&str, &str)] = &[
     ("camera", "Camera"), ("path", "Path"), ("verge", "Verge"), ("walls", "Walls"), ("ceiling", "Ceiling"),
     ("sky", "Sky"), ("light", "Lighting"), ("weather", "Weather"), ("post", "Post"), ("style", "Style"), ("motion", "Motion"), ("canvas", "Canvas"),
 ];
-const LISTS: &[(&str, &str, &str)] = &[("fixtures", "Lights", "Fixture"), ("props", "Props", "PropLayer"), ("set_pieces", "Set pieces", "SetPiece"), ("particles", "Particles", "Particles")];
+const LISTS: &[(&str, &str, &str)] = &[
+    ("fixtures", "Lights", "Fixture"), ("props", "Props", "PropLayer"), ("set_pieces", "Set pieces", "SetPiece"),
+    ("particles", "Particles", "Particles"), ("ground_cover", "Ground cover", "GroundCover"),
+];
+/// What one item of a list is called: "light", "prop", "set piece".
+fn one_of(label: &str) -> String {
+    let l = label.to_lowercase();
+    if l == "particles" || l == "ground cover" { l } else { l.trim_end_matches('s').to_owned() }
+}
 const HISTORY: usize = 200;
 const THUMB_FRAMES: usize = 8;
 
@@ -122,6 +131,15 @@ pub struct Studio {
     /// Gallery thumbnails: each preset's frames across its loop, played while the gallery is open.
     thumbs: Vec<Vec<TextureHandle>>,
     thumbs_rx: Option<Receiver<(usize, usize, crate::world::Image)>>,
+    /// Your own presets (read when the gallery or the save dialog opens), a thumbnail for each as
+    /// it gets drawn, the name being typed in "Save as preset", and the one asked to be deleted.
+    my_presets: Vec<crate::project::MyPreset>,
+    my_thumbs: Vec<Option<TextureHandle>>,
+    my_listed: bool,
+    preset_name: Option<String>,
+    preset_delete: Option<String>,
+    /// The glow and shadow mask being painted for an image, if that window is open.
+    mask: Option<mask::MaskUi>,
     remix: RemixUi,
     walk: walk::WalkUi,
     loop_rx: Option<Receiver<LoopReport>>,
@@ -201,7 +219,8 @@ pub fn new(cc: &eframe::CreationContext<'_>, open: Option<PathBuf>, section: Opt
             playing: true, pos: 0.0, last_tick: Instant::now(),
             preview: worker::Preview::spawn(cc.egui_ctx.clone(), Self::preview_gpu(cc)), texture: None, shown_tag: 0, tag: 1, pending: false, sent: None,
             render_ms: 0.0, stats: None, drag: None, pick: None, frame_no: 0, outline: None, play: (Instant::now(), 0, 0, u32::MAX),
-            gallery_open: open.is_none(), thumbs: vec![Vec::new(); presets::ALL.len()], thumbs_rx: None, remix: RemixUi::default(), walk: walk::WalkUi::default(),
+            gallery_open: open.is_none(), thumbs: vec![Vec::new(); presets::ALL.len()], thumbs_rx: None,
+            my_presets: Vec::new(), my_thumbs: Vec::new(), my_listed: false, preset_name: None, preset_delete: None, mask: None, remix: RemixUi::default(), walk: walk::WalkUi::default(),
             loop_rx: None, loop_report: None, export: ExportDialog::default(), status: String::new(), title: String::new(),
         };
         if let Some(p) = open { s.open_file(&p); }
@@ -256,6 +275,62 @@ pub fn new(cc: &eframe::CreationContext<'_>, open: Option<PathBuf>, section: Opt
         self.file = None;
         self.disk_stamp = None;
         self.status = format!("New scene from {name} (not saved yet)");
+    }
+
+    /// Start a new scene from one of your own presets.
+    fn new_from_my_preset(&mut self, name: &str) {
+        match crate::project::open_preset(&home(), name) {
+            Ok(s) => {
+                self.replace_doc(to_doc(&s), true);
+                self.saved = Value::Null;
+                self.file = None;
+                self.disk_stamp = None;
+                self.status = format!("New scene from your preset {name} (not saved yet)");
+            }
+            Err(e) => self.status = e,
+        }
+    }
+
+    fn list_my_presets(&mut self) {
+        self.my_presets = crate::project::my_presets(&home());
+        self.my_thumbs = vec![None; self.my_presets.len()];
+    }
+
+    /// "Save as preset": a name, then the scene and copies of its files go into the presets folder.
+    fn preset_window(&mut self, ctx: &egui::Context) {
+        let Some(mut name) = self.preset_name.clone() else { return };
+        let (mut open, mut save, mut cancel) = (true, false, false);
+        egui::Window::new("Save as a preset").open(&mut open).collapsible(false).resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO).show(ctx, |ui| {
+            ui.label(RichText::new("Keeps this scene as a starting point under File → New from preset, with copies of the images it uses.").weak());
+            ui.add_space(6.0);
+            ui.horizontal(|ui| {
+                ui.label("Name");
+                let r = ui.add(egui::TextEdit::singleline(&mut name).desired_width(260.0));
+                if r.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) { save = true; }
+            });
+            let key = |s: &str| s.trim().to_lowercase();
+            if self.my_presets.iter().any(|p| key(&p.name) == key(&name)) {
+                ui.label(RichText::new("You have a preset of this name: saving replaces it.").color(Color32::from_rgb(240, 170, 90)));
+            }
+            ui.add_space(6.0);
+            ui.horizontal(|ui| {
+                if ui.add_enabled(!name.trim().is_empty(), egui::Button::new(RichText::new("Save preset").strong())).clicked() { save = true; }
+                if ui.button("Cancel").clicked() { cancel = true; }
+            });
+        });
+        self.preset_name = Some(name.clone());
+        if save && !name.trim().is_empty() {
+            match crate::project::save_preset(&home(), &name, &self.scene, self.base_dir().as_deref()) {
+                Ok(p) => {
+                    self.status = format!("Saved the preset {} ({})", name.trim(), p.parent().unwrap_or(&p).display());
+                    self.preset_name = None;
+                    self.my_listed = false;
+                }
+                Err(e) => self.status = e,
+            }
+        }
+        if cancel || !open { self.preset_name = None; }
     }
 
     fn open_file(&mut self, p: &Path) {
@@ -389,6 +464,11 @@ pub fn new(cc: &eframe::CreationContext<'_>, open: Option<PathBuf>, section: Opt
                 ui.separator();
                 if ui.add_enabled(true, egui::Button::new("Save  ⌘S")).clicked() { ui.close_menu(); self.save(); }
                 if ui.button("Save as…  ⇧⌘S").clicked() { ui.close_menu(); self.save_as(); }
+                if ui.button("Save as preset…").on_hover_text("Keep this scene as a starting point of your own under New from preset").clicked() {
+                    ui.close_menu();
+                    self.list_my_presets();
+                    self.preset_name = Some(self.scene.name.clone());
+                }
                 ui.separator();
                 if ui.button("Export…  ⌘E").clicked() { ui.close_menu(); self.open_export(); }
                 if let Some(p) = self.file.clone() {
@@ -475,52 +555,76 @@ pub fn new(cc: &eframe::CreationContext<'_>, open: Option<PathBuf>, section: Opt
             }
             for (key, label, def) in LISTS {
                 ui.add_space(6.0);
+                let len = self.doc[*key].as_array().map(|a| a.len()).unwrap_or(0);
+                let mut action: Option<(&str, usize)> = None;
                 ui.horizontal(|ui| {
                     ui.label(RichText::new(label.to_uppercase()).small().weak());
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui.small_button("+").on_hover_text(format!("Add {}", label.trim_end_matches('s').to_lowercase())).clicked() {
+                        if ui.small_button("+").on_hover_text(format!("Add {}", one_of(label))).clicked() {
                             let item = crate::mcp::default_of(def);
+                            if !self.doc[*key].is_array() { self.doc[*key] = Value::Array(Vec::new()); }
                             if let Some(list) = self.doc[*key].as_array_mut() {
                                 list.push(item);
                                 self.selection = Selection::Item(key, list.len() - 1);
                             }
                         }
+                        if len > 1 && ui.small_button("Clear").on_hover_text(format!("Remove all {len} (Undo brings them back)")).clicked() { action = Some(("clear", 0)); }
                     });
                 });
-                let len = self.doc[*key].as_array().map(|a| a.len()).unwrap_or(0);
-                let mut action: Option<(&str, usize)> = None;
                 for i in 0..len {
                     let item = &self.doc[*key][i];
                     let summary = inspector::item_summary(key, item);
                     let mut on = item.get("enabled").and_then(|e| e.as_bool()).unwrap_or(true);
                     let sel = self.selection == Selection::Item(key, i);
                     ui.horizontal(|ui| {
-                        if ui.checkbox(&mut on, "").changed() { self.doc[*key][i]["enabled"] = Value::Bool(on); }
-                        let text = if on { RichText::new(&summary) } else { RichText::new(&summary).weak() };
-                        let r = ui.selectable_label(sel, text);
-                        if r.clicked() { self.selection = Selection::Item(key, i); }
-                        r.context_menu(|ui| {
-                            if ui.button("Duplicate").clicked() { action = Some(("dup", i)); ui.close_menu(); }
-                            if ui.add_enabled(i > 0, egui::Button::new("Move up")).clicked() { action = Some(("up", i)); ui.close_menu(); }
-                            if ui.add_enabled(i + 1 < len, egui::Button::new("Move down")).clicked() { action = Some(("down", i)); ui.close_menu(); }
-                            if ui.button("Delete").clicked() { action = Some(("del", i)); ui.close_menu(); }
+                        if ui.checkbox(&mut on, "").on_hover_text("Show or hide").changed() { self.doc[*key][i]["enabled"] = Value::Bool(on); }
+                        // The remove button sits at the row's right-hand end, the name takes the rest.
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui.small_button("🗑").on_hover_text(format!("Remove this {} (Undo brings it back)", one_of(label))).clicked() { action = Some(("del", i)); }
+                            ui.with_layout(egui::Layout::left_to_right(egui::Align::Center).with_main_justify(false), |ui| {
+                                let text = if on { RichText::new(&summary) } else { RichText::new(&summary).weak() };
+                                let r = ui.add(egui::SelectableLabel::new(sel, text).truncate());
+                                if r.clicked() { self.selection = Selection::Item(key, i); }
+                                r.context_menu(|ui| {
+                                    if ui.button("Duplicate").clicked() { action = Some(("dup", i)); ui.close_menu(); }
+                                    if ui.add_enabled(i > 0, egui::Button::new("Move up")).clicked() { action = Some(("up", i)); ui.close_menu(); }
+                                    if ui.add_enabled(i + 1 < len, egui::Button::new("Move down")).clicked() { action = Some(("down", i)); ui.close_menu(); }
+                                    if ui.button("Remove").clicked() { action = Some(("del", i)); ui.close_menu(); }
+                                });
+                            });
                         });
                     });
                 }
-                if let (Some((what, i)), Some(list)) = (action, self.doc[*key].as_array_mut()) {
-                    match what {
-                        "dup" => { let v = list[i].clone(); list.insert(i + 1, v); self.selection = Selection::Item(key, i + 1); }
-                        "up" => { list.swap(i, i - 1); self.selection = Selection::Item(key, i - 1); }
-                        "down" => { list.swap(i, i + 1); self.selection = Selection::Item(key, i + 1); }
-                        _ => {
-                            list.remove(i);
-                            self.selection = if list.is_empty() { Selection::Section("camera") } else { Selection::Item(key, i.min(list.len() - 1)) };
-                        }
-                    }
-                }
+                if let Some((what, i)) = action { self.list_action(key, what, i); }
                 if len == 0 { ui.label(RichText::new("  none").weak().italics()); }
             }
         });
+    }
+
+    /// Duplicate ("dup"), move ("up", "down") or remove ("del") item `i` of a list, or empty the
+    /// list ("clear"). All of it goes through the document, so Undo takes it back.
+    fn list_action(&mut self, key: &'static str, what: &str, i: usize) {
+        let label = LISTS.iter().find(|(k, ..)| *k == key).map(|(_, l, _)| *l).unwrap_or(key);
+        let Some(list) = self.doc[key].as_array_mut() else { return };
+        if what != "clear" && i >= list.len() { return; }
+        match what {
+            "dup" => { let v = list[i].clone(); list.insert(i + 1, v); self.selection = Selection::Item(key, i + 1); }
+            "up" if i > 0 => { list.swap(i, i - 1); self.selection = Selection::Item(key, i - 1); }
+            "down" if i + 1 < list.len() => { list.swap(i, i + 1); self.selection = Selection::Item(key, i + 1); }
+            "del" => {
+                let what = inspector::item_summary(key, &list[i]);
+                list.remove(i);
+                self.selection = if list.is_empty() { Selection::Section("camera") } else { Selection::Item(key, i.min(list.len() - 1)) };
+                self.status = format!("Removed {what} (Undo to bring it back)");
+            }
+            "clear" => {
+                let n = list.len();
+                list.clear();
+                if matches!(self.selection, Selection::Item(k, _) if k == key) { self.selection = Selection::Section("camera"); }
+                self.status = format!("Removed all {n} {} (Undo to bring them back)", label.to_lowercase());
+            }
+            _ => {}
+        }
     }
 
     fn inspector(&mut self, ui: &mut egui::Ui) {
@@ -561,7 +665,18 @@ pub fn new(cc: &eframe::CreationContext<'_>, open: Option<PathBuf>, section: Opt
                     let label = LISTS.iter().find(|(k, ..)| *k == key).map(|(_, l, _)| *l).unwrap_or(key);
                     let len = self.doc[key].as_array().map(|a| a.len()).unwrap_or(0);
                     if i >= len { self.selection = Selection::Section("camera"); return; }
-                    ui.heading(format!("{} {}", label.trim_end_matches('s'), i + 1));
+                    let mut act = None;
+                    ui.horizontal(|ui| {
+                        let one = one_of(label);
+                        ui.heading(format!("{}{} {}", one[..1].to_uppercase(), &one[1..], i + 1));
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui.button("🗑 Remove").on_hover_text("Take it out of the scene (Undo brings it back; the Delete key does the same)").clicked() { act = Some("del"); }
+                            if ui.button("Duplicate").on_hover_text("Add a copy just after it").clicked() { act = Some("dup"); }
+                            if ui.add_enabled(i + 1 < len, egui::Button::new("⏷")).on_hover_text("Move down the list").clicked() { act = Some("down"); }
+                            if ui.add_enabled(i > 0, egui::Button::new("⏶")).on_hover_text("Move up the list").clicked() { act = Some("up"); }
+                        });
+                    });
+                    if let Some(a) = act { self.list_action(key, a, i); return; }
                     if let Some(def) = self.schema.section(key).and_then(|l| self.schema.items(l)).cloned() {
                         let path = format!("{key}.{i}");
                         let v = &mut self.doc[key][i];
@@ -819,11 +934,34 @@ pub fn new(cc: &eframe::CreationContext<'_>, open: Option<PathBuf>, section: Opt
                 self.thumbs[i].push(ctx.load_texture(format!("thumb{i}_{k}"), ci, TextureOptions::LINEAR));
             }
         }
+        // Your own presets: listed when the gallery opens, a thumbnail drawn for one each frame.
+        if !self.my_listed { self.list_my_presets(); self.my_listed = true; }
+        if let Some(i) = self.my_thumbs.iter().position(|t| t.is_none()) {
+            let p = &self.my_presets[i];
+            let img = crate::scene::load_file(&p.file).ok().map(|(s, _)| {
+                let base_dir = p.file.parent().map(Path::to_path_buf);
+                let mut r = crate::world::WorldRenderer::default();
+                if s.style.pixel_size > 1 {
+                    review::downscale(&r.render(&s, 0.0, &crate::world::RenderOptions { base_dir, ..Default::default() }), 0.25)
+                } else {
+                    let size = ((s.canvas.width as f32 * 0.25) as u32, (s.canvas.height as f32 * 0.25) as u32);
+                    r.render(&s, 0.0, &crate::world::RenderOptions { size: Some(size), base_dir, ..Default::default() })
+                }
+            });
+            let ci = match &img {
+                Some(img) => egui::ColorImage::from_rgba_unmultiplied([img.width, img.height], &img.rgba),
+                None => egui::ColorImage::new([2, 2], vec![Color32::DARK_GRAY; 4]),
+            };
+            self.my_thumbs[i] = Some(ctx.load_texture(format!("mythumb{i}"), ci, TextureOptions::LINEAR));
+            ctx.request_repaint();
+        }
         // Play the loops: a frame every 1/8 s, in step across the gallery.
         let tick = (ctx.input(|i| i.time) * 8.0) as usize;
         ctx.request_repaint_after(std::time::Duration::from_millis(125));
         let mut open = self.gallery_open;
         let mut pick = None;
+        let mut pick_mine: Option<String> = None;
+        let mut delete: Option<String> = None;
         // Never wider or taller than the app window: the thumbnails wrap into rows instead.
         let screen = ctx.screen_rect();
         // Explicit rows sized to the app window, so the gallery is never wider than the screen.
@@ -835,6 +973,35 @@ pub fn new(cc: &eframe::CreationContext<'_>, open: Option<PathBuf>, section: Opt
             .anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO).show(ctx, |ui| {
             ui.label(RichText::new("Pick a starting point; every setting can be changed after.").weak());
             egui::ScrollArea::vertical().id_salt("gallery").auto_shrink([false, false]).show(ui, |ui| {
+                if !self.my_presets.is_empty() {
+                    ui.label(RichText::new("YOURS").small().weak());
+                    egui::Grid::new("gallery-mine").spacing([12.0, 10.0]).show(ui, |ui| {
+                        for (i, p) in self.my_presets.iter().enumerate() {
+                            ui.vertical(|ui| {
+                                let r = match self.my_thumbs.get(i).and_then(|t| t.as_ref()) {
+                                    Some(t) => ui.add(egui::ImageButton::new(egui::Image::new((t.id(), cell)))),
+                                    None => ui.add_sized(cell, egui::Button::new("…")),
+                                };
+                                if r.clicked() { pick_mine = Some(p.name.clone()); }
+                                if self.preset_delete.as_deref() == Some(p.name.as_str()) {
+                                    ui.horizontal(|ui| {
+                                        if ui.small_button("Delete").on_hover_text("Deletes the preset's folder: this cannot be undone").clicked() { delete = Some(p.name.clone()); }
+                                        if ui.small_button("Keep").clicked() { self.preset_delete = None; }
+                                    });
+                                } else {
+                                    ui.horizontal(|ui| {
+                                        ui.set_max_width(cell.x);
+                                        if ui.small_button("🗑").on_hover_text("Delete this preset…").clicked() { self.preset_delete = Some(p.name.clone()); }
+                                        ui.add(egui::Label::new(&p.name).truncate());
+                                    });
+                                }
+                            });
+                            if i % cols == cols - 1 { ui.end_row(); }
+                        }
+                    });
+                    ui.add_space(8.0);
+                    ui.label(RichText::new("BUILT IN").small().weak());
+                }
                 egui::Grid::new("gallery-grid").spacing([12.0, 10.0]).show(ui, |ui| {
                     for (i, (name, _)) in presets::ALL.iter().enumerate() {
                         ui.vertical(|ui| {
@@ -852,6 +1019,13 @@ pub fn new(cc: &eframe::CreationContext<'_>, open: Option<PathBuf>, section: Opt
             });
         });
         if let Some(i) = pick { self.new_from_preset(i); open = false; }
+        if let Some(n) = pick_mine { self.new_from_my_preset(&n); open = false; }
+        if let Some(n) = delete {
+            self.status = match crate::project::remove_preset(&home(), &n) { Ok(()) => format!("Deleted your preset {n}"), Err(e) => e };
+            self.preset_delete = None;
+            self.my_listed = false;
+        }
+        if !open { self.my_listed = false; self.preset_delete = None; }
         self.gallery_open = open;
     }
 
@@ -1084,6 +1258,10 @@ pub fn new(cc: &eframe::CreationContext<'_>, open: Option<PathBuf>, section: Opt
             if ctx.input(|i| i.key_pressed(Key::ArrowLeft)) { self.step(-1); }
             if ctx.input(|i| i.key_pressed(Key::ArrowRight)) { self.step(1); }
             if ctx.input(|i| i.key_pressed(Key::G)) { self.guides = !self.guides; }
+            // Delete (or Backspace) removes the selected light, prop, set piece...
+            if ctx.input(|i| i.key_pressed(Key::Delete) || i.key_pressed(Key::Backspace)) {
+                if let Selection::Item(key, i) = self.selection.clone() { self.list_action(key, "del", i); }
+            }
         }
     }
 }
@@ -1117,6 +1295,8 @@ impl eframe::App for Studio {
         egui::CentralPanel::default().frame(egui::Frame::none()).show(ctx, |ui| self.viewport(ui));
         self.gallery(ctx);
         self.remix_window(ctx);
+        self.preset_window(ctx);
+        self.mask_window(ctx);
         self.export_window(ctx);
         self.walk_window(ctx);
         self.dev_shot(ctx);

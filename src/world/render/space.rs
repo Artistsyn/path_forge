@@ -62,7 +62,7 @@ pub(super) fn space_k(ctx: &Ctx) -> Option<SpaceK> {
         stars: s.stars.clamp(0.0, 3.0),
         sb: s.star_brightness.max(0.0),
         star_var: s.star_colors.clamp(0.0, 1.0),
-        cx: ox + 0.5 * fw,
+        cx: ox + v.sky_dx() + 0.5 * fw,
         unit: fhy,
         hy,
         top: oy,
@@ -252,7 +252,7 @@ impl PlanetK {
         let (ta, ra) = (p.tilt.to_radians(), p.rings.angle.to_radians());
         PlanetK {
             kind: match p.kind { PlanetKind::Rocky => 0.0, PlanetKind::Gas => 1.0, PlanetKind::Earth => 2.0, PlanetKind::Ice => 3.0, PlanetKind::Lava => 4.0 },
-            cx: ox + p.pos[0] * fw,
+            cx: ox + v.sky_dx() + p.pos[0] * fw,
             cy: oy + p.pos[1] * fhy,
             r: (p.radius * fhy).max(1.0),
             col: rgb_lin(p.color),
@@ -621,8 +621,9 @@ mod tests {
     #[test]
     fn space_and_its_companion_keep_the_loop_seamless() {
         let mut r = WorldRenderer::default();
-        // Star Bridge has a spinning planet and a ship that bobs and weaves.
-        let s = preset("Star Bridge");
+        // Star Bridge has a spinning planet; a ship that bobs and weaves flies beside it.
+        let mut s = preset("Star Bridge");
+        s.companions = vec![crate::scene::Companion::default()];
         let (len, secs) = (s.motion.loop_length, s.motion.loop_seconds());
         assert_eq!(r.render(&s, 0.0, &opts(0.0)).rgba, r.render(&s, len, &opts(secs)).rgba, "the loop must close");
         let c = r.render(&s, 7.3, &opts(2.1));
@@ -677,7 +678,8 @@ mod tests {
         s.path.bridge.deck.glow = 0.0;
         let no_glow = sum(&r.render(&s, 3.0, &opts(0.5)));
         assert!(lit > no_edges * 1.01, "edge lights should brighten the deck ({lit} vs {no_edges})");
-        assert!(no_edges > no_glow * 1.01, "the panels' light bars should glow ({no_edges} vs {no_glow})");
+        // The railings stand on the deck now and hide some of it, so the bars show a little less.
+        assert!(no_edges > no_glow * 1.005, "the panels' light bars should glow ({no_edges} vs {no_glow})");
     }
 
     #[test]

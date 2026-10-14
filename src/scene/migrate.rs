@@ -54,6 +54,7 @@ pub fn from_v2(o: &PathForgeSettings, name: &str) -> Scene {
         half_width,
         flare: (1.0 - o.scene.path_power).clamp(0.0, 0.85),
         bend: (o.scene.horizon_curve * 0.5).clamp(-1.0, 1.0),
+        winding: Winding::default(),
         hill: 0.0,
         edge_noise: 0.1,
         edge_dark: (o.floor.edge_vignette * 0.5).clamp(0.0, 1.0),
@@ -137,7 +138,7 @@ pub fn from_v2(o: &PathForgeSettings, name: &str) -> Scene {
             lateral: 0.3, size: (l.torch_scale / 0.068 * l.fx_scale).clamp(0.2, 6.0), light: l.emits_light,
             intensity: 1.0, radius: 6.5, flicker: l.flicker, jitter: l.placement_jitter.min(2.0),
             sprite: sprite(&l.sprite_path, &l.sprite_pool_paths, l.sprite_pool_enabled, l.sprite_flip_x),
-            seed: l.variation_seed,
+            seed: l.variation_seed, ..Fixture::default()
         });
     }
 
@@ -151,8 +152,8 @@ pub fn from_v2(o: &PathForgeSettings, name: &str) -> Scene {
         PropLayer {
             enabled: p.enabled, kind, side, lateral: (p.wx.abs() * 0.8 - half_width + 0.5).max(0.3),
             spacing: (p.z_spacing * TILE_M).max(0.5), offset: p.pos_z * TILE_M, rows: p.tree_row_count.max(1),
-            row_spacing: (p.tree_row_spacing * TILE_M).max(1.0), jitter: (p.x_jitter * 2.0).min(3.0), density: 1.0,
-            scale: p.scale, scale_var: p.scale_var.min(0.9), tint: p.tint, sink: (p.y_sink * 0.04).min(0.3), float: 0.0, float_var: 0.0,
+            row_spacing: (p.tree_row_spacing * TILE_M).max(1.0), jitter: (p.x_jitter * 2.0).min(3.0), jitter_along: 0.0, stagger: 0.0, lean_var: 0.0, density: 1.0,
+            scale: p.scale, scale_var: p.scale_var.min(0.9), tint_var: 0.0, tint: p.tint, sink: (p.y_sink * 0.04).min(0.3), float: 0.0, float_var: 0.0, orbit: Orbit::default(),
             shadow: p.casts_shadow, shadow_opacity: (p.shadow_opacity * 0.7).clamp(0.0, 1.0),
             sprite: sprite(&p.sprite_path, &p.sprite_pool_paths, p.sprite_pool_enabled, p.sprite_flip_x),
             seed: p.seed, def: String::new(),
@@ -163,6 +164,7 @@ pub fn from_v2(o: &PathForgeSettings, name: &str) -> Scene {
     Scene {
         version: SCENE_VERSION,
         name: name.to_owned(),
+        ground_cover: Vec::new(),
         canvas: Canvas { width: o.canvas.w() as u32, height: o.canvas.h() as u32 },
         camera: Camera { eye_height: eye, horizon: (hy / h).clamp(0.05, 0.95), zoom, lens_curve: o.scene.horizon_curve },
         path,
@@ -184,6 +186,7 @@ pub fn from_v2(o: &PathForgeSettings, name: &str) -> Scene {
             vignette: if o.post.vignette_enabled { o.post.vignette } else { 0.0 },
             grain: if o.post.grain_enabled { o.post.grain } else { 0.0 },
             tint: [255, 255, 255],
+            flare: Flare::default(),
         },
         style: Style::default(),
         motion: Motion { loop_length, speed: o.anim.play_speed.max(0.01) * loop_length, fps: 24 },

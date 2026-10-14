@@ -76,14 +76,14 @@ fn splat_main(@builtin(global_invocation_id) gid: vec3<u32>) {
                 if x < i32(sx - gr) || x > i32(sx + gr) || y < i32(sy - gr) || y > i32(sy + gr) { continue; }
                 if g.depth < z - 0.3 { continue; }
                 let dd = div(sqrt(sq(fx + 0.5 - sx) + sq(fy + 0.5 - sy)), gr);
-                if dd < 1.0 { c += f3(s, 3u) * ((1.0 - dd) * (1.0 - dd)); }
+                if dd < 1.0 { c += f3(s, 3u) * ((1.0 - dd) * (1.0 - dd) * div(0.035, dd * dd + 0.035)); }
             }
             case 2u: { // orb
                 let sx = s.f[0]; let sy = s.f[1]; let r = s.f[2];
                 if x < i32(sx - r) || x > i32(sx + r) || y < i32(sy - r) || y > i32(sy + r) { continue; }
                 if g.depth < z - 0.1 { continue; }
                 let dd = div(sqrt(sq(fx + 0.5 - sx) + sq(fy + 0.5 - sy)), r);
-                if dd < 1.0 { c += f3(s, 3u) * (3.0 * (1.0 - dd) * s.f[6]); }
+                if dd < 1.0 { c += f3(s, 3u) * (6.0 * (1.0 - dd) * (1.0 - dd) * s.f[6]); }
             }
             case 3u: { // flame body
                 let sx = s.f[0]; let cy = s.f[1]; let rx = s.f[2]; let ry = s.f[3];
@@ -97,7 +97,7 @@ fn splat_main(@builtin(global_invocation_id) gid: vec3<u32>) {
                 if dd < 0.35 { col = mix3(f3(s, 4u), f3(s, 7u), div(dd, 0.35)); a = 1.0; }
                 else if dd < 0.7 { col = mix3(f3(s, 7u), f3(s, 10u), div(dd - 0.35, 0.35)); a = 0.85; }
                 else { col = mix3(f3(s, 10u), f3(s, 13u), div(dd - 0.7, 0.3)); a = 0.85 * (1.0 - div(dd - 0.7, 0.3)); }
-                c += col * (a * 2.2 * s.f[16]);
+                c += col * (a * 2.2 * (1.0 + 1.6 * (1.0 - dd) * (1.0 - dd)) * s.f[16]);
             }
             case 4u: { // wisp
                 if x < fi(s, 4u) || x > fi(s, 5u) || y < fi(s, 6u) || y > fi(s, 7u) { continue; }

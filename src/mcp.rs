@@ -134,7 +134,9 @@ pub fn tools() -> Vec<Value> {
     let scale = json!({"type": "number", "description": "Preview size as a fraction of the canvas (0.05..1). Default 0.5."});
     let hide = json!({"type": "array", "items": {"type": "string", "enum": ["sky", "ground", "walls", "props", "fixtures", "particles", "post"]}, "description": "Layers to leave out, e.g. [\"props\"] to see the bare path."});
     vec![
-        tool("pf_presets", "List presets", "Built-in scenes with a one-line summary of each (setting, lights, props, sky). Start new scenes from one of these.", json!({"type": "object", "properties": {}}), true),
+        tool("pf_presets", "List presets", "Built-in scenes with a one-line summary of each (setting, lights, props, sky), then `yours`: the presets kept with pf_save_preset or the studio. Start new scenes from any of them by name.", json!({"type": "object", "properties": {}}), true),
+        tool("pf_save_preset", "Save as preset", "Keep a scene as a preset of your own: it and copies of every file it uses go into <home>/presets/<name>/, and from then on `preset: <name>` works wherever a preset is named (pf_new_scene, pf_render, pf_export...) and the studio's gallery shows it. A preset of the same name is replaced; built-in names are refused.",
+            with_source(json!({"properties": {"name": {"type": "string", "description": "What to call the preset."}}, "required": ["name"]})), false),
         tool("pf_schema", "Scene schema", "JSON Schema of the scene format, with units and meanings from the field docs. Pass `section` (e.g. \"Fixture\", \"PropLayer\", \"SetPiece\", \"Style\", \"Camera\") for one type only; without it, a list of sections and the top-level fields.",
             json!({"type": "object", "properties": {"section": {"type": "string", "description": "Type name to show, e.g. Fixture, PropLayer, Particles, Material, Post, Style, Motion."}}}), true),
         tool("pf_palettes", "Palettes", "Named pixel-art palettes (use in style.palette as {\"Named\": \"<name>\"}) with their colours.", json!({"type": "object", "properties": {}}), true),
@@ -242,6 +244,7 @@ pub fn tools() -> Vec<Value> {
                 "anchor": {"type": "string", "enum": ["Ground", "Ceiling"]},
                 "pixelated": {"type": "boolean", "description": "Pixel art: drawn with hard pixels (default true for a new prop)."},
                 "overwrite": {"type": "boolean", "description": "Replace an existing file (default false)."},
+                "mask_glow_from": {"type": "number", "description": "Also write a mask beside the image (<file>.mask.png) marking every texel at least this light (0..1) as glowing: those parts light themselves, give off light in their colour, and cast no shadow - a lantern's flame, a lit window. Paint a finer mask in the studio (Glow & shadow mask) or edit the PNG: red = glows, green = casts a shadow."},
                 "preview": {"type": "boolean", "description": "Return a preview (default true)."}
             }, "required": ["kit", "file"]}), false),
         tool("pf_pack", "Pack scene", "Make a scene self-contained: copy every file it uses (images, image folders, kits, .cube grades) into one folder and name them relative to the scene, so the folder can be moved, shared or committed with a game. Files already inside the folder stay where they are; images and grades from elsewhere go to assets/, kits to kits/. Without out_dir it gathers the scene's outside files into its own folder and rewrites the scene in place. Missing files are listed and left as they are.",
@@ -289,8 +292,13 @@ pub fn tools() -> Vec<Value> {
 
 fn find_preset(name: &str) -> Result<Scene, String> {
     let key = |s: &str| s.chars().filter(|c| c.is_alphanumeric()).collect::<String>().to_lowercase();
-    presets::ALL.iter().find(|(n, _)| key(n) == key(name)).map(|(_, f)| f())
-        .ok_or_else(|| format!("no preset named '{name}'. Presets: {}", presets::ALL.iter().map(|(n, _)| *n).collect::<Vec<_>>().join(", ")))
+    if let Some((_, f)) = presets::ALL.iter().find(|(n, _)| key(n) == key(name)) { return Ok(f()); }
+    // Then the user's own (pf_save_preset, or the studio's "Save as preset").
+    crate::project::open_preset(&home(), name).map_err(|_| {
+        let mine: Vec<String> = crate::project::my_presets(&home()).into_iter().map(|p| p.name).collect();
+        format!("no preset named '{name}'. Presets: {}{}", presets::ALL.iter().map(|(n, _)| *n).collect::<Vec<_>>().join(", "),
+            if mine.is_empty() { String::new() } else { format!(". Yours: {}", mine.join(", ")) })
+    })
 }
 
 use crate::scene::revision;
@@ -527,6 +535,7 @@ impl Server {
     pub fn call(&mut self, name: &str, args: &Value) -> Reply {
         let r = match name {
             "pf_presets" => self.presets(),
+            "pf_save_preset" => self.save_preset(args),
             "pf_schema" => self.schema(args),
             "pf_palettes" => self.palettes(),
             "pf_styles" => self.styles(args),
@@ -553,12 +562,24 @@ impl Server {
 
     // ── Tools ──────────────────────────────────────────────────────────────
 
+    fn save_preset(&self, args: &Value) -> ToolResult {
+        let name = string(args, "name").ok_or("`name`: what to call the preset")?;
+        let l = self.load(args)?;
+        let base = l.file.as_ref().and_then(|f| f.parent().map(Path::to_path_buf));
+        let file = crate::project::save_preset(&self.home, name, &l.scene, base.as_deref())?;
+        Ok(Reply::json(&json!({"preset": name.trim(), "file": file, "note": format!("start scenes from it with preset: \"{}\"", name.trim())})))
+    }
+
     fn presets(&self) -> ToolResult {
         let list: Vec<Value> = presets::ALL.iter().map(|(n, f)| {
             let s = f();
             json!({"name": n, "summary": summary(&s)})
         }).collect();
-        Ok(Reply::json(&json!({"presets": list, "home": self.home})))
+        let yours: Vec<Value> = crate::project::my_presets(&self.home).into_iter().filter_map(|p| {
+            let (s, _) = crate::scene::load_file(&p.file).ok()?;
+            Some(json!({"name": p.name, "summary": summary(&s), "file": p.file}))
+        }).collect();
+        Ok(Reply::json(&json!({"presets": list, "yours": yours, "home": self.home})))
     }
 
     fn schema(&self, args: &Value) -> ToolResult {
@@ -1177,6 +1198,11 @@ impl Server {
         std::fs::write(&tmp, &bytes).map_err(|e| format!("{}: {e}", tmp.display()))?;
         std::fs::rename(&tmp, &target).map_err(|e| format!("{}: {e}", target.display()))?;
         let mut extra = Map::new();
+        if let Some(from) = num(args, "mask_glow_from") {
+            let m = crate::world::sprites::Mask::from_light(img.as_raw(), w as usize, h as usize, (from as f32).clamp(0.0, 1.0));
+            let alpha: Vec<u8> = img.pixels().map(|p| p[3]).collect();
+            extra.insert("mask".into(), json!({"saved": m.save(&target)?, "glowing": format!("{:.0}% of the image", m.glowing(&alpha) * 100.0)}));
+        }
         extra.insert("saved".into(), json!(target));
         extra.insert("size".into(), json!([w, h]));
         extra.insert("visible".into(), json!({"x": x0, "y": y0, "width": x1 - x0, "height": y1 - y0}));
@@ -1364,6 +1390,7 @@ pub fn default_of(section: &str) -> Value {
         "PropLight" => serde_json::to_value(PropLight::default()),
         "Particles" => serde_json::to_value(Particles::default()),
         "SetPiece" => serde_json::to_value(SetPiece::default()),
+        "GroundCover" => serde_json::to_value(GroundCover::default()),
         "Material" => serde_json::to_value(Material::default()),
         "Camera" => serde_json::to_value(Camera::default()),
         "PathShape" => serde_json::to_value(PathShape::default()),
@@ -1412,7 +1439,15 @@ pub fn scene_warnings(s: &Scene) -> Vec<String> {
     let len = s.motion.loop_length.max(1.0);
     for (i, f) in s.fixtures.iter().enumerate().filter(|(_, f)| f.enabled) {
         if f.spacing < 1.0 { w.push(format!("fixtures/{i}: spacing {}m puts a light every step; very bright and slow", f.spacing)); }
+        else if f.light && f.spacing / (f.cluster.clamp(1, 8) as f32 * f.density.clamp(0.05, 1.0)) < 1.0 {
+            w.push(format!("fixtures/{i}: a cluster of {} every {}m is more than one light a metre; very bright and slow. Raise the spacing, lower the density, or set light false and let a few lit ones stand among them", f.cluster.clamp(1, 8), f.spacing));
+        }
         if f.spacing > len { w.push(format!("fixtures/{i}: spacing {}m is longer than the loop ({len}m), so it is snapped to the loop length", f.spacing)); }
+        match f.place {
+            crate::scene::LightPlace::Bridges if !s.path.bridge.enabled => w.push(format!("fixtures/{i}: place is Bridges but path.bridge is off, so none of these lights stand anywhere")),
+            crate::scene::LightPlace::SetPieces if !s.set_pieces.get(f.set_piece as usize).is_some_and(|p| p.enabled) => w.push(format!("fixtures/{i}: place is SetPieces but set_pieces/{} is missing or off, so none of these lights stand anywhere", f.set_piece)),
+            _ => {}
+        }
         for (j, p) in s.props.iter().enumerate() {
             let a = crate::world::render::snap_to_loop(f.spacing.max(0.5), len);
             let b = crate::world::render::snap_to_loop(p.spacing.max(0.5), len);
@@ -1543,7 +1578,7 @@ mod tests {
 
     #[test]
     fn read_only_tools_are_marked_and_writers_are_not() {
-        let writers = ["pf_new_scene", "pf_edit_scene", "pf_export", "pf_kit", "pf_import_sprite", "pf_pack", "pf_remix", "pf_transition", "pf_journey"];
+        let writers = ["pf_new_scene", "pf_edit_scene", "pf_export", "pf_kit", "pf_import_sprite", "pf_pack", "pf_remix", "pf_transition", "pf_journey", "pf_save_preset"];
         for t in tools() {
             let name = t["name"].as_str().unwrap();
             let ro = t["annotations"]["readOnlyHint"].as_bool().unwrap();

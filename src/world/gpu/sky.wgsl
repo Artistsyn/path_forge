@@ -6,7 +6,8 @@
 struct Sky {
     craters: array<vec4<f32>, 22>,
     hy: f32, ox: f32, oy: f32, fw: f32,
-    fhy: f32, tile_cols: u32, pad0: u32, pad1: u32,
+    // (cl_n layers of noise cloud, render::clouds::REC floats each, in prims from cl_recs.)
+    fhy: f32, tile_cols: u32, cl_n: u32, cl_recs: u32,
     stars_on: u32, star_bins: u32, star_prims: u32, md_on: u32,
     md_x: f32, md_y: f32, md_r: f32,
     au_on: u32, au_a: f32, au_m: f32, au_cx: f32,
@@ -62,13 +63,35 @@ fn sky_weight(x: u32) -> f32 {
     return S.w_near * (1.0 - left);
 }
 
+// render::MARIA and RAY_CRATERS
+const MARIA = array<vec4<f32>, 11>(
+    vec4<f32>(-0.55, -0.05, 0.33, 0.52), vec4<f32>(-0.2, -0.45, 0.32, 0.28), vec4<f32>(0.27, -0.4, 0.2, 0.2), vec4<f32>(0.42, -0.1, 0.24, 0.22), vec4<f32>(0.78, -0.28, 0.09, 0.12), vec4<f32>(0.68, 0.1, 0.12, 0.18), vec4<f32>(0.48, 0.27, 0.1, 0.1), vec4<f32>(-0.2, 0.36, 0.24, 0.2), vec4<f32>(-0.5, 0.4, 0.11, 0.11), vec4<f32>(0.0, -0.8, 0.45, 0.06), vec4<f32>(0.06, -0.22, 0.1, 0.1));
+const RAY_CRATERS = array<vec4<f32>, 4>(vec4<f32>(-0.12, 0.69, 0.5, 0.22), vec4<f32>(-0.33, -0.15, 0.2, 0.16), vec4<f32>(-0.6, -0.13, 0.13, 0.13), vec4<f32>(-0.68, -0.39, 0.08, 0.2));
 // render::moon_albedo
 fn moon_albedo(n: vec3<f32>, px: f32) -> f32 {
     let x = n.x; let y = n.y; let z = n.z;
-    let m = 0.55 * value_noise(x * 2.2 + 3.1, y * 2.2 + 7.4) + 0.3 * value_noise(x * 4.7 + 1.3, y * 4.7 + 5.2) + 0.15 * value_noise(x * 9.0 + 4.0, y * 9.0);
-    let soft = max(2.0 * px, 0.04);
-    let maria = smoothstep_r(0.55 - soft, 0.6 + soft, m - 0.1 * y - 0.06 * x);
-    var a = 1.0 - 0.42 * maria;
+    let warp = 0.5 * (value_noise(x * 5.0 + 1.7, y * 5.0 + 3.9) - 0.5) + 0.22 * (value_noise(x * 11.0 + 8.0, y * 11.0 + 2.0) - 0.5);
+    var sea = 0.0;
+    for (var k = 0; k < 11; k++) {
+        let m = MARIA[k];
+        let ex = (x - m.x) / m.z; let ey = (y - m.y) / m.w;
+        let d = sqrt(ex * ex + ey * ey) + warp;
+        let soft = max(px / min(m.z, m.w), 0.08);
+        sea = max(sea, 1.0 - smoothstep_r(0.82 - soft, 1.0 + soft, d));
+    }
+    var a = (1.0 - 0.5 * sea) * (0.93 + 0.14 * value_noise(x * 6.5 + 2.0, y * 6.5 + 5.0));
+    let pits = 1.0 - smoothstep_r(0.02, 0.07, px);
+    for (var k = 0; k < 4; k++) {
+        let rc = RAY_CRATERS[k];
+        let vx = x - rc.x; let vy = y - rc.y;
+        let dist = sqrt(vx * vx + vy * vy);
+        if dist > rc.z * 3.0 { continue; }
+        let ux = vx / max(dist, 1e-4); let uy = vy / max(dist, 1e-4);
+        let streak = smoothstep_r(0.5, 0.78, value_noise(ux * 4.5 + 10.0 + rc.x * 7.0, uy * 4.5 + 20.0));
+        let sp = dist / (0.09 * rc.z + px);
+        let spot = exp(-sp * sp);
+        a += rc.w * (0.75 * streak * exp(-dist / rc.z) * (1.0 - exp(-dist / (0.1 * rc.z + px))) + spot);
+    }
     for (var k = 0; k < 22; k++) {
         let c = S.craters[k];
         if c.w <= 0.0 { continue; }
@@ -77,10 +100,15 @@ fn moon_albedo(n: vec3<f32>, px: f32) -> f32 {
         let e = max(px / c.w, 0.06);
         let fl = 1.0 - smoothstep_r(0.78 - e, 0.82 + e, d);
         let rim = smoothstep_r(0.72 - e, 0.92, d) * (1.0 - smoothstep_r(1.0, 1.2 + e, d));
-        a *= 1.0 - 0.2 * fl + 0.14 * rim;
+        a *= 1.0 + pits * (0.1 * rim - 0.12 * fl);
     }
     let grain = (1.0 - smoothstep_r(0.03, 0.08, px)) * (value_noise(x * 24.0 + 9.0, y * 24.0) - 0.5);
     return a * (1.0 + 0.16 * grain);
+}
+// render::moon_halo (MOON_HALO 5).
+fn moon_halo(d: f32) -> f32 {
+    let w = max(1.0 - d / 5.0, 0.0);
+    return (0.2 * exp(-d / 0.3) + 0.06 * exp(-d / 1.8)) * w * w;
 }
 fn spectrum(t0: f32) -> vec3<f32> {
     let t = clamp(t0, 0.0, 1.0);
@@ -633,6 +661,90 @@ fn tunnel_px(x: u32, y: u32) -> vec3<f32> {
     return (tube + c1 * (0.15 * S.tn_core * exp(-q / 0.15))) * S.tn_k;
 }
 
+// ── clouds (render::clouds::CloudK: sheet_px, heaps_px, lining; fields as CloudK::rec) ────
+fn clr(b: u32, f: u32) -> f32 { return prims[b + f]; }
+fn cloud_lining(b: u32, u: f32, v: f32, thin: f32) -> vec3<f32> {
+    if clr(b, 24u) == 0.0 { return vec3<f32>(0.0); }
+    let du = u - clr(b, 25u); let dv = v - clr(b, 26u);
+    let near = exp(-(du * du + dv * dv) / 0.09);
+    return vec3<f32>(clr(b, 27u), clr(b, 28u), clr(b, 29u)) * (near * (0.25 + 0.9 * thin));
+}
+fn cloud_light_dir(b: u32, u: f32, v: f32) -> vec2<f32> {
+    if clr(b, 24u) == 0.0 { return vec2<f32>(-0.45, -0.89); }
+    let dx = clr(b, 25u) - u; let dy = clr(b, 26u) - v;
+    let l = max(sqrt(dx * dx + dy * dy), 1e-3);
+    return vec2<f32>(dx / l, dy / l);
+}
+fn cloud_sheet(b: u32, u: f32, v: f32) -> vec4<f32> {
+    let z = 1.0 / max(1.3 - v, 0.3);
+    var uu = (u - clr(b, 17u)) * z / clr(b, 1u) - clr(b, 14u);
+    uu = uu - floor(uu);
+    let fnx = clr(b, 2u); let nx = i32(fnx); let vs = clr(b, 3u); let seed = clr(b, 23u);
+    let coarse = fbm_wrap(uu, z + seed, nx, vs);
+    var n = coarse;
+    let detail = clr(b, 16u);
+    if detail > 0.0 { n = n * (1.0 - detail) + detail * fbm_wrap(uu, z + seed + 3.1, nx * 4, vs * 4.0); }
+    let d = (n - clr(b, 4u)) / clr(b, 5u);
+    let a = smoothstep_r(0.0, 1.0, d) * clr(b, 6u) * (1.0 - smoothstep_r(0.86, 1.0, v));
+    if a <= 0.0 { return vec4<f32>(0.0); }
+    let thick = smoothstep_r(0.5, 3.0, d);
+    let l = cloud_light_dir(b, u, v);
+    let lift = clamp(0.5 + 3.0 * (coarse - fbm_wrap(uu + l.x * 0.4 / fnx, z + seed + l.y * 0.4 / vs, nx, vs)), 0.0, 1.0);
+    let shadow = min(0.7 * thick + 0.5 * (1.0 - lift), 1.0);
+    let lit = vec3<f32>(clr(b, 8u), clr(b, 9u), clr(b, 10u));
+    let dark = vec3<f32>(clr(b, 11u), clr(b, 12u), clr(b, 13u));
+    let col = mix3(lit, dark, min(1.5 * clr(b, 7u), 1.0) * shadow) + cloud_lining(b, u, v, 1.0 - thick);
+    return vec4<f32>(col * a, a);
+}
+fn cloud_dome(th: f32, m: f32) -> f32 { return smoothstep_r(th, th + 0.15, m) * (0.55 + 0.45 * smoothstep_r(th + 0.1, th + 0.5, m)); }
+fn cloud_swell(uu: f32, arg: f32, nb: i32, vs: f32) -> f32 { return 2.2 * abs(fbm_wrap(uu, arg, nb, vs) - 0.47); }
+fn cloud_depth(h: f32, n: f32, top: f32, billow: f32, env: f32) -> f32 {
+    let d = top - h + billow * (n - 0.25) * (0.3 + 0.7 * smoothstep_r(0.0, 0.2, h));
+    if h < 0.0 { return min(d, env * (h + 0.1) / 0.1); }
+    return d;
+}
+fn cloud_heaps(b: u32, u: f32, v: f32) -> vec4<f32> {
+    let rows = clamp(u32(clr(b, 18u)), 1u, 3u);
+    var col = vec3<f32>(0.0); var alpha = 0.0;
+    let l = cloud_light_dir(b, u, v);
+    let span = clr(b, 1u); let vs = clr(b, 3u); let th = clr(b, 4u); let soft = clr(b, 5u); let op = clr(b, 6u);
+    let shade = min(1.5 * clr(b, 7u), 1.0);
+    let height = clr(b, 21u); let billow = clr(b, 22u);
+    let lit = vec3<f32>(clr(b, 8u), clr(b, 9u), clr(b, 10u));
+    let dark = vec3<f32>(clr(b, 11u), clr(b, 12u), clr(b, 13u));
+    for (var r = 0u; r < rows; r++) {
+        let s = clr(b, 30u + r);
+        let base = clr(b, 19u) - f32(r) * clr(b, 20u);
+        let h = (base - v) / (height * s);
+        if !(h >= -0.1 && h <= 1.3) { continue; }
+        let near = r + 1u == rows && rows > 1u;
+        var uu = u / span - clr(b, 14u) * select(1.0, 2.0, near) + 0.37 * f32(r) + clr(b, 23u);
+        uu = uu - floor(uu);
+        let nx = i32(clr(b, 33u + r));
+        let mass = fbm_wrap(uu, 0.0, nx, 0.0);
+        let env = smoothstep_r(th, th + 0.2, mass);
+        if env <= 0.0 { continue; }
+        let nb = nx * 4; let arg = (base - v) / s + 11.3 * f32(r + 1u);
+        let top = cloud_dome(th, mass);
+        let d = cloud_depth(h, cloud_swell(uu, arg, nb, vs), top, billow, env) + 0.22 * env * (fbm_wrap(uu, arg + 5.3, nb * 4, vs * 4.0) - 0.47);
+        let a = smoothstep_r(0.0, soft, d) * op * (0.55 + 0.45 * f32(r + 1u) / f32(rows));
+        if a <= 0.0 { continue; }
+        let du = l.x * 0.14 * height * s / span;
+        let top3 = cloud_dome(th, fbm_wrap(uu + 3.0 * du, 0.0, nx, 0.0));
+        var between = 0.0;
+        for (var i = 1; i <= 3; i++) {
+            let f = f32(i);
+            let di = cloud_depth(h - l.y * 0.14 * f, cloud_swell(uu + du * f, arg - l.y * 0.14 * f * height, nb, vs), top + (top3 - top) * f / 3.0, billow, env);
+            between += clamp(di / 0.3, 0.0, 1.0);
+        }
+        let light = 0.1 + 0.9 * exp(-1.1 * between);
+        let cc = mix3(lit, dark, shade * (1.0 - light)) + cloud_lining(b, u, v, 1.0 - smoothstep_r(0.0, 0.6, d));
+        col = col * (1.0 - a) + cc * a;
+        alpha += a * (1.0 - alpha);
+    }
+    return vec4<f32>(col, alpha);
+}
+
 @compute @workgroup_size(8, 8)
 fn sky_main(@builtin(global_invocation_id) gid: vec3<u32>) {
     if gid.x >= W.width || gid.y >= W.height { return; }
@@ -652,13 +764,12 @@ fn sky_main(@builtin(global_invocation_id) gid: vec3<u32>) {
             let a = bins[S.star_bins + tile]; let b = bins[S.star_bins + tile + 1u];
             for (var k = a; k < b; k++) {
                 let s = bins[S.star_bins + ntiles + 1u + k];
-                let ox = i32(x) - i32(prim(S.star_prims, s, 0u));
-                let oy = i32(y) - i32(prim(S.star_prims, s, 1u));
+                let sx = prim(S.star_prims, s, 0u); let sy = prim(S.star_prims, s, 1u);
                 let ri = i32(prim(S.star_prims, s, 3u));
-                if abs(ox) > ri || abs(oy) > ri { continue; }
+                if abs(i32(x) - i32(floor(sx))) > ri || abs(i32(y) - i32(floor(sy))) > ri { continue; }
                 let r = prim(S.star_prims, s, 2u);
-                let dd = sqrt(f32(ox * ox + oy * oy));
-                if dd <= r { c += vec3<f32>(0.9, 0.92, 1.0) * (prim(S.star_prims, s, 4u) * (1.0 - dd / (r + 1.0))); }
+                let d2 = (fx + 0.5 - sx) * (fx + 0.5 - sx) + (fy + 0.5 - sy) * (fy + 0.5 - sy);
+                c += mix3(vec3<f32>(0.75, 0.85, 1.0), vec3<f32>(1.0, 0.9, 0.75), prim(S.star_prims, s, 5u)) * (prim(S.star_prims, s, 4u) * exp(-d2 / (r * r)));
             }
         }
     }
@@ -671,12 +782,14 @@ fn sky_main(@builtin(global_invocation_id) gid: vec3<u32>) {
         let dx = fx + 0.5 - S.s_x; let dy = fy + 0.5 - S.s_y;
         let dd = sqrt(dx * dx + dy * dy);
         let th = dd / S.s_focal;
-        let glow = S.s_air * (0.45 * exp(-th / (0.05 * S.s_spread)) + 0.1 * exp(-th / (0.35 * S.s_spread))) + (1.0 - S.s_air) * 0.5 * exp(-th / 0.01);
+        let glare = 1.1 * exp(-max(dd - S.s_r, 0.0) / (0.4 * S.s_r + 1.0));
+        let glow = S.s_air * (0.45 * exp(-th / (0.05 * S.s_spread)) + 0.1 * exp(-th / (0.35 * S.s_spread))) + (1.0 - S.s_air) * 0.5 * exp(-th / 0.01) + glare;
         c += sc * glow;
         if dd < S.s_r + 0.5 {
             let q = min(dd / S.s_r, 1.0);
             let mu = sqrt(1.0 - q * q);
-            c = mix3(c, sc * (3.0 * (0.6 + 0.4 * mu)), clamp(S.s_r + 0.5 - dd, 0.0, 1.0));
+            // render::SUN_GAIN
+            c = mix3(c, sc * (12.0 * (0.8 + 0.2 * mu)), clamp(S.s_r + 0.5 - dd, 0.0, 1.0));
         }
     }
     if S.moon_on != 0u {
@@ -689,15 +802,16 @@ fn sky_main(@builtin(global_invocation_id) gid: vec3<u32>) {
             if dd < 1.0 {
                 let nz = sqrt(max(1.0 - dd * dd, 0.0));
                 let edge = clamp(1.5 / max(r, 1.0), 0.01, 0.2);
-                let lit = smoothstep_r(-edge, edge, dx * S.m_sx + nz * S.m_sy);
-                var crater = 1.0;
-                if S.m_craters != 0u { crater = moon_albedo(vec3<f32>(dx, dy, nz), 1.0 / max(r, 1.0)); }
-                if lit > 0.0 { c = mix3(c, mc * (1.15 * crater), clamp(S.m_op * lit, 0.0, 1.0)); }
+                let mu0 = dx * S.m_sx + nz * S.m_sy;
+                let lit = smoothstep_r(-edge, edge, mu0);
+                var crater = min(2.0 * max(mu0, 0.0) / max(max(mu0, 0.0) + nz, 1e-3), 1.35);
+                if S.m_craters != 0u { crater *= moon_albedo(vec3<f32>(dx, dy, nz), 1.0 / max(r, 1.0)); }
+                // render::MOON_GAIN
+                if lit > 0.0 { c = mix3(c, mc * (1.35 * crater), clamp(S.m_op * lit, 0.0, 1.0)); }
                 c += mc * (0.012 * S.m_op * (1.0 - lit));
-                c += mc * (0.15 * S.m_litf);
+                c += mc * (S.m_litf * moon_halo(1.2 * max(-mu0, 0.0)));
             } else if dd * r < gr {
-                let q = 1.0 - (dd * r - r) / (gr - r);
-                c += mc * (0.15 * S.m_litf * q * q);
+                c += mc * (S.m_litf * moon_halo(dd - 1.0 + 1.2 * max(-dx / dd * S.m_sx, 0.0)));
             }
         }
     }
@@ -730,6 +844,15 @@ fn sky_main(@builtin(global_invocation_id) gid: vec3<u32>) {
                 }
                 c = mix3(c, cc, clamp(S.cl_op * prim(S.cl_prims, bl, 4u) * pow(1.0 - d2, 1.2) * 0.8, 0.0, 1.0));
             }
+        }
+    }
+    if S.cl_n != 0u && above {
+        let u = (fx + 0.5 - S.ox) / S.fhy; let v = (fy + 0.5 - S.oy) / S.fhy;
+        for (var k = 0u; k < S.cl_n; k++) {
+            let b = S.cl_recs + k * 40u;
+            var pc: vec4<f32>;
+            if prims[b] != 0.0 { pc = cloud_heaps(b, u, v); } else { pc = cloud_sheet(b, u, v); }
+            if pc.w > 0.0 { c = c * (1.0 - pc.w) + pc.xyz; }
         }
     }
     if S.rb_on != 0u && above {

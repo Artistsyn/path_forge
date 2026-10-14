@@ -58,11 +58,11 @@ pf presets
 pf render --preset "Forest Path" -o forest.png
 ```
 
-There are 33 presets: Stone Dungeon, Stone Crypt, Mossy Sewer, Forest Path, Desert Canyon, Night
+There are 34 presets: Stone Dungeon, Stone Crypt, Mossy Sewer, Forest Path, Desert Canyon, Night
 Road, Magic Cavern, Ice Dungeon, Ruins Path, Dark Street, Mountain Pass, Volcanic Rift, Haunted
 Forest, Ruined Castle, Fiery Dungeon, Tower Stair, Bog Boardwalk, Desert Ruins, Ice Cave, Star Bridge,
 Hyperspace Run, Wormhole, Starship Flight, Event Horizon, Black Hole Arena, River Run, Canal Lanterns,
-Jungle River, Lagoon Swim, Frozen Channel, Misty River, Dawn Road and Hyperspace Jump.
+Jungle River, Lagoon Swim, Frozen Channel, Misty River, Dawn Road, Winding Trail and Hyperspace Jump.
 Every one loops without a seam (`pf seam` checks them all).
 
 ## 2. Scenes
@@ -81,14 +81,15 @@ times in seconds.
 | `ceiling` | A roof at a height, with its material. |
 | `sky` | Sky gradient (top and horizon colours), sun (with the bright aureole round it), moon (with phase and craters), stars, clouds (with drift and shadows on the ground), aurora, rainbow, and deep space (starfield, nebulae, a galaxy band, planets with rings). |
 | `light` | Ambient light and its colour, the colour of the far distance, fog, and cel-shaded light bands. |
-| `fixtures` | Repeating lights: torches, lanterns, candles, braziers, crystals, fireflies, magic, green fire, ice wisps, mounted on walls, the ground or the ceiling, or floating. |
-| `props` | Layers of repeating objects: trees, pillars, rocks, barrels, banners, or data-defined props (§5). `float` lifts a layer off the ground (asteroids, drifting islands, lanterns), over a bridge's drop too. |
+| `fixtures` | Repeating lights: torches, lanterns, candles, braziers, crystals, fireflies, magic, green fire, ice wisps, street lamps, paper lanterns, campfires, glowshrooms, beacons and chandeliers, mounted on walls, the ground or the ceiling, or floating, on posts where there is no wall, scattered or in swarms. See [Lights](#lights). |
+| `props` | Layers of repeating objects: trees, pillars, rocks, barrels, banners, things of space (asteroids, satellites, debris, cargo pods, comets), or data-defined props (§5). `float` lifts a layer off the ground (asteroids, drifting islands, lanterns), over a bridge's drop too; `orbit` sends it round the path in a turning spiral. See [Scatter, lean and orbit](#scatter-lean-and-orbit). |
+| `ground_cover` | Up to three layers of grass, tall grass, wildflowers or moss growing on the verge, the path or both. See [Ground cover](#ground-cover). |
 | `set_pieces` | Structures spanning the path at intervals: archways, gates, banners. |
 | `companions` | Things travelling along with the camera at a fixed place in the frame: a ship flying beside the path (drawn, or any image seen from behind via `sprite`), following its bends, bobbing and weaving in whole cycles per loop, its engines lighting what is near. |
 | `particles` | Dust, embers, fireflies, rain, snow, leaves, ash, spores, sand, petals. They drift with the wind. |
 | `weather` | Rain, snow, sleet and hail with what they do to the ground, drips, wind, sandstorms, mist, light shafts, heat shimmer, drops or frost on the lens, lightning and fog banks. See [Weather and the air](#weather-and-the-air). |
 | `prop_defs` | Props described by data, named for the scene's prop layers to use. |
-| `post` | Exposure, contrast, saturation, bloom, vignette, grain, tint. |
+| `post` | Exposure, contrast, saturation, bloom (a tight glow round every flame and the sun, falling off into a wide veil), `flare` (what bright light does in the lens: a `style` of streaks, ghosts or haloes, with `strength`), vignette, grain, tint. |
 | `style` | How the picture is drawn: pixel size, palette, dither, outline, paint, grade (§4). |
 | `motion` | Loop length (metres), walking speed (m/s) and fps for exports. |
 
@@ -102,6 +103,23 @@ where it started. Loop time is `loop_length / speed` seconds: a 24 m loop at 2.5
 cloud right round the sky that many times per loop. A fraction (0.4, 0.45…) keeps its exact
 speed, and each cloud forms, drifts and dissolves once per loop, so the loop still joins.
 
+**Cloud kinds.** `sky.clouds.kind` is `Cumulus` (heaped fair-weather clouds), `Towering`, `Stratus`
+(a flat grey sheet), `Mackerel` (ripples), `Cirrus` (high streaks), `Overcast`, `Rain`, `Snow`
+(dark, heavy decks that read as weather), `Storm` (a black deck with ragged scud under it) or `Soft`
+(the older round puffs). `cover` is how much of the sky they fill, `shade` how dark their undersides
+are. Heaped kinds are lit through their depth from the sun's side, so they have a bright edge and a
+shaded body. `sky.cloud_layers` adds more layers behind the first, each a full set of cloud settings
+(cirrus above cumulus, say). On the GPU a cloud layer costs about 1-2.5 ms at 960 x 1708.
+
+**The sun** is a small hot disc inside a wide aureole that brightens the sky round it, rather than a
+painted shape; with `post.bloom` and `post.flare` it also glows and flares in the lens.
+
+**Bloom at night.** In the world only light brighter than white paper glows (as exposed: raising
+`post.exposure` makes more of it glow). A sky is judged against itself: under a dark sky the moon,
+an aurora and bright clouds glow though they are far dimmer than that, and each brighter star gets
+a soft glow that grows with `post.bloom`. A day sky, deep space and tunnels keep the world's
+threshold. Around 0.3-0.6 is a soft glow; above 1 it is strong.
+
 **The moon** is drawn as a lit sphere. `phase` runs from −1 to 1: 0 is full, and the lit part
 shrinks towards new at either end (negative on the waning side, positive on the waxing side). The unlit part shows the sky and the stars behind it, plus a
 faint earthshine.
@@ -113,10 +131,23 @@ walls when there is no verge, in a band `foam_width` metres wide that swells `la
 `foam_color`; the bank or wall is darkened and glossy where the water wets it, up to `wet` metres
 out. `floating` sets what drifts down on the current: `Foam` (patches or ice floes), `Leaves` or
 `LilyPads` (a few in flower), at `float_density` per cell, `float_size` metres across, in
-`float_color`. Rain rings the water instead of wetting it, and snow does not lie on it. For a
+`float_color`. `floating: Ice` drifts floes down it, and `frozen` (0..1) freezes it over from the
+banks inwards: a shelf of cracked, snow-dusted ice with open water left in the middle, until at 1
+it is closed from bank to bank (Frozen Channel). Rain rings the water instead of wetting it, and snow does not lie on it. For a
 swimmer, put `camera.eye_height` near 0.3 and the horizon low (Lagoon Swim); for a boat, 1-1.3 m.
 Light shafts fill the whole air under an open sky, so leave them off unless trees or walls break
 the sun up.
+
+**Winding paths** (`path.winding`). With `enabled` the path swings from side to side as it goes:
+`amplitude` metres either way, a bend every `length` metres (snapped so the loop closes), `turn`
+for how much the camera turns to follow it (0 looks straight ahead while the path snakes across the
+view, 1 keeps the path under the camera), `irregular` to make the bends uneven, `phase` to slide
+them along. Everything beside the path follows it. See Winding Trail.
+The sky turns with the camera: the sun, moon, stars, clouds, aurora, planets and rainbow slide
+across the frame by as much as the camera has turned, out of the frame on a sharp bend and back
+again, and the light of the sun and moon swings round with them, so shadows turn too. A steady
+`path.bend` does not turn the sky (the view of a steady curve never changes, and a sky that kept
+turning could not come back to where it started each loop).
 
 **Bridges** (`path.bridge`). Every `spacing` metres the ground beside the path drops away for
 `length` metres and the path crosses on a `deck`. Below it is `bottom`: ground `depth` metres down,
@@ -137,6 +168,46 @@ at each end of every railing: stone for parapets, balustrades and iron, wood for
 Every railing is built as solid pieces, with faces on all the sides the camera can see. In the
 studio, switching between Iron and Rope also switches `rail_color`, unless you have chosen a colour yourself.
 
+### Lights
+
+`fixtures.*.kind` sets what the light is; the rest sets where it stands and how it varies.
+
+| Field | What it does |
+|---|---|
+| `post` | What holds it up where there is no wall: `Auto` (a street lamp on a pole, a paper lantern from a crook, a wall light with no wall on a pole, anything else raised on a pedestal), `Off`, `Pole`, `Crook` (a tall post with an arm the light hangs from) or `Pedestal`. |
+| `place` | `Anywhere`, `Bridges` (only on the path's bridges), `OffBridges`, or `SetPieces`: one at each repeat of `set_pieces[set_piece]`, at that set piece's spacing, with `offset` measured from it (torches on every arch). |
+| `tint` | A colour multiplied over the light and its flame. |
+| `jitter`, `jitter_along`, `height_var` | Random placement: sideways (metres), along the path (as a share of the spacing) and in height (metres). |
+| `size_var`, `intensity_var`, `color_var` | Each one a little larger or smaller, brighter or dimmer, warmer or cooler. |
+| `density`, `cluster` | The share of places that hold a light, and how many stand at each (1..8). A cluster with jitter is a swarm: fireflies at every height. |
+| `stagger` | With lights on both sides, how far the right-hand row is out of step (0.5 = left and right take turns). |
+
+A beacon pulses; a chandelier carries five flames; glass, paper and glowing caps are lit from
+inside. A post is not lit by its own lamp, so it reads dark against the glow.
+
+### Scatter, lean and orbit
+
+Prop layers have `jitter` (sideways), `jitter_along` (along the path, as a share of the spacing),
+`stagger` (the right-hand side out of step with the left), `scale_var`, `tint_var` and `lean_var`
+(each one bowing a little to one side: 0.04 is a natural stand of trees). The presets' trees, bushes
+and rocks stand unevenly and lean; pillars and obelisks stand in their rows.
+
+`orbit` sets a layer round the path instead of beside it: each prop on a ring of `radius` (spread
+by `radius_var`) about the path's line at `height` (0 = eye height, the middle of a tunnel), the row
+winding round it `twist` whole turns per loop length and the ring turning `spin` whole turns per
+loop. With `with_tunnel` (the default) both come from `sky.tunnel`, so the props spiral with a
+wormhole. `side: Both` makes two strands and `rows` more; `stray` loosens them. Props hanging in a
+tunnel are lit by its walls. See Wormhole.
+
+### Ground cover
+
+`ground_cover` holds up to three layers, each a `kind` (`Grass`, `TallGrass`, `Wildflowers`,
+`Moss`) growing `on` the `Verge`, the `Path` or `Both`, with `density`, `height`, two colours
+(`color` at the foot, `color2` at the tips or the flower heads), `patchiness` and a `seed`. Blades
+and flowers stand up from the ground and are seen through one another, near ones over far ones;
+they sway with the wind. Moss is a soft cushion pattern on the surface. On the GPU one grass layer
+costs about 1.5 ms at 480 x 854 and a second about 0.5 ms more.
+
 ### Weather and the air
 
 Every effect here works in any scene, can be combined with the others, and repeats exactly with
@@ -148,7 +219,7 @@ falling. Each is off until `enabled`. Field by field, see
 |---|---|---|
 | Rain, snow, sleet, hail | `weather.precipitation` | Falls wherever the sky is open (not under a ceiling), at `intensity` from a few drops to a downpour or blizzard, slanted by the wind. Rain and sleet make the ground wet (darker and glossy, so lamps streak in it), leave puddles that mirror the scene with rings where drops land, and splash. Snow and sleet lie on the ground, the verges, the tops of walls and the tops of props, with a trodden track down the path. `haze` adds curtains of rain in the distance or a blizzard's whiteout. |
 | Drips | `weather.drips` | Beads form on the ceiling (or the tops of the walls), fall and splash, from the same spots every time. For caves, sewers and crypts. |
-| Wind | `weather.wind` | `speed` in m/s (negative blows left) with `gusts`. Rain and snow slant and drift, particles are carried, and trees, reeds, palms, grass and banners bend and sway (`sway`); rocks, pillars and crates stay put. |
+| Wind | `weather.wind` | `speed` in m/s (negative blows left) with `gusts`. Rain and snow slant and drift, particles are carried, and trees, reeds, palms, grass and banners bend and sway (`sway`); leaves stir within a tree's crown and a willow's strands swing and trail downwind while trunks stand (`flutter`); rocks, pillars and crates stay put. |
 | Sandstorm | `weather.sandstorm` | Sand streaming past, a sand-coloured haze that hides the distance, the sun dimmed to a disc. Follows the wind's direction. |
 | Mist | `weather.mist` | Mist lying below `height` metres, drifting in banks (`patchiness`), with wisps rising. Each pixel takes as much mist as its line of sight passes through, so the ground near the camera stays clear and the distance goes white. Keep `density` near 0.1-0.2. `soft` 1 makes it thickest at the ground and thin smoothly to nothing at `height` (morning ground fog, dew lifting off a field), with no flat top. `over: Path` keeps it over the path only (the water of a river, a road), fading out `spread` metres past the edges, and the wisps then lift off the path like steam. `glow` brightens it looking towards the sun, as mist does lit from behind (Misty River, Dawn Road). |
 | Light shafts | `weather.light_shafts` | `sun`: rays streaming past trees, walls and arches near the sun. `lamps`: glowing haloes in the air round every light. Both are stronger in fog, mist and haze. |
@@ -160,7 +231,7 @@ falling. Each is off until `enabled`. Field by field, see
 | Black hole | `sky.space.black_hole` | A black hole that bends the light round it: the stars, nebulae and galaxy behind are lensed into arcs, and the far side of its accretion disk shows over the top and under the bottom of the dark shadow, edged by a thin photon ring. `pos`, `size` (the shadow's radius), `tilt` (0 face-on, about 85 the classic edge-on look) and `roll`; the disk's `disk_inner`/`disk_outer` (in horizon radii), three `disk_colors` (hot inner to cool outer), `brightness`, `doppler` (the side turning towards you brighter and bluer), `spin` (whole turns of its inner edge per loop; the outer part turns slower); `lensing`; `infall` streaks of gas spiralling in from beyond the disk's edge, and `nodes` shaped like ball_swing_game's hook nodes (`node_size` as a share of the frame's width, `node_colors`): each floats in slowly and level from its side at play depth, untouched until it nears the middle, then is pulled back towards the hole `distance` times further off, shrinking in perspective to a speck and crawling on screen as it recedes (which is what says the hole is far away), settling into the disk's plane, reddening and fading at the rim. Every trip rolls its own side, height, size and pace, with pauses between (`infall_speed` trips per loop, `infall_color`); `light` on the scene. Planets are not lensed, so keep them clear of it (Event Horizon, Starship Flight, Black Hole Arena). `sky.space.star_colors` 0 makes every star the faint blue-white of the game's starfield. |
 | Tunnel | `sky.tunnel` | A tube all round the path in place of the sky, filling everything not drawn (below the horizon too): `kind` Hyperspace (streaks of starlight rushing past) or Wormhole (swirling bands spiralling to a bright throat). `radius`, three `colors` (walls, streaks or bands, the far end's light), `rush` (extra loop lengths per loop), `twist` and `spin` (whole turns), `density`, `core`, `light` (tints the path). Pair it with a bridge over a void, as Hyperspace Run and Wormhole do. |
 | Rainbow | `sky.rainbow` | An arc with a fainter, reversed second bow. `size` 1 spans the frame: a real 42-degree bow is wider than a portrait view. |
-| On the lens | `weather.lens` | `Drops`: raindrops land on the lens, each showing the scene upside down, linger and run down. `Frost`: crystals creeping in from the edges. |
+| On the lens | `weather.lens` | `Drops`: rain on a lens or windscreen: fine beads that bend the view, heavy drops that gather and run down in wavering trails leaving beads behind, and a haze where the glass is wet (`size`, `trails`, `blur`). `Frost`: crystals creeping in from the edges. |
 | Lightning | `weather.lightning` | Flashes that light the scene from the sky, and bolts where the sky shows. The export metadata gives each strike's frame, for thunder. |
 | Fog banks | `weather.fog_banks` | Thick stretches of fog the camera walks into and out of. |
 
@@ -190,9 +261,14 @@ path_forge
 path_forge path/to/scene.json
 ```
 
-The window has an outliner on the left (the scene's parts, its fixtures, prop layers, set pieces
-and particles, with Duplicate and Delete), a live preview in the middle, an inspector on the right
-generated from the scene format, and a timeline along the bottom.
+The window has an outliner on the left (the scene's parts, its lights, prop layers, set pieces,
+particles and ground cover), a live preview in the middle, an inspector on the right generated from
+the scene format, and a timeline along the bottom.
+
+- **Adding and removing.** `+` beside a list adds an item; the bin on a row removes it, and Clear
+  empties the list. The inspector's heading has Remove, Duplicate and move up / down for the
+  selected item, and Delete (or Backspace) removes it. Undo brings anything back. Lists inside a
+  part (extra cloud layers, planets) have their own `+ Add` and Remove in the inspector.
 
 - **Inspector.** Every field, with units, ranges and hover help. View > Advanced fields shows the
   rarely used ones too. Image and grade pickers copy files from elsewhere into the scene's
@@ -206,8 +282,13 @@ generated from the scene format, and a timeline along the bottom.
   only the current frame renders, and the newest finished frame shows meanwhile.
   `PF_STUDIO_STATS=1 path_forge scene.json` prints once a second how many frames were on time.
 - **Camera guides** (View > Camera guides, or G) draw the path edges and distance marks.
-- **File:** New from preset… (the gallery), Open… ⌘O, Save ⌘S, Save as… ⇧⌘S, Export… ⌘E, Show
-  in Finder, Gather files into the scene folder, Pack into folder… (§14).
+- **File:** New from preset… (the gallery), Open… ⌘O, Save ⌘S, Save as… ⇧⌘S, Save as preset…,
+  Export… ⌘E, Show in Finder, Gather files into the scene folder, Pack into folder… (§14).
+- **Presets of your own.** Save as preset… keeps the scene, with copies of the files it uses, in
+  `<home>/presets/<name>/`. The gallery shows yours first, each with a delete button that asks
+  before deleting. `pf preset-save --scene FILE --name NAME` does the same from a terminal, and
+  `--preset NAME` then finds it everywhere a preset is named.
+- **Glow & shadow mask…** (beside any image field) opens the mask editor (§5).
 - **Edit:** undo ⌘Z, redo ⇧⌘Z, Remix… (variations that keep the parts you tick and take the rest
   from other presets), Transition / fork… (§9, §10).
 - **Live reload.** The studio watches the scene file. When it changes on disk (another editor, an
@@ -250,6 +331,18 @@ barrels, crates) is drawn from shapes and needs no files.
 ```bash
 pf kit --kit @wayside -o wayside.png
 ```
+
+**What glows and what casts a shadow.** Props, lights and set pieces are flat images (PNG with
+transparency) stood upright; nothing needs to be 3D. An image can have a mask beside it,
+`<name>.mask.png`, the same size: red is how much a texel glows, green whether it casts a shadow.
+Glowing parts light themselves, give off light in their own colour from the middle of the glowing
+part, and cast no shadow; solid parts take the scene's light and cast one; parts marked as neither
+(smoke, glass) do neither. In the studio, Glow & shadow mask… beside an image field opens an editor
+with a brush for each, a brush size, and Mark the light parts (everything above a lightness
+glows). An image used as a light takes its flame's place and colour from the mask and only the halo
+is drawn over it; used as a prop it lights the ground round it. `pf mask --image FILE --glow-from
+0.7` writes a mask from lightness, `--remove` takes it away; `pf_import_sprite` takes
+`mask_glow_from`. Masks travel with their images when a scene is packed or kept as a preset.
 
 Sprites made with an image generator go straight into a kit. `pf_import_sprite` (MCP) takes a URL
 (for example a PixelLab download link), a local file, or base64 PNG data, checks it, saves it in the
@@ -558,11 +651,11 @@ Scenes are given as `--preset NAME` or `--scene FILE`.
 
 | Group | Commands |
 |---|---|
-| Looking | `presets`, `dump`, `render`, `sheet`, `gallery`, `styles`, `kit`, `schema [--markdown]` |
+| Looking | `presets [--mine]`, `dump`, `render`, `sheet`, `gallery`, `styles`, `kit`, `sprites` (every painted prop and light on one sheet), `schema [--markdown]` |
 | Checking | `seam`, `bench`, `animcheck`, `animsheet`, `gifdiff` |
 | Exporting | `export` (loops, encounters, transitions, forks) |
 | Transitions, forks, journeys | `transition`, `journey` |
-| Projects and the skill | `project`, `assets`, `pack`, `skill` |
+| Projects and the skill | `project`, `assets`, `pack`, `preset-save`, `mask`, `skill` |
 
 `pf` with no arguments lists the commands; the top of `src/bin/pf.rs` gives every command with all
 its options.
@@ -574,7 +667,8 @@ look at it, and export it:
 
 | Tool | Purpose |
 |---|---|
-| `pf_presets`, `pf_schema`, `pf_palettes`, `pf_styles` | What there is to start from. |
+| `pf_presets`, `pf_schema`, `pf_palettes`, `pf_styles` | What there is to start from (`pf_presets` lists your own presets too). |
+| `pf_save_preset` | Keep a scene as a preset of your own. |
 | `pf_new_scene`, `pf_get_scene`, `pf_edit_scene` | Create, read and edit scene files (merge patches and pointer edits, validated, atomic, with a revision check). |
 | `pf_render`, `pf_contact_sheet`, `pf_compare`, `pf_analyze`, `pf_check_loop`, `pf_camera` | Look at and measure a scene. |
 | `pf_export` | Export (§6). |

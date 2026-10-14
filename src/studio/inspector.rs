@@ -18,7 +18,7 @@ const fn a(pat: &'static str, min: f64, max: f64, unit: &'static str) -> Meta { 
 const META: &[Meta] = &[
     m("canvas.width", 64.0, 2048.0, " px"), m("canvas.height", 64.0, 4096.0, " px"),
     m("camera.eye_height", 0.2, 10.0, " m"), m("camera.horizon", 0.02, 0.98, ""), m("camera.zoom", 0.3, 4.0, "×"), m("camera.lens_curve", -1.0, 1.0, ""),
-    m("path.half_width", 0.2, 10.0, " m"), m("path.flare", 0.0, 0.95, ""), m("path.bend", -2.0, 2.0, ""), m("path.hill", -2.0, 2.0, ""),
+    m("path.half_width", 0.2, 10.0, " m"), m("path.flare", 0.0, 0.95, ""), m("path.bend", -2.0, 2.0, ""), m("ground_cover.*.density", 0.0, 1.0, ""), m("ground_cover.*.height", 0.02, 1.5, " m"), m("ground_cover.*.patchiness", 0.0, 1.0, ""), m("path.waterway.frozen", 0.0, 1.0, ""), m("path.winding.amplitude", 0.0, 8.0, " m"), m("path.winding.length", 10.0, 200.0, " m"), m("path.winding.turn", 0.0, 1.0, ""), m("path.winding.irregular", 0.0, 1.0, ""), m("path.winding.phase", 0.0, 1.0, ""), m("path.hill", -2.0, 2.0, ""),
     m("path.edge_noise", 0.0, 1.0, ""), m("path.edge_dark", 0.0, 1.0, ""),
     m("*.material.tile_size", 0.2, 10.0, " m"), m("*.material.brightness", 0.2, 3.0, "×"), m("*.material.damage", 0.0, 1.0, ""),
     a("*.material.noise", 0.0, 60.0, ""), a("*.material.rotate", 0.0, 1.0, ""),
@@ -27,14 +27,20 @@ const META: &[Meta] = &[
     m("ceiling.height", 1.0, 20.0, " m"),
     m("*.radius", 0.0, 0.4, ""), m("*.intensity", 0.0, 5.0, "×"), m("sky.moon.phase", -1.0, 1.0, ""), m("sky.moon.opacity", 0.0, 1.0, ""),
     m("sky.stars.count", 0.0, 1000.0, ""), m("sky.stars.size", 0.2, 4.0, "×"), m("sky.stars.twinkle", 0.0, 1.0, ""),
-    m("sky.clouds.count", 0.0, 60.0, ""), m("sky.clouds.drift", 0.0, 5.0, "×"), m("sky.clouds.scale", 0.2, 4.0, "×"), m("sky.clouds.opacity", 0.0, 1.0, ""), a("sky.clouds.variation", 0.0, 1.0, ""),
+    m("sky.clouds.count", 0.0, 60.0, ""), m("sky.clouds.cover", 0.0, 1.0, ""), m("sky.clouds.shade", 0.0, 1.0, ""), m("sky.cloud_layers.*.cover", 0.0, 1.0, ""), m("sky.cloud_layers.*.shade", 0.0, 1.0, ""), m("sky.cloud_layers.*.drift", 0.0, 5.0, "×"), m("sky.cloud_layers.*.scale", 0.2, 4.0, "×"), m("sky.cloud_layers.*.opacity", 0.0, 1.0, ""), m("sky.cloud_layers.*.variation", 0.0, 1.0, ""), m("sky.clouds.drift", 0.0, 5.0, "×"), m("sky.clouds.scale", 0.2, 4.0, "×"), m("sky.clouds.opacity", 0.0, 1.0, ""), a("sky.clouds.variation", 0.0, 1.0, ""),
     m("light.ambient", 0.0, 2.0, ""), m("light.fog.distance", 2.0, 300.0, " m"), m("light.bands", 0.0, 8.0, ""),
     m("fixtures.*.height", 0.0, 6.0, " m"), m("fixtures.*.spacing", 0.5, 48.0, " m"), m("fixtures.*.offset", 0.0, 48.0, " m"),
     m("fixtures.*.lateral", -3.0, 5.0, " m"), m("fixtures.*.size", 0.2, 4.0, "×"), m("fixtures.*.radius", 0.5, 30.0, " m"),
-    m("fixtures.*.flicker", 0.0, 3.0, "×"), a("fixtures.*.jitter", 0.0, 2.0, " m"),
+    m("fixtures.*.flicker", 0.0, 3.0, "×"), m("fixtures.*.jitter", 0.0, 3.0, " m"),
+    m("fixtures.*.jitter_along", 0.0, 1.0, ""), m("fixtures.*.height_var", 0.0, 3.0, " m"), m("fixtures.*.size_var", 0.0, 0.9, ""),
+    m("fixtures.*.intensity_var", 0.0, 1.0, ""), m("fixtures.*.color_var", 0.0, 1.0, ""), m("fixtures.*.density", 0.0, 1.0, ""),
+    m("fixtures.*.cluster", 1.0, 8.0, ""), m("fixtures.*.stagger", 0.0, 1.0, ""), m("fixtures.*.set_piece", 0.0, 7.0, ""),
+    m("props.*.jitter_along", 0.0, 1.0, ""), m("props.*.stagger", 0.0, 1.0, ""), m("props.*.lean_var", 0.0, 0.2, ""),
+    m("props.*.orbit.radius", 0.5, 30.0, " m"), m("props.*.orbit.radius_var", 0.0, 10.0, " m"), m("props.*.orbit.height", 0.0, 20.0, " m"),
+    m("props.*.orbit.twist", -6.0, 6.0, ""), m("props.*.orbit.spin", -4.0, 4.0, ""), m("props.*.orbit.stray", 0.0, 0.5, ""),
     m("props.*.lateral", -3.0, 20.0, " m"), m("props.*.spacing", 0.3, 48.0, " m"), m("props.*.offset", 0.0, 48.0, " m"),
     m("props.*.rows", 1.0, 8.0, ""), m("props.*.row_spacing", 0.5, 20.0, " m"), m("props.*.density", 0.0, 1.0, ""),
-    m("props.*.scale", 0.1, 6.0, "×"), m("props.*.scale_var", 0.0, 1.0, ""), m("props.*.shadow_opacity", 0.0, 1.0, ""),
+    m("props.*.scale", 0.1, 6.0, "×"), m("props.*.scale_var", 0.0, 1.0, ""), m("props.*.tint_var", 0.0, 0.5, ""), m("props.*.shadow_opacity", 0.0, 1.0, ""),
     a("props.*.jitter", 0.0, 5.0, " m"), a("props.*.sink", 0.0, 1.0, " m"),
     m("set_pieces.*.spacing", 4.0, 96.0, " m"), m("set_pieces.*.offset", 0.0, 96.0, " m"), m("set_pieces.*.width", 0.0, 12.0, " m"),
     m("set_pieces.*.height", 1.0, 10.0, " m"), m("set_pieces.*.shadow", 0.0, 1.0, ""),
@@ -54,12 +60,12 @@ m("weather.precipitation.intensity", 0.0, 1.0, ""), m("weather.precipitation.siz
 m("weather.precipitation.wetness", 0.0, 1.0, ""), m("weather.precipitation.puddles", 0.0, 1.0, ""), m("weather.precipitation.splashes", 0.0, 1.0, ""),
 m("weather.precipitation.cover", 0.0, 1.0, ""), m("weather.precipitation.track", 0.0, 1.0, ""), m("weather.precipitation.haze", 0.0, 1.0, ""),
 m("weather.drips.rate", 0.0, 10.0, " /m"),
-m("weather.wind.speed", -20.0, 20.0, " m/s"), m("weather.wind.gusts", 0.0, 1.0, ""), m("weather.wind.sway", 0.0, 1.0, ""),
+m("weather.wind.speed", -20.0, 20.0, " m/s"), m("weather.wind.gusts", 0.0, 1.0, ""), m("weather.wind.sway", 0.0, 1.0, ""), m("weather.wind.flutter", 0.0, 1.0, ""),
 m("weather.sandstorm.intensity", 0.0, 1.0, ""),
 m("weather.mist.height", 0.1, 5.0, " m"), m("weather.mist.density", 0.0, 2.0, " /m"), m("weather.mist.patchiness", 0.0, 1.0, ""), m("weather.mist.wisps", 0.0, 1.0, ""), m("weather.mist.soft", 0.0, 1.0, ""), m("weather.mist.spread", 0.0, 10.0, " m"), m("weather.mist.glow", 0.0, 2.0, ""),
 m("weather.light_shafts.sun", 0.0, 2.0, ""), m("weather.light_shafts.lamps", 0.0, 2.0, ""),
 m("weather.heat_shimmer.strength", 0.0, 1.0, ""), m("weather.heat_shimmer.speed", 0.0, 3.0, "×"),
-m("weather.lens.amount", 0.0, 1.0, ""),
+m("weather.lens.amount", 0.0, 1.0, ""), m("weather.lens.size", 0.3, 3.0, "×"), m("weather.lens.trails", 0.0, 1.0, ""), m("weather.lens.blur", 0.0, 1.0, ""),
 m("sky.clouds.shadows", 0.0, 1.0, ""),
 m("sky.aurora.intensity", 0.0, 2.0, ""), m("sky.aurora.height", 0.0, 1.0, ""), m("sky.aurora.speed", 0.0, 4.0, "×"),
 m("sky.aurora.tall", 0.3, 2.0, "×"), m("sky.aurora.coverage", 0.0, 1.0, ""), m("sky.aurora.rays", 0.0, 2.0, ""),
@@ -182,6 +188,7 @@ pub fn edit_struct(ui: &mut Ui, schema: &Schema, def: &Value, path: &str, value:
     let Some(props) = def.get("properties").and_then(|p| p.as_object()) else { return false; };
     let mut changed = false;
     let mut nested: Vec<(String, &Value)> = Vec::new();
+    let mut lists: Vec<(String, &Value)> = Vec::new();
     egui::Grid::new(("grid", path)).num_columns(3).spacing([8.0, 4.0]).striped(false).show(ui, |ui| {
         for (key, fs) in props {
             let p = if path.is_empty() { key.clone() } else { format!("{path}.{key}") };
@@ -202,6 +209,8 @@ pub fn edit_struct(ui: &mut Ui, schema: &Schema, def: &Value, path: &str, value:
             // Structs other than colours and pairs open as their own group below the plain fields.
             let resolved = schema.resolve(fs);
             if resolved.get("properties").is_some() && v.is_object() { nested.push((key.clone(), fs)); continue; }
+            // A list of structs (cloud layers, planets) is a group of its own too, with add and remove.
+            if v.is_array() && schema.items(fs).is_some_and(|it| schema.resolve(it).get("properties").is_some()) { lists.push((key.clone(), fs)); continue; }
             changed |= field_row(ui, schema, fs, key, &p, v, opts);
             ui.end_row();
         }
@@ -216,7 +225,44 @@ pub fn edit_struct(ui: &mut Ui, schema: &Schema, def: &Value, path: &str, value:
         if let Some(desc) = schema.description(fs) { r.header_response.on_hover_text(desc); }
         changed |= r.body_returned.unwrap_or(false);
     }
+    for (key, fs) in lists {
+        let p = if path.is_empty() { key.clone() } else { format!("{path}.{key}") };
+        let Some(items) = schema.items(fs) else { continue };
+        let Some(arr) = obj.get_mut(&key).and_then(|v| v.as_array_mut()) else { continue };
+        let title = label_of(&key);
+        let one = title.trim_end_matches('s').to_lowercase();
+        ui.add_space(4.0);
+        ui.horizontal(|ui| {
+            let mut l = ui.label(RichText::new(&title).strong());
+            if let Some(desc) = schema.description(fs) { l = l.on_hover_text(desc); }
+            let _ = l;
+            if ui.small_button("+ Add").on_hover_text(format!("Add a {one}")).clicked() { arr.push(default_item(schema, items)); changed = true; }
+            if arr.is_empty() { ui.label(RichText::new("none").weak().italics()); }
+        });
+        let mut remove = None;
+        for (i, item) in arr.iter_mut().enumerate() {
+            let ip = format!("{p}.{i}");
+            let kind = item.get("kind").and_then(|k| k.as_str()).map(|k| format!(" · {}", spaced(k))).unwrap_or_default();
+            let r = egui::CollapsingHeader::new(format!("{} {}{kind}", label_of(&one), i + 1)).id_salt(("item", &ip)).default_open(false).show(ui, |ui| {
+                if ui.small_button("🗑 Remove").on_hover_text(format!("Remove this {one} (Undo brings it back)")).clicked() { remove = Some(i); }
+                edit_struct(ui, schema, items, &ip, item, opts)
+            });
+            changed |= r.body_returned.unwrap_or(false);
+        }
+        if let Some(i) = remove { arr.remove(i); changed = true; }
+    }
     changed
+}
+
+/// A new item for a list of structs: every field at its default, switched on.
+fn default_item(schema: &Schema, items: &Value) -> Value {
+    let def = schema.resolve(items);
+    let mut o = serde_json::Map::new();
+    if let Some(props) = def.get("properties").and_then(|p| p.as_object()) {
+        for (k, fs) in props { if let Some(d) = missing_default(schema, fs) { o.insert(k.clone(), d); } }
+    }
+    if o.contains_key("enabled") { o.insert("enabled".into(), json!(true)); }
+    Value::Object(o)
 }
 
 /// What to show for a field missing from the file: its default, or empty text for a string
@@ -437,6 +483,17 @@ fn sprite_widget(ui: &mut Ui, v: &mut Value, base: Option<&std::path::Path>) -> 
                 }
             }
         });
+        // An image of your own can say which of its parts glow and which cast a shadow.
+        let p = o.get("path").and_then(|x| x.as_str()).unwrap_or("").trim().to_owned();
+        if !p.is_empty() {
+            let full = if std::path::Path::new(&p).is_absolute() { std::path::PathBuf::from(&p) } else { base.map(|b| b.join(&p)).unwrap_or_else(|| std::path::PathBuf::from(&p)) };
+            let masked = crate::world::sprites::mask_path(&full).is_file();
+            if ui.add_enabled(full.is_file(), egui::Button::new(if masked { "Glow & shadow mask… ✔" } else { "Glow & shadow mask…" }).small())
+                .on_hover_text("Paint which parts of the image glow and give off light, and which are solid and cast a shadow")
+                .on_disabled_hover_text("Save the scene first, or pick an image file (not a folder)").clicked() {
+                ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new("pf-mask-open"), full.to_string_lossy().into_owned()));
+            }
+        }
         for key in ["pixelated", "flip_x"] {
             let mut b = o.get(key).and_then(|x| x.as_bool()).unwrap_or(false);
             if ui.checkbox(&mut b, label_of(key)).changed() { o.insert(key.into(), json!(b)); changed = true; }
@@ -454,6 +511,7 @@ pub fn item_summary(section: &str, v: &Value) -> String {
         "props" => format!("{} · {} · every {} m", s("kind"), s("side").to_lowercase(), f("spacing")),
         "particles" => format!("{} · {}", s("kind"), v.get("count").and_then(|x| x.as_u64()).unwrap_or(0)),
         "set_pieces" => format!("{} · every {} m", s("kind"), f("spacing")),
+        "ground_cover" => format!("{} · {}", s("kind"), s("on").to_lowercase()),
         _ => section.to_owned(),
     }
 }
