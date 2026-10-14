@@ -11,7 +11,18 @@ fn torches(kind: FixtureKind, height: f32, spacing: f32) -> Fixture {
 }
 
 fn props(kind: PropKind, lateral: f32, spacing: f32, scale: f32, seed: u32) -> PropLayer {
-    PropLayer { kind, lateral, spacing, scale, tint: kind.default_tint(), seed, ..PropLayer::default() }
+    // Things that grew or fell where they are stand unevenly along the path, and trees lean; what was
+    // built stands in its row.
+    let (jitter_along, lean_var) = match kind {
+        PropKind::Tree | PropKind::Pine => (0.6, 0.04),
+        PropKind::DeadTree | PropKind::Willow => (0.6, 0.06),
+        PropKind::Palm => (0.6, 0.09),
+        // (A headstone's lean is in its painting.)
+        PropKind::Gravestone => (0.3, 0.0),
+        PropKind::Pillar | PropKind::Obelisk => (0.0, 0.0),
+        _ => (0.6, 0.0),
+    };
+    PropLayer { kind, lateral, spacing, scale, tint: kind.default_tint(), seed, jitter_along, lean_var, ..PropLayer::default() }
 }
 
 fn dust(kind: ParticleKind, count: u32) -> Particles {
@@ -24,7 +35,7 @@ fn night_sky(top: Rgb, horizon: Rgb) -> Sky {
         sun: SkyBody::default(),
         moon: Moon { body: SkyBody { enabled: true, ..Moon::default().body }, ..Moon::default() },
         stars: Stars { enabled: true, ..Stars::default() },
-        clouds: Clouds { enabled: true, opacity: 0.22, tint: [120, 130, 160], ..Clouds::default() },
+        clouds: Clouds { enabled: true, kind: CloudKind::Stratus, cover: 0.4, opacity: 0.3, tint: [120, 130, 160], ..Clouds::default() },
         ..Sky::default()
     }
 }
@@ -38,6 +49,11 @@ fn day_sky(top: Rgb, horizon: Rgb, sun_pos: [f32; 2]) -> Sky {
         clouds: Clouds { enabled: true, ..Clouds::default() },
         ..Sky::default()
     }
+}
+
+/// A layer of ground cover on the verge.
+fn cover(kind: CoverKind, density: f32, height: f32, color: Rgb, color2: Rgb, patchiness: f32, seed: u32) -> GroundCover {
+    GroundCover { enabled: true, kind, on: CoverOn::Verge, density, height, color, color2, patchiness, seed }
 }
 
 fn no_sky(void: Rgb) -> Sky { Sky { enabled: false, top: void, horizon: void, ..Sky::default() } }
@@ -59,7 +75,7 @@ fn outdoor_light(ambient: f32, fog_color: Rgb, fog: f32) -> Lighting {
 fn scene(name: &str) -> Scene {
     Scene {
         version: SCENE_VERSION, name: name.to_owned(), canvas: Canvas::default(), camera: Camera::default(),
-        path: PathShape::default(), verge: Verge::default(), walls: Walls::default(), ceiling: Ceiling::default(),
+        path: PathShape::default(), verge: Verge::default(), ground_cover: vec![], walls: Walls::default(), ceiling: Ceiling::default(),
         sky: no_sky([0, 0, 0]), light: indoor_light(0.25, [0, 0, 0], 20.0), fixtures: vec![], props: vec![], set_pieces: vec![], companions: vec![], weather: Weather::default(), prop_defs: Default::default(),
         particles: vec![], post: Post::default(), style: Style::default(), motion: Motion::default(),
     }
@@ -101,7 +117,7 @@ pub fn bog_boardwalk() -> Scene {
         PropLayer { density: 0.7, rows: 2, row_spacing: 6.0, jitter: 1.5, ..props(PropKind::Willow, 4.5, 11.0, 1.0, 47) },
         PropLayer { density: 0.6, jitter: 2.0, ..props(PropKind::DeadTree, 7.5, 13.0, 1.2, 53) },
     ];
-    s.fixtures = vec![Fixture { kind: FixtureKind::Lantern, mount: Mount::Ground, lateral: 0.05, height: 1.5, spacing: 8.0, radius: 7.0, intensity: 1.1, side: Side::Both, ..Fixture::default() }];
+    s.fixtures = vec![Fixture { kind: FixtureKind::Lantern, mount: Mount::Ground, post: LampPost::Pole, lateral: 0.05, height: 1.5, spacing: 8.0, radius: 7.0, intensity: 1.1, side: Side::Both, ..Fixture::default() }];
     s.particles = vec![dust(ParticleKind::Fireflies, 60), dust(ParticleKind::Spores, 30)];
     s.weather.fog_banks = FogBanks { enabled: true, spacing: 12.0, length: 4.0, density: 0.22, offset: 6.0 };
     s.weather.mist = Mist { enabled: true, height: 0.5, density: 0.14, color: [150, 180, 170], patchiness: 0.6, wisps: 0.6, ..Mist::default() };
@@ -110,7 +126,7 @@ pub fn bog_boardwalk() -> Scene {
 }
 
 /// A walkway through deep space: dark planks and iron rails over nothing at all, a ringed gas giant
-/// and a blue world in a starfield, asteroids drifting past, and a ship flying alongside.
+/// and a blue world in a starfield, and asteroids drifting past.
 pub fn star_bridge() -> Scene {
     let mut s = scene("Star Bridge");
     s.camera.horizon = 0.4;
@@ -157,8 +173,10 @@ pub fn star_bridge() -> Scene {
     s.props = vec![
         PropLayer { rows: 2, row_spacing: 7.0, jitter: 2.5, density: 0.3, scale_var: 0.6, float: 0.5, float_var: 3.5, shadow: false, tint: [100, 92, 84], ..props(PropKind::Boulder, 3.5, 10.0, 0.9, 81) },
         PropLayer { rows: 1, jitter: 3.0, density: 0.3, scale_var: 0.5, float: 3.0, float_var: 4.0, shadow: false, tint: [86, 80, 76], ..props(PropKind::Rock, 7.0, 8.0, 2.2, 83) },
+        // A dead satellite drifting by on one side, and a cargo pod that got away.
+        PropLayer { side: Side::Left, jitter: 2.0, scale_var: 0.3, float: 4.5, float_var: 2.5, shadow: false, ..props(PropKind::Satellite, 9.0, 40.0, 1.5, 85) },
+        PropLayer { side: Side::Right, jitter: 2.0, scale_var: 0.3, float: 2.5, float_var: 1.5, offset: 17.0, shadow: false, ..props(PropKind::CargoPod, 6.0, 40.0, 1.0, 87) },
     ];
-    s.companions = vec![Companion::default()];
     s.motion = Motion { loop_length: 40.0, speed: 5.0, fps: 24 };
     s
 }
@@ -189,13 +207,12 @@ fn tunnel_deck(name: &str, deck: Material, rail: Rgb) -> Scene {
 }
 
 /// A metal deck with lit panels racing down a hyperspace tunnel of stretched starlight, cyan lights
-/// running ahead along its edges and a ship keeping pace.
+/// running ahead along its edges.
 pub fn hyperspace_run() -> Scene {
     let deck = Material { gloss: 0.3, glow: 1.0, noise: 6, damage: 0.1, ..mat(Pattern::Panels, [92, 98, 110], [120, 220, 255], 1.8) };
     let mut s = tunnel_deck("Hyperspace Run", deck, [70, 90, 110]);
     s.path.edge_lights = EdgeLights { enabled: true, color: [80, 210, 255], dash: 2.0, flow: 8, ..EdgeLights::default() };
     s.sky.tunnel = Tunnel { enabled: true, kind: TunnelKind::Hyperspace, colors: [[4, 10, 44], [170, 210, 255], [235, 245, 255]], rush: 4, ..Tunnel::default() };
-    s.companions = vec![Companion { offset: [-2.2, 2.2, 9.0], ..Companion::default() }];
     s
 }
 
@@ -209,6 +226,19 @@ pub fn wormhole() -> Scene {
         rush: 2, twist: 1, spin: 1, light: 0.6, ..Tunnel::default()
     };
     s.light.ambient_color = [190, 150, 210];
+    // Rock and wreckage caught in the throat, winding and turning with it.
+    s.props = vec![
+        PropLayer {
+            rows: 2, density: 0.8, scale_var: 0.6, shadow: false, tint: [205, 190, 200],
+            orbit: Orbit { enabled: true, radius: 4.2, radius_var: 1.0, stray: 0.06, ..Orbit::default() },
+            ..props(PropKind::Asteroid, 0.0, 4.0, 0.9, 11)
+        },
+        PropLayer {
+            side: Side::Left, density: 0.6, scale_var: 0.4, offset: 2.0, shadow: false, tint: [170, 176, 200],
+            orbit: Orbit { enabled: true, radius: 3.0, radius_var: 0.6, stray: 0.15, ..Orbit::default() },
+            ..props(PropKind::Debris, 0.0, 8.0, 0.8, 12)
+        },
+    ];
     s
 }
 
@@ -243,6 +273,7 @@ pub fn river_run() -> Scene {
         PropLayer { density: 0.3, jitter: 0.5, sink: 0.45, shadow: false, tint: [118, 116, 108], ..props(PropKind::Rock, -0.9, 9.0, 0.7, 69) },
     ];
     s.particles = vec![dust(ParticleKind::Leaves, 20)];
+    s.ground_cover = vec![cover(CoverKind::Grass, 0.9, 0.16, [44, 92, 34], [118, 150, 58], 0.2, 5)];
     s.weather.wind = Wind { enabled: true, speed: 2.0, gusts: 0.4, sway: 0.4, ..Wind::default() };
     s.motion.speed = 4.5;
     s
@@ -290,6 +321,7 @@ pub fn jungle_river() -> Scene {
     s.verge = Verge { enabled: true, material: mat(Pattern::Dirt, [70, 62, 40], [44, 38, 24], 2.0), tufts: true, tuft_color: [52, 96, 30], tuft_density: 1.4, ..Verge::default() };
     s.walls.enabled = false;
     s.sky = day_sky([84, 136, 150], [176, 198, 176], [0.35, 0.3]);
+    s.sky.clouds = Clouds { kind: CloudKind::Towering, cover: 0.4, ..s.sky.clouds };
     s.light = outdoor_light(0.45, [110, 136, 108], 55.0);
     s.light.ambient_color = [190, 205, 165];
     s.props = vec![
@@ -317,6 +349,8 @@ pub fn lagoon_swim() -> Scene {
     s.verge = Verge { enabled: true, material: mat(Pattern::Sand, [214, 196, 150], [190, 170, 124], 2.0), tufts: false, ..Verge::default() };
     s.walls.enabled = false;
     s.sky = day_sky([70, 110, 190], [255, 190, 140], [0.5, 0.42]);
+    s.sky.clouds = Clouds { kind: CloudKind::Cirrus, cover: 0.55, tint: [255, 226, 204], ..s.sky.clouds };
+    s.sky.cloud_layers = vec![Clouds { enabled: true, kind: CloudKind::Stratus, cover: 0.3, opacity: 0.4, tint: [250, 206, 180], seed: 5, ..Clouds::default() }];
     s.sky.sun.color = [255, 210, 160];
     s.light = outdoor_light(0.5, [240, 190, 160], 70.0);
     s.light.ambient_color = [255, 210, 190];
@@ -340,12 +374,13 @@ pub fn frozen_channel() -> Scene {
     s.path.edge_dark = 0.1;
     s.path.material = water([24, 40, 52], [12, 22, 30], 0.15);
     s.path.waterway = Waterway {
-        foam_color: [200, 220, 230], floating: Floating::Foam, float_density: 0.18, float_color: [220, 232, 240], float_size: 0.8, wet: 0.2,
+        foam_color: [214, 228, 238], floating: Floating::Ice, float_density: 0.3, float_color: [226, 236, 244], float_size: 1.1, frozen: 0.3, wet: 0.2,
         ..waterway(1, 0.35)
     };
     s.verge = Verge { enabled: true, material: mat(Pattern::Sand, [222, 228, 234], [196, 206, 216], 2.0), tufts: false, ..Verge::default() };
     s.walls.enabled = false;
     s.sky = day_sky([96, 130, 172], [214, 224, 234], [0.3, 0.5]);
+    s.sky.clouds = Clouds { kind: CloudKind::Snow, cover: 0.6, ..s.sky.clouds };
     s.light = outdoor_light(0.6, [200, 212, 224], 70.0);
     s.props = vec![
         PropLayer { density: 0.5, jitter: 0.6, tint: [170, 210, 230], ..props(PropKind::IceSpike, 0.8, 5.0, 0.8, 97) },
@@ -367,6 +402,8 @@ pub fn misty_river() -> Scene {
     s.sky = day_sky([92, 124, 170], [246, 200, 162], [0.58, 0.86]);
     s.sky.sun.color = [255, 210, 168];
     s.sky.clouds.opacity = 0.35;
+    s.sky.clouds = Clouds { kind: CloudKind::Stratus, cover: 0.4, tint: [252, 222, 204], ..s.sky.clouds };
+    s.sky.cloud_layers = vec![Clouds { enabled: true, kind: CloudKind::Cirrus, cover: 0.5, opacity: 0.4, tint: [255, 232, 214], seed: 9, ..Clouds::default() }];
     s.light = outdoor_light(0.45, [214, 196, 182], 80.0);
     s.light.ambient_color = [214, 206, 214];
     s.props[1].tint = [96, 120, 62];
@@ -394,6 +431,7 @@ pub fn dawn_road() -> Scene {
     s.verge = Verge { enabled: true, material: mat(Pattern::Grass, [66, 96, 44], [40, 62, 28], 2.0), tufts: true, ..Verge::default() };
     s.walls.enabled = false;
     s.sky = day_sky([104, 132, 176], [250, 206, 166], [0.42, 0.9]);
+    s.sky.clouds = Clouds { kind: CloudKind::Mackerel, cover: 0.5, tint: [255, 224, 204], ..s.sky.clouds };
     s.sky.sun.color = [255, 204, 160];
     s.light = outdoor_light(0.45, [206, 196, 190], 120.0);
     s.light.ambient_color = [214, 208, 220];
@@ -503,8 +541,8 @@ pub fn black_hole_arena() -> Scene {
     s
 }
 
-/// Open flight with no ground: the camera follows a ship along its route. No fog, a dark void, and
-/// the ship flying just ahead and below, chased from behind.
+/// Open flight with no ground: the camera flies a ship's route. No fog and a dark void; the game
+/// lays its own ship over the picture.
 fn flight(name: &str) -> Scene {
     let mut s = scene(name);
     s.camera.horizon = 0.45;
@@ -516,13 +554,12 @@ fn flight(name: &str) -> Scene {
         ambient: 0.22, ambient_color: [140, 150, 190], void_color: [2, 3, 9],
         fog: Fog { enabled: false, color: [2, 3, 9], distance: 200.0, match_sky: false }, bands: 0,
     };
-    s.companions = vec![Companion { offset: [0.0, 0.9, 9.0], bob: 0.2, weave: 0.6, ..Companion::default() }];
     s.post.bloom = 0.5;
     s.motion = Motion { loop_length: 80.0, speed: 16.0, fps: 24 };
     s
 }
 
-/// A ship's route through open space, chased from behind, straight for a black hole: its disk and
+/// A ship's route through open space, straight for a black hole: its disk and
 /// lensed ring ahead, matter streaming in, a small ringed giant far off, and asteroids and dust
 /// rushing past above, below and beside. Everything in the sky is far enough away to stay put;
 /// the speed shows in what streams by.
@@ -551,7 +588,7 @@ pub fn starship_flight() -> Scene {
     s
 }
 
-/// The same chase at light speed: the ship ahead down a tunnel of stretched starlight.
+/// The same flight at light speed, down a tunnel of stretched starlight.
 pub fn hyperspace_jump() -> Scene {
     let mut s = flight("Hyperspace Jump");
     s.path.bend = 0.0;
@@ -571,6 +608,7 @@ pub fn desert_ruins() -> Scene {
     s.verge = Verge { enabled: true, tufts: false, material: mat(Pattern::Sand, [212, 178, 124], [180, 146, 96], 3.0), ..Verge::default() };
     s.walls.enabled = false;
     s.sky = day_sky([88, 146, 214], [238, 220, 182], [0.7, 0.18]);
+    s.sky.clouds = Clouds { kind: CloudKind::Cirrus, cover: 0.45, ..s.sky.clouds };
     s.light = outdoor_light(0.42, [228, 204, 162], 130.0);
     s.light.ambient_color = [210, 196, 180];
     s.post.contrast = 1.12;
@@ -652,10 +690,35 @@ pub fn mossy_sewer() -> Scene {
     s.ceiling = Ceiling { enabled: true, height: 3.6, material: mat(Pattern::Brick, [40, 52, 36], [16, 22, 12], 2.0) };
     s.light = indoor_light(0.22, [0, 4, 0], 18.0);
     s.light.fog.color = [6, 14, 6];
-    s.fixtures = vec![Fixture { kind: FixtureKind::Firefly, mount: Mount::Floating, lateral: -0.6, height: 1.4, spacing: 3.0, radius: 3.0, intensity: 0.7, jitter: 0.6, ..Fixture::default() }];
+    // A loose swarm: a few at each place, at every height and anywhere between their neighbours.
+    s.fixtures = vec![Fixture {
+        kind: FixtureKind::Firefly, mount: Mount::Floating, lateral: -0.6, height: 1.5, spacing: 4.0, radius: 3.0, intensity: 0.7, jitter: 1.0,
+        cluster: 3, jitter_along: 1.0, height_var: 0.9, size_var: 0.4, intensity_var: 0.5, color_var: 0.3, density: 0.85, ..Fixture::default()
+    }];
     s.particles = vec![dust(ParticleKind::Spores, 80)];
     s.weather.drips = Drips { enabled: true, rate: 1.5, color: [150, 190, 150], ..Drips::default() };
+    s.ground_cover = vec![GroundCover { on: CoverOn::Path, ..cover(CoverKind::Moss, 0.5, 0.1, [34, 66, 30], [84, 108, 44], 0.5, 9) }];
     s.motion.speed = 3.2;
+    s
+}
+
+/// A trail that winds through open woodland: it swings left and right as it goes, the trees
+/// and bushes following it round every bend.
+pub fn winding_trail() -> Scene {
+    let mut s = forest_path();
+    s.name = "Winding Trail".into();
+    s.path.winding = Winding { enabled: true, amplitude: 2.2, length: 24.0, turn: 0.6, irregular: 0.4, phase: 0.0 };
+    s.ground_cover = vec![
+        cover(CoverKind::Grass, 0.9, 0.14, [40, 92, 30], [112, 150, 52], 0.2, 1),
+        cover(CoverKind::TallGrass, 0.3, 0.42, [52, 96, 34], [150, 160, 70], 0.8, 2),
+        cover(CoverKind::Wildflowers, 0.22, 0.3, [50, 100, 36], [230, 90, 150], 0.7, 3),
+    ];
+    s.props[0] = PropLayer { rows: 3, row_spacing: 4.0, jitter: 1.4, density: 0.7, ..props(PropKind::Tree, 2.6, 6.0, 1.0, 7) };
+    s.light.fog.distance = 70.0;
+    // (No sun shafts: where the trail opens out there is nothing to break the sun up, and they
+    // would haze the whole frame.)
+    s.weather.light_shafts.enabled = false;
+    s.motion = Motion { loop_length: 48.0, speed: 4.0, fps: 24 };
     s
 }
 
@@ -675,6 +738,10 @@ pub fn forest_path() -> Scene {
     ];
     s.particles = vec![dust(ParticleKind::Leaves, 40)];
     s.weather.wind = Wind { enabled: true, speed: 2.5, gusts: 0.5, sway: 0.5, ..Wind::default() };
+    s.ground_cover = vec![
+        cover(CoverKind::Grass, 0.9, 0.14, [40, 88, 30], [104, 142, 50], 0.2, 1),
+        cover(CoverKind::Wildflowers, 0.12, 0.26, [48, 96, 34], [236, 214, 96], 0.8, 3),
+    ];
     s.weather.light_shafts = LightShafts { enabled: true, sun: 0.7, lamps: 0.0 };
     s.motion.speed = 4.0;
     s
@@ -689,6 +756,7 @@ pub fn desert_canyon() -> Scene {
     s.verge = Verge { enabled: true, material: mat(Pattern::Sand, [176, 138, 90], [140, 106, 64], 3.0), ..Verge::default() };
     s.walls = Walls { enabled: true, gap: 4.0, height: 14.0, base_shadow: 0.3, material: mat(Pattern::RockFace, [170, 116, 70], [120, 80, 46], 6.0) };
     s.sky = day_sky([96, 150, 210], [236, 206, 150], [0.3, 0.3]);
+    s.sky.clouds.cover = 0.25;
     s.light = outdoor_light(0.6, [220, 190, 150], 70.0);
     s.props = vec![
         PropLayer { density: 0.6, ..props(PropKind::Cactus, 1.6, 8.0, 1.0, 3) },
@@ -708,7 +776,7 @@ pub fn night_road() -> Scene {
     s.walls = Walls { enabled: true, gap: 3.0, height: 1.2, base_shadow: 0.4, material: mat(Pattern::StoneBlock, [64, 64, 76], [30, 30, 40], 1.6) };
     s.sky = night_sky([6, 8, 24], [26, 22, 52]);
     s.light = outdoor_light(0.2, [14, 14, 30], 40.0);
-    s.fixtures = vec![Fixture { kind: FixtureKind::Lantern, mount: Mount::Ground, lateral: 0.6, height: 2.6, spacing: 8.0, radius: 9.0, intensity: 1.3, ..Fixture::default() }];
+    s.fixtures = vec![Fixture { kind: FixtureKind::StreetLamp, mount: Mount::Ground, lateral: 0.6, height: 3.0, spacing: 8.0, radius: 9.0, intensity: 1.3, ..Fixture::default() }];
     s.particles = vec![dust(ParticleKind::Fireflies, 30)];
     s.motion.speed = 5.0;
     s
@@ -753,10 +821,15 @@ pub fn ruins_path() -> Scene {
     s.walls = Walls { enabled: true, gap: 1.8, height: 2.2, base_shadow: 0.4, material: mat(Pattern::StoneBlock, [140, 124, 98], [86, 74, 58], 2.4) };
     s.walls.material.damage = 0.7;
     s.sky = day_sky([84, 124, 176], [206, 206, 186], [0.78, 0.45]);
+    s.sky.cloud_layers = vec![Clouds { enabled: true, kind: CloudKind::Cirrus, cover: 0.45, opacity: 0.4, seed: 4, ..Clouds::default() }];
     s.light = outdoor_light(0.55, [190, 196, 190], 55.0);
     s.props = vec![
         PropLayer { density: 0.5, ..props(PropKind::Pillar, 0.6, 8.0, 1.0, 17) },
         PropLayer { density: 0.7, rows: 2, ..props(PropKind::DeadTree, 4.0, 7.0, 1.0, 19) },
+    ];
+    s.ground_cover = vec![
+        cover(CoverKind::Grass, 0.8, 0.13, [52, 86, 34], [128, 140, 60], 0.4, 7),
+        GroundCover { on: CoverOn::Path, ..cover(CoverKind::Moss, 0.4, 0.1, [44, 72, 30], [96, 112, 44], 0.5, 8) },
     ];
     s.motion.speed = 4.0;
     s.set_pieces = vec![SetPiece { kind: SetPieceKind::RuinedArch, spacing: 24.0, offset: 8.0, height: 3.6, tint: [176, 160, 132], ..SetPiece::default() }];
@@ -770,6 +843,7 @@ pub fn dark_street() -> Scene {
     s.walls = Walls { enabled: true, gap: 0.8, height: 8.0, base_shadow: 0.5, material: mat(Pattern::Brick, [70, 60, 56], [30, 26, 24], 2.0) };
     s.sky = night_sky([4, 6, 18], [20, 16, 34]);
     s.light = indoor_light(0.18, [6, 6, 12], 30.0);
+    s.sky.clouds = Clouds { kind: CloudKind::Storm, cover: 0.6, opacity: 0.5, ..s.sky.clouds };
     s.fixtures = vec![Fixture { kind: FixtureKind::Lantern, height: 3.0, spacing: 8.0, radius: 7.5, intensity: 1.3, ..Fixture::default() }];
     s.particles = vec![];
     s.weather.precipitation = Precipitation { enabled: true, kind: PrecipKind::Rain, intensity: 0.6, wetness: 0.9, puddles: 0.35, ..Precipitation::default() };
@@ -788,6 +862,7 @@ pub fn mountain_pass() -> Scene {
     s.verge = Verge { enabled: true, material: mat(Pattern::RockFace, [110, 104, 100], [76, 70, 66], 3.0), ..Verge::default() };
     s.walls.enabled = false;
     s.sky = day_sky([110, 140, 190], [214, 210, 200], [0.62, 0.3]);
+    s.sky.clouds = Clouds { kind: CloudKind::Snow, cover: 0.6, ..s.sky.clouds };
     s.light = outdoor_light(0.6, [200, 205, 214], 60.0);
     s.props = vec![
         PropLayer { density: 0.6, jitter: 1.5, rows: 2, row_spacing: 5.0, ..props(PropKind::Boulder, 2.0, 7.0, 1.0, 23) },
@@ -797,6 +872,11 @@ pub fn mountain_pass() -> Scene {
     s.weather.precipitation = Precipitation { enabled: true, kind: PrecipKind::Snow, intensity: 0.35, cover: 0.35, track: 0.5, haze: 0.4, ..Precipitation::default() };
     s.weather.wind = Wind { enabled: true, speed: 2.5, gusts: 0.5, sway: 0.5, ..Wind::default() };
     s.path.bridge = Bridge { enabled: true, spacing: 42.0, length: 11.0, offset: 16.0, depth: 40.0, bottom_color: [120, 130, 150], ..Bridge::default() };
+    // Lanterns on the bridge and nowhere else: three pairs along its railings.
+    s.fixtures = vec![Fixture {
+        kind: FixtureKind::Lantern, mount: Mount::Ground, post: LampPost::Pole, place: LightPlace::Bridges, spacing: 3.5, offset: 0.5,
+        lateral: 0.05, height: 1.9, radius: 6.0, ..Fixture::default()
+    }];
     s.motion = Motion { loop_length: 42.0, speed: 5.0, fps: 24 };
     s
 }
@@ -850,12 +930,18 @@ pub fn ruined_castle() -> Scene {
     s.sky = day_sky([70, 90, 130], [180, 170, 160], [0.25, 0.45]);
     s.sky.clouds.opacity = 0.6;
     s.sky.clouds.tint = [170, 170, 180];
+    s.sky.clouds.kind = CloudKind::Overcast;
     s.light = outdoor_light(0.45, [150, 150, 160], 45.0);
     s.fixtures = vec![torches(FixtureKind::Torch, 2.6, 8.0)];
     s.props = vec![PropLayer { density: 0.5, ..props(PropKind::Pillar, 0.1, 8.0, 0.9, 43) }];
     s.particles = vec![dust(ParticleKind::Ash, 40)];
     s.props[0].offset = 4.0; // between the torches, not under them
     s.set_pieces = vec![SetPiece { kind: SetPieceKind::Gate, spacing: 24.0, offset: 12.0, height: 3.6, tint: [104, 98, 92], accent: [120, 24, 30], ..SetPiece::default() }];
+    // A brazier either side of every gate, a step in front of it.
+    s.fixtures.push(Fixture {
+        kind: FixtureKind::Brazier, mount: Mount::Ground, place: LightPlace::SetPieces, set_piece: 0, offset: -1.2, lateral: -0.45, height: 0.84,
+        radius: 4.5, intensity: 0.6, ..Fixture::default()
+    });
     s
 }
 
@@ -907,5 +993,6 @@ pub const ALL: &[(&str, fn() -> Scene)] = &[
     ("Frozen Channel", frozen_channel),
     ("Misty River", misty_river),
     ("Dawn Road", dawn_road),
+    ("Winding Trail", winding_trail),
 ("Hyperspace Jump", hyperspace_jump),
 ];

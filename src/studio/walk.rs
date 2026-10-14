@@ -98,7 +98,9 @@ impl Studio {
         if w.shot_frames == 0 {
             if let Ok(v) = std::env::var("PF_STUDIO_WALK") { w.open = true; w.fork = v == "fork"; w.travel = std::env::var("PF_STUDIO_TRAVEL").ok().and_then(|t| t.parse().ok()).unwrap_or(0.0); }
         }
-        let Ok(path) = std::env::var("PF_STUDIO_SHOT") else { return };
+        // (`PF_STUDIO_MASK=<image.png>` opens the mask editor on that image.)
+        if w.shot_frames == 0 { if let Ok(img) = std::env::var("PF_STUDIO_MASK") { ctx.data_mut(|d| d.insert_temp(egui::Id::new("pf-mask-open"), img)); } }
+        let Ok(path) = std::env::var("PF_STUDIO_SHOT") else { w.shot_frames = w.shot_frames.max(1); return };
         w.shot_frames += 1;
         ctx.request_repaint();
         if w.shot_frames == 240 { ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(Default::default())); }

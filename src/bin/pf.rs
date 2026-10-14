@@ -2,7 +2,9 @@
 //! export journeys, and manage kits, projects and the agent skill. docs/MANUAL.md explains each.
 //!
 //! Looking
-//!   pf presets                                                   the built-in presets
+//!   pf mask --image FILE.png [--glow-from 0.7 | --remove]         the glow and shadow mask of an image
+//!   pf presets [--mine]                                          the built-in presets (or your own)
+//!   pf preset-save --scene FILE --name NAME [--remove]           keep a scene as a preset of your own
 //!   pf dump    (--preset NAME | --scene FILE)                    v3 scene JSON to stdout (2.0 files are converted)
 //!   pf render  (--preset NAME | --scene FILE) [--t 0..1] -o out.png
 //!   pf sheet   (--preset NAME | --scene FILE) [--frames 8] [--cols 4] [--scale 0.5] -o out.png
@@ -171,7 +173,13 @@ fn items(args: &Args) -> Result<Vec<(String, Item)>, String> {
     match want {
         Some(w) => {
             let found: Vec<_> = list.into_iter().filter(|(n, _)| norm(n) == w).collect();
-            if found.is_empty() { Err(format!("no preset `{}`; run `pf presets`", args.opts["preset"])) } else { Ok(found) }
+            if !found.is_empty() { return Ok(found); }
+            // One of the user's own (`pf preset-save`, or the studio's "Save as preset").
+            let name = &args.opts["preset"];
+            match path_forge::project::open_preset(&path_forge::project::default_home(), name) {
+                Ok(s) if !v2(args) => Ok(vec![(name.clone(), Item::V3(s, None))]),
+                _ => Err(format!("no preset `{name}`; run `pf presets` (and `pf presets --mine` for your own)")),
+            }
         }
         None => Ok(list),
     }
@@ -899,7 +907,19 @@ fn main() -> ExitCode {
     }).and_then(|args| match args.cmd.as_str() {
         "presets" => {
             if v2(&args) { for (n, _) in v2presets::ALL { println!("{n}"); } }
+            else if args.opts.contains_key("mine") { for p in path_forge::project::my_presets(&path_forge::project::default_home()) { println!("{}", p.name); } }
             else { for (n, _) in scene::presets::ALL { println!("{n}"); } }
+            Ok(())
+        }
+        // Keep a scene as a preset of your own (`--remove` deletes one instead).
+        "preset-save" => {
+            let home = path_forge::project::default_home();
+            let name = args.opts.get("name").ok_or("preset-save needs --name NAME (and --scene FILE or --preset NAME)")?;
+            if args.opts.contains_key("remove") { path_forge::project::remove_preset(&home, name)?; println!("removed {name}"); return Ok(()); }
+            let (_, item) = one_item(&args)?;
+            let Item::V3(scene, dir) = item else { return Err("preset-save needs a v3 scene".into()) };
+            let file = path_forge::project::save_preset(&home, name, &scene, dir.as_deref())?;
+            println!("{}", file.display());
             Ok(())
         }
         "dump" => cmd_dump(&args),
@@ -920,6 +940,61 @@ fn main() -> ExitCode {
 "kit" => cmd_kit(&args),
 "pack" => cmd_pack(&args),
 "assets" => cmd_assets(&args),
+        // Every painted prop (three of each) and light on one sheet, on mid grey, for looking at
+        // the art: `pf sprites -o sheet.png [--kinds Tree,Pine] [--cell 220]`.
+        "sprites" => {
+            use path_forge::scene::{FixtureKind, PropKind};
+            use path_forge::world::sprites::{paint_fixture, paint_post, paint_prop, Sprite};
+            let cell: usize = opt(&args, "cell", 200usize)?.clamp(48, 512);
+            let only: Option<Vec<String>> = args.opts.get("kinds").map(|k| k.split(',').map(norm).collect());
+            let want = |n: &str| only.as_ref().is_none_or(|o| o.contains(&norm(n)));
+            let mut rows: Vec<Vec<Sprite>> = PropKind::ALL.iter().filter(|k| want(k.name())).map(|&k| (0..3).map(|v| paint_prop(k, k.default_tint(), v)).collect()).collect();
+            let fx: Vec<Sprite> = FixtureKind::ALL.iter().filter(|k| want(k.name())).filter_map(|&k| paint_fixture(k)).collect();
+            for ch in fx.chunks(3) { rows.push(ch.iter().map(|s| Sprite::clone_levels(s)).collect()); }
+            if only.is_none() { rows.push(vec![paint_post(path_forge::scene::LampPost::Pole), paint_post(path_forge::scene::LampPost::Crook), paint_post(path_forge::scene::LampPost::Pedestal)]); }
+            // Four rows of kinds side by side.
+            let per = rows.len().div_ceil(4).max(1);
+            let (w, h) = (4 * 3 * cell, per * cell);
+            let mut out = vec![118u8; w * h * 4];
+            for p in out.chunks_exact_mut(4) { p[3] = 255; }
+            let enc = |v: f32| (255.0 * if v <= 0.003_130_8 { 12.92 * v } else { 1.055 * v.max(0.0).powf(1.0 / 2.4) - 0.055 }).clamp(0.0, 255.0) as u8;
+            for (ri, row) in rows.iter().enumerate() {
+                for (ci, s) in row.iter().enumerate() {
+                    let (ox, oy) = (((ri / per) * 3 + ci) * cell, (ri % per) * cell);
+                    let side = (cell - 8) as f32;
+                    let (dw, dh) = if s.aspect >= 1.0 { (side as usize, (side / s.aspect).max(1.0) as usize) } else { ((side * s.aspect).max(1.0) as usize, side as usize) };
+                    for y in 0..dh { for x in 0..dw {
+                        let c = s.sample((x as f32 + 0.5) / dw as f32, (y as f32 + 0.5) / dh as f32, dh as f32, false);
+                        let i = ((oy + cell - 4 - dh + y) * w + ox + (cell - dw) / 2 + x) * 4;
+                        for j in 0..3 { out[i + j] = (enc(c[j]) as f32 * c[3] + out[i + j] as f32 * (1.0 - c[3])) as u8; }
+                    } }
+                }
+            }
+            let file = PathBuf::from(args.opts.get("o").or(args.opts.get("out")).cloned().unwrap_or_else(|| "sprites.png".into()));
+            image::save_buffer(&file, &out, w as u32, h as u32, image::ExtendedColorType::Rgba8).map_err(|e| format!("{}: {e}", file.display()))?;
+            println!("{} ({} kinds)", file.display(), rows.len());
+            Ok(())
+        }
+        // The glow and shadow mask of an image: what it has, or (--glow-from 0..1) write one that
+        // marks the light parts as glowing, or (--remove) take it away.
+        "mask" => {
+            use path_forge::world::sprites::{mask_path, Mask};
+            let file = PathBuf::from(args.opts.get("image").ok_or("mask needs --image FILE.png [--glow-from 0.7 | --remove]")?);
+            let img = image::ImageReader::open(&file).map_err(|e| format!("{}: {e}", file.display()))?.decode().map_err(|e| format!("{}: {e}", file.display()))?.to_rgba8();
+            let (w, h) = (img.width() as usize, img.height() as usize);
+            let alpha: Vec<u8> = img.pixels().map(|p| p[3]).collect();
+            if args.opts.contains_key("remove") {
+                let m = mask_path(&file);
+                if m.is_file() { std::fs::remove_file(&m).map_err(|e| format!("{}: {e}", m.display()))?; println!("removed {}", m.display()); } else { println!("no mask"); }
+            } else if let Some(from) = args.opts.get("glow-from") {
+                let from: f32 = from.parse().map_err(|_| "--glow-from takes a number from 0 to 1")?;
+                let m = Mask::from_light(img.as_raw(), w, h, from.clamp(0.0, 1.0));
+                println!("{} ({:.0}% of the image glows)", m.save(&file)?.display(), m.glowing(&alpha) * 100.0);
+            } else if mask_path(&file).is_file() {
+                println!("{}: {:.0}% of the image glows", mask_path(&file).display(), Mask::load(&file, w, h).glowing(&alpha) * 100.0);
+            } else { println!("no mask: the whole image is solid (it takes the scene's light and casts a shadow)"); }
+            Ok(())
+        }
 "project" => cmd_project(&args),
 "schema" => { if args.opts.contains_key("markdown") { print!("{}", path_forge::docs::scene_reference()); } else { println!("{}", serde_json::to_string_pretty(&path_forge::docs::schema()).map_err(|e| e.to_string()).unwrap_or_default()); } Ok(()) }
         other => Err(format!("unknown command `{other}`\n{}", usage())),

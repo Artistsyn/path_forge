@@ -60,6 +60,13 @@ struct World {
     ww_on: u32, ww_shift: f32, ww_foam: f32, ww_foam_r: f32, ww_foam_g: f32, ww_foam_b: f32, ww_foam_w: f32,
     ww_lap_ph: f32, ww_lap_k: f32, ww_k1: f32, ww_k2: f32, ww_wet: f32,
     ww_kind: u32, ww_dens: f32, ww_fr: f32, ww_fg: f32, ww_fb: f32, ww_fsize: f32, ww_period: f32, ww_cs: f32, ww_seed: u32,
+    // Spans::rail_inset, then spare words.
+    br_inset: f32, ww_frozen: f32, ww_hw: f32, sp2: f32, sp3: f32, sp4: f32, sp5: f32, sp6: f32,
+    // View::wind_now: (amplitude, wave number, phase at the camera, turn) of each wave.
+    wind: array<vec4<f32>, 4>,
+    // Ground cover (render::cover): layers, the wind in them (Wx::sway_parts), CoverK::rec each.
+    gc_n: u32, gc_sway: f32, gc_lean: f32, gc_phase: f32,
+    gc: array<vec4<f32>, 12>,
 }
 
 // Every pass binds the world's parameters here.
@@ -257,7 +264,16 @@ fn lift(d: f32) -> f32 {
     if W.stairs_on == 0u { return 0.0; }
     return st_ground(W.scroll + d) - st_ramp(W.scroll);
 }
-fn bend_x(d: f32) -> f32 { return W.bend * 0.012 * d * d; }
+fn wind_wave(t: vec4<f32>, d: f32) -> f32 { return t.x * (sin(t.y * d + t.z) - sin(t.z) - t.w * t.y * d * cos(t.z)); }
+fn bend_x(d: f32) -> f32 {
+    var x = W.bend * 0.012 * d * d;
+    // (Each wave by its own number: a loop over the uniform array costs far more.)
+    if W.wind[0].x != 0.0 { x += wind_wave(W.wind[0], d); }
+    if W.wind[1].x != 0.0 { x += wind_wave(W.wind[1], d); }
+    if W.wind[2].x != 0.0 { x += wind_wave(W.wind[2], d); }
+    if W.wind[3].x != 0.0 { x += wind_wave(W.wind[3], d); }
+    return x;
+}
 fn hill_y(d: f32) -> f32 { return W.hill * 0.006 * d * d; }
 // View::shear_x for world r of the frame.
 fn shear_of(r: u32, d: f32) -> f32 {

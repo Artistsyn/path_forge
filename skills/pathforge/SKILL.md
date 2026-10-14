@@ -67,7 +67,33 @@ depth layers or a depth map).
   `dry_run: true` to see what an edit would change without writing it.
 - Props for biomes: Tree, Pine, Bush, Rock, Boulder, Cactus, DeadTree, Mushroom, Pillar,
   Gravestone, Crystal, Stalagmite, Reeds, Willow, Palm, Obelisk, Icicle (hangs from the ceiling or
-  wall tops), IceSpike. A layer without a `tint` takes its kind's own colour. Particles: Dust,
+  wall tops), IceSpike; for space: Asteroid, Satellite, Debris, CargoPod, Comet (give them `float`,
+  or `orbit`). A layer without a `tint` takes its kind's own colour.
+- **Make rows look grown, not planted:** `jitter_along` (0.6 for anything natural), `lean_var`
+  (0.04 for trees), `tint_var`, `scale_var`, `density` below 1, and `stagger: 0.5` when both sides
+  should not mirror each other. Built things (pillars, obelisks) keep `jitter_along: 0`.
+- **Lights:** kinds Torch, Lantern, Candle, Brazier, Crystal, Firefly, Magic, GreenFire, IceWisp,
+  StreetLamp, PaperLantern, Campfire, Glowshroom, Beacon (pulses), Chandelier (ceiling). Outdoors a
+  light needs something to stand on: `mount: Ground` with `post: Pole` or `Crook` (`Auto` picks
+  one). `place: Bridges` keeps a row to the bridges; `place: SetPieces` with `set_piece: N` puts one
+  at every repeat of that set piece. A swarm of fireflies is one fixture: `cluster: 3`,
+  `jitter: 1`, `jitter_along: 1`, `height_var: 0.9`, `size_var`, `intensity_var`. Every light in a
+  cluster is a real light: keep `spacing / cluster` above a metre or set `light: false`.
+- **Props round the path:** `orbit: {enabled: true, radius: 4}` sets a layer on a ring about the
+  path; in a wormhole (`sky.tunnel`) it winds and turns with the tunnel.
+- **Ground cover:** `ground_cover: [{kind: "Grass"}, {kind: "Wildflowers", density: 0.3}]` grows on
+  the verge; `{kind: "Moss", on: "Path"}` for damp stone. Each grass layer costs about 1.5 ms on the
+  GPU, so one or two is plenty.
+- **Clouds that read as weather:** `sky.clouds.kind` Rain, Snow or Storm with precipitation; Cumulus
+  or Cirrus for fair days; add height with `sky.cloud_layers`. A path that should wander:
+  `path.winding`. A frozen river: `path.waterway.frozen`. Sun glare: `post.bloom` + `post.flare`.
+  Under a dark sky `post.bloom` also makes the moon, aurora and brighter stars glow (0.3-0.6 soft). On a
+  winding path the sky turns with the camera: sun, moon, stars and clouds slide across the frame and
+  can leave it on a sharp bend; a steady `path.bend` does not turn the sky.
+- **Your own images that glow:** after `pf_import_sprite`, pass `mask_glow_from: 0.7` (or paint a
+  mask in the studio) so the light parts glow, light the scene and cast no shadow.
+- **Keep a good scene as a starting point:** `pf_save_preset {path, name}`; it then works as
+  `preset: <name>` everywhere. Particles: Dust,
   Embers, Fireflies, Rain, Snow, Leaves, Ash, Spores, Sand (blown low and sideways) and Petals;
   set a particle layer's `color` to its kind's own when you change its kind (the studio does).
 - **Props as data (kits):** when no built-in kind fits, describe the prop instead of settling.
@@ -179,8 +205,8 @@ depth layers or a depth map).
     For a game backdrop that sits in pixel art, Black Hole Arena shows the recipe: 16:9 canvas,
     `path.surface: false`, `style.pixel_size` 4 and a `Custom` palette of the game's colours.
   - Open flight, no walkway: `path.surface: false` draws no ground; the camera follows the route
-    (a ship's flight path). Put a `companions` ship just ahead (offset ~[0, 0.9, 9]) to chase it,
-    floating props with a wide `float_var` above and below, and `sky.space` (with `below`) or a
+    (a ship's flight path). Leave the player's ship out: the game lays its own over the picture
+    (a `companions` ship at offset ~[0, 0.9, 9] is only for a preview). Add floating props with a wide `float_var` above and below, and `sky.space` (with `below`) or a
     `sky.tunnel` all round (presets Starship Flight, Hyperspace Jump). And
     `sky.rainbow` (`x` across the sky, `size` 1 spans the frame, `double`).
   - `weather.lens`: `kind` Drops (rain landing on and running down the lens) or Frost (creeping

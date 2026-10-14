@@ -2,7 +2,8 @@
 //! the same way as camera-facing billboards.
 
 use super::texture::{rgb_lin, srgb_to_lin};
-use crate::scene::{FixtureKind, PropKind, Rgb, SetPieceKind, Shape, ShapePart};
+use crate::scene::{FixtureKind, LampPost, PropKind, Rgb, SetPieceKind, Shape, ShapePart};
+use std::f32::consts::PI;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -15,7 +16,102 @@ pub struct Sprite {
     /// How much each texel lights itself, in the red channel of a sprite of the same size (drawn
     /// props whose parts glow).
     pub glow: Option<Arc<Sprite>>,
+    /// The image came with a painted mask (`<name>.mask.png`): the glow map's green channel then
+    /// says which texels cast a shadow.
+    pub casts: bool,
+    /// The light its glowing texels give off, worked out from the mask.
+    pub lamp: Option<Lamp>,
 }
+
+/// The light an image's glowing part gives off: where its middle is (across from the left and down
+/// from the top, as fractions of the image), its colour at full brightness, and how much of the
+/// image glows.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Lamp {
+    pub u: f32,
+    pub v: f32,
+    pub color: [f32; 3],
+    pub cover: f32,
+}
+
+/// Where the mask painted for an image is kept: `torch.png` has `torch.mask.png` beside it. Red is
+/// how much a texel glows, green whether it casts a shadow.
+pub fn mask_path(image: &Path) -> PathBuf { image.with_extension("mask.png") }
+/// What a texel of a mask says.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MaskPart {
+    /// Lights itself and what is round it, and casts no shadow: a flame, a lamp's glass, a rune.
+    Glow,
+    /// Takes the scene's light and casts a shadow: what an image is without a mask.
+    Solid,
+    /// Neither: smoke, glass, a thin chain that should not throw a hard shadow.
+    Clear,
+}
+
+/// The mask painted for an image: for each texel how much it glows and whether it casts a shadow.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Mask {
+    pub w: usize,
+    pub h: usize,
+    /// (glow, solid), each 0..255.
+    pub px: Vec<[u8; 2]>,
+}
+
+impl Mask {
+    /// Nothing glows and everything casts: the same as having no mask.
+    pub fn solid(w: usize, h: usize) -> Mask { Mask { w, h, px: vec![[0, 255]; w * h] } }
+
+    /// The mask saved beside `image`, or a plain one of the image's size.
+    pub fn load(image: &Path, w: usize, h: usize) -> Mask {
+        match image::ImageReader::open(mask_path(image)).ok().and_then(|r| r.decode().ok()).map(|m| m.to_rgba8()) {
+            Some(m) if m.width() as usize == w && m.height() as usize == h => Mask { w, h, px: m.pixels().map(|p| [p[0], p[1]]).collect() },
+            _ => Mask::solid(w, h),
+        }
+    }
+
+    pub fn save(&self, image: &Path) -> Result<PathBuf, String> {
+        let file = mask_path(image);
+        let bytes: Vec<u8> = self.px.iter().flat_map(|p| [p[0], p[1], 0, 255]).collect();
+        image::save_buffer(&file, &bytes, self.w as u32, self.h as u32, image::ExtendedColorType::Rgba8).map_err(|e| format!("{}: {e}", file.display()))?;
+        Ok(file)
+    }
+
+    /// Texels of an sRGB image (four bytes each) at least `from` light (0..1, as the eye sees it)
+    /// glow; the rest are solid.
+    pub fn from_light(rgba: &[u8], w: usize, h: usize, from: f32) -> Mask {
+        let px = rgba.chunks_exact(4).map(|p| {
+            let light = (0.2126 * srgb_to_lin(p[0]) + 0.7152 * srgb_to_lin(p[1]) + 0.0722 * srgb_to_lin(p[2])).max(0.0).powf(1.0 / 2.2);
+            let t = ((light - from) / 0.08).clamp(0.0, 1.0);
+            let g = (t * t * (3.0 - 2.0 * t) * 255.0) as u8;
+            if p[3] == 0 { [0, 255] } else { [g, 255 - g] }
+        }).collect();
+        Mask { w, h, px }
+    }
+
+    /// Paint a round dab of `part`, `r` texels in radius, at (cx, cy).
+    pub fn paint(&mut self, cx: f32, cy: f32, r: f32, part: MaskPart) {
+        let v = match part { MaskPart::Glow => [255, 0], MaskPart::Solid => [0, 255], MaskPart::Clear => [0, 0] };
+        let r = r.max(0.5);
+        for y in ((cy - r).floor().max(0.0) as usize)..=((cy + r).ceil() as usize).min(self.h.saturating_sub(1)) {
+            for x in ((cx - r).floor().max(0.0) as usize)..=((cx + r).ceil() as usize).min(self.w.saturating_sub(1)) {
+                let (dx, dy) = (x as f32 + 0.5 - cx, y as f32 + 0.5 - cy);
+                if dx * dx + dy * dy <= r * r { self.px[y * self.w + x] = v; }
+            }
+        }
+    }
+
+    /// The share of the image's visible texels that glow (`alpha`: one byte a texel).
+    pub fn glowing(&self, alpha: &[u8]) -> f32 {
+        let (mut g, mut n) = (0.0f32, 0.0f32);
+        for (p, a) in self.px.iter().zip(alpha) { if *a > 0 { n += 1.0; g += p[0] as f32 / 255.0; } }
+        if n > 0.0 { g / n } else { 0.0 }
+    }
+
+    pub fn is_plain(&self) -> bool { self.px.iter().all(|p| *p == [0, 255]) }
+}
+
+/// Whether a file is a mask rather than an image to draw.
+pub fn is_mask(file: &Path) -> bool { file.file_name().is_some_and(|n| n.to_string_lossy().to_lowercase().ends_with(".mask.png")) }
 
 impl Sprite {
     fn from_rgba_lin(w: usize, h: usize, px: Vec<[f32; 4]>) -> Sprite {
@@ -39,10 +135,13 @@ impl Sprite {
             }
             levels.push((nw, nh, next));
         }
-        Sprite { aspect: w as f32 / h as f32, levels, glow: None }
+        Sprite { aspect: w as f32 / h as f32, levels, glow: None, casts: false, lamp: None }
     }
 
     pub fn load(path: &Path) -> Option<Sprite> { Sprite::load_opt(path, false) }
+
+    /// A copy of the image alone.
+    pub fn clone_levels(s: &Sprite) -> Sprite { Sprite { levels: s.levels.clone(), aspect: s.aspect, glow: None, casts: false, lamp: None } }
 
     /// Load an image; with `trim`, cut away fully transparent rows and columns around it, keeping
     /// it centred on the middle of what is visible (the anchor is the bottom centre).
@@ -66,7 +165,38 @@ impl Sprite {
                 px.push([srgb_to_lin(p[0]), srgb_to_lin(p[1]), srgb_to_lin(p[2]), p[3] as f32 / 255.0]);
             }
         }
-        Some(Sprite::from_rgba_lin(x1 - x0, y1 - y0, px))
+        // A mask painted for it: what glows (and so gives light), and what casts a shadow.
+        let (mw, mh) = (x1 - x0, y1 - y0);
+        let mask = image::ImageReader::open(mask_path(path)).ok().and_then(|r| r.decode().ok()).map(|m| m.to_rgba8())
+            .filter(|m| m.width() as usize == w && m.height() as usize == h);
+        let mut s = Sprite::from_rgba_lin(mw, mh, px);
+        if let Some(mask) = mask {
+            let src = &s.levels[0].2;
+            let mut g = Vec::with_capacity(mw * mh);
+            let (mut su, mut sv, mut col, mut n) = (0.0f32, 0.0f32, [0.0f32; 3], 0.0f32);
+            for y in 0..mh {
+                for x in 0..mw {
+                    let m = mask.get_pixel((x0 + x) as u32, (y0 + y) as u32);
+                    let p = src[y * mw + x];
+                    let glow = m[0] as f32 / 255.0;
+                    g.push([glow * MASK_GLOW, m[1] as f32 / 255.0, 0.0, p[3]]);
+                    let wgt = glow * p[3];
+                    if wgt > 0.0 {
+                        su += wgt * (x as f32 + 0.5) / mw as f32;
+                        sv += wgt * (y as f32 + 0.5) / mh as f32;
+                        for i in 0..3 { col[i] += wgt * p[i]; }
+                        n += wgt;
+                    }
+                }
+            }
+            s.glow = Some(Arc::new(Sprite::from_rgba_lin(mw, mh, g)));
+            s.casts = true;
+            if n >= 1.0 {
+                let top = col[0].max(col[1]).max(col[2]).max(1e-4);
+                s.lamp = Some(Lamp { u: su / n, v: sv / n, color: [col[0] / top, col[1] / top, col[2] / top], cover: n / (mw * mh) as f32 });
+            }
+        }
+        Some(s)
     }
 
     /// The mip level `sample` reads for a sprite drawn `screen_h` pixels tall.
@@ -116,6 +246,8 @@ struct Canvas {
 }
 
 const SS: usize = 4;
+/// How strongly a fully masked texel lights itself.
+pub const MASK_GLOW: f32 = 1.5;
 
 fn mul(c: [f32; 3], k: f32) -> [f32; 3] { [c[0] * k, c[1] * k, c[2] * k] }
 fn mix(a: [f32; 3], b: [f32; 3], t: f32) -> [f32; 3] { [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t] }
@@ -194,6 +326,35 @@ impl Canvas {
         self.poly(&[[a[0] + nx, a[1] + ny], [b[0] + nx, b[1] + ny], [b[0] - nx, b[1] - ny], [a[0] - nx, a[1] - ny]], c, 0.4);
     }
 
+    /// A soft glow laid over what is there: an ellipse turned by `ang`, strongest at its middle and
+    /// gone at its edge. Where nothing is painted yet it leaves a see-through haze.
+    fn haze(&mut self, cx: f32, cy: f32, rx: f32, ry: f32, ang: f32, c: [f32; 3], strength: f32) { self.wash(cx, cy, rx, ry, ang, c, strength, false) }
+
+    /// The same glow, but only over what is already painted: a stain, moss, a sheen.
+    fn stain(&mut self, cx: f32, cy: f32, rx: f32, ry: f32, ang: f32, c: [f32; 3], strength: f32) { self.wash(cx, cy, rx, ry, ang, c, strength, true) }
+
+    #[allow(clippy::too_many_arguments)]
+    fn wash(&mut self, cx: f32, cy: f32, rx: f32, ry: f32, ang: f32, c: [f32; 3], strength: f32, painted_only: bool) {
+        let (cx, cy, rx, ry) = (cx * self.k, cy * self.k, rx * self.k, ry * self.k);
+        if rx <= 0.0 || ry <= 0.0 { return; }
+        let (sn, cs) = ang.sin_cos();
+        let e = rx.max(ry);
+        for y in ((cy - e).floor() as i32).max(0)..=((cy + e).ceil() as i32).min(self.h as i32 - 1) {
+            for x in ((cx - e).floor() as i32).max(0)..=((cx + e).ceil() as i32).min(self.w as i32 - 1) {
+                let (dx, dy) = (x as f32 + 0.5 - cx, y as f32 + 0.5 - cy);
+                let (u, v) = ((dx * cs + dy * sn) / rx, (-dx * sn + dy * cs) / ry);
+                let q = 1.0 - (u * u + v * v);
+                if q <= 0.0 { continue; }
+                let a = (strength * q * q).min(1.0);
+                let p = &mut self.px[y as usize * self.w + x as usize];
+                if painted_only && p[3] < 0.99 { continue; }
+                let out = a + p[3] * (1.0 - a);
+                for i in 0..3 { p[i] = (c[i] * a + p[i] * p[3] * (1.0 - a)) / out.max(1e-6); }
+                p[3] = out;
+            }
+        }
+    }
+
     /// A flat ellipse turned by `ang` radians: a leaf, or a dab of foliage.
     fn dab(&mut self, cx: f32, cy: f32, rx: f32, ry: f32, ang: f32, c: [f32; 3]) {
         let (cx, cy, rx, ry) = (cx * self.k, cy * self.k, rx * self.k, ry * self.k);
@@ -211,7 +372,47 @@ impl Canvas {
 
     /// A limb from `a` (`wa` wide) to `b` (`wb` wide), rounded where it starts: shaded round on
     /// the side away from the upper-left light, with bark furrows running along it.
-    fn limb(&mut self, a: [f32; 2], b: [f32; 2], wa: f32, wb: f32, c: [f32; 3], seed: f32) {
+    fn limb(&mut self, a: [f32; 2], b: [f32; 2], wa: f32, wb: f32, c: [f32; 3], seed: f32) { self.bar(a, b, wa, wb, c, seed, 0.14) }
+
+    /// A round column from `a` to `b`, rounded at both ends, with `ribs` ridges showing down its
+    /// length (a cactus) or as many flutes cut into it (a stone column, `fluted`); `spines` dots the
+    /// ridges with pale thorns.
+    #[allow(clippy::too_many_arguments)]
+    fn ribbed(&mut self, a: [f32; 2], b: [f32; 2], w: f32, c: [f32; 3], ribs: f32, fluted: bool, spines: bool) {
+        let k = self.k;
+        let (ax, ay, bx, by) = (a[0] * k, a[1] * k, b[0] * k, b[1] * k);
+        let (dx, dy) = (bx - ax, by - ay);
+        let len = (dx * dx + dy * dy).sqrt().max(1e-3);
+        let (ux, uy) = (dx / len, dy / len);
+        let (nx, ny) = (-uy, ux);
+        let side = if -0.6 * nx - 0.8 * ny >= 0.0 { 1.0 } else { -1.0 };
+        let hw = w * k * 0.5;
+        let m = hw + 1.0;
+        for y in (ay.min(by) - m).floor() as i32..=(ay.max(by) + m).ceil() as i32 {
+            for x in (ax.min(bx) - m).floor() as i32..=(ax.max(bx) + m).ceil() as i32 {
+                let (px, py) = (x as f32 + 0.5 - ax, y as f32 + 0.5 - ay);
+                let along = px * ux + py * uy;
+                let across = px * nx + py * ny;
+                // Past either end: a dome (a square end for a fluted column, which a capital covers).
+                let over = if along < 0.0 { -along } else if along > len { along - len } else { 0.0 };
+                if over > 0.0 && (fluted || over * over + across * across > hw * hw) { continue; }
+                if across.abs() > hw { continue; }
+                let s = (across / hw).clamp(-1.0, 1.0) * side;
+                let turn = s.asin();
+                let ridge = (ribs * turn).cos();
+                let round = (1.0 - s * s).max(0.0).sqrt() * (1.0 - 0.5 * (over / hw).powi(2));
+                let relief = if fluted { 0.9 + 0.1 * ridge.abs().powf(0.6) - 0.16 * (1.0 - ridge.abs()).powi(3) } else { 0.8 + 0.2 * ridge };
+                let mut col = mul(c, (0.62 + 0.28 * round + 0.3 * s) * relief);
+                if spines && ridge > 0.93 && ((along / k) % 9.0) < 1.1 { col = mix(col, [0.8, 0.78, 0.55], 0.45); }
+                self.put(x, y, col);
+            }
+        }
+    }
+
+    /// A smooth round bar: turned iron, a candle, a pole.
+    fn rod(&mut self, a: [f32; 2], b: [f32; 2], wa: f32, wb: f32, c: [f32; 3]) { self.bar(a, b, wa, wb, c, 0.0, 0.0) }
+
+    fn bar(&mut self, a: [f32; 2], b: [f32; 2], wa: f32, wb: f32, c: [f32; 3], seed: f32, furrows: f32) {
         let k = self.k;
         let (ax, ay, bx, by) = (a[0] * k, a[1] * k, b[0] * k, b[1] * k);
         let (dx, dy) = (bx - ax, by - ay);
@@ -231,7 +432,7 @@ impl Canvas {
                 if (t < 0.0 && px * px + py * py > ha * ha) || (t >= 0.0 && across.abs() > hw) { continue; }
                 let s = (across / hw.max(1e-3)).clamp(-1.0, 1.0) * side;
                 let round = (1.0 - s * s).max(0.0).sqrt();
-                let furrow = 0.86 + 0.14 * ((across / k) * 1.7 + seed + 0.8 * ((t * len / k) * 0.3 + seed).sin()).sin();
+                let furrow = 1.0 - furrows + furrows * ((across / k) * 1.7 + seed + 0.8 * ((t * len / k) * 0.3 + seed).sin()).sin();
                 self.put(x, y, mul(c, (0.7 + 0.25 * round + 0.3 * s) * furrow));
             }
         }
@@ -267,27 +468,102 @@ impl Rng {
 
 /// Paint one variant of a procedural prop in `tint`.
 /// A lumpy rock all round, lit from the upper left, with a few craters.
+/// What a lump of rock is like: out in space (craters, a black night side) or lying on the ground
+/// (cut flat where it meets it, broken into faces, darker towards its foot).
+struct Lump { space: bool, floor: f32, faces: f32 }
+
+/// A lump of rock lit from the upper left, `ax` by `ay` about (`cx`, `cy`): an uneven outline, its
+/// surface rising and falling, and what `kind` asks for.
+fn lump(c: &mut Canvas, r: &mut Rng, t: [f32; 3], centre: [f32; 2], radii: [f32; 2], kind: Lump) {
+    let ([cx, cy], [ax, ay]) = (centre, radii);
+    let outline: Vec<(f32, f32)> = (2..7).map(|k| (r.range(0.03, 0.11) / (k as f32 * 0.5), r.range(0.0, 6.2832))).collect();
+    let swell: Vec<(f32, f32, f32, f32)> = (0..5).map(|_| (r.range(1.5, 5.0), r.range(1.5, 5.0), r.range(0.0, 6.2832), r.range(0.1, 0.22))).collect();
+    let craters: Vec<(f32, f32, f32)> = if kind.space { (0..r.range(4.0, 8.0) as usize).map(|_| (r.range(-0.6, 0.6), r.range(-0.6, 0.6), r.range(0.07, 0.22))).collect() } else { Vec::new() };
+    let k = c.k;
+    for y in 0..c.h as i32 {
+        for x in 0..c.w as i32 {
+            let (fx, fy) = ((x as f32 + 0.5) / k, (y as f32 + 0.5) / k);
+            if fy > kind.floor { continue; }
+            let (p, q) = ((fx - cx) / ax, (fy - cy) / ay);
+            let (ang, rr) = (q.atan2(p), (p * p + q * q).sqrt());
+            let edge = 1.0 + outline.iter().enumerate().map(|(i, (a, ph))| a * ((i + 2) as f32 * ang + ph).cos()).sum::<f32>();
+            let s = rr / edge;
+            if s >= 1.0 { continue; }
+            // The round of the lump, then its swells and hollows leaning the surface this way and that.
+            let nz = (1.0 - s * s).sqrt();
+            let (mut nx, mut ny) = (s * ang.cos(), s * ang.sin());
+            for (wx, wy, ph, amp) in &swell {
+                // (Broken rock: the swells are squared off into faces with creases between.)
+                let wave = (wx * p + wy * q + ph).cos();
+                let g = amp * (wave + kind.faces * ((3.0 * wave).clamp(-1.0, 1.0) - wave));
+                let lean = 0.25 + 0.3 * kind.faces;
+                nx += g * wx * lean;
+                ny += g * wy * lean;
+            }
+            let mut dust = 1.0;
+            for (ccx, ccy, rad) in &craters {
+                let (dx, dy) = (p - ccx, q - ccy);
+                let d = (dx * dx + dy * dy).sqrt() / rad;
+                if d < 1.0 {
+                    // The bowl: its floor level, its wall steep.
+                    let wall = d * d * d;
+                    nx -= dx / rad * 0.9 * wall / d.max(0.05);
+                    ny -= dy / rad * 0.9 * wall / d.max(0.05);
+                    dust *= 0.86 + 0.14 * d;
+                } else if d < 1.3 {
+                    let rim = 1.0 - (d - 1.0) / 0.3;
+                    nx += dx / rad * 0.5 * rim / d;
+                    ny += dy / rad * 0.5 * rim / d;
+                }
+            }
+            let len = (nx * nx + ny * ny + nz * nz).sqrt();
+            let lit = ((-0.52 * nx - 0.6 * ny + 0.6 * nz) / len).max(0.0);
+            let h = ((x / 3) as u32).wrapping_mul(0x9E37_79B1) ^ ((y / 3) as u32).wrapping_mul(0x85EB_CA77);
+            let grain = 0.9 + 0.2 * ((h ^ (h >> 15)).wrapping_mul(0x2C1B_3C6D) >> 24) as f32 / 255.0;
+            let shade = if kind.space { 0.035 + 1.25 * lit.powf(0.85) } else {
+                // On the ground the sky fills its shadows, and it darkens where it meets the earth.
+                (0.4 + 0.8 * lit.powf(0.9)) * (0.62 + 0.38 * smooth01((kind.floor - fy) / (0.3 * ay)))
+            };
+            c.put(x, y, mul(t, shade * dust * grain));
+        }
+    }
+}
+
+fn smooth01(x: f32) -> f32 { let t = x.clamp(0.0, 1.0); t * t * (3.0 - 2.0 * t) }
+
 fn paint_asteroid(tint: Rgb, variant: u32) -> Sprite {
-    let t = rgb_lin(tint);
+    // A lump of rock in hard sunlight: an uneven outline, its surface rising and falling, craters
+    // with a lit far wall and a shadowed near one, and a night side that is nearly black.
     let mut r = Rng(variant.wrapping_mul(2_654_435_761).wrapping_add(0xA57) | 1);
     let mut c = Canvas::new(160, 128);
-    let n = 14;
-    let (ax, ay) = (r.range(66.0, 76.0), r.range(52.0, 60.0));
-    let pts: Vec<[f32; 2]> = (0..n).map(|i| {
-        let a = i as f32 / n as f32 * std::f32::consts::TAU;
-        let rad = r.range(0.8, 1.0);
-        [80.0 + a.cos() * ax * rad, 64.0 + a.sin() * ay * rad]
-    }).collect();
-    c.poly(&pts, mul(t, 0.7), 1.0);
-    c.ellipse(80.0 - r.range(10.0, 22.0), 64.0 - r.range(10.0, 20.0), r.range(30.0, 40.0), r.range(22.0, 30.0), mul(t, 1.05), 0.6);
-    c.ellipse(80.0 + r.range(18.0, 28.0), 64.0 + r.range(14.0, 22.0), r.range(28.0, 38.0), r.range(18.0, 26.0), mul(t, 0.45), 0.5);
-    for _ in 0..4 {
-        let (x, y, rr) = (r.range(40.0, 120.0), r.range(34.0, 94.0), r.range(4.0, 10.0));
-        c.ellipse(x, y, rr, rr * 0.8, mul(t, 0.45), 0.8);
-        c.ellipse(x - rr * 0.3, y - rr * 0.3, rr * 0.6, rr * 0.45, mul(t, 0.95), 0.4);
-    }
+    let radii = [r.range(60.0, 72.0), r.range(44.0, 54.0)];
+    lump(&mut c, &mut r, rgb_lin(tint), [80.0, 64.0], radii, Lump { space: true, floor: 1e9, faces: 0.0 });
     c.finish()
 }
+
+/// A crystal standing from `base` to `tip`, `w` wide: three long faces (one to the light, one to
+/// the eye, one in shade) that turn in to a point from `shoulder` of the way up, light pooling
+/// inside it towards the tip, and a glint down the edge that faces the light.
+fn shard(c: &mut Canvas, base: [f32; 2], tip: [f32; 2], w: f32, shoulder: f32, t: [f32; 3]) {
+    let (dx, dy) = (tip[0] - base[0], tip[1] - base[1]);
+    let len = (dx * dx + dy * dy).sqrt().max(1e-3);
+    let (nx, ny) = (-dy / len, dx / len);
+    // (Across is towards the light when negative: the light is at the upper left.)
+    let side = if nx > 0.0 { -1.0 } else { 1.0 };
+    let at = |along: f32, across: f32| [base[0] + dx * along + nx * side * across * w, base[1] + dy * along + ny * side * across * w];
+    let (a, b) = (-0.14, 0.2);
+    c.poly(&[at(0.0, -0.5), at(shoulder, -0.46), tip, at(shoulder, a), at(0.0, a)], mul(t, 1.3), 0.15);
+    c.poly(&[at(0.0, b), at(shoulder, b), tip, at(shoulder, 0.46), at(0.0, 0.5)], mul(t, 0.6), 0.15);
+    c.poly(&[at(0.0, a), at(shoulder, a), tip, at(shoulder, b), at(0.0, b)], t, 0.1);
+    let mid = at(0.62, 0.0);
+    c.stain(mid[0], mid[1], 0.3 * len, 0.42 * w, dy.atan2(dx), [0.95, 0.98, 1.0], 0.3);
+    let foot = at(0.06, 0.0);
+    c.stain(foot[0], foot[1], 0.16 * len, 0.6 * w, dy.atan2(dx), mul(t, 0.35), 0.5);
+    c.line(at(0.08, a), at(shoulder * 0.96, a), 1.1, [0.95, 0.98, 1.0]);
+}
+
+/// How far a cactus flower sits above the tip it grows from, by where across the tip it is.
+fn w_tip(d: f32) -> f32 { 10.0 - 0.4 * d.abs() }
 
 /// Foliage colour for a light level from 0 (deep shade) to 1 (full sun): dark and cool in the
 /// shade, light and warm in the sun, in a few soft steps the way a painter lays foliage in.
@@ -338,6 +614,43 @@ fn leaf_clump(c: &mut Canvas, r: &mut Rng, t: [f32; 3], cr: Crown, p: [f32; 2], 
         let lit = foliage_light(dome_normal(x, y, cr.0, cr.1, cr.2, cr.3), [lx, ly, lz], below) * back * r.range(0.9, 1.08);
         let size = if stray { r.range(1.5, 2.4) } else { r.range(2.4, 4.4) };
         c.dab(x, y, size * r.range(1.0, 1.5), size, r.range(0.0, std::f32::consts::PI), leaf_tone(t, lit));
+    }
+}
+
+/// A bare limb from `a` heading `ang` (radians from the right, a quarter turn = straight up),
+/// `len` long and `w` wide at its start: it bends along its length, then forks into two or three
+/// thinner ones that do the same, down to twigs; now and then one has snapped off short.
+#[allow(clippy::too_many_arguments)]
+fn bare_limb(c: &mut Canvas, r: &mut Rng, wood: [f32; 3], a: [f32; 2], ang: f32, len: f32, w: f32, depth: u32) {
+    use std::f32::consts::PI;
+    let segs = if depth == 0 { 3 } else { 2 };
+    let (mut p, mut an, mut ww) = (a, ang, w);
+    for sgm in 0..segs {
+        let l = len / segs as f32;
+        let q = [p[0] + an.cos() * l, p[1] - an.sin() * l];
+        let w1 = ww * if sgm == segs - 1 { 0.66 } else { 0.86 };
+        c.limb(p, q, ww, w1, wood, r.f() * 6.0);
+        (p, ww) = (q, w1);
+        // Now and then a lesser bough leaves the side of a trunk or a main limb.
+        if depth <= 1 && sgm < segs - 1 && r.f() < 0.55 {
+            let side = if r.f() < 0.5 { -1.0 } else { 1.0 };
+            let sa = (an + side * r.range(0.6, 1.05)).clamp(0.12, PI - 0.12);
+            let sl = len * r.range(0.3, 0.45);
+            bare_limb(c, r, wood, p, sa, sl, ww * 0.42, depth + 2);
+        }
+        // A trunk stands nearly true; its boughs wander.
+        an += if depth == 0 { r.range(-0.09, 0.09) } else { r.range(-0.28, 0.28) };
+    }
+    if depth >= 4 || ww < 1.3 || (depth >= 2 && r.f() < 0.12) { return; }
+    let kids = if depth == 0 { 3 } else if r.f() < 0.35 { 3 } else { 2 };
+    let spread = r.range(0.45, 0.8);
+    for k in 0..kids {
+        let f = k as f32 / (kids - 1) as f32 * 2.0 - 1.0;
+        // Boughs reach up and out, never far below level.
+        let ca = (an + f * spread + r.range(-0.15, 0.15)).clamp(0.12, PI - 0.12);
+        let kw = ww * r.range(0.6, 0.8) * if f == 0.0 { 1.1 } else { 1.0 };
+        let kl = len * r.range(0.55, 0.72);
+        bare_limb(c, r, wood, p, ca, kl, kw, depth + 1);
     }
 }
 
@@ -435,16 +748,67 @@ pub fn paint_prop(kind: PropKind, tint: Rgb, variant: u32) -> Sprite {
             c.finish()
         }
         PropKind::Pine => {
-            let mut c = Canvas::new(160, 256);
-            c.rect(73.0, 200.0, 87.0, 256.0, bark, 0.8);
-            let tiers = 4 + (variant % 2) as usize;
-            for i in 0..tiers {
-                let f = i as f32 / tiers as f32;
-                let base_y = 214.0 - f * 170.0;
-                let half = 74.0 * (1.0 - f * 0.7) * r.range(0.9, 1.05);
-                let hgt = 72.0 * (1.0 - f * 0.3);
-                c.poly(&[[80.0, base_y - hgt], [80.0 + half, base_y], [80.0 - half, base_y]], mul(t, 0.7 + f * 0.45), 0.9);
+            // A conifer: a straight tapering trunk bare at the foot, and whorls of boughs that sweep
+            // out and down, shortest at the top. Each bough is sprays of needles, lit along its upper
+            // side and dark beneath; trunk and shadow show between the tiers, and the outline is
+            // ragged, never a triangle.
+            let mut c = Canvas::new(176, 256);
+            let cx = 88.0;
+            let top = r.range(8.0, 16.0);
+            let skirt = r.range(194.0, 216.0);
+            let reach = r.range(58.0, 74.0);
+            let lean = r.range(-5.0, 5.0);
+            let axis = |y: f32| cx + lean * ((256.0 - y) / 256.0).powi(2);
+            let cr: Crown = (cx, 0.5 * (top + skirt) + 10.0, reach * 1.05, 0.5 * (skirt - top) + 24.0);
+            // One bough from the trunk at height y: `side` -1 left, 1 right, 0 hanging towards the
+            // viewer over the trunk; `depth` dims the ones round the back.
+            let bough = |c: &mut Canvas, r: &mut Rng, y: f32, len: f32, side: f32, depth: f32| {
+                let droop = r.range(0.26, 0.42);
+                let skew = r.range(-0.3, 0.3);
+                let n = ((len / 2.0) as i32).max(2);
+                for i in 0..=n {
+                    let u = i as f32 / n as f32;
+                    let (bx, by, ang) = if side == 0.0 {
+                        (axis(y) + skew * len * u, y + 0.55 * len * u, std::f32::consts::FRAC_PI_2 + skew)
+                    } else {
+                        // Out and down, the tip lifting a little.
+                        (axis(y) + side * len * u, y + droop * len * u.powf(1.4) - 0.1 * len * u * u * u, if side > 0.0 { droop } else { std::f32::consts::PI - droop })
+                    };
+                    let th = (0.15 * len + 3.0) * (1.0 - 0.72 * u);
+                    for _ in 0..3 {
+                        // More of the spray hangs below the bough than stands above it.
+                        let off = r.range(-0.45, 1.0);
+                        let (x, yy) = (bx + r.range(-1.6, 1.6), by + off * th);
+                        let below = (yy - top) / (skirt + 30.0 - top);
+                        let lit = foliage_light(dome_normal(x, yy, cr.0, cr.1, cr.2, cr.3), [side * 0.4, off * 0.9, 0.45], below) * depth * r.range(0.88, 1.1) * (0.9 + 0.22 * u + 0.2 * (-off).max(0.0));
+                        c.dab(x, yy, r.range(3.4, 5.6), r.range(1.2, 1.9), ang + r.range(-0.5, 0.5), leaf_tone(t, lit));
+                    }
+                }
+            };
+            // The tiers, from the lowest up: closer together and shorter towards the top.
+            let mut tiers: Vec<(f32, f32)> = Vec::new();
+            let mut y = skirt;
+            while y > top + 8.0 {
+                let f = ((y - top) / (skirt - top)).clamp(0.0, 1.0);
+                tiers.push((y, reach * f.powf(0.85) * r.range(0.82, 1.1) + 4.0));
+                y -= r.range(9.0, 13.0) * (0.5 + 0.5 * f);
             }
+            for (y, len) in &tiers {
+                for side in [-1.0, 1.0] {
+                    let l = len * r.range(0.75, 0.95);
+                    bough(&mut c, &mut r, y + 5.0, l, side, 0.55);
+                }
+            }
+            let tw = r.range(11.0, 15.0);
+            let bark = mul(bark, 1.6);
+            c.poly(&[[cx - tw * 0.9, 256.0], [cx + tw * 0.9, 256.0], [cx + tw * 0.5, 244.0], [cx - tw * 0.5, 244.0]], mul(bark, 0.75), 0.6);
+            c.limb([cx, 256.0], [axis(top + 4.0), top + 4.0], tw, 1.4, bark, 0.7);
+            for (y, len) in &tiers {
+                for side in [-1.0, 1.0] { bough(&mut c, &mut r, *y, *len, side, 1.0); }
+                if r.f() < 0.75 { bough(&mut c, &mut r, *y, len * 0.5, 0.0, 0.95); }
+            }
+            // The leader at the very top.
+            for k in 0..6 { c.dab(axis(top) + r.range(-1.5, 1.5), top - 2.0 + k as f32 * 2.2, 1.6, 3.2, r.range(-0.2, 0.2), leaf_tone(t, 0.75)); }
             c.finish()
         }
         PropKind::Bush => {
@@ -473,87 +837,143 @@ pub fn paint_prop(kind: PropKind, tint: Rgb, variant: u32) -> Sprite {
             c.finish()
         }
         PropKind::Rock | PropKind::Boulder => {
+            // Broken stone lying where it fell: faces catching the light differently, a crack or
+            // two, lichen on its upper side, dark where it sits in the earth. A boulder stands
+            // taller; a rock lies low.
             let mut c = Canvas::new(192, 128);
-            let n = 9;
-            let pts: Vec<[f32; 2]> = (0..n).map(|i| {
-                let a = std::f32::consts::PI + i as f32 / (n - 1) as f32 * std::f32::consts::PI;
-                let rad = r.range(0.75, 1.0);
-                [96.0 + a.cos() * 92.0 * rad, 127.0 + a.sin() * 118.0 * rad.min(0.95)]
-            }).collect();
-            c.poly(&pts, mul(t, 0.75), 1.0);
-            c.ellipse(96.0 - r.range(10.0, 30.0), r.range(48.0, 64.0), r.range(26.0, 40.0), r.range(16.0, 24.0), mul(t, 1.15), 0.5);
-            for _ in 0..3 {
-                let x = r.range(50.0, 140.0);
-                let y = r.range(50.0, 110.0);
-                c.line([x, y], [x + r.range(-24.0, 24.0), y + r.range(8.0, 20.0)], 2.5, mul(t, 0.4));
+            let (cy, ay) = if kind == PropKind::Boulder { (r.range(72.0, 80.0), r.range(70.0, 78.0)) } else { (r.range(96.0, 104.0), r.range(50.0, 60.0)) };
+            let ax = r.range(70.0, 80.0);
+            lump(&mut c, &mut r, t, [96.0, cy], [ax, ay], Lump { space: false, floor: 127.0, faces: 0.85 });
+            for _ in 0..2 {
+                let (x, y) = (r.range(50.0, 140.0), r.range(cy - 0.4 * ay, 104.0));
+                let (dx, dy) = (r.range(-22.0, 22.0), r.range(10.0, 22.0));
+                c.stain(x + dx * 0.5, y + dy * 0.5, 0.6 * (dx * dx + dy * dy).sqrt(), 1.3, dy.atan2(dx), mul(t, 0.25), 0.9);
             }
+            for _ in 0..3 { c.stain(r.range(50.0, 140.0), cy - ay * r.range(0.3, 0.8), r.range(10.0, 22.0), r.range(5.0, 10.0), r.range(-0.4, 0.4), [0.42, 0.46, 0.24], 0.35); }
+            c.stain(96.0, 126.0, 90.0, 9.0, 0.0, [0.1, 0.14, 0.05], 0.5);
             c.finish()
         }
         PropKind::Cactus => {
+            // A saguaro: a ribbed column with arms that leave it sideways and turn up, thorns down
+            // every rib, sometimes in flower.
             let mut c = Canvas::new(144, 256);
-            c.rect(58.0, 24.0, 86.0, 256.0, t, 1.0);
-            c.ellipse(72.0, 26.0, 14.0, 14.0, t, 0.8);
-            let ay = r.range(100.0, 140.0);
-            c.rect(22.0, ay, 58.0, ay + 18.0, t, 0.6);
-            c.rect(22.0, ay - 60.0, 40.0, ay + 18.0, t, 1.0);
-            c.ellipse(31.0, ay - 60.0, 9.0, 9.0, t, 0.8);
-            let by = r.range(120.0, 170.0);
-            c.rect(86.0, by, 120.0, by + 16.0, t, 0.6);
-            c.rect(104.0, by - 44.0, 120.0, by + 16.0, t, 1.0);
-            c.ellipse(112.0, by - 44.0, 8.0, 8.0, t, 0.8);
+            let green = mul(t, 0.8);
+            let arms = [(-1.0f32, r.range(104.0, 150.0), r.range(48.0, 78.0), r.range(34.0, 44.0), 19.0), (1.0, r.range(120.0, 176.0), r.range(34.0, 60.0), r.range(30.0, 40.0), 17.0)];
+            let top = r.range(20.0, 34.0);
+            let mut tips = vec![[72.0, top]];
+            for (side, y, up, out, w) in arms {
+                if side > 0.0 && variant % 3 == 2 { continue; }
+                let x = 72.0 + side * out;
+                c.ribbed([72.0, y], [x, y], w, green, 5.0, false, true);
+                c.ribbed([x, y], [x, y - up], w, green, 5.0, false, true);
+                tips.push([x, y - up]);
+            }
+            c.ribbed([72.0, 262.0], [72.0, top], 30.0, green, 7.0, false, true);
+            if variant % 2 == 0 {
+                for [x, y] in tips { for d in [-5.0f32, 0.0, 5.0] { c.ellipse(x + d, y - 0.5 * w_tip(d), 4.0, 3.2, [0.95, 0.9, 0.82], 0.5); c.ellipse(x + d, y - 0.5 * w_tip(d), 1.4, 1.2, [0.95, 0.75, 0.2], 0.0); } }
+            }
+            c.stain(72.0, 254.0, 30.0, 12.0, 0.0, [0.25, 0.2, 0.1], 0.5);
             c.finish()
         }
         PropKind::DeadTree => {
+            // A dead tree: a tapering trunk, a little off true, forking again and again into crooked
+            // boughs and bare twigs, some snapped short; its wood furrowed and lit from the upper left.
             let mut c = Canvas::new(208, 256);
-            c.poly(&[[92.0, 256.0], [116.0, 256.0], [110.0, 60.0], [100.0, 60.0]], t, 1.0);
-            let branch = |c: &mut Canvas, x: f32, y: f32, dx: f32, dy: f32, w: f32| {
-                c.line([x, y], [x + dx, y + dy], w, t);
-                c.line([x + dx, y + dy], [x + dx * 1.5 + dy * 0.2, y + dy * 1.6], w * 0.6, t);
-            };
-            branch(&mut c, 104.0, 150.0, -r.range(40.0, 60.0), -r.range(40.0, 60.0), 9.0);
-            branch(&mut c, 106.0, 120.0, r.range(40.0, 64.0), -r.range(36.0, 56.0), 8.0);
-            branch(&mut c, 104.0, 90.0, -r.range(26.0, 44.0), -r.range(30.0, 46.0), 6.0);
-            branch(&mut c, 105.0, 70.0, r.range(20.0, 36.0), -r.range(30.0, 44.0), 5.0);
+            let x0 = 104.0 + r.range(-6.0, 6.0);
+            let tw = r.range(15.0, 21.0);
+            c.poly(&[[x0 - tw * 0.95, 256.0], [x0 + tw * 0.95, 256.0], [x0 + tw * 0.5, 243.0], [x0 - tw * 0.5, 243.0]], mul(t, 0.8), 0.6);
+            let trunk_len = r.range(86.0, 102.0);
+            let ang = std::f32::consts::FRAC_PI_2 + r.range(-0.1, 0.1);
+            bare_limb(&mut c, &mut r, t, [x0, 256.0], ang, trunk_len, tw, 0);
             c.finish()
         }
         PropKind::Mushroom => {
+            // A toadstool: a domed cap with warts, pale gills under its lip, a stem with a ring.
             let mut c = Canvas::new(160, 160);
-            c.rect(66.0, 70.0, 94.0, 160.0, [0.75, 0.70, 0.6], 0.8);
-            c.ellipse(80.0, 66.0, 76.0, 44.0, mul(t, 0.7), 0.3);
-            c.ellipse(80.0, 58.0, 72.0, 40.0, t, 0.9);
-            for _ in 0..5 {
-                c.ellipse(80.0 + r.range(-50.0, 50.0), r.range(36.0, 66.0), r.range(5.0, 10.0), r.range(4.0, 7.0), [0.9, 0.9, 0.88], 0.2);
+            let (stem, gill) = ([0.78, 0.74, 0.62], [0.5, 0.45, 0.36]);
+            let lean = r.range(-8.0, 8.0);
+            let (cx, cy, rx, ry) = (80.0 + lean, r.range(60.0, 68.0), r.range(64.0, 74.0), r.range(40.0, 48.0));
+            c.ellipse(cx, cy, rx, ry, mul(t, 0.85), 1.0);
+            c.cut(|c| c.rect(0.0, cy + 0.22 * ry, 160.0, 160.0, [0.0; 3], 0.0));
+            c.ellipse(cx, cy + 0.22 * ry, rx * 0.96, 7.0, gill, 0.5);
+            for i in 0..15 { let x = cx - 0.9 * rx + 1.8 * rx * i as f32 / 14.0; c.line([cx + (x - cx) * 0.3, cy + 0.22 * ry + 4.0], [x, cy + 0.22 * ry - 3.0], 0.9, mul(gill, 0.6)); }
+            c.rod([80.0, 164.0], [cx, cy + 0.22 * ry + 3.0], 34.0, 24.0, stem);
+            c.ellipse((80.0 + cx) * 0.5, cy + 0.22 * ry + 28.0, 17.0, 5.0, mul(stem, 0.9), 0.6);
+            c.stain(cx, cy + 0.22 * ry + 10.0, 22.0, 12.0, 0.0, [0.2, 0.17, 0.12], 0.6);
+            for _ in 0..r.range(6.0, 10.0) as usize {
+                // Warts sit on the dome: smaller and flatter towards its edge.
+                let (u, v) = (r.range(-0.85, 0.85), r.range(-0.8, 0.1));
+                if u * u + v * v > 0.8 { continue; }
+                let size = r.range(4.0, 9.0) * (1.0 - 0.5 * u.abs());
+                c.ellipse(cx + u * rx, cy + v * ry, size * (1.0 - 0.4 * u.abs()), size * 0.75, [0.93, 0.9, 0.82], 0.6);
             }
+            c.stain(cx - 0.35 * rx, cy - 0.55 * ry, 0.3 * rx, 0.16 * ry, -0.3, [1.0, 1.0, 1.0], 0.22);
+            c.stain(80.0, 158.0, 30.0, 8.0, 0.0, [0.12, 0.1, 0.06], 0.6);
             c.finish()
         }
         PropKind::Pillar => {
+            // A stone column: a fluted shaft on a moulded base under a square capital; some have
+            // lost their tops.
             let mut c = Canvas::new(96, 256);
-            c.rect(20.0, 24.0, 76.0, 236.0, t, 1.0);
-            c.rect(8.0, 4.0, 88.0, 24.0, mul(t, 1.1), 0.6);
-            c.rect(10.0, 236.0, 86.0, 256.0, mul(t, 0.9), 0.6);
-            for i in 0..4 { let x = 28.0 + i as f32 * 13.0; c.rect(x, 26.0, x + 3.0, 234.0, mul(t, 0.7), 0.0); }
+            c.ribbed([48.0, 238.0], [48.0, 22.0], 54.0, t, 9.0, true, false);
+            c.rect(8.0, 4.0, 88.0, 20.0, mul(t, 1.08), 0.7);
+            c.rect(8.0, 4.0, 88.0, 7.0, mul(t, 1.3), 0.3);
+            c.ellipse(48.0, 24.0, 35.0, 6.0, mul(t, 0.95), 0.9);
+            c.ellipse(48.0, 238.0, 36.0, 7.0, mul(t, 0.95), 0.9);
+            c.rect(8.0, 242.0, 88.0, 256.0, mul(t, 0.92), 0.7);
+            for _ in 0..4 { c.stain(r.range(24.0, 72.0), r.range(40.0, 230.0), r.range(4.0, 9.0), r.range(16.0, 40.0), 0.0, mul(t, 0.45), 0.3); }
+            c.stain(48.0, 250.0, 44.0, 14.0, 0.0, [0.14, 0.18, 0.08], 0.4);
             if variant % 2 == 1 {
                 // Broken top.
-                c.poly(&[[0.0, 0.0], [96.0, 0.0], [96.0, r.range(40.0, 70.0)], [50.0, r.range(20.0, 40.0)], [0.0, r.range(60.0, 90.0)]], [0.0; 3], 0.0);
-                for p in c.px.iter_mut() { if p[0] == 0.0 && p[1] == 0.0 && p[2] == 0.0 { p[3] = 0.0; } }
+                let pts = [[0.0, 0.0], [96.0, 0.0], [96.0, r.range(40.0, 70.0)], [50.0, r.range(20.0, 40.0)], [0.0, r.range(60.0, 90.0)]];
+                c.cut(|c| c.poly(&pts, [0.0; 3], 0.0));
             }
             c.finish()
         }
         PropKind::Gravestone => {
+            // A weathered headstone, leaning a little: a bevelled slab (round-topped, pointed, or a
+            // cross), its carving worn shallow, streaked by rain, lichen and moss creeping up it.
             let mut c = Canvas::new(128, 160);
-            c.rect(20.0, 50.0, 108.0, 160.0, t, 1.0);
-            c.ellipse(64.0, 52.0, 44.0, 42.0, t, 0.8);
-            c.rect(58.0, 50.0, 70.0, 116.0, mul(t, 0.6), 0.0);
-            c.rect(42.0, 66.0, 86.0, 76.0, mul(t, 0.6), 0.0);
+            let lean = r.range(-0.07, 0.07);
+            let (sn, cs) = lean.sin_cos();
+            let at = |x: f32, y: f32| [64.0 + (x - 64.0) * cs - (y - 160.0) * sn, 160.0 + (x - 64.0) * sn + (y - 160.0) * cs];
+            let shape: Vec<[f32; 2]> = match variant % 3 {
+                0 => {
+                    let mut p = vec![[22.0, 164.0], [22.0, 62.0]];
+                    for i in 0..=12 { let a = PI * (1.0 - i as f32 / 12.0); p.push([64.0 + 42.0 * a.cos(), 62.0 - 40.0 * a.sin()]); }
+                    p.push([106.0, 164.0]);
+                    p
+                }
+                1 => vec![[48.0, 164.0], [48.0, 80.0], [20.0, 80.0], [20.0, 52.0], [48.0, 52.0], [48.0, 18.0], [80.0, 18.0], [80.0, 52.0], [108.0, 52.0], [108.0, 80.0], [80.0, 80.0], [80.0, 164.0]],
+                _ => vec![[26.0, 164.0], [26.0, 60.0], [64.0, 26.0], [102.0, 60.0], [102.0, 164.0]],
+            };
+            let turned = |dx: f32, dy: f32| shape.iter().map(|p| at(p[0] + dx, p[1] + dy)).collect::<Vec<_>>();
+            // Its thickness shows down the side away from the light, and a lit edge towards it.
+            c.poly(&turned(4.0, 3.0), mul(t, 0.45), 0.0);
+            c.poly(&turned(-1.5, -1.5), mul(t, 1.25), 0.0);
+            c.poly(&turned(0.0, 0.0), t, 0.5);
+            // Carving: cut lines dark, their lower lips catching light.
+            let carve = |c: &mut Canvas, a: [f32; 2], b: [f32; 2], w: f32| { c.line(at(a[0] + 1.0, a[1] + 1.0), at(b[0] + 1.0, b[1] + 1.0), w, mul(t, 1.2)); c.line(at(a[0], a[1]), at(b[0], b[1]), w, mul(t, 0.5)); };
+            if variant % 3 != 1 {
+                carve(&mut c, [64.0, 50.0], [64.0, 86.0], 4.0);
+                carve(&mut c, [50.0, 62.0], [78.0, 62.0], 4.0);
+            }
+            for (i, y) in [100.0f32, 110.0, 120.0].into_iter().enumerate() { let half = if variant % 3 == 1 { 9.0 } else { 26.0 - 5.0 * i as f32 }; carve(&mut c, [64.0 - half, y], [64.0 + half, y], 1.6); }
+            for _ in 0..5 { c.stain(r.range(30.0, 98.0), r.range(40.0, 150.0), r.range(3.0, 7.0), r.range(14.0, 36.0), lean, mul(t, 0.4), 0.3); }
+            for _ in 0..4 { c.stain(r.range(30.0, 98.0), r.range(30.0, 130.0), r.range(5.0, 11.0), r.range(4.0, 8.0), r.range(0.0, 3.0), [0.5, 0.52, 0.3], 0.4); }
+            c.stain(64.0, 158.0, 56.0, 20.0, 0.0, [0.12, 0.2, 0.07], 0.75);
             c.finish()
         }
         PropKind::Crystal => {
+            // A cluster of crystal points: the tall ones in the middle, short ones leaning out at
+            // the sides, each with its faces lit differently.
             let mut c = Canvas::new(128, 192);
-            for i in 0..4 {
-                let x = 64.0 + (i as f32 - 1.5) * r.range(14.0, 22.0);
-                let hgt = r.range(90.0, 180.0) * if i == 1 || i == 2 { 1.0 } else { 0.7 };
-                let lean = r.range(-16.0, 16.0);
-                c.poly(&[[x - 14.0, 192.0], [x + lean - 4.0, 192.0 - hgt], [x + lean + 6.0, 192.0 - hgt + 10.0], [x + 14.0, 192.0]], mul(t, r.range(0.8, 1.3)), 1.0);
+            for i in [0usize, 4, 1, 3, 2] {
+                let off = i as f32 - 2.0;
+                let x = 64.0 + off * r.range(13.0, 19.0);
+                let hgt = r.range(110.0, 182.0) * (1.0 - 0.2 * off.abs());
+                let lean = off * r.range(6.0, 13.0) + r.range(-5.0, 5.0);
+                shard(&mut c, [x, 196.0], [x + lean, 192.0 - hgt], r.range(20.0, 28.0), r.range(0.78, 0.88), mul(t, r.range(0.85, 1.15)));
             }
             c.finish()
         }
@@ -695,37 +1115,144 @@ pub fn paint_prop(kind: PropKind, tint: Rgb, variant: u32) -> Sprite {
             c.finish()
         }
         PropKind::Icicle => {
-            // Hangs: the top of the sprite is the ceiling. A row of cones of different lengths.
+            // Hangs: the top of the sprite is the ceiling. A row of icicles of different lengths,
+            // round and tapering, light running down each.
             let mut c = Canvas::new(128, 192);
             let n = 3 + (variant % 4) as usize;
+            c.rect(0.0, 0.0, 128.0, 7.0, mul(t, 0.85), 0.5);
             for i in 0..n {
                 let x = 18.0 + i as f32 * (92.0 / n.max(1) as f32) + r.range(-6.0, 6.0);
-                let len = r.range(60.0, 188.0) * if i == n / 2 { 1.0 } else { 0.7 };
-                let wdt = r.range(9.0, 16.0);
-                c.poly(&[[x - wdt, 0.0], [x + wdt, 0.0], [x + r.range(-2.0, 2.0), len]], mul(t, r.range(0.85, 1.1)), 1.0);
-                c.line([x - wdt * 0.3, 2.0], [x, len * 0.8], 2.0, [0.95, 0.98, 1.0]);
+                let len = r.range(60.0, 186.0) * if i == n / 2 { 1.0 } else { 0.7 };
+                let wdt = r.range(16.0, 28.0);
+                let tip = [x + r.range(-3.0, 3.0), len];
+                c.rod([x, -6.0], tip, wdt, 1.2, mul(t, r.range(0.85, 1.1)));
+                c.stain(x - 0.16 * wdt, 0.4 * len, 0.09 * wdt, 0.38 * len, 0.0, [1.0, 1.0, 1.0], 0.55);
+                c.stain(tip[0], tip[1] - 5.0, 3.0, 5.0, 0.0, [1.0, 1.0, 1.0], 0.5);
             }
-            c.rect(0.0, 0.0, 128.0, 6.0, mul(t, 0.9), 0.5);
             c.finish()
         }
         PropKind::IceSpike => {
-            // Clear ice shards with frosted edges and a bright face catching the light.
+            // Shards of clear ice thrust up from the floor: thin, sharp, frosted at the foot.
             let mut c = Canvas::new(128, 192);
-            for i in 0..5 {
-                let x = 64.0 + (i as f32 - 2.0) * r.range(12.0, 20.0);
-                let hgt = r.range(80.0, 186.0) * if i == 2 { 1.0 } else { 0.65 };
-                let lean = r.range(-20.0, 20.0);
-                let tip = [x + lean, 192.0 - hgt];
-                c.poly(&[[x - 13.0, 192.0], tip, [x + 13.0, 192.0]], mul(t, r.range(0.75, 1.0)), 1.0);
-                c.poly(&[[x - 2.0, 192.0], tip, [x + 13.0, 192.0]], mul(t, 1.2), 0.0);
-                c.line([x - 13.0, 192.0], tip, 2.0, [0.92, 0.97, 1.0]);
+            for i in [0usize, 4, 1, 3, 2] {
+                let off = i as f32 - 2.0;
+                let x = 64.0 + off * r.range(12.0, 20.0);
+                let hgt = r.range(100.0, 186.0) * if i == 2 { 1.0 } else { 0.65 };
+                let lean = off * r.range(4.0, 12.0) + r.range(-8.0, 8.0);
+                shard(&mut c, [x, 196.0], [x + lean, 192.0 - hgt], r.range(18.0, 26.0), r.range(0.25, 0.45), mul(t, r.range(0.8, 1.05)));
+            }
+            c.stain(64.0, 190.0, 60.0, 12.0, 0.0, [0.95, 0.98, 1.0], 0.5);
+            c.finish()
+        }
+        PropKind::Asteroid => paint_asteroid(tint, variant),
+        PropKind::Satellite => {
+            // A foil-wrapped body between two wings of solar cells, a dish on a boom: turned a
+            // different way each time, the cells catching the sun on one wing more than the other.
+            let mut c = Canvas::new(224, 160);
+            let ang = r.range(-0.6, 0.6);
+            let (sn, cs) = ang.sin_cos();
+            let at = |x: f32, y: f32| [112.0 + x * cs - y * sn, 80.0 + x * sn + y * cs];
+            let quad = |c: &mut Canvas, x0: f32, y0: f32, x1: f32, y1: f32, col: [f32; 3], shade: f32| c.poly(&[at(x0, y0), at(x1, y0), at(x1, y1), at(x0, y1)], col, shade);
+            let (cell, frame, grey) = ([0.01, 0.022, 0.085], [0.2, 0.2, 0.215], [0.3, 0.31, 0.33]);
+            for (side, lit) in [(-1.0f32, r.range(0.7, 1.0)), (1.0, r.range(1.3, 2.6))] {
+                c.rod(at(side * 18.0, 0.0), at(side * 34.0, 0.0), 3.0, 3.0, grey);
+                quad(&mut c, side * 33.0, -20.0, side * 100.0, 20.0, frame, 0.3);
+                for i in 0..4 { for j in 0..2 {
+                    let x0 = side * (34.5 + 16.3 * i as f32);
+                    let y0 = -19.0 + 19.5 * j as f32;
+                    quad(&mut c, x0, y0, x0 + side * 14.5, y0 + 18.0, mul(cell, lit * (0.85 + 0.3 * r.f())), 0.25);
+                } }
+            }
+            quad(&mut c, -18.0, -16.0, 18.0, 16.0, t, 0.9);
+            for i in 0..9 { let x = -16.0 + 4.0 * i as f32; c.line(at(x, -16.0), at(x + r.range(-4.0, 4.0), 16.0), r.range(0.8, 2.2), mul(t, r.range(0.45, 1.3))); }
+            quad(&mut c, -18.0, -19.0, 18.0, -15.0, grey, 0.5);
+            c.rod(at(0.0, -17.0), at(6.0, -38.0), 2.6, 2.2, grey);
+            let d = at(8.0, -44.0);
+            c.dab(d[0], d[1], 19.0, 7.5, ang - 0.3, [0.5, 0.51, 0.54]);
+            c.dab(d[0] + 1.5, d[1] + 1.5, 15.0, 5.0, ang - 0.3, [0.24, 0.25, 0.28]);
+            c.rod(d, at(13.0, -58.0), 1.6, 1.2, grey);
+            c.rod(at(-6.0, 16.0), at(-12.0, 40.0), 1.6, 1.0, grey);
+            c.finish()
+        }
+        PropKind::Debris => {
+            // Torn hull plate: a few buckled sheets with ragged edges, ribs showing behind, a spar
+            // sticking out, scorched where it broke.
+            let mut c = Canvas::new(176, 152);
+            let scorch = [0.03, 0.028, 0.026];
+            let a0 = r.range(0.0, PI);
+            c.rod([88.0 - 66.0 * a0.cos(), 76.0 - 50.0 * a0.sin()], [88.0 + 70.0 * a0.cos(), 76.0 + 52.0 * a0.sin()], 5.0, 3.0, mul(t, 0.5));
+            for i in 0..3 {
+                let (cx, cy) = (88.0 + r.range(-26.0, 26.0), 76.0 + r.range(-20.0, 20.0));
+                let (rx, ry) = (r.range(34.0, 52.0), r.range(24.0, 38.0));
+                let n = 9;
+                let turn = r.range(0.0, 6.28);
+                let pts: Vec<[f32; 2]> = (0..n).map(|j| {
+                    let a = turn + j as f32 / n as f32 * 6.2832;
+                    let rad = if j % 2 == 0 { r.range(0.75, 1.0) } else { r.range(0.4, 0.8) };
+                    [cx + a.cos() * rx * rad, cy + a.sin() * ry * rad]
+                }).collect();
+                // A dark rim a little larger, then the plate: the torn edge shows its thickness.
+                let rim: Vec<[f32; 2]> = pts.iter().map(|p| [cx + (p[0] - cx) * 1.07 + 1.5, cy + (p[1] - cy) * 1.07 + 2.0]).collect();
+                c.poly(&rim, scorch, 0.0);
+                c.poly(&pts, mul(t, 0.75 + 0.2 * i as f32), 0.9);
+                let (la, lb) = (turn + 0.4, turn + 0.4 + PI);
+                for k in -1..=1 {
+                    let off = 0.3 * k as f32;
+                    c.line([cx + (la + off).cos() * rx * 0.45, cy + (la + off).sin() * ry * 0.45], [cx + (lb - off).cos() * rx * 0.45, cy + (lb - off).sin() * ry * 0.45], 1.3, mul(t, 0.5));
+                }
+                for _ in 0..5 { let (px, py) = (cx + r.range(-0.4, 0.4) * rx, cy + r.range(-0.4, 0.4) * ry); c.ellipse(px, py, 1.6, 1.6, mul(t, 1.3), 0.6); }
             }
             c.finish()
         }
+        PropKind::CargoPod => {
+            // A pressure can with domed ends, hoops round it and a hazard band, tumbling end over end.
+            let mut c = Canvas::new(200, 140);
+            let ang = r.range(-0.7, 0.7);
+            let (sn, cs) = ang.sin_cos();
+            let at = |x: f32, y: f32| [100.0 + x * cs - y * sn, 70.0 + x * sn + y * cs];
+            let (steel, dark) = ([0.3, 0.31, 0.34], [0.05, 0.05, 0.055]);
+            for side in [-1.0f32, 1.0] { let e = at(side * 54.0, 0.0); c.dab(e[0], e[1], 22.0, 30.0, ang, mul(steel, if side < 0.0 { 1.0 } else { 0.6 })); }
+            // The barrel, lit along its upper side.
+            for i in 0..12 {
+                let (y0, y1) = (-30.0 + 5.0 * i as f32, -25.0 + 5.0 * i as f32);
+                let lit = 1.15 - 1.0 * ((i as f32 - 2.5) / 9.5).abs().min(1.0).powf(0.8);
+                c.poly(&[at(-54.0, y0), at(54.0, y0), at(54.0, y1), at(-54.0, y1)], mul(t, lit), 0.0);
+            }
+            for x in [-46.0f32, -16.0, 16.0, 46.0] { c.poly(&[at(x - 2.5, -31.0), at(x + 2.5, -31.0), at(x + 2.5, 31.0), at(x - 2.5, 31.0)], mul(steel, 0.7), 0.0); }
+            for i in 0..5 { let x = -12.0 + 5.0 * i as f32; c.poly(&[at(x, -30.0), at(x + 2.5, -30.0), at(x + 8.5, 30.0), at(x + 6.0, 30.0)], if i % 2 == 0 { [0.55, 0.42, 0.06] } else { dark }, 0.0); }
+            let h = at(-32.0, -6.0);
+            c.dab(h[0], h[1], 9.0, 11.0, ang, dark);
+            c.dab(h[0], h[1], 6.5, 8.5, ang, mul(steel, 0.8));
+            c.finish()
+        }
+        PropKind::Comet => {
+            // A lump of dirty ice in its own glow, gas and dust streaming away behind it.
+            let mut c = Canvas::new(256, 128);
+            let (hx, hy) = (58.0, 64.0 + r.range(-8.0, 8.0));
+            let lean = r.range(-0.12, 0.12);
+            c.haze(hx + 84.0, hy + 84.0 * lean, 108.0, 26.0, lean, mul(t, 0.7), 0.3);
+            c.haze(hx + 66.0, hy + 66.0 * (lean + 0.1), 92.0, 12.0, lean + 0.1, [0.9, 0.85, 0.7], 0.22);
+            c.haze(hx + 56.0, hy + 56.0 * (lean - 0.07), 84.0, 7.0, lean - 0.07, [0.6, 0.8, 1.0], 0.4);
+            c.haze(hx, hy, 40.0, 36.0, 0.0, t, 0.6);
+            let n = 10;
+            let pts: Vec<[f32; 2]> = (0..n).map(|i| { let a = i as f32 / n as f32 * 6.2832; let rad = r.range(0.72, 1.0); [hx + a.cos() * 17.0 * rad, hy + a.sin() * 14.0 * rad] }).collect();
+            c.poly(&pts, [0.62, 0.68, 0.74], 0.9);
+            c.ellipse(hx - 4.0, hy - 3.0, 9.0, 7.0, [0.9, 0.95, 1.0], 0.5);
+            c.ellipse(hx + 6.0, hy + 5.0, 4.0, 3.0, [0.35, 0.38, 0.42], 0.7);
+            c.haze(hx - 2.0, hy, 22.0, 20.0, 0.0, [0.9, 0.97, 1.0], 0.35);
+            c.finish()
+        }
         PropKind::Stalagmite => {
+            // Stone built up drip by drip: one tall spire with smaller ones round its foot, ridged
+            // down their length, wet where the light catches.
             let mut c = Canvas::new(112, 224);
-            c.poly(&[[6.0, 224.0], [50.0 + r.range(-8.0, 8.0), 0.0], [64.0, 10.0], [106.0, 224.0]], t, 1.0);
-            for i in 1..5 { let y = 224.0 - i as f32 * 42.0; c.line([20.0 + i as f32 * 8.0, y], [92.0 - i as f32 * 8.0, y + 6.0], 3.0, mul(t, 0.7)); }
+            let tip = 50.0 + r.range(-10.0, 10.0);
+            c.limb([24.0 + r.range(-4.0, 4.0), 232.0], [16.0 + r.range(-4.0, 6.0), r.range(120.0, 160.0)], 42.0, 2.0, mul(t, 0.8), r.range(0.0, 6.0));
+            c.limb([90.0 + r.range(-4.0, 4.0), 232.0], [96.0 + r.range(-6.0, 4.0), r.range(140.0, 176.0)], 38.0, 2.0, mul(t, 0.85), r.range(0.0, 6.0));
+            c.limb([56.0, 236.0], [tip, 4.0], 88.0, 3.0, t, r.range(0.0, 6.0));
+            for i in 1..6 { let y = 224.0 - i as f32 * 36.0; let half = 44.0 * (y / 224.0) * 0.8; c.stain(56.0 + (tip - 56.0) * (1.0 - y / 224.0), y, half, 2.2, 0.08, mul(t, 0.4), 0.35); }
+            c.stain(46.0 + 0.3 * (tip - 56.0), 110.0, 5.0, 70.0, -0.05, [0.9, 0.92, 1.0], 0.2);
+            c.stain(56.0, 222.0, 54.0, 10.0, 0.0, mul(t, 0.25), 0.6);
             c.finish()
         }
     }
@@ -733,46 +1260,224 @@ pub fn paint_prop(kind: PropKind, tint: Rgb, variant: u32) -> Sprite {
 
 /// Paint a fixture body (the flame or orb is drawn separately). The wall side is on the left.
 pub fn paint_fixture(kind: FixtureKind) -> Option<Sprite> {
-    let iron = [0.05, 0.045, 0.04];
     let wood = [0.12, 0.06, 0.025];
     match kind {
         FixtureKind::Torch | FixtureKind::GreenFire | FixtureKind::Magic | FixtureKind::IceWisp => {
+            // A brand in an iron sconce: a plate bolted to the wall, an arm with a ring, a wooden
+            // shaft through it, its head bound in pitch-soaked cloth.
             let mut c = Canvas::new(64, 160);
-            c.rect(0.0, 70.0, 10.0, 110.0, iron, 0.5);
-            c.line([6.0, 90.0], [34.0, 60.0], 6.0, iron);
-            c.line([24.0, 158.0], [36.0, 26.0], 10.0, wood);
-            c.rect(22.0, 22.0, 48.0, 40.0, iron, 0.6);
+            let (plate, cloth) = ([0.07, 0.065, 0.06], [0.05, 0.04, 0.03]);
+            c.rect(0.0, 66.0, 9.0, 114.0, plate, 0.7);
+            c.rect(0.0, 66.0, 9.0, 68.5, mul(plate, 1.8), 0.0);
+            for y in [72.0, 108.0] { c.ellipse(4.5, y, 2.2, 2.2, mul(plate, 2.0), 0.9); }
+            c.rod([6.0, 96.0], [30.0, 66.0], 5.5, 4.5, plate);
+            c.rod([8.0, 78.0], [24.0, 74.0], 3.0, 3.0, plate);
+            c.limb([23.0, 160.0], [36.0, 40.0], 9.0, 11.0, wood, 2.0);
+            c.rod([21.0, 68.0], [41.0, 64.0], 6.0, 6.0, mul(plate, 1.3));
+            // The head: wrapped and tied, charred at the top.
+            c.rod([35.0, 46.0], [38.0, 20.0], 18.0, 15.0, cloth);
+            for (i, y) in [42.0f32, 36.0, 30.0, 24.0].into_iter().enumerate() { c.line([27.0 + i as f32 * 0.5, y + 2.0], [46.0, y - 3.0], 1.4, mul(cloth, 2.4)); }
+            c.stain(37.0, 20.0, 9.0, 5.0, 0.0, [0.9, 0.35, 0.05], 0.7);
             Some(c.finish())
         }
         FixtureKind::Lantern => {
+            // A glazed lantern hung by a ring from a scrolled wall bracket.
             let mut c = Canvas::new(96, 200);
-            c.rect(0.0, 6.0, 8.0, 40.0, iron, 0.5);
-            c.line([4.0, 14.0], [64.0, 14.0], 5.0, iron);
-            c.rect(62.0, 14.0, 66.0, 70.0, iron, 0.0);
-            c.rect(44.0, 70.0, 84.0, 80.0, iron, 0.6);
-            c.rect(46.0, 80.0, 82.0, 140.0, [0.9, 0.62, 0.25], 0.3);
-            for x in [46.0, 63.0, 80.0] { c.rect(x, 80.0, x + 3.0, 140.0, iron, 0.0); }
-            c.rect(42.0, 140.0, 86.0, 152.0, iron, 0.6);
+            let (plate, glass) = ([0.07, 0.065, 0.06], [0.95, 0.66, 0.28]);
+            c.rect(0.0, 4.0, 8.0, 44.0, plate, 0.7);
+            for y in [10.0, 38.0] { c.ellipse(4.0, y, 2.0, 2.0, mul(plate, 2.0), 0.9); }
+            c.rod([4.0, 14.0], [66.0, 14.0], 5.0, 4.0, plate);
+            for i in 0..8 { let t = |i: i32| { let a = 0.5 * PI * i as f32 / 8.0; [8.0 + 30.0 * a.sin(), 44.0 - 28.0 * (1.0 - a.cos()) - 2.0 * a.sin()] }; c.rod(t(i), t(i + 1), 3.0, 2.8, plate); }
+            for i in 0..5 { c.ellipse(64.0, 20.0 + 8.0 * i as f32, 2.6, 4.4, plate, 0.6); }
+            c.ellipse(64.0, 60.0, 5.0, 5.0, plate, 0.8);
+            c.poly(&[[64.0, 60.0], [92.0, 78.0], [36.0, 78.0]], plate, 0.9);
+            c.rect(38.0, 77.0, 90.0, 82.0, mul(plate, 1.3), 0.7);
+            c.poly(&[[44.0, 82.0], [84.0, 82.0], [80.0, 140.0], [48.0, 140.0]], glass, 0.3);
+            c.poly(&[[65.0, 82.0], [84.0, 82.0], [80.0, 140.0], [64.5, 140.0]], mul(glass, 0.85), 0.2);
+            c.stain(56.0, 104.0, 6.0, 24.0, 0.05, [1.0, 0.95, 0.8], 0.45);
+            for (x0, x1) in [(44.0, 48.0), (84.0, 80.0), (64.5, 64.0)] { c.rod([x0, 82.0], [x1, 140.0], 3.0, 3.0, plate); }
+            c.rect(44.0, 139.0, 84.0, 147.0, plate, 0.7);
+            c.poly(&[[52.0, 147.0], [76.0, 147.0], [68.0, 156.0], [60.0, 156.0]], plate, 0.8);
             Some(c.finish())
         }
         FixtureKind::Candle => {
+            // A fat tallow candle on an iron pricket dish, wax run down its sides.
             let mut c = Canvas::new(48, 120);
-            c.rect(6.0, 104.0, 42.0, 120.0, iron, 0.5);
-            c.rect(16.0, 30.0, 32.0, 106.0, [0.78, 0.72, 0.58], 0.8);
-            c.ellipse(26.0, 34.0, 4.0, 6.0, [0.85, 0.8, 0.66], 0.5);
+            let (plate, wax) = ([0.07, 0.065, 0.06], [0.8, 0.74, 0.58]);
+            c.rod([24.0, 120.0], [24.0, 108.0], 6.0, 5.0, plate);
+            c.ellipse(24.0, 107.0, 21.0, 6.0, plate, 0.9);
+            c.ellipse(24.0, 105.0, 18.0, 3.5, mul(plate, 0.6), 0.3);
+            c.rod([24.0, 106.0], [24.0, 34.0], 17.0, 16.0, wax);
+            for (x, y0, y1, w) in [(17.5, 36.0, 74.0, 4.0), (29.0, 34.0, 58.0, 3.4), (22.0, 35.0, 49.0, 3.0), (31.5, 60.0, 92.0, 3.0)] {
+                c.rod([x, y0], [x, y1], w, w * 0.8, mul(wax, 1.08));
+                c.ellipse(x, y1, w * 0.6, w * 0.8, mul(wax, 1.1), 0.6);
+            }
+            c.ellipse(24.0, 34.0, 8.0, 3.0, mul(wax, 1.2), 0.4);
+            c.ellipse(24.0, 34.5, 4.0, 1.6, [0.95, 0.8, 0.45], 0.0);
+            c.rod([24.0, 34.0], [24.6, 27.0], 1.6, 1.2, [0.03, 0.025, 0.02]);
             Some(c.finish())
         }
         FixtureKind::Brazier => {
+            // An iron fire bowl on three legs braced by a ring, coals heaped in it.
             let mut c = Canvas::new(128, 160);
-            c.line([30.0, 160.0], [60.0, 70.0], 6.0, iron);
-            c.line([98.0, 160.0], [68.0, 70.0], 6.0, iron);
-            c.line([64.0, 160.0], [64.0, 70.0], 6.0, iron);
-            c.poly(&[[6.0, 30.0], [122.0, 30.0], [100.0, 74.0], [28.0, 74.0]], [0.09, 0.07, 0.06], 0.8);
-            c.rect(10.0, 26.0, 118.0, 34.0, [0.3, 0.12, 0.04], 0.3);
+            let plate = [0.07, 0.065, 0.06];
+            c.rod([64.0, 160.0], [64.0, 70.0], 5.0, 5.0, mul(plate, 0.7));
+            c.ellipse(64.0, 122.0, 26.0, 5.0, plate, 0.8);
+            c.cut(|c| c.ellipse(64.0, 121.0, 22.0, 3.0, [0.0; 3], 0.0));
+            c.rod([26.0, 160.0], [56.0, 70.0], 6.5, 5.5, plate);
+            c.rod([102.0, 160.0], [72.0, 70.0], 6.5, 5.5, plate);
+            for x in [26.0, 102.0] { c.ellipse(x, 158.0, 6.0, 3.0, plate, 0.8); }
+            // The bowl: the lower half of a round, its rim towards us, embers inside.
+            c.ellipse(64.0, 34.0, 58.0, 44.0, mul(plate, 1.2), 1.0);
+            c.cut(|c| c.rect(0.0, 0.0, 128.0, 34.0, [0.0; 3], 0.0));
+            c.ellipse(64.0, 34.0, 60.0, 10.0, mul(plate, 1.7), 0.8);
+            c.ellipse(64.0, 34.0, 53.0, 7.0, [0.25, 0.06, 0.02], 0.3);
+            for _ in 0..1 { for (x, y, rx) in [(40.0, 33.0, 12.0), (62.0, 31.0, 14.0), (84.0, 33.0, 12.0), (52.0, 35.0, 9.0), (74.0, 35.5, 9.0)] { c.ellipse(x, y, rx, 4.2, [0.95, 0.3, 0.05], 0.7); } }
+            c.stain(64.0, 31.0, 34.0, 4.0, 0.0, [1.0, 0.8, 0.3], 0.7);
+            for i in 0..7 { let x = 14.0 + 16.6 * i as f32; c.ellipse(x, 40.0 + 3.0 * (1.0 - ((x - 64.0) / 50.0).powi(2)), 1.8, 1.8, mul(plate, 2.4), 0.9); }
             Some(c.finish())
         }
         FixtureKind::Crystal => Some(paint_prop(PropKind::Crystal, [140, 210, 255], 3)),
         FixtureKind::Firefly => None,
+        FixtureKind::StreetLamp => {
+            // A glazed lamp head: a peaked roof with a finial, four panes narrowing downwards, a neck to stand on.
+            let (iron, glass) = ([0.085, 0.08, 0.075], [0.95, 0.8, 0.5]);
+            let mut c = Canvas::new(56, 120);
+            c.ellipse(28.0, 5.0, 3.0, 4.0, iron, 0.8);
+            c.poly(&[[28.0, 8.0], [52.0, 30.0], [4.0, 30.0]], iron, 0.9);
+            c.rect(6.0, 29.0, 50.0, 34.0, iron, 0.7);
+            c.poly(&[[10.0, 34.0], [46.0, 34.0], [40.0, 92.0], [16.0, 92.0]], glass, 0.3);
+            // (The pane to the right is turned from the light; the glow inside still fills it.)
+            c.poly(&[[30.0, 34.0], [46.0, 34.0], [40.0, 92.0], [29.0, 92.0]], mul(glass, 0.86), 0.2);
+            for (x0, x1) in [(10.0, 16.0), (46.0, 40.0), (29.0, 28.5)] { c.rod([x0, 34.0], [x1, 92.0], 3.0, 3.0, iron); }
+            c.rect(13.0, 91.0, 43.0, 98.0, iron, 0.7);
+            c.poly(&[[18.0, 98.0], [38.0, 98.0], [33.0, 112.0], [23.0, 112.0]], iron, 0.8);
+            c.rect(22.0, 112.0, 34.0, 120.0, iron, 0.7);
+            Some(c.finish())
+        }
+        FixtureKind::PaperLantern => {
+            // A round paper lantern on its string: ribs showing through the paper, a tassel beneath.
+            let (paper, wood, gold) = ([0.9, 0.17, 0.08], [0.07, 0.04, 0.03], [0.8, 0.58, 0.16]);
+            let mut c = Canvas::new(64, 108);
+            c.rect(31.0, 0.0, 33.0, 10.0, wood, 0.0);
+            c.ellipse(32.0, 48.0, 28.0, 35.0, paper, 0.45);
+            for i in 0..7 {
+                let y = 21.0 + 9.0 * i as f32;
+                let half = 28.0 * (1.0 - ((y - 48.0) / 35.0f32).powi(2)).max(0.0).sqrt();
+                c.rect(32.0 - half, y, 32.0 + half, y + 1.4, mul(paper, 0.7), 0.3);
+            }
+            c.rect(20.0, 9.0, 44.0, 16.0, wood, 0.6);
+            c.rect(22.0, 80.0, 42.0, 86.0, wood, 0.6);
+            c.rect(30.5, 86.0, 33.5, 92.0, gold, 0.3);
+            c.poly(&[[29.0, 92.0], [35.0, 92.0], [37.0, 108.0], [27.0, 108.0]], gold, 0.5);
+            Some(c.finish())
+        }
+        FixtureKind::Campfire => {
+            // Logs leaning together in a ring of stones, embers in their lap.
+            let (stone, log) = ([0.2, 0.19, 0.18], [0.1, 0.055, 0.03]);
+            let mut c = Canvas::new(128, 60);
+            for (x, y, rx, ry) in [(30.0, 40.0, 11.0, 8.0), (64.0, 37.0, 12.0, 8.0), (98.0, 40.0, 11.0, 8.0)] { c.ellipse(x, y, rx, ry, mul(stone, 0.7), 0.8); }
+            c.limb([18.0, 46.0], [92.0, 16.0], 13.0, 10.0, log, 1.0);
+            c.limb([110.0, 46.0], [38.0, 14.0], 13.0, 10.0, log, 2.3);
+            c.ellipse(64.0, 34.0, 20.0, 7.0, [1.0, 0.32, 0.05], 0.2);
+            c.ellipse(64.0, 33.0, 10.0, 3.5, [1.0, 0.7, 0.2], 0.0);
+            c.limb([64.0, 52.0], [66.0, 10.0], 11.0, 8.0, mul(log, 0.85), 4.1);
+            for (x, y, rx, ry) in [(12.0, 50.0, 12.0, 9.0), (38.0, 53.0, 13.0, 7.0), (66.0, 54.0, 12.0, 6.0), (92.0, 53.0, 13.0, 7.0), (116.0, 50.0, 12.0, 9.0)] { c.ellipse(x, y, rx, ry, stone, 0.9); }
+            Some(c.finish())
+        }
+        FixtureKind::Glowshroom => {
+            // Three caps of different ages on pale stems, spotted, lit from within.
+            let (cap, stem) = ([0.22, 0.9, 0.74], [0.55, 0.78, 0.7]);
+            let mut c = Canvas::new(96, 80);
+            for (cx, cy, rx, ry, lean) in [(30.0, 26.0, 24.0, 15.0, -4.0), (68.0, 42.0, 19.0, 12.0, 5.0), (47.0, 58.0, 12.0, 8.0, 1.0)] {
+                c.ellipse(cx, cy, rx, ry, cap, 0.55);
+                c.cut(|c| c.rect(cx - rx - 1.0, cy + 0.3 * ry, cx + rx + 1.0, cy + ry + 2.0, [0.0; 3], 0.0));
+                c.rect(cx - 0.82 * rx, cy + 0.3 * ry - 1.5, cx + 0.82 * rx, cy + 0.3 * ry + 1.0, mul(cap, 0.55), 0.2);
+                c.rod([cx, cy + 0.3 * ry], [cx + lean, 80.0], 0.26 * rx, 0.36 * rx, stem);
+                for (dx, dy, r) in [(-0.45, -0.25, 0.13), (0.2, -0.5, 0.1), (0.5, -0.1, 0.09)] { c.ellipse(cx + dx * rx, cy + dy * ry, r * rx, r * ry, [0.8, 1.0, 0.93], 0.0); }
+            }
+            Some(c.finish())
+        }
+        FixtureKind::Beacon => {
+            // A lens under a wire cage on a squat housing.
+            let (metal, lens) = ([0.13, 0.13, 0.14], [0.95, 0.12, 0.08]);
+            let mut c = Canvas::new(48, 72);
+            c.ellipse(24.0, 28.0, 15.0, 19.0, lens, 0.4);
+            c.ellipse(19.0, 20.0, 4.0, 6.0, [1.0, 0.55, 0.45], 0.0);
+            for x in [12.0, 24.0, 36.0] { c.rod([x, 44.0], [24.0 + (x - 24.0) * 0.5, 8.0], 1.6, 1.6, metal); }
+            c.rect(9.0, 26.0, 39.0, 28.0, metal, 0.3);
+            c.rect(4.0, 42.0, 44.0, 48.0, metal, 0.7);
+            c.poly(&[[8.0, 48.0], [40.0, 48.0], [44.0, 72.0], [4.0, 72.0]], metal, 0.9);
+            Some(c.finish())
+        }
+        FixtureKind::Chandelier => {
+            // An iron ring on three chains from one above, candles standing round it.
+            let (iron, wax) = ([0.07, 0.065, 0.06], [0.8, 0.74, 0.6]);
+            let mut c = Canvas::new(160, 150);
+            for i in 0..7 { c.ellipse(80.0, 4.0 + 8.0 * i as f32, 2.6, 4.6, iron, 0.5); }
+            c.ellipse(80.0, 60.0, 7.0, 6.0, iron, 0.8);
+            for x in [14.0, 80.0, 146.0] { c.rod([80.0, 62.0], [x, 100.0], 2.4, 2.4, iron); }
+            // The far side of the ring, its candles, then the near side over their feet.
+            c.ellipse(80.0, 100.0, 72.0, 13.0, mul(iron, 0.7), 0.4);
+            c.cut(|c| c.ellipse(80.0, 102.0, 66.0, 9.0, [0.0; 3], 0.0));
+            for (x, y) in CHANDELIER_CANDLES { c.rod([x, y + 26.0], [x, y + 3.0], 7.0, 6.5, wax); c.ellipse(x, y + 26.0, 7.0, 3.0, iron, 0.6); }
+            c.poly(&[[8.0, 101.0], [152.0, 101.0], [140.0, 110.0], [118.0, 114.5], [80.0, 116.0], [42.0, 114.5], [20.0, 110.0]], iron, 0.8);
+            c.cut(|c| c.ellipse(80.0, 100.0, 70.0, 10.5, [0.0; 3], 0.0));
+            for (x, y) in CHANDELIER_CANDLES { if y > 78.0 { c.rod([x, y + 26.0], [x, y + 3.0], 7.0, 6.5, wax); c.ellipse(x, y + 26.0, 7.0, 3.0, iron, 0.6); } }
+            Some(c.finish())
+        }
+    }
+}
+
+/// Where the chandelier's candle tops are in its 160 x 150 painting.
+const CHANDELIER_CANDLES: [(f32, f32); 5] = [(16.0, 72.0), (50.0, 66.0), (110.0, 66.0), (144.0, 72.0), (80.0, 84.0)];
+/// The chandelier's flames, as offsets from the middle of its body in body widths and heights
+/// (right and up positive).
+pub fn chandelier_flames() -> [[f32; 2]; 5] {
+    CHANDELIER_CANDLES.map(|(x, y)| [x / 160.0 - 0.5, (CHANDELIER_FLAME_Y - y) / 150.0])
+}
+const CHANDELIER_FLAME_Y: f32 = 72.0;
+
+/// Where a crook's arm ends, in its painting: across (from the left, the post standing on the
+/// right) and down from the top, as fractions.
+pub const CROOK_HOOK: [f32; 2] = [22.0 / 120.0, 70.0 / 480.0];
+
+/// What a light stands on or hangs from: a pole, a crook (its arm reaching left), or a pedestal.
+pub fn paint_post(style: LampPost) -> Sprite {
+    let iron = [0.04, 0.037, 0.034];
+    match style {
+        LampPost::Crook => {
+            let mut c = Canvas::new(120, 480);
+            let px = 98.0;
+            // The arm: up out of the post, over, and down to a ring.
+            let arc = |a: f32| [60.0 + 38.0 * a.cos(), 64.0 - 38.0 * a.sin()];
+            for i in 0..16 {
+                let (a0, a1) = (PI * i as f32 / 16.0, PI * (i + 1) as f32 / 16.0);
+                let w = 6.5 - 2.5 * i as f32 / 16.0;
+                c.rod(arc(a0), arc(a1), w, w - 0.15, iron);
+            }
+            // A scroll bracing it.
+            for i in 0..10 {
+                let t = |i: i32| { let a = 0.5 * PI * i as f32 / 10.0; [px - 30.0 * a.sin(), 122.0 - 44.0 * (1.0 - a.cos()) - 12.0 * a.sin()] };
+                c.rod(t(i), t(i + 1), 3.2, 3.0, iron);
+            }
+            c.ellipse(22.0, 67.0, 3.6, 3.6, iron, 0.6);
+            c.rod([px, 446.0], [px, 62.0], 9.0, 6.5, iron);
+            c.rect(px - 7.0, 196.0, px + 7.0, 203.0, iron, 0.8);
+            c.poly(&[[px - 6.0, 440.0], [px + 6.0, 440.0], [px + 10.0, 464.0], [px - 10.0, 464.0]], iron, 0.9);
+            c.rect(px - 13.0, 463.0, px + 13.0, 480.0, iron, 0.8);
+            c.finish()
+        }
+        LampPost::Pedestal => paint_prop(PropKind::Pillar, [36, 32, 30], 0),
+        _ => {
+            let mut c = Canvas::new(28, 480);
+            c.rod([14.0, 446.0], [14.0, 4.0], 9.0, 6.5, iron);
+            c.ellipse(14.0, 5.0, 5.0, 4.5, iron, 0.8);
+            c.rect(7.0, 250.0, 21.0, 257.0, iron, 0.8);
+            c.poly(&[[8.0, 440.0], [20.0, 440.0], [24.0, 464.0], [4.0, 464.0]], iron, 0.9);
+            c.rect(1.0, 463.0, 27.0, 480.0, iron, 0.8);
+            c.finish()
+        }
     }
 }
 
@@ -785,6 +1490,12 @@ pub fn fixture_body(kind: FixtureKind) -> (f32, f32) {
         FixtureKind::Brazier => (1.0, 0.16),
         FixtureKind::Crystal => (0.9, 0.3),
         FixtureKind::Firefly => (0.0, 0.0),
+        FixtureKind::StreetLamp => (0.62, 0.52),
+        FixtureKind::PaperLantern => (0.5, 0.45),
+        FixtureKind::Campfire => (0.32, 0.25),
+        FixtureKind::Glowshroom => (0.4, 0.4),
+        FixtureKind::Beacon => (0.32, 0.39),
+        FixtureKind::Chandelier => (0.75, CHANDELIER_FLAME_Y / 150.0),
     }
 }
 
@@ -831,7 +1542,9 @@ pub fn paint_set_piece(kind: SetPieceKind, tint: Rgb, accent: Rgb, ow: f32, oh: 
             }
             // Arch ring: voussoirs fanning around the opening, and a keystone.
             let (cx, cy) = (m(wm * 0.5), ground - m(spring));
-            c.ellipse(cx, cy, m(rad + ring), m(rad + ring), mul(t, 1.08), 0.15);
+            // The ring is a half round: it springs from the piers and never runs down over them.
+            let half: Vec<[f32; 2]> = (0..=48).map(|i| { let a = std::f32::consts::PI * i as f32 / 48.0; [cx + a.cos() * m(rad + ring), cy - a.sin() * m(rad + ring)] }).collect();
+            c.poly(&half, mul(t, 1.08), 0.15);
             let n = ((rad * std::f32::consts::PI) / 0.45).round().max(5.0) as i32;
             for i in 0..=n {
                 let a = std::f32::consts::PI * (i as f32 / n as f32);
@@ -999,6 +1712,7 @@ pub struct SpriteCache {
     /// Set-pieces by kind, colours, opening size in centimetres and variant; with their size in metres.
     pieces: HashMap<(u8, Rgb, Rgb, u32, u32, u32), (Arc<Sprite>, f32, f32)>,
     fixtures: HashMap<u8, Option<Arc<Sprite>>>,
+    posts: HashMap<u8, Arc<Sprite>>,
     /// By path and trim, with the file's modification time when it was read.
     files: HashMap<(PathBuf, bool), (Option<std::time::SystemTime>, Option<Arc<Sprite>>)>,
     /// Images with a glow layer from their lightest texels, with the image they were made from.
@@ -1007,7 +1721,7 @@ pub struct SpriteCache {
     shapes: HashMap<String, Option<(Arc<Sprite>, f32)>>,
 }
 
-pub const VARIANTS: u32 = 4;
+pub const VARIANTS: u32 = 6;
 
 impl SpriteCache {
     pub fn prop(&mut self, kind: PropKind, tint: Rgb, variant: u32) -> Arc<Sprite> {
@@ -1033,6 +1747,10 @@ pub fn set_piece(&mut self, kind: SetPieceKind, tint: Rgb, accent: Rgb, ow: f32,
         }).clone()
     }
 
+    pub fn post(&mut self, style: LampPost) -> Arc<Sprite> {
+        self.posts.entry(style as u8).or_insert_with(|| Arc::new(paint_post(style))).clone()
+    }
+
     pub fn fixture(&mut self, kind: FixtureKind) -> Option<Arc<Sprite>> {
         self.fixtures.entry(kind as u8).or_insert_with(|| paint_fixture(kind).map(Arc::new)).clone()
     }
@@ -1046,7 +1764,9 @@ pub fn set_piece(&mut self, kind: SetPieceKind, tint: Rgb, accent: Rgb, ow: f32,
     /// An image at a resolved path, optionally trimmed to what is visible.
     /// Read again when the file changes on disk.
     pub fn file_at(&mut self, full: &Path, trim: bool) -> Option<Arc<Sprite>> {
-        let mtime = std::fs::metadata(full).and_then(|m| m.modified()).ok();
+        // (The later of the image's time and its mask's: painting a mask redraws the image.)
+        let stamp = |p: &Path| std::fs::metadata(p).and_then(|m| m.modified()).ok();
+        let mtime = stamp(full).max(stamp(&mask_path(full)).map(|t| t + std::time::Duration::from_nanos(1)));
         let key = (full.to_path_buf(), trim);
         if let Some((t, s)) = self.files.get(&key) {
             if *t == mtime { return s.clone(); }
@@ -1069,6 +1789,8 @@ pub fn set_piece(&mut self, kind: SetPieceKind, tint: Rgb, accent: Rgb, ow: f32,
             let k = t * t * (3.0 - 2.0 * t) * strength;
             [k, k, k, p[3]]
         }).collect();
+        // (A painted mask says what glows; the lightness rule is for images without one.)
+        if base.casts { return Some(base); }
         let mut s = Sprite::from_rgba_lin(*w, *h, base.levels[0].2.clone());
         s.glow = Some(Arc::new(Sprite::from_rgba_lin(*w, *h, mask)));
         let s = Arc::new(s);

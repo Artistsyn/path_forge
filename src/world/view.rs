@@ -27,6 +27,10 @@ pub struct View {
     pub focal_px: f32,
     pub eye_height: f32,
     pub bend: f32,
+    /// The path's winding (`path.winding`): up to four waves, each (amplitude in metres, wave
+    /// number per metre, phase where the loop starts, how much the view turns with it). See
+    /// `bend_x`.
+    pub wind: [[f32; 4]; 4],
     pub hill: f32,
     pub half_width: f32,
     pub flare: f32,
@@ -145,6 +149,23 @@ impl StairProfile {
     }
 }
 
+/// A scene's winding as waves (the first two slots; a crossing puts the next scene's in the
+/// others): a whole number of bends to the loop, and a second wave one bend more to the loop
+/// that makes them uneven.
+fn winding(scene: &Scene) -> [[f32; 4]; 4] {
+    let w = &scene.path.winding;
+    let mut out = [[0.0; 4]; 4];
+    let amp = w.amplitude.clamp(0.0, 20.0);
+    if !w.enabled || amp <= 0.0 { return out; }
+    let tau = std::f32::consts::TAU;
+    let len = scene.motion.loop_length.max(1.0);
+    let n = (len / w.length.clamp(4.0, 1000.0)).round().max(1.0);
+    let (turn, uneven) = (w.turn.clamp(0.0, 1.0), w.irregular.clamp(0.0, 1.0));
+    out[0] = [amp, tau * n / len, tau * w.phase, turn];
+    if uneven > 0.0 { out[1] = [0.45 * amp * uneven, tau * (n + 1.0) / len, tau * (w.phase * 1.7 + 0.31), turn]; }
+    out
+}
+
 impl View {
     pub fn new(scene: &Scene, width: usize, height: usize) -> View {
         let h = height.max(2) as f32;
@@ -154,7 +175,7 @@ impl View {
         let eye_height = scene.camera.eye_height.clamp(0.05, 50.0);
         View {
             width, height, horizon_px, center_px: width as f32 * 0.5, focal_px, eye_height,
-            bend: scene.path.bend.clamp(-2.0, 2.0), hill: scene.path.hill.clamp(-2.0, 2.0),
+            bend: scene.path.bend.clamp(-2.0, 2.0), wind: winding(scene), hill: scene.path.hill.clamp(-2.0, 2.0),
             half_width: scene.path.half_width.clamp(0.05, 50.0), flare: scene.path.flare.clamp(0.0, 0.95),
             near_ground: eye_height * zoom, lens_curve: scene.camera.lens_curve.clamp(-1.0, 1.0),
             stairs: StairProfile::new(&scene.path.stairs, scene.motion.loop_length), scroll: 0.0, top: 0, left: 0, split: None, shear: None,
@@ -195,8 +216,46 @@ impl View {
         match &self.stairs { Some(s) => s.ground(self.scroll + d) - s.ramp(self.scroll), None => 0.0 }
     }
 
+    /// How far sideways the path's centre is `d` metres ahead: the steady bend, and the
+    /// winding, measured from where the camera stands and (as far as it turns with the path)
+    /// from the way the path heads there.
     #[inline]
-    pub fn bend_x(&self, d: f32) -> f32 { self.bend * BEND_K * d * d }
+    pub fn bend_x(&self, d: f32) -> f32 {
+        let mut x = self.bend * BEND_K * d * d;
+        for [a, k, p0, turn] in self.wind {
+            if a != 0.0 {
+                let p = k * self.scroll + p0;
+                x += a * ((k * d + p).sin() - p.sin() - turn * k * d * p.cos());
+            }
+        }
+        x
+    }
+
+    /// How far the camera has turned to follow the winding path, as the tangent of the angle:
+    /// the far end of the path stands this far to the left of straight ahead, per metre of
+    /// distance (`bend_x(d) / d` far away).
+    pub fn turn_tan(&self) -> f32 {
+        self.wind.iter().filter(|t| t[0] != 0.0).map(|&[a, k, p0, turn]| a * turn * k * (k * self.scroll + p0).cos()).sum()
+    }
+
+    /// How far sideways the sky stands from where the scene puts it, pixels. The sky is
+    /// infinitely far, so as the camera turns with the path all of it slides across the frame
+    /// together, the way the far end of the path does.
+    pub fn sky_dx(&self) -> f32 { -self.focal_px * self.turn_tan() }
+
+    /// The furthest the sky slides either way over the loop, pixels (0 when the camera never turns).
+    pub fn sky_swing(&self) -> f32 {
+        self.focal_px * self.wind.iter().map(|&[a, k, _, turn]| (a * turn * k).abs()).sum::<f32>()
+    }
+
+    /// The winding's waves as they stand now (the phase at the camera in place of the loop's
+    /// start), for the GPU.
+    pub fn wind_now(&self) -> [[f32; 4]; 4] { self.wind.map(|[a, k, p0, turn]| [a, k, k * self.scroll + p0, turn]) }
+
+    /// The shortest of the winding's waves, metres (None when the path does not wind).
+    pub fn wind_length(&self) -> Option<f32> {
+        self.wind.iter().filter(|t| t[0] != 0.0 && t[1] > 0.0).map(|t| std::f32::consts::TAU / t[1]).reduce(f32::min)
+    }
     #[inline]
     pub fn hill_y(&self, d: f32) -> f32 { self.hill * HILL_K * d * d }
     /// Sideways offset of a fork branch `d` metres ahead.
@@ -245,4 +304,49 @@ impl View {
     /// Pixels per metre for something standing at distance `z`.
     #[inline]
     pub fn px_per_m(&self, z: f32) -> f32 { self.focal_px / z.max(NEAR) }
+}
+
+#[cfg(test)]
+mod winding_tests {
+    use super::*;
+
+    #[test]
+    fn the_sky_slides_as_far_as_the_far_end_of_the_path() {
+        let mut s = Scene::default();
+        (s.motion.loop_length, s.path.bend) = (48.0, 0.0);
+        assert_eq!(View::new(&s, 480, 854).at(7.0).sky_dx(), 0.0);
+        s.path.winding = crate::scene::Winding { enabled: true, amplitude: 2.0, length: 20.0, turn: 0.7, irregular: 0.5, phase: 0.2 };
+        let v = View::new(&s, 480, 854);
+        for scroll in [0.0, 5.0, 17.0, 31.0] {
+            let v = v.at(scroll);
+            let far = 1.0e6;
+            let end = v.focal_px * v.bend_x(far) / far;
+            assert!((v.sky_dx() - end).abs() < 0.05, "{scroll}: sky {} path end {end}", v.sky_dx());
+            assert!(v.sky_dx().abs() <= v.sky_swing() + 1e-3);
+        }
+        assert!((v.at(0.0).sky_dx() - v.at(48.0).sky_dx()).abs() < 0.02);
+        assert!(v.sky_swing() > 100.0);
+    }
+
+    #[test]
+    fn a_winding_path_starts_under_the_camera_and_comes_round_with_the_loop() {
+        let mut s = Scene::default();
+        s.motion.loop_length = 48.0;
+        s.path.winding = crate::scene::Winding { enabled: true, amplitude: 2.0, length: 20.0, turn: 1.0, irregular: 0.5, phase: 0.2 };
+        let v = View::new(&s, 90, 160);
+        // Two whole bends fit the loop (24 m each, the nearest to the 20 asked for); the wave that
+        // makes them uneven has three, 16 m each.
+        assert!((v.wind_length().unwrap() - 16.0).abs() < 1e-3, "{:?}", v.wind_length());
+        for scroll in [0.0, 7.3, 31.0] {
+            let at = v.at(scroll);
+            // The path is under the camera, and with the view turned fully it leaves straight ahead.
+            assert!(at.bend_x(0.0).abs() < 1e-6);
+            assert!(at.bend_x(0.5).abs() < 0.02, "{}", at.bend_x(0.5));
+            // It does wind further on, and is the same a whole loop later.
+            assert!((0..60).any(|d| at.bend_x(d as f32).abs() > 1.0));
+            for d in [3.0, 17.0, 40.0] { assert!((at.bend_x(d) - v.at(scroll + 48.0).bend_x(d)).abs() < 2e-3); }
+        }
+        s.path.winding.enabled = false;
+        assert_eq!(View::new(&s, 90, 160).wind_length(), None);
+    }
 }

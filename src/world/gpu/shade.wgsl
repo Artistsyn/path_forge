@@ -80,11 +80,189 @@ fn water_edge(d: f32) -> f32 {
     if W.verge_on == 0u && W.walls_on != 0u { return wall_x(d); }
     return path_edge(d);
 }
+// water::water_dist
+fn water_dist(x: f32, d: f32) -> f32 {
+    let e = water_edge(d);
+    if W.fork_on != 0u && W.walls_on == 0u {
+        if W.fk_style != 0u { return -split_field(x, d).z; }
+        if on_fork(x, d) || on_fork(select(e + 0.05, -e - 0.05, x < 0.0), d) { return 1.0; }
+    }
+    return e - abs(x);
+}
 fn wetness(out: f32) -> f32 {
     if W.ww_wet <= 0.0 { return 0.0; }
     return 1.0 - smoothstep_r(0.0, W.ww_wet, max(out, 0.0));
 }
-fn water_cover(x: f32, w: f32, dist: f32, px: f32) -> vec4<f32> {
+// ── ground cover (render::cover) ─────────────────────────────────────────────────────────
+fn gcv(i: u32, r: u32) -> vec4<f32> { return W.gc[i * 4u + r]; }
+// cover::h32 / h32f: a 32-bit mix, where `hash` is 64-bit arithmetic built from halves.
+fn h32(seed: u32, key: i32) -> u32 {
+    var x = bitcast<u32>(key) ^ (seed * 0x9E3779B9u);
+    x ^= x >> 16u; x *= 0x7FEB352Du; x ^= x >> 15u; x *= 0x846CA68Bu;
+    return x ^ (x >> 16u);
+}
+fn h32f(seed: u32, key: i32) -> f32 { return f32(h32(seed, key) >> 8u) / 16777216.0; }
+// rem_ei for whole numbers small enough to be exact in a float (cell counts along a loop): a GPU has no
+// integer divide, and `%` costs a march step more than its hashes do.
+fn rem_small(x: i32, n: i32) -> i32 { let a = f32(x); let b = f32(n); return i32(a - b * floor(div(a, b))); }
+fn patch_noise(x: f32, w: f32, cell: f32, seed: u32) -> f32 {
+    let c = snap_to_loop(cell, W.loop_len);
+    let n = i32(rround(div(W.loop_len, c)));
+    let tx = div(x, c); let tw = div(w, c);
+    let ix = floor(tx); let iw = floor(tw);
+    let fx = tx - ix; let fw = tw - iw;
+    let sx = fx * fx * (3.0 - 2.0 * fx); let sw = fw * fw * (3.0 - 2.0 * fw);
+    let i = i32(ix); let j = i32(iw);
+    let j0 = rem_small(j, n) * 104729; let j1 = rem_small(j + 1, n) * 104729;
+    let h00 = h32f(seed, i * 7919 + j0); let h10 = h32f(seed, (i + 1) * 7919 + j0);
+    let h01 = h32f(seed, i * 7919 + j1); let h11 = h32f(seed, (i + 1) * 7919 + j1);
+    let a = h00 + (h10 - h00) * sx;
+    let b = h01 + (h11 - h01) * sx;
+    return a + (b - a) * sw;
+}
+fn cover_thick(i: u32, x: f32, w: f32) -> f32 {
+    let pch = gcv(i, 1u).w;
+    if pch <= 0.0 { return 1.0; }
+    return 1.0 - pch * (1.0 - smoothstep_r(0.35, 0.65, patch_noise(x, w, 1.2, u32(gcv(i, 2u).w) ^ 0xB1u)));
+}
+fn cover_part(h: u32, i: u32) -> f32 { return f32((h >> (8u * i)) & 0xFFu) / 256.0; }
+// cover::tuft: (colour, 1) where the point h metres up at (x, w) is inside layer i's tuft there.
+fn cover_tuft(i: u32, x: f32, w: f32, h: f32, grown: f32) -> vec4<f32> {
+    let a = gcv(i, 0u); let gd = gcv(i, 3u);
+    let seed = u32(gcv(i, 2u).w); let cs = gd.x; let r0 = gd.z;
+    let fx = div(x, cs); let fz = div(w, cs);
+    let ci = floor(fx); let cj = floor(fz);
+    let key = i32(ci) * 7919 + rem_small(i32(cj), i32(gd.y)) * 104729;
+    let h1 = h32(seed ^ 0xC1u, key);
+    if f32(h1 & 0xFFFFu) / 65536.0 >= a.z * grown { return vec4<f32>(0.0); }
+    let hb = a.w * (0.55 + 0.45 * f32(h1 >> 16u) / 65536.0);
+    if h >= hb { return vec4<f32>(0.0); }
+    let t = h / hb;
+    let h2 = h32(seed ^ 0xC3u, key);
+    var lean = (cover_part(h2, 0u) - 0.5) * 0.5;
+    if W.gc_sway != 0.0 { lean += W.gc_sway * (W.gc_lean + 0.35 * sin(W.gc_phase + TAU * cover_part(h2, 1u))) * 2.5; }
+    let dx = (fx - ci - 0.3 - 0.4 * cover_part(h2, 2u)) * cs - lean * h * t;
+    let dz = (fz - cj - 0.3 - 0.4 * cover_part(h2, 3u)) * cs;
+    let q = dx * dx + dz * dz;
+    if q >= r0 * r0 { return vec4<f32>(0.0); }
+    let h3 = h32(seed ^ 0xC7u, key);
+    let tone = 0.8 + 0.4 * cover_part(h3, 1u);
+    let cb = gcv(i, 1u); let cc = gcv(i, 2u);
+    if u32(a.x) == 3u {
+        let head = t > 0.7;
+        var rr = 0.14 * r0;
+        if head { let qh = (t - 0.85) / 0.15; rr = 0.5 * r0 * sqrt(max(1.0 - qh * qh, 0.0)); }
+        if q >= rr * rr { return vec4<f32>(0.0); }
+        if !head { return vec4<f32>(cb.xyz * (0.55 * tone), 1.0); }
+        let pick = cover_part(h3, 2u);
+        var petal = cc.xyz;
+        if pick >= 0.8 { petal = vec3<f32>(0.9, 0.9, 0.82); } else if pick >= 0.55 { petal = cc.zxy; }
+        return vec4<f32>(petal * (0.85 + 0.3 * cover_part(h3, 3u)), 1.0);
+    }
+    let rr = r0 * (1.0 - 0.7 * t);
+    if q >= rr * rr { return vec4<f32>(0.0); }
+    let sl = dx / (0.4 * r0) + 7.0 * cover_part(h3, 0u);
+    let si = floor(sl);
+    let bh = hb * (0.6 + 0.4 * h32f(seed ^ 0xC8u, key * 16 + i32(si)));
+    if h >= bh || sl - si > 0.62 { return vec4<f32>(0.0); }
+    let tb = h / bh;
+    return vec4<f32>(mix3(cb.xyz, cc.xyz, tb * tb) * (tone * (0.45 + 0.55 * tb)), 1.0);
+}
+fn cover_over(acc: vec4<f32>, c: vec3<f32>, m: f32) -> vec4<f32> {
+    let na = m + acc.w * (1.0 - m);
+    if na > 0.0 { return vec4<f32>((c * m + acc.xyz * (acc.w * (1.0 - m))) / na, na); }
+    return vec4<f32>(acc.xyz, na);
+}
+// cover::at: the cover over ground pixel g (tex 0 the path, 1 the verge): colour and how much.
+fn cover_at(g: GPix, tex: u32, jitter: f32) -> vec4<f32> {
+    let w0 = W.scroll + g.d;
+    let here = select(2u, 1u, tex == 1u);
+    let water = W.ww_on != 0u;
+    var acc = vec4<f32>(0.0);
+    var hmax = 0.0;
+    // (Three plain values, not an array: indexing a local array in a loop is slow on some GPUs.)
+    var grown = vec3<f32>(1.0);
+    var sides = 0u;
+    for (var i = 0u; i < W.gc_n; i++) {
+        let a = gcv(i, 0u);
+        let kind = u32(a.x); let on = u32(a.y);
+        if kind != 4u {
+            hmax = max(hmax, a.w);
+            sides |= on;
+            continue;
+        }
+        if (on & here) == 0u || (water && here == 2u) { continue; }
+        let cb = gcv(i, 1u); let cc = gcv(i, 2u); let seed = u32(cc.w);
+        let n = 0.65 * patch_noise(g.x, w0, 0.9, seed) + 0.35 * patch_noise(g.x, w0, 0.23, seed ^ 0x5Au);
+        let th = 0.95 - 0.9 * a.z;
+        let m = 0.92 * smoothstep_r(th, th + 0.1 + 0.2 * (1.0 - cb.w), n);
+        if m > 0.0 {
+            let fine = 0.6 * patch_noise(g.x, w0, 0.14, seed ^ 0x77u) + 0.4 * patch_noise(g.x, w0, 0.045, seed ^ 0x78u);
+            acc = cover_over(acc, mix3(cb.xyz, cc.xyz, fine * fine) * (0.8 + 0.3 * fine), m);
+        }
+    }
+    if hmax <= 0.0 { return acc; }
+    let e = max(W.eye_height, 0.2);
+    let xc = g.x + bend_x(g.d);
+    let en = abs(W.edge_noise);
+    let hw = path_half_width(g.d);
+    if water { sides &= 1u; }
+    let ft = max(1.0 - hmax / e, 0.02);
+    let xt = abs(xc * ft - bend_x(g.d * ft));
+    var known = 0u;
+    if min(xt, abs(g.x)) > hw + en + 0.05 { known = 1u; } else if max(xt, abs(g.x)) < hw - en - 0.05 { known = 2u; }
+    var steps = 8;
+    if known != 0u && (sides & known) == 0u { steps = 0; }
+    if steps == 0 && known == here { return acc; }
+    for (var i = 0u; i < W.gc_n; i++) {
+        if u32(gcv(i, 0u).x) == 4u { continue; }
+        let th = cover_thick(i, g.x, w0);
+        if i == 0u { grown.x = th; } else if i == 1u { grown.y = th; } else { grown.z = th; }
+    }
+    for (var j = 0; j < steps; j++) {
+        let h = hmax * (1.0 - (f32(j) + jitter) / 8.0);
+        let f = 1.0 - h / e;
+        if f <= 0.02 { continue; }
+        let dj = g.d * f;
+        if W.bridge_on != 0u && on_bridge(dj) { continue; }
+        let xj = xc * f - bend_x(dj);
+        var side = known;
+        if side == 0u {
+            side = 2u;
+            // (Nested, not `&&`: a call on the right of `&&` is made whether or not the left holds.)
+            if abs(xj) > hw + en { side = 1u; } else if abs(xj) >= hw - en { if abs(xj) > path_edge(dj) { side = 1u; } }
+        }
+        if water && side == 2u { continue; }
+        for (var i = 0u; i < W.gc_n; i++) {
+            let a = gcv(i, 0u);
+            if u32(a.x) == 4u || (u32(a.y) & side) == 0u || h >= a.w { continue; }
+            let t = cover_tuft(i, xj, W.scroll + dj, h, select(select(grown.z, grown.y, i == 1u), grown.x, i == 0u));
+            if t.w > 0.0 { return t; }
+        }
+    }
+    let step = g.d * hmax / e / 8.0;
+    for (var i = 0u; i < W.gc_n; i++) {
+        let a = gcv(i, 0u);
+        if u32(a.x) == 4u || (u32(a.y) & here) == 0u || (water && here == 2u) { continue; }
+        let cs = gcv(i, 3u).x;
+        let fill = smoothstep_r(0.5, 2.5, step / cs) * min(1.3 * a.z, 1.0) * select(select(grown.z, grown.y, i == 1u), grown.x, i == 0u);
+        if fill > 0.0 {
+            let cb = gcv(i, 1u); let cc = gcv(i, 2u);
+            let tone = 0.8 + 0.4 * patch_noise(g.x, w0, 2.0 * cs, u32(cc.w) ^ 0xC9u);
+            acc = cover_over(acc, mix3(cb.xyz, cc.xyz, 0.45) * (0.8 * tone), fill);
+        }
+    }
+    return acc;
+}
+
+// How far the ice has grown out from a bank at w (water::water_cover).
+fn ice_reach(w: f32, ph: f32) -> f32 {
+    let n = 0.5 + 0.25 * sin(w * W.ww_k1 + 1.3 + ph) + 0.25 * sin(w * W.ww_k2 + 4.1 - 0.6 * ph);
+    return W.ww_frozen * W.ww_hw * 1.25 * (0.7 + 0.6 * n) + max(W.ww_frozen - 0.9, 0.0) * 10.0 * W.ww_hw;
+}
+// (col, cover) and how much of the water's shine is left.
+struct WaterCover { c: vec4<f32>, shine: f32 }
+fn water_cover(x: f32, w: f32, dist: f32, px: f32) -> WaterCover {
     var col = vec3<f32>(0.0);
     var a = 0.0;
     if W.ww_foam > 0.0 {
@@ -116,6 +294,15 @@ fn water_cover(x: f32, w: f32, dist: f32, px: f32) -> vec4<f32> {
             if W.ww_kind == 1u {
                 sd = q - r * (1.0 + 0.25 * sin(3.0 * th + 2.0 * PI * hf(W.ww_seed ^ 0xF16u, key)));
                 c = fc;
+            } else if W.ww_kind == 4u {
+                let sides = 5 + i32(hf(W.ww_seed ^ 0xF18u, key) * 2.0);
+                sd = -r;
+                for (var s = 0; s < sides; s++) {
+                    let hs = hf(W.ww_seed ^ 0xF19u, key * 8 + s);
+                    let ths = 2.0 * PI * (f32(s) + 0.6 * hs) / f32(sides);
+                    sd = max(sd, lx * cos(ths) + lz * sin(ths) - r * (0.72 + 0.28 * hs));
+                }
+                c = fc * mix3(vec3<f32>(0.7, 0.84, 0.96), vec3<f32>(1.0), smoothstep_r(0.0, -0.3 * r, sd)) * tone;
             } else if W.ww_kind == 2u {
                 let rz = 0.42 * r;
                 let e = sqrt((lx / r) * (lx / r) + (lz / rz) * (lz / rz));
@@ -134,7 +321,27 @@ fn water_cover(x: f32, w: f32, dist: f32, px: f32) -> vec4<f32> {
             }
         }
     }
-    return vec4<f32>(col, a);
+    var shine = 1.0 - a;
+    if W.ww_frozen > 0.0 {
+        let half = dist + abs(x);
+        let inside = max(ice_reach(w, 0.0) - (half + x), ice_reach(w, 2.4) - (half - x));
+        let ia = smoothstep_r(0.0, 1.5 * max(px, 0.04), inside);
+        if ia > 0.0 {
+            let f = sin(2.0 * w * W.ww_k1 + 3.1 * x) + sin(w * W.ww_k2 - 2.3 * x + 1.7) + sin(4.7 * x + 3.0 * w * W.ww_k1 + 0.4);
+            let crack = 1.0 - smoothstep_r(0.0, max(2.5 * px, 0.035), 0.35 * abs(f));
+            let snow = smoothstep_r(0.5, 0.9, sin(w * W.ww_k1 + 1.9 * x + 0.7) + sin(2.0 * w * W.ww_k2 - 1.1 * x));
+            let rim = 1.0 - smoothstep_r(0.0, 0.25, inside);
+            let foam = vec3<f32>(W.ww_foam_r, W.ww_foam_g, W.ww_foam_b);
+            var ic = mix3(foam * vec3<f32>(0.72, 0.84, 0.95), foam, snow);
+            ic = ic * (1.0 - 0.45 * crack * (1.0 - snow));
+            ic = mix3(ic, foam * vec3<f32>(0.55, 0.75, 0.9), 0.5 * rim * (1.0 - snow));
+            let na = ia + a * (1.0 - ia);
+            col = (ic * ia + col * (a * (1.0 - ia))) / na;
+            a = na;
+            shine = shine * (1.0 - ia) + ia * 0.3 * (1.0 - snow);
+        }
+    }
+    return WaterCover(vec4<f32>(col, a), shine);
 }
 
 fn rot(bit: u32, u: f32, v: f32) -> vec2<f32> {
@@ -503,7 +710,7 @@ fn shade_px(g: GPix, i: u32, x: u32, y: u32, own: bool) -> Shaded {
             let gb = gbuf[jy[k]];
             if (gb.idr & 0xFFu) == ID_GROUND { px_d = max(px_d, abs(gb.d - g.d)); }
         }
-        glow_c += edge_light(max(path_edge(g.d), 0.05), g.x, W.scroll + g.d, px_x, px_d, albedo);
+        glow_c += edge_light(max(path_edge(g.d) - select(0.0, W.br_inset, on_bridge(g.d)), 0.05), g.x, W.scroll + g.d, px_x, px_d, albedo);
     }
     if tex == 7u {
         let lw = vec3<f32>(0.3, 0.59, 0.11);
@@ -514,15 +721,24 @@ fn shade_px(g: GPix, i: u32, x: u32, y: u32, own: bool) -> Shaded {
     var gloss_k = 1.0; var wet_g = 0.0;
     if W.ww_on != 0u {
         if id == ID_GROUND && tex == 0u {
-            let wc = water_cover(g.x, W.scroll + g.d, water_edge(g.d) - abs(g.x), g.depth / W.focal_px);
-            albedo = mix3(albedo, wc.xyz, wc.w);
-            gloss_k = 1.0 - wc.w;
+            let wc = water_cover(g.x, W.scroll + g.d, water_dist(g.x, g.d), g.depth / W.focal_px);
+            albedo = mix3(albedo, wc.c.xyz, wc.c.w);
+            gloss_k = wc.shine;
         } else if id == ID_GROUND && tex == 1u {
-            let wt = wetness(abs(g.x) - water_edge(g.d));
+            let wt = wetness(-water_dist(g.x, g.d));
             albedo = albedo * (1.0 - 0.45 * wt);
             wet_g = 0.35 * wt;
         } else if id == ID_WALL_L || id == ID_WALL_R {
             albedo = albedo * (1.0 - 0.45 * wetness(g.y));
+        }
+    }
+    // What grows on the ground hides it.
+    if W.gc_n != 0u && id == ID_GROUND && tex <= 1u {
+        let cv = cover_at(g, tex, h32f(0x6Cu, i32(i)));
+        if cv.w > 0.0 {
+            albedo = mix3(albedo, cv.xyz, cv.w);
+            gloss_k *= 1.0 - cv.w;
+            wet_g *= 1.0 - cv.w;
         }
     }
     var ao = masks[w * h + i];
@@ -596,7 +812,9 @@ fn shade_px(g: GPix, i: u32, x: u32, y: u32, own: bool) -> Shaded {
     let gr = vec2<f32>(max(gr0.x * gloss_k, wet_g), gr0.y);
     let s = weather_surface(g, id, tex, albedo, gr.x, gr.y);
     let sun = masks[i];
-    let light = light_at(g.x, g.y, g.d, normal, skip, sun, x, y);
+    var sun_d = sun;
+    if W.ww_on != 0u && id == ID_GROUND && tex == 0u { sun_d = 1.0 - 0.4 * (1.0 - sun); }
+    let light = light_at(g.x, g.y, g.d, normal, skip, sun_d, x, y);
     var c = s.albedo * (light * ao);
     if s.gloss > 0.001 {
         let gloss = s.gloss;

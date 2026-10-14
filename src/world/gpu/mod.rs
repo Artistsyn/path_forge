@@ -148,6 +148,14 @@ pub(crate) struct WorldParams {
     pub ww_on: u32, pub ww_shift: f32, pub ww_foam: f32, pub ww_foam_col: [f32; 3], pub ww_foam_w: f32,
     pub ww_lap_ph: f32, pub ww_lap_k: f32, pub ww_k1: f32, pub ww_k2: f32, pub ww_wet: f32,
     pub ww_kind: u32, pub ww_dens: f32, pub ww_fcol: [f32; 3], pub ww_fsize: f32, pub ww_period: f32, pub ww_cs: f32, pub ww_seed: u32,
+    /// How far in from the deck's edge a bridge's railing stands (Spans::rail_inset), then words
+    /// kept free for what comes next.
+    pub br_inset: f32, pub ww_frozen: f32, pub ww_hw: f32, pub spare: [f32; 5],
+    /// View::wind_now: the path's winding.
+    pub wind: [[f32; 4]; 4],
+    /// Ground cover (render::cover): how many layers, the wind in them, and each layer's record.
+    pub gc_n: u32, pub gc_sway: f32, pub gc_lean: f32, pub gc_phase: f32,
+    pub gc: [[f32; 4]; 12],
 }
 
 /// The sky pass's parameters; `Sky` in sky.wgsl, field for field.
@@ -156,7 +164,7 @@ pub(crate) struct WorldParams {
 pub(crate) struct SkyParams {
     pub craters: [[f32; 4]; 22],
     pub hy: f32, pub ox: f32, pub oy: f32, pub fw: f32,
-    pub fhy: f32, pub tile_cols: u32, pub pad0: u32, pub pad1: u32,
+    pub fhy: f32, pub tile_cols: u32, pub cl_n: u32, pub cl_recs: u32,
     pub stars_on: u32, pub star_bins: u32, pub star_prims: u32, pub md_on: u32,
     pub md: [f32; 3],
     pub au_on: u32, pub au_a: f32, pub au_m: f32, pub au_cx: f32,
@@ -247,6 +255,9 @@ pub(crate) struct CardGpu {
     pub emissive: f32,
     pub sw: u32, pub sh: u32, pub soff: u32, pub gw: u32, pub gh: u32, pub goff: u32,
     pub id: u32, pub realm: u32, pub world: [f32; 3], pub source: u32,
+    /// `render::CardWind`.
+    pub w_amp: f32, pub w_v: f32, pub w_lean: f32, pub w_t1: f32, pub w_t2: f32,
+    pub w_c0: f32, pub w_c1: f32, pub w_trunk: f32, pub w_foot: f32, pub w_kv: f32,
 }
 
 /// A card and the sprite levels it samples (chosen on the CPU, as `Sprite::sample` would).
@@ -409,7 +420,7 @@ pub(crate) struct PostParams {
     pub r_wdst: u32, pub r_last: u32, pub hz: f32, pub unit: f32,
     pub sh_on: u32, pub sh_strength: f32, pub sh_c1: f32, pub sh_c2: f32,
     pub lens_kind: u32, pub lens_weight: f32, pub n_drops: u32, pub lens_seed: u32,
-    pub th: f32, pub tw: f32, pub aspect: f32, pub pad0: u32,
+    pub th: f32, pub tw: f32, pub aspect: f32, pub o_q2: u32,
     pub post_on: u32, pub bloom: f32, pub exposure: f32, pub grain_seed: u32,
     pub tint_r: f32, pub tint_g: f32, pub tint_b: f32, pub saturation: f32,
     pub contrast: f32, pub vignette: f32, pub grain: f32, pub kuw_r: i32,
@@ -420,17 +431,24 @@ pub(crate) struct PostParams {
     pub ramp_k: f32, pub q_on: u32, pub q_bits: u32, pub q_amp: f32,
     pub dither: u32, pub paper: f32, pub scan: f32, pub stats_on: u32,
     pub sky_enabled: u32, pub verge_enabled: u32, pub t_lut: u32, pub t_col: u32,
-    pub t_cube: u32, pub t_drops: u32, pub lens_tphase: f32, pub pad2: u32,
+    pub t_cube: u32, pub t_drops: u32, pub lens_tphase: f32, pub fl_rays: u32,
     // Heat haze per world of the frame (each pixel its own world's): the clock of world 0 (whose
     // strength and cycles are sh_strength, sh_c1, sh_c2), then worlds 1 and 2's.
-    pub sh_t0: f32, pub sh_s: [f32; 2], pub sh_a: [f32; 2], pub sh_b: [f32; 2], pub sh_t: [f32; 2], pub pad3: [u32; 3],
+    pub sh_t0: f32, pub sh_s: [f32; 2], pub sh_a: [f32; 2], pub sh_b: [f32; 2], pub sh_t: [f32; 2],
+    /// The lens flare (post::FlareK): ghosts or not and its strength; `fl_rays` above.
+    pub fl_ghosts: u32, pub fl_amt: f32, pub ln_diag: i32,
+    /// Rain on the lens (render::lens::LensRain; its heavy drops are in scratch at `t_drops`).
+    pub ln_cell0: f32, pub ln_cell1: f32, pub ln_tt: f32, pub ln_cyc: u32,
+    pub ln_fill: f32, pub ln_haze: f32, pub ln_blur: i32, pub ln_reach: f32,
+    /// The bloom threshold of the sky (post::sky_threshold).
+    pub bl_sky: f32, pub bl_pad: [f32; 3],
 }
 
 /// What post needs besides its settings: the lens drops, the palette and grade tables (cached by
 /// `key`), and what to bring back.
 pub(crate) struct PostIn<'a> {
     pub params: PostParams,
-    pub drops: Vec<[f32; 5]>,
+    pub drops: Vec<[f32; 8]>,
     pub key: usize,
     pub lut: Option<(u32, &'a [u8], Vec<u32>)>,
     pub cube: Option<&'a [[f32; 3]]>,
@@ -672,7 +690,7 @@ impl Gpu {
             let pl = d.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: Some("post"), bind_group_layouts: &[&layout], push_constant_ranges: &[] });
             let m = ctx.module("post.wgsl", include_str!("post.wgsl"))?;
             let mut pipes = std::collections::HashMap::new();
-            for e in ["post_crop", "post_shimmer", "post_frost_rows", "post_frost_mean", "post_lens", "post_bloom_down", "post_blur_h", "post_blur_v",
+            for e in ["post_crop", "post_shimmer", "post_frost_rows", "post_frost_mean", "post_lens", "post_bloom_down", "post_bh0", "post_bv0", "post_bh1", "post_bv1", "post_bh2", "post_bv2", "post_bh3", "post_bv3", "post_bh4", "post_bv4", "post_rays", "post_ghosts",
                       "post_finish", "post_kuw_h", "post_kuw_v", "post_grade_outline", "post_warp", "post_quant", "post_stats", "post_out"] {
                 pipes.insert(e, ctx.compute(&m, &pl, e)?);
             }
@@ -1249,12 +1267,13 @@ impl<'g> Frame<'g> {
         let (ha, hb, o_pg, o_pk, ra, rb) = (0, 3 * n, 6 * n, 11 * n, 12 * n, 15 * n);
         let mut at = 18 * n;
         let o_ks = at; if pin.kuwahara { at += 14 * n; }
-        let (o_q0, o_q1) = (at, at + 3 * qw * qh); at += 6 * qw * qh;
+        let (o_q0, o_q1, o_q2) = (at, at + 3 * qw * qh, at + 6 * qw * qh); at += 9 * qw * qh;
         let o_red = at; at += h * 23 + 1;
-        let t_drops = at; at += pin.drops.len().max(1) * 5;
+        let t_drops = at; at += pin.drops.len().max(1) * 8;
         let words = at;
-        (p.o_pg, p.o_pk, p.o_ks, p.o_q0, p.o_q1, p.o_red, p.t_drops) = (o_pg as u32, o_pk as u32, o_ks as u32, o_q0 as u32, o_q1 as u32, o_red as u32, t_drops as u32);
-        (p.qw, p.qh, p.n_drops) = (qw as u32, qh as u32, pin.drops.len() as u32);
+        (p.o_pg, p.o_pk, p.o_ks, p.o_q0, p.o_q1, p.o_q2, p.o_red, p.t_drops) = (o_pg as u32, o_pk as u32, o_ks as u32, o_q0 as u32, o_q1 as u32, o_q2 as u32, o_red as u32, t_drops as u32);
+        // (After the heavy drops come eight records of strip masks: lens::LensRain::strips.)
+        (p.qw, p.qh, p.n_drops) = (qw as u32, qh as u32, (pin.drops.len() as u32).saturating_sub(8));
         let other = |o: usize| if o == ha { hb } else { ha };
         let other_r = |o: usize| if o == ra { rb } else { ra };
         let mut cur = ha;
@@ -1332,7 +1351,14 @@ impl<'g> Frame<'g> {
         }
         if pin.bloom {
             steps.push(("post_bloom_down", quarter));
-            for _ in 0..2 { steps.push(("post_blur_h", quarter)); steps.push(("post_blur_v", quarter)); }
+            // Rays come from the bright parts as they are, ghosts from a soft blur (post::bloom_buffer).
+            if params.fl_rays != 0 { steps.push(("post_rays", quarter)); }
+            let levels: [(&'static str, &'static str); 5] = [("post_bh0", "post_bv0"), ("post_bh1", "post_bv1"), ("post_bh2", "post_bv2"), ("post_bh3", "post_bv3"), ("post_bh4", "post_bv4")];
+            for (k, (bh, bv)) in levels.into_iter().enumerate() {
+                steps.push((bh, quarter));
+                steps.push((bv, quarter));
+                if k == 2 && params.fl_ghosts != 0 { steps.push(("post_ghosts", quarter)); }
+            }
         }
         steps.push(("post_finish", full));
         if pin.kuwahara { steps.push(("post_kuw_h", full)); steps.push(("post_kuw_v", full)); }
@@ -1518,12 +1544,12 @@ mod tests {
     fn world_params_match_the_wgsl_struct_size() {
         // A uniform block's size is a multiple of 16; the WGSL struct has the same fields.
         assert_eq!(std::mem::size_of::<WorldParams>() % 16, 0);
-        assert_eq!(std::mem::size_of::<WorldParams>(), 4 * 216);
-        assert_eq!(std::mem::size_of::<CardGpu>(), 4 * 42);
+        assert_eq!(std::mem::size_of::<WorldParams>(), 4 * 292);
+        assert_eq!(std::mem::size_of::<CardGpu>(), 4 * 52);
         assert_eq!(std::mem::size_of::<SplatGpu>(), 4 * 24);
         assert_eq!(std::mem::size_of::<AirParams>(), 80);
         assert_eq!(std::mem::size_of::<ShaftParams>(), 64);
-        assert_eq!(std::mem::size_of::<PostParams>(), 384);
+        assert_eq!(std::mem::size_of::<PostParams>(), 432);
         assert_eq!(std::mem::size_of::<SkyParams>() % 16, 0, "SkyParams is {} bytes", std::mem::size_of::<SkyParams>());
     }
 

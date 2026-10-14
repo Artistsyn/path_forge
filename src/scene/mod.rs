@@ -27,6 +27,9 @@ pub struct Scene {
     pub camera: Camera,
     pub path: PathShape,
     pub verge: Verge,
+    /// What grows on the ground: grass, tall grass and wildflowers standing on it, moss lying on
+    /// it; over the verge, the path or both. Up to three layers.
+    pub ground_cover: Vec<GroundCover>,
     pub walls: Walls,
     pub ceiling: Ceiling,
     pub sky: Sky,
@@ -89,6 +92,8 @@ pub struct PathShape {
     pub flare: f32,
     /// Lateral curve of the road ahead (-1 left .. 1 right).
     pub bend: f32,
+    /// The path winding left and right as it goes, over and over.
+    pub winding: Winding,
     /// Vertical curve of the road ahead (-1 dips away .. 1 rises).
     pub hill: f32,
     /// How ragged the path edge is, metres.
@@ -139,13 +144,17 @@ pub struct Waterway {
     pub float_color: Rgb,
     /// How big each one is, metres across.
     pub float_size: f32,
+    /// How much of the water is frozen over (0..1): ice grows out from the banks, leaving a
+    /// narrowing channel of open water down the middle, until at 1 it is ice from bank to bank.
+    /// The ice is cracked, with snow lying on it in patches, and takes `foam_color`.
+    pub frozen: f32,
     pub seed: u32,
 }
 impl Default for Waterway {
     fn default() -> Self {
         Waterway {
             enabled: false, flow: 2, foam: 0.5, foam_color: [214, 226, 224], foam_width: 0.35, lap: 3, wet: 0.25,
-            floating: Floating::None, float_density: 0.3, float_color: [70, 110, 52], float_size: 0.5, seed: 0,
+            floating: Floating::None, float_density: 0.3, float_color: [70, 110, 52], float_size: 0.5, frozen: 0.0, seed: 0,
         }
     }
 }
@@ -161,6 +170,8 @@ pub enum Floating {
     Leaves,
     /// Lily pads, a few in flower.
     LilyPads,
+    /// Ice floes: flat straight-sided plates, snow on top and bare blue ice round the rim.
+    Ice,
 }
 
 /// Forks. On open ground a branch path splits off at `angle` and runs away into the distance; between
@@ -329,10 +340,36 @@ impl Default for EdgeLights {
     fn default() -> Self { EdgeLights { enabled: false, color: [80, 210, 255], strength: 1.0, width: 0.05, inset: 0.08, dash: 0.0, flow: 0 } }
 }
 
+/// A path that winds: it swings to one side and back to the other as it goes, and everything
+/// beside it (walls, verge, props, lights) follows. The bends come towards the camera as it
+/// walks; a whole number of them fits the loop.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
+pub struct Winding {
+    pub enabled: bool,
+    /// How far the path swings to each side, metres.
+    pub amplitude: f32,
+    /// Distance from one bend to the next the same way, metres (snapped so the loop closes).
+    pub length: f32,
+    /// How much the view turns with the path (0..1). At 1 the camera always looks along the
+    /// path under it, so the bends ahead swing well across the frame; at 0 it looks straight
+    /// on and the path slides from side to side under it. The sky turns with the camera: the
+    /// sun, moon, stars, clouds and aurora slide across the frame by as much as it has turned
+    /// (and out of it on a sharp bend), and the sun's and moon's light swings round with them.
+    pub turn: f32,
+    /// How uneven the bends are (0..1): 0 an even wave, more makes some sharper, some gentler.
+    pub irregular: f32,
+    /// Where in a bend the loop starts (0..1 of a whole bend).
+    pub phase: f32,
+}
+impl Default for Winding {
+    fn default() -> Self { Winding { enabled: false, amplitude: 2.0, length: 40.0, turn: 0.6, irregular: 0.3, phase: 0.0 } }
+}
+
 impl Default for PathShape {
     fn default() -> Self {
         Self {
-            half_width: 1.1, flare: 0.0, bend: 0.0, hill: 0.0, edge_noise: 0.12, edge_dark: 0.35,
+            half_width: 1.1, flare: 0.0, bend: 0.0, winding: Winding::default(), hill: 0.0, edge_noise: 0.12, edge_dark: 0.35,
             material: Material::default(), stairs: Stairs::default(), bridge: Bridge::default(), fork: Fork::default(),
             edge_lights: EdgeLights::default(), surface: true, waterway: Waterway::default(),
         }
@@ -358,6 +395,55 @@ impl Default for Verge {
             material: Material { pattern: Pattern::Grass, base: [42, 70, 30], mortar: [26, 46, 18], ..Material::default() },
             tufts: false, tuft_color: [44, 100, 30], tuft_density: 1.0, tuft_height: 0.25,
         }
+    }
+}
+
+/// What a layer of ground cover is.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub enum CoverKind {
+    /// Short grass: a lawn, a mown verge.
+    #[default]
+    Grass,
+    /// Long grass in tall clumps: a meadow, a field gone wild.
+    TallGrass,
+    /// Flowers on thin stems, in the flower colour, a related one and white.
+    Wildflowers,
+    /// Moss lying on the ground in soft cushions (no height).
+    Moss,
+}
+
+/// Where a layer of ground cover grows.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub enum CoverOn {
+    #[default]
+    Verge,
+    Path,
+    Both,
+}
+
+/// One layer of ground cover. It stands on the ground itself (not at the path's edge only, as
+/// `verge.tufts` do): each blade has its place, hides what is behind it and leans in the wind.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
+pub struct GroundCover {
+    pub enabled: bool,
+    pub kind: CoverKind,
+    pub on: CoverOn,
+    /// How much of the ground it takes (0..1).
+    pub density: f32,
+    /// How tall it stands, metres (grass about 0.12, tall grass 0.45, flowers 0.3; not moss).
+    pub height: f32,
+    /// Its colour: blades and stems, or the moss.
+    pub color: Rgb,
+    /// Grass: the colour of the tips. Wildflowers: the flowers. Moss: its second shade.
+    pub color2: Rgb,
+    /// 0 grows evenly; towards 1 it grows in patches with bare ground between.
+    pub patchiness: f32,
+    pub seed: u32,
+}
+impl Default for GroundCover {
+    fn default() -> Self {
+        GroundCover { enabled: true, kind: CoverKind::Grass, on: CoverOn::Verge, density: 0.8, height: 0.12, color: [40, 92, 30], color2: [112, 150, 52], patchiness: 0.2, seed: 0 }
     }
 }
 
@@ -457,6 +543,9 @@ pub struct Sky {
     pub moon: Moon,
     pub stars: Stars,
     pub clouds: Clouds,
+    /// More layers of cloud over `clouds`, drawn in order (up to three): cirrus high over
+    /// cumulus, heaps under an overcast.
+    pub cloud_layers: Vec<Clouds>,
     /// Northern lights: curtains of green and violet light rippling across the sky.
     pub aurora: Aurora,
     pub rainbow: Rainbow,
@@ -469,7 +558,7 @@ impl Default for Sky {
     fn default() -> Self {
         Self {
             enabled: true, top: [70, 110, 170], horizon: [200, 190, 160],
-            sun: SkyBody::default(), moon: Moon::default(), stars: Stars::default(), clouds: Clouds::default(),
+            sun: SkyBody::default(), moon: Moon::default(), stars: Stars::default(), clouds: Clouds::default(), cloud_layers: Vec::new(),
             aurora: Aurora::default(), rainbow: Rainbow::default(), space: Space::default(), tunnel: Tunnel::default(),
         }
     }
@@ -778,7 +867,7 @@ pub struct SkyBody {
 }
 impl Default for SkyBody {
     fn default() -> Self {
-        Self { enabled: false, pos: [0.72, 0.35], radius: 0.08, color: [255, 236, 190], emits_light: true, intensity: 1.0 }
+        Self { enabled: false, pos: [0.72, 0.35], radius: 0.045, color: [255, 236, 190], emits_light: true, intensity: 1.0 }
     }
 }
 
@@ -813,10 +902,42 @@ impl Default for Stars {
     fn default() -> Self { Self { enabled: false, count: 140, size: 1.0, twinkle: 0.5, seed: 0 } }
 }
 
+/// What kind of cloud a layer is. Whatever the kind, cloud that rain or snow is falling from
+/// (`weather.precipitation`) is drawn heavier and darker.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Default)]
+pub enum CloudKind {
+    /// Fair-weather heaps standing in rows on level bases: bright billowing tops, grey beneath.
+    #[default]
+    Cumulus,
+    /// Tall heaps building up from the horizon, dark under them: the sky before a storm.
+    Towering,
+    /// Long low bands lying along the horizon.
+    Stratus,
+    /// A high sheet broken into ripples and small flakes: a mackerel sky.
+    Mackerel,
+    /// Thin bright streaks very high up, drawn out towards the horizon.
+    Cirrus,
+    /// A grey deck over the whole sky, lighter and darker in patches.
+    Overcast,
+    /// Rain cloud: a low dark deck, heavy-bellied and ragged underneath.
+    Rain,
+    /// Snow cloud: an even, pale, heavy sky with hardly a feature in it.
+    Snow,
+    /// Storm cloud: a black deck with ragged scud driving along under it.
+    Storm,
+    /// Soft round puffs with no detail, as PathForge drew every cloud before; suits flat and
+    /// pixel-art styles. (The main layer only: in `cloud_layers` it reads as cumulus.)
+    Soft,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(default)]
 pub struct Clouds {
     pub enabled: bool,
+    pub kind: CloudKind,
+    /// How much of the sky they fill (0..1). (`Soft` clouds are counted instead: `count`.)
+    pub cover: f32,
+    /// How many `Soft` clouds.
     pub count: u32,
     /// Drifts across the sky per loop. Whole numbers wrap each cloud round the sky; any other
     /// value (0.4, 1.5) keeps its exact speed, with each cloud forming and dissolving over one
@@ -825,7 +946,10 @@ pub struct Clouds {
     pub scale: f32,
     pub opacity: f32,
     pub tint: Rgb,
+    /// How ragged and billowing their outlines are (0..1).
     pub variation: f32,
+    /// How dark their thick parts and undersides are (0..1).
+    pub shade: f32,
     /// Shadows of clouds drifting over the ground (0..1; needs a light-giving sun). They drift
     /// with the wind when there is one, and work with the clouds themselves switched off too.
     pub shadows: f32,
@@ -833,7 +957,7 @@ pub struct Clouds {
 }
 impl Default for Clouds {
     fn default() -> Self {
-        Self { enabled: false, count: 10, drift: 1.0, scale: 1.0, opacity: 0.4, tint: [226, 230, 238], variation: 0.55, shadows: 0.0, seed: 0 }
+        Self { enabled: false, kind: CloudKind::Cumulus, cover: 0.45, count: 10, drift: 1.0, scale: 1.0, opacity: 0.5, tint: [226, 230, 238], variation: 0.55, shade: 0.55, shadows: 0.0, seed: 0 }
     }
 }
 
@@ -871,18 +995,22 @@ impl Default for Fog {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-pub enum FixtureKind { Torch, Lantern, Candle, Brazier, Crystal, Firefly, Magic, GreenFire, IceWisp }
+pub enum FixtureKind { Torch, Lantern, Candle, Brazier, Crystal, Firefly, Magic, GreenFire, IceWisp, StreetLamp, PaperLantern, Campfire, Glowshroom, Beacon, Chandelier }
 
 impl FixtureKind {
-    pub const ALL: [FixtureKind; 9] = [
+    pub const ALL: [FixtureKind; 15] = [
         FixtureKind::Torch, FixtureKind::Lantern, FixtureKind::Candle, FixtureKind::Brazier, FixtureKind::Crystal,
         FixtureKind::Firefly, FixtureKind::Magic, FixtureKind::GreenFire, FixtureKind::IceWisp,
+        FixtureKind::StreetLamp, FixtureKind::PaperLantern, FixtureKind::Campfire, FixtureKind::Glowshroom, FixtureKind::Beacon,
+        FixtureKind::Chandelier,
     ];
     pub fn name(self) -> &'static str {
         match self {
             FixtureKind::Torch => "Torch", FixtureKind::Lantern => "Lantern", FixtureKind::Candle => "Candle",
             FixtureKind::Brazier => "Brazier", FixtureKind::Crystal => "Crystal", FixtureKind::Firefly => "Firefly",
             FixtureKind::Magic => "Magic", FixtureKind::GreenFire => "Green Fire", FixtureKind::IceWisp => "Ice Wisp",
+            FixtureKind::StreetLamp => "Street Lamp", FixtureKind::PaperLantern => "Paper Lantern", FixtureKind::Campfire => "Campfire",
+            FixtureKind::Glowshroom => "Glowshroom", FixtureKind::Beacon => "Beacon", FixtureKind::Chandelier => "Chandelier",
         }
     }
     /// Light colour.
@@ -893,19 +1021,73 @@ impl FixtureKind {
             FixtureKind::Crystal => [120, 200, 255], FixtureKind::Firefly => [150, 255, 90],
             FixtureKind::Magic => [150, 90, 255], FixtureKind::GreenFire => [80, 255, 70],
             FixtureKind::IceWisp => [110, 210, 255],
+            FixtureKind::StreetLamp => [255, 214, 150], FixtureKind::PaperLantern => [255, 120, 60],
+            FixtureKind::Campfire => [255, 135, 45], FixtureKind::Glowshroom => [90, 240, 200],
+            FixtureKind::Beacon => [255, 60, 40], FixtureKind::Chandelier => [255, 180, 90],
         }
     }
     /// Flame gradient from core to edge, or None for a soft orb.
     pub fn flame(self) -> Option<[Rgb; 4]> {
         match self {
-            FixtureKind::Torch | FixtureKind::Brazier => Some([[255, 255, 210], [255, 205, 60], [255, 110, 15], [200, 50, 5]]),
+            FixtureKind::Torch | FixtureKind::Brazier | FixtureKind::Campfire => Some([[255, 255, 210], [255, 205, 60], [255, 110, 15], [200, 50, 5]]),
             FixtureKind::Lantern => Some([[255, 255, 235], [255, 225, 150], [255, 185, 80], [215, 130, 30]]),
-            FixtureKind::Candle => Some([[255, 245, 200], [255, 190, 70], [255, 110, 25], [200, 55, 5]]),
+            FixtureKind::Candle | FixtureKind::Chandelier => Some([[255, 245, 200], [255, 190, 70], [255, 110, 25], [200, 55, 5]]),
             FixtureKind::Magic => Some([[230, 210, 255], [150, 100, 255], [90, 50, 230], [45, 15, 190]]),
             FixtureKind::GreenFire => Some([[220, 255, 210], [100, 235, 60], [25, 170, 15], [5, 95, 5]]),
             FixtureKind::IceWisp => Some([[225, 245, 255], [130, 210, 255], [50, 150, 230], [15, 85, 190]]),
-            FixtureKind::Crystal | FixtureKind::Firefly => None,
+            FixtureKind::Crystal | FixtureKind::Firefly | FixtureKind::StreetLamp | FixtureKind::PaperLantern | FixtureKind::Glowshroom | FixtureKind::Beacon => None,
         }
+    }
+    /// What holds it up where there is no wall to hang it on, when `post` is left to choose.
+    pub fn natural_post(self) -> LampPost {
+        match self {
+            FixtureKind::StreetLamp => LampPost::Pole,
+            FixtureKind::PaperLantern => LampPost::Crook,
+            _ => LampPost::Pedestal,
+        }
+    }
+}
+
+/// What a light stands on or hangs from where there is no wall for it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub enum LampPost {
+    /// The kind's own: a street lamp on a pole, a paper lantern from a crook, a wall light with no
+    /// wall on a pole, anything else set above the ground on a stone pedestal.
+    #[default]
+    Auto,
+    /// Nothing: the light hangs in the air.
+    Off,
+    /// A slim iron pole: under a lamp, or beside a torch or lantern at its bracket.
+    Pole,
+    /// A tall post with an arm curling over towards the path, the light hanging from its end.
+    Crook,
+    /// A stone pedestal under it.
+    Pedestal,
+}
+impl LampPost {
+    pub const ALL: [LampPost; 5] = [LampPost::Auto, LampPost::Off, LampPost::Pole, LampPost::Crook, LampPost::Pedestal];
+    pub fn name(self) -> &'static str {
+        match self { LampPost::Auto => "Auto", LampPost::Off => "Off", LampPost::Pole => "Pole", LampPost::Crook => "Crook", LampPost::Pedestal => "Pedestal" }
+    }
+}
+
+/// Where along the path a row of lights is allowed to stand.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub enum LightPlace {
+    #[default]
+    Anywhere,
+    /// Only on the path's bridges (`path.bridge`).
+    Bridges,
+    /// Everywhere but on the bridges.
+    OffBridges,
+    /// One at each repeat of a set piece (`set_piece` says which): torches on every arch, a lantern
+    /// at every gate. The set piece's spacing replaces `spacing`, and `offset` is measured from it.
+    SetPieces,
+}
+impl LightPlace {
+    pub const ALL: [LightPlace; 4] = [LightPlace::Anywhere, LightPlace::Bridges, LightPlace::OffBridges, LightPlace::SetPieces];
+    pub fn name(self) -> &'static str {
+        match self { LightPlace::Anywhere => "Anywhere", LightPlace::Bridges => "Bridges", LightPlace::OffBridges => "Off Bridges", LightPlace::SetPieces => "Set Pieces" }
     }
 }
 
@@ -1118,10 +1300,13 @@ pub struct Wind {
     pub gusts: f32,
     /// How much trees, reeds, grass and banners sway (0..1).
     pub sway: f32,
+    /// How much the wind stirs leaves and hanging strands (0..1): a tree's crown ripples, a
+    /// willow's strands swing and trail downwind, while trunks stay put.
+    pub flutter: f32,
     pub seed: u32,
 }
 impl Default for Wind {
-    fn default() -> Self { Wind { enabled: false, speed: 3.0, gusts: 0.4, sway: 0.5, seed: 0 } }
+    fn default() -> Self { Wind { enabled: false, speed: 3.0, gusts: 0.4, sway: 0.5, flutter: 0.6, seed: 0 } }
 }
 
 /// A sandstorm: sand streaming past on the wind (to the right unless the wind says otherwise),
@@ -1208,7 +1393,9 @@ impl Default for HeatShimmer {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Default)]
 pub enum LensKind {
-    /// Raindrops that land on the lens, linger and run down.
+    /// Rain on the glass, as a lens or a windscreen shows it: beads gathering all over it, heavy
+    /// drops that land, hang and run down leaving wet trails, each drop holding the scene upside
+    /// down, and the wet glass between them a little out of focus.
     #[default]
     Drops,
     /// Frost creeping in from the edges.
@@ -1221,12 +1408,18 @@ pub enum LensKind {
 pub struct Lens {
     pub enabled: bool,
     pub kind: LensKind,
-    /// How many drops, or how far the frost reaches in (0..1).
+    /// How much rain is on the glass, or how far the frost reaches in (0..1).
     pub amount: f32,
+    /// Size of the drops (1 = as on a camera lens; larger reads as a windscreen close to).
+    pub size: f32,
+    /// Share of the heavy drops that run down the glass and leave a trail (0..1).
+    pub trails: f32,
+    /// How far out of focus the wet glass is between the drops and their trails (0 = clear).
+    pub blur: f32,
     pub seed: u32,
 }
 impl Default for Lens {
-    fn default() -> Self { Lens { enabled: false, kind: LensKind::Drops, amount: 0.5, seed: 0 } }
+    fn default() -> Self { Lens { enabled: false, kind: LensKind::Drops, amount: 0.5, size: 1.0, trails: 0.6, blur: 0.35, seed: 0 } }
 }
 
 /// Lightning strikes: a flash that lights the whole scene, and a bolt in the sky.
@@ -1287,8 +1480,38 @@ pub struct Fixture {
     /// Reach of the light, metres.
     pub radius: f32,
     pub flicker: f32,
-    /// Random placement wobble, metres.
+    /// Random placement wobble, metres: sideways by this much either way and up or down by half of it.
+    /// Floating lights also drift about by it.
     pub jitter: f32,
+    /// Random shift along the path, as a fraction of the spacing (0 = an even row, 1 = anywhere
+    /// between its neighbours).
+    pub jitter_along: f32,
+    /// Random height, metres either way (on top of `jitter`'s): fireflies and wisps at every height.
+    pub height_var: f32,
+    /// Random size, as a fraction either way (0.3 = from 0.7 to 1.3 of `size`).
+    pub size_var: f32,
+    /// Random brightness, as a fraction either way.
+    pub intensity_var: f32,
+    /// Random colour, 0..1: each one a little warmer or cooler than the next.
+    pub color_var: f32,
+    /// Fraction of places that hold a light (1 = every place, 0.5 = half of them, at random).
+    pub density: f32,
+    /// How many stand at each place (1..8). They share the place's random settings, so with `jitter`,
+    /// `jitter_along` and `height_var` they scatter into a loose swarm. Each is a light of its own:
+    /// turn `light` off, or the spacing up, when there are many.
+    pub cluster: u32,
+    /// With lights on both sides: how far the right-hand row is shifted along the path, as a fraction
+    /// of the spacing (0 = in pairs, 0.5 = left and right take turns).
+    pub stagger: f32,
+    /// Colour multiplied over the kind's own light and flame (white = as it is).
+    pub tint: Rgb,
+    /// What it stands on or hangs from where there is no wall (ground mounts, and wall mounts in a
+    /// scene without walls).
+    pub post: LampPost,
+    /// Where along the path the row is allowed to stand.
+    pub place: LightPlace,
+    /// For `place: SetPieces`: which of `set_pieces` the lights go with (0 = the first).
+    pub set_piece: u32,
     pub sprite: SpriteRef,
     pub seed: u32,
 }
@@ -1297,20 +1520,23 @@ impl Default for Fixture {
         Self {
             enabled: true, kind: FixtureKind::Torch, side: Side::Both, mount: Mount::Wall, height: 2.1, spacing: 6.0,
             offset: 0.0, lateral: 0.3, size: 1.0, light: true, intensity: 1.0, radius: 6.0, flicker: 1.0, jitter: 0.0,
+            jitter_along: 0.0, height_var: 0.0, size_var: 0.0, intensity_var: 0.0, color_var: 0.0, density: 1.0, cluster: 1, stagger: 0.0,
+            tint: [255, 255, 255], post: LampPost::Auto, place: LightPlace::Anywhere, set_piece: 0,
             sprite: SpriteRef::default(), seed: 0,
         }
     }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-pub enum PropKind { Tree, Pine, Bush, Rock, Boulder, Cactus, DeadTree, Mushroom, Pillar, Gravestone, Crystal, Stalagmite, Reeds, Willow, Palm, Obelisk, Icicle, IceSpike }
+pub enum PropKind { Tree, Pine, Bush, Rock, Boulder, Cactus, DeadTree, Mushroom, Pillar, Gravestone, Crystal, Stalagmite, Reeds, Willow, Palm, Obelisk, Icicle, IceSpike, Asteroid, Satellite, Debris, CargoPod, Comet }
 
 impl PropKind {
-    pub const ALL: [PropKind; 18] = [
+    pub const ALL: [PropKind; 23] = [
         PropKind::Tree, PropKind::Pine, PropKind::Bush, PropKind::Rock, PropKind::Boulder, PropKind::Cactus,
         PropKind::DeadTree, PropKind::Mushroom, PropKind::Pillar, PropKind::Gravestone, PropKind::Crystal,
         PropKind::Stalagmite, PropKind::Reeds, PropKind::Willow, PropKind::Palm, PropKind::Obelisk,
         PropKind::Icicle, PropKind::IceSpike,
+        PropKind::Asteroid, PropKind::Satellite, PropKind::Debris, PropKind::CargoPod, PropKind::Comet,
     ];
     pub fn name(self) -> &'static str {
         match self {
@@ -1320,12 +1546,16 @@ impl PropKind {
             PropKind::Crystal => "Crystal", PropKind::Stalagmite => "Stalagmite", PropKind::Reeds => "Reeds",
             PropKind::Willow => "Willow", PropKind::Palm => "Palm", PropKind::Obelisk => "Obelisk",
             PropKind::Icicle => "Icicle", PropKind::IceSpike => "Ice Spike",
+            PropKind::Asteroid => "Asteroid", PropKind::Satellite => "Satellite", PropKind::Debris => "Debris",
+            PropKind::CargoPod => "Cargo Pod", PropKind::Comet => "Comet",
         }
     }
     /// Hangs from the ceiling (or the top of the walls) instead of standing on the ground.
     pub fn hangs(self) -> bool { self == PropKind::Icicle }
     /// How much it lights itself (crystals and ice glow faintly).
-    pub fn glow(self) -> f32 { match self { PropKind::Crystal => 0.6, PropKind::IceSpike | PropKind::Icicle => 0.12, _ => 0.0 } }
+    pub fn glow(self) -> f32 { match self { PropKind::Crystal => 0.6, PropKind::IceSpike | PropKind::Icicle => 0.12, PropKind::Comet => 0.45, _ => 0.0 } }
+    /// Things of open space (set `float` to hang them in it, or `orbit` to send them round the path).
+    pub fn of_space(self) -> bool { matches!(self, PropKind::Asteroid | PropKind::Satellite | PropKind::Debris | PropKind::CargoPod | PropKind::Comet) }
     /// Natural height in metres at scale 1.
     pub fn height_m(self) -> f32 {
         match self {
@@ -1334,6 +1564,7 @@ impl PropKind {
             PropKind::Pillar => 4.0, PropKind::Gravestone => 1.0, PropKind::Crystal => 1.3, PropKind::Stalagmite => 1.8,
             PropKind::Reeds => 1.5, PropKind::Willow => 6.5, PropKind::Palm => 7.0, PropKind::Obelisk => 5.0,
             PropKind::Icicle => 1.1, PropKind::IceSpike => 1.7,
+            PropKind::Asteroid => 1.6, PropKind::Satellite => 2.0, PropKind::Debris => 1.4, PropKind::CargoPod => 1.2, PropKind::Comet => 1.5,
         }
     }
     pub fn default_tint(self) -> Rgb {
@@ -1344,8 +1575,38 @@ impl PropKind {
             PropKind::Gravestone => [104, 104, 110], PropKind::Crystal => [120, 190, 255], PropKind::Stalagmite => [96, 84, 74],
             PropKind::Reeds => [104, 112, 58], PropKind::Willow => [70, 96, 52], PropKind::Palm => [64, 118, 46],
             PropKind::Obelisk => [180, 156, 116], PropKind::Icicle => [196, 228, 246], PropKind::IceSpike => [168, 214, 240],
+            PropKind::Asteroid => [128, 118, 108], PropKind::Satellite => [170, 124, 52], PropKind::Debris => [112, 120, 134],
+            PropKind::CargoPod => [150, 108, 64], PropKind::Comet => [190, 220, 255],
         }
     }
+}
+
+/// Props set round the path instead of beside it: each stands on a ring about the path's line, the
+/// row winding round it like the thread of a screw, the whole of it turning - rocks and wreckage
+/// spiralling down a wormhole's throat. `side: Both` makes two strands opposite each other, `rows`
+/// more strands between; `spacing`, `density` and the rest work as they do for a row.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
+pub struct Orbit {
+    pub enabled: bool,
+    /// The ring's radius, metres.
+    pub radius: f32,
+    /// Random spread of the radius, metres either way.
+    pub radius_var: f32,
+    /// Height of the ring's centre above the path, metres (0 = the camera's eye height, which is the
+    /// middle of a tunnel).
+    pub height: f32,
+    /// Whole turns each strand winds round the path along one loop length.
+    pub twist: i32,
+    /// Whole turns the ring makes in one loop.
+    pub spin: i32,
+    /// How far each one strays from its strand, in turns either way (0 = a clean spiral, 0.5 = anywhere round the ring).
+    pub stray: f32,
+    /// Take `twist` and `spin` from `sky.tunnel`, so the props wind and turn with the wormhole.
+    pub with_tunnel: bool,
+}
+impl Default for Orbit {
+    fn default() -> Self { Orbit { enabled: false, radius: 4.0, radius_var: 0.8, height: 0.0, twist: 1, spin: 1, stray: 0.08, with_tunnel: true } }
 }
 
 /// A repeating row (or several rows) of props beside the path.
@@ -1365,10 +1626,22 @@ pub struct PropLayer {
     pub row_spacing: f32,
     /// Random sideways placement, metres.
     pub jitter: f32,
+    /// Random shift along the path, as a fraction of the spacing (0 = an even row, 1 = anywhere
+    /// between its neighbours). Rows beyond the first are always shifted by at least 0.8.
+    pub jitter_along: f32,
+    /// With props on both sides: how far the right-hand side is shifted along the path, as a
+    /// fraction of the spacing (0 = in pairs, 0.5 = left and right take turns).
+    pub stagger: f32,
     /// Share of slots that hold a prop (0..1), for natural gaps.
     pub density: f32,
     pub scale: f32,
     pub scale_var: f32,
+    /// How far each one leans, at random to either side: its top moves by up to this fraction of its
+    /// height, the trunk bowing over (0.04 is a natural stand of trees; rocks and pillars want 0).
+    pub lean_var: f32,
+    /// How much each one's colour differs from its neighbours' (0 all alike, 0.12 natural, 0.4
+    /// strongly): some lighter or darker, some a little warmer or cooler.
+    pub tint_var: f32,
     /// Colour of procedural props. Left out of a scene file, it is the kind's own colour.
     pub tint: Rgb,
     /// How far the base sinks into the ground, as a fraction of height.
@@ -1378,6 +1651,8 @@ pub struct PropLayer {
     /// sun shadow.
     pub float: f32,
     pub float_var: f32,
+    /// Set round the path in a ring instead of in rows beside it.
+    pub orbit: Orbit,
     pub shadow: bool,
     pub shadow_opacity: f32,
     pub sprite: SpriteRef,
@@ -1392,8 +1667,8 @@ impl Default for PropLayer {
     fn default() -> Self {
         Self {
             enabled: true, kind: PropKind::Tree, side: Side::Both, lateral: 1.5, spacing: 6.0, offset: 0.0, rows: 1,
-            row_spacing: 3.0, jitter: 0.5, density: 1.0, scale: 1.0, scale_var: 0.2, tint: PropKind::Tree.default_tint(),
-            sink: 0.02, float: 0.0, float_var: 0.0, shadow: true, shadow_opacity: 0.6, sprite: SpriteRef::default(), seed: 1, def: String::new(),
+            row_spacing: 3.0, jitter: 0.5, jitter_along: 0.0, stagger: 0.0, density: 1.0, scale: 1.0, scale_var: 0.2, lean_var: 0.0, tint_var: 0.12, tint: PropKind::Tree.default_tint(),
+            sink: 0.02, float: 0.0, float_var: 0.0, orbit: Orbit::default(), shadow: true, shadow_opacity: 0.6, sprite: SpriteRef::default(), seed: 1, def: String::new(),
         }
     }
 }
@@ -1575,16 +1850,59 @@ pub struct Post {
     pub exposure: f32,
     pub contrast: f32,
     pub saturation: f32,
-    /// Glow around bright light (0..1).
+    /// Glow around bright light, as a lens scatters it: a tight glow round every flame, the sun,
+    /// a glint or a lit panel, falling off into a wide soft veil (0..1; in the world only light
+    /// brighter than white paper spreads, as exposed, so raising `exposure` makes more of it
+    /// glow). Under a dark sky the moon, an aurora and the brighter stars glow too.
     pub bloom: f32,
     pub vignette: f32,
     pub grain: f32,
     /// Colour multiplied over the final image.
     pub tint: Rgb,
+    /// What bright light does in the lens besides bloom.
+    pub flare: Flare,
+}
+
+/// Lens flare from the sun and bright lights.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
+pub struct Flare {
+    pub style: FlareStyle,
+    /// Strength (0..2).
+    pub amount: f32,
+}
+impl Default for Flare {
+    fn default() -> Self { Self { style: FlareStyle::None, amount: 0.5 } }
+}
+
+/// The look of a lens flare.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub enum FlareStyle {
+    #[default]
+    None,
+    /// Four fine rays from every bright light, as through a star filter or a stopped-down lens.
+    Star,
+    /// Six rays.
+    Starburst,
+    /// A long horizontal blue streak, as an anamorphic cinema lens makes.
+    Anamorphic,
+    /// Faint coloured reflections of the light across the frame from it, and a wide ring.
+    Ghosts,
+    /// The streak and the ghosts together.
+    Cinematic,
+}
+impl FlareStyle {
+    /// (rays or the streak, ghosts): which parts this style draws; rays 0 none, 4, 6, or 1 the streak.
+    pub fn parts(self) -> (u32, bool) {
+        match self {
+            FlareStyle::None => (0, false), FlareStyle::Star => (4, false), FlareStyle::Starburst => (6, false),
+            FlareStyle::Anamorphic => (1, false), FlareStyle::Ghosts => (0, true), FlareStyle::Cinematic => (1, true),
+        }
+    }
 }
 impl Default for Post {
     fn default() -> Self {
-        Self { exposure: 1.0, contrast: 1.0, saturation: 1.0, bloom: 0.35, vignette: 0.35, grain: 0.0, tint: [255, 255, 255] }
+        Self { exposure: 1.0, contrast: 1.0, saturation: 1.0, bloom: 0.35, vignette: 0.35, grain: 0.0, tint: [255, 255, 255], flare: Flare::default() }
     }
 }
 

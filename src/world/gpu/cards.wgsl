@@ -11,6 +11,7 @@ struct Card {
     emissive: f32,
     sw: u32, sh: u32, soff: u32, gw: u32, gh: u32, goff: u32,
     id: u32, realm: u32, wx: f32, wy: f32, wd: f32, source: u32,
+    w_amp: f32, w_v: f32, w_lean: f32, w_t1: f32, w_t2: f32, w_c0: f32, w_c1: f32, w_trunk: f32, w_foot: f32, w_kv: f32,
 }
 
 struct Pass { tile_cols: u32, pick: u32, n_cards: u32, pad: u32 }
@@ -65,11 +66,24 @@ fn cards_main(@builtin(global_invocation_id) gid: vec3<u32>) {
     for (var k = a0; k < a1; k++) {
         let cd = cards[bins[ntiles + 1u + k]];
         if px < cd.x0 || px > cd.x1 || py < cd.y0 || py > cd.y1 { continue; }
-        let vv = div(f32(py) + 0.5 - cd.sy_top, cd.hp);
-        if !(vv >= 0.0 && vv < 1.0) { continue; }
+        let row = div(f32(py) + 0.5 - cd.sy_top, cd.hp);
+        if !(row >= 0.0 && row < 1.0) { continue; }
+        var vv = row;
         if cd.z >= g.depth { continue; }
         let bend = rnd(rnd(cd.sway * (1.0 - vv)) * (1.0 - vv));
         var u = div(rnd(rnd(f32(px) + 0.5 - rnd(cd.sx - cd.wp * 0.5)) - bend), cd.wp);
+        if cd.w_amp != 0.0 {
+            // render::CardWind::at.
+            var wt = smoothstep_r(cd.w_c1, cd.w_c0, row);
+            if cd.w_trunk > 0.0 { wt *= 1.0 - (1.0 - smoothstep_r(cd.w_trunk, 4.0 * cd.w_trunk, abs(u - 0.5))) * smoothstep_r(cd.w_foot - 0.45, cd.w_foot, row); }
+            let wh = cd.w_kv * row;
+            let wa = TAU * (1.6 * u + 1.1 * wh) - cd.w_t1;
+            let wb = TAU * (4.3 * u - 2.7 * wh) - cd.w_t2;
+            let wc = TAU * (11.0 * u + 7.0 * wh) - cd.w_t1 - cd.w_t2;
+            u -= wt * (cd.w_lean + cd.w_amp * (0.55 * sin(wa) + 0.3 * sin(wb) + 0.15 * sin(wc)));
+            vv = row - wt * cd.w_v * sin(wb + 1.3);
+            if !(vv >= 0.0 && vv < 1.0) { continue; }
+        }
         if !(u >= 0.0 && u < 1.0) { continue; }
         if cd.flip != 0u { u = 1.0 - u; }
         let nearest = cd.nearest != 0u;

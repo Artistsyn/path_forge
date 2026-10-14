@@ -21,7 +21,10 @@ pub(super) struct WaterK {
     pub k1: f32,
     pub k2: f32,
     pub wet: f32,
-    /// 0 nothing afloat, 1 foam, 2 leaves, 3 lily pads.
+    /// How much is frozen over (0..1), and half the water's width, metres.
+    pub frozen: f32,
+    pub hw: f32,
+    /// 0 nothing afloat, 1 foam, 2 leaves, 3 lily pads, 4 ice floes.
     pub kind: u32,
     pub dens: f32,
     pub fcol: [f32; 3],
@@ -53,7 +56,9 @@ pub(super) fn water_k(scene: &Scene, loop_len: f32, path_tile: f32, tphase: f32)
         k1: whole(2.3),
         k2: whole(1.1),
         wet: ww.wet.max(0.0),
-        kind: match ww.floating { Floating::None => 0, Floating::Foam => 1, Floating::Leaves => 2, Floating::LilyPads => 3 },
+        frozen: ww.frozen.clamp(0.0, 1.0),
+        hw: scene.path.half_width.max(0.05) + if !scene.verge.enabled && scene.walls.enabled { scene.walls.gap.max(0.0) } else { 0.0 },
+        kind: match ww.floating { Floating::None => 0, Floating::Foam => 1, Floating::Leaves => 2, Floating::LilyPads => 3, Floating::Ice => 4 },
         dens: ww.float_density.clamp(0.0, 1.0),
         fcol: rgb_lin(ww.float_color),
         fsize: ww.float_size.max(0.02),
@@ -68,9 +73,23 @@ pub(super) fn water_edge(ctx: &Ctx, d: f32) -> f32 {
     if !ctx.scene.verge.enabled && ctx.scene.walls.enabled { ctx.wall_x(d) } else { ctx.path_edge(d) }
 }
 
-/// Foam and floating things on the water at (x, w) (w = scroll + d), `dist` metres in from the
-/// bank, `px` the width of a pixel there in metres: the colour laid over the water, and how much.
-pub(super) fn water_cover(k: &WaterK, x: f32, w: f32, dist: f32, px: f32) -> ([f32; 3], f32) {
+/// How far (x, d) is inside the water from the land round it, metres (below 0 on the land): the
+/// bank or wall, and where the waterway forks the banks of its branches too, so foam follows
+/// them and none is drawn across a branch's mouth.
+pub(super) fn water_dist(ctx: &Ctx, x: f32, d: f32) -> f32 {
+    let e = water_edge(ctx, d);
+    if let Some(f) = ctx.fork.as_ref().filter(|_| !ctx.scene.walls.enabled) {
+        if f.split { return -ctx.split_field(x, d).2; }
+        // A side branch: open water on it and across its mouth.
+        if ctx.on_fork(x, d) || ctx.on_fork(if x < 0.0 { -e - 0.05 } else { e + 0.05 }, d) { return 1.0; }
+    }
+    e - x.abs()
+}
+
+/// Foam, floating things and ice on the water at (x, w) (w = scroll + d), `dist` metres in from
+/// the bank, `px` the width of a pixel there in metres: the colour laid over the water, how much,
+/// and how much of the water's shine is left there.
+pub(super) fn water_cover(k: &WaterK, x: f32, w: f32, dist: f32, px: f32) -> ([f32; 3], f32, f32) {
     let mut col = [0.0f32; 3];
     let mut a = 0.0f32;
     if k.foam > 0.0 {
@@ -100,6 +119,18 @@ pub(super) fn water_cover(k: &WaterK, x: f32, w: f32, dist: f32, px: f32) -> ([f
             let tone = 0.8 + 0.4 * h(0xF15);
             let (sd, c) = match k.kind {
                 1 => (q - r * (1.0 + 0.25 * (3.0 * th + TAU * h(0xF16)).sin()), k.fcol),
+                4 => {
+                    // A plate with five or six straight sides, each at its own distance out.
+                    let sides = 5 + (h(0xF18) * 2.0) as i32;
+                    let mut sd = -r;
+                    for s in 0..sides {
+                        let hs = hf(k.seed ^ 0xF19, key * 8 + s as i64);
+                        let th = TAU * (s as f32 + 0.6 * hs) / sides as f32;
+                        sd = sd.max(lx * th.cos() + lz * th.sin() - r * (0.72 + 0.28 * hs));
+                    }
+                    // Snow on top, bare blue ice round its rim.
+                    (sd, scale3(mul3(k.fcol, mix3([0.7, 0.84, 0.96], [1.0; 3], smoothstep(0.0, -0.3 * r, sd))), tone))
+                }
                 2 => {
                     let rz = 0.42 * r;
                     let e = ((lx / r) * (lx / r) + (lz / rz) * (lz / rz)).sqrt();
@@ -121,10 +152,70 @@ pub(super) fn water_cover(k: &WaterK, x: f32, w: f32, dist: f32, px: f32) -> ([f
             }
         }
     }
-    (col, a)
+    let mut shine = 1.0 - a;
+    if k.frozen > 0.0 {
+        // The ice has grown this far out from the bank here (further in some places than others),
+        // and past nine tenths frozen it closes over the middle.
+        // (Each bank's ice has its own edge, so where they meet the join is not a straight line.)
+        let reach = |ph: f32| {
+            let n = 0.5 + 0.25 * (w * k.k1 + 1.3 + ph).sin() + 0.25 * (w * k.k2 + 4.1 - 0.6 * ph).sin();
+            k.frozen * k.hw * 1.25 * (0.7 + 0.6 * n) + (k.frozen - 0.9).max(0.0) * 10.0 * k.hw
+        };
+        let half = dist + x.abs();
+        let (from_left, from_right) = (reach(0.0) - (half + x), reach(2.4) - (half - x));
+        let inside = from_left.max(from_right);
+        let ia = smoothstep(0.0, 1.5 * px.max(0.04), inside);
+        if ia > 0.0 {
+            // Cracks run where three crossing waves cancel; snow lies in patches; the ice is
+            // thinner and bluer at its edge by the water.
+            let f = (2.0 * w * k.k1 + 3.1 * x).sin() + (w * k.k2 - 2.3 * x + 1.7).sin() + (4.7 * x + 3.0 * w * k.k1 + 0.4).sin();
+            let crack = 1.0 - smoothstep(0.0, (2.5 * px).max(0.035), 0.35 * f.abs());
+            let snow = smoothstep(0.5, 0.9, (w * k.k1 + 1.9 * x + 0.7).sin() + (2.0 * w * k.k2 - 1.1 * x).sin());
+            let rim = 1.0 - smoothstep(0.0, 0.25, inside);
+            let mut ic = mix3(mul3(k.foam_col, [0.72, 0.84, 0.95]), k.foam_col, snow);
+            ic = scale3(ic, 1.0 - 0.45 * crack * (1.0 - snow));
+            ic = mix3(ic, mul3(k.foam_col, [0.55, 0.75, 0.9]), 0.5 * rim * (1.0 - snow));
+            let na = ia + a * (1.0 - ia);
+            col = scale3(add3(scale3(ic, ia), scale3(col, a * (1.0 - ia))), 1.0 / na);
+            a = na;
+            // Bare ice still shines a little; snow not at all.
+            shine = shine * (1.0 - ia) + ia * 0.3 * (1.0 - snow);
+        }
+    }
+    (col, a, shine)
 }
 
 /// How wet the bank (or wall) is `out` metres from the water: 1 at the water, 0 past `wet`.
 pub(super) fn wetness(k: &WaterK, out: f32) -> f32 {
     if k.wet <= 0.0 { 0.0 } else { 1.0 - smoothstep(0.0, k.wet, out.max(0.0)) }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn k(frozen: f32) -> WaterK {
+        let mut s = crate::scene::presets::ALL.iter().find(|(m, _)| *m == "River Run").unwrap().1();
+        s.path.waterway.frozen = frozen;
+        s.path.waterway.floating = Floating::None;
+        water_k(&s, s.motion.loop_length, 2.0, 0.0).unwrap()
+    }
+
+    #[test]
+    fn ice_grows_from_the_banks_and_closes_over_when_frozen_through() {
+        // Open water in the middle and at the bank with no ice asked for.
+        let open = k(0.0);
+        assert_eq!(water_cover(&open, 0.0, 5.0, open.hw, 0.02).2, 1.0);
+        // Half frozen: ice by the bank, water still open down the middle.
+        let half = k(0.4);
+        let (bank, mid) = (water_cover(&half, half.hw - 0.3, 5.0, 0.3, 0.02), water_cover(&half, 0.0, 5.0, half.hw, 0.02));
+        assert!(bank.1 > 0.95 && bank.2 < 0.35, "ice at the bank: {bank:?}");
+        assert!(mid.1 < 0.05 && mid.2 > 0.95, "open water mid-stream: {mid:?}");
+        // Frozen through: ice everywhere, all along the loop.
+        let all = k(1.0);
+        for i in 0..40 {
+            let (x, w) = ((i as f32 * 0.37).sin() * all.hw * 0.98, i as f32 * 1.7);
+            assert!(water_cover(&all, x, w, all.hw - x.abs(), 0.02).1 > 0.99, "ice at {x}, {w}");
+        }
+    }
 }

@@ -9,11 +9,14 @@ use crate::scene::{Dither, Outline, Scene};
 use rayon::prelude::*;
 
 /// HDR linear light to display RGB in 0..255 (as f32 so later stages keep precision).
-pub fn finish(view: &View, scene: &Scene, phase: f32, hdr: &[[f32; 3]], post_on: bool) -> Vec<[f32; 3]> {
+/// (`gbuf` is the frame's, to tell the sky from the world.)
+pub fn finish(view: &View, scene: &Scene, phase: f32, hdr: &[[f32; 3]], gbuf: &[GPixel], post_on: bool) -> Vec<[f32; 3]> {
     let (w, h) = (view.width, view.height);
     let p = &scene.post;
-    let bloom = if post_on && p.bloom > 0.001 { Some(bloom_buffer(hdr, w, h)) } else { None };
+    let flare = FlareK::of(scene, post_on);
     let exposure = if post_on { p.exposure.max(0.0) } else { 1.0 };
+    let glow = BloomK { exposure, sky: sky_threshold(scene), hy: view.horizon_px };
+    let bloom = if post_on && (p.bloom > 0.001 || flare.on()) { Some(bloom_buffer(hdr, gbuf, w, h, p.bloom.max(0.0), glow, flare)) } else { None };
     let tint = [p.tint[0] as f32 / 255.0, p.tint[1] as f32 / 255.0, p.tint[2] as f32 / 255.0];
     let grain_seed = (phase.rem_euclid(1.0) * 4096.0).round() as u32 % 4096;
     let (cx, cy) = (w as f32 * 0.5, h as f32 * 0.5);
@@ -25,7 +28,7 @@ pub fn finish(view: &View, scene: &Scene, phase: f32, hdr: &[[f32; 3]], post_on:
             let mut c = hdr[i];
             if let Some(b) = &bloom {
                 let s = sample_quarter(b, w, h, x, y);
-                for k in 0..3 { c[k] += s[k] * p.bloom * 0.9; }
+                for k in 0..3 { c[k] += s[k]; }
             }
             let mut rgb = [0.0f32; 3];
             for k in 0..3 {
@@ -59,8 +62,55 @@ pub fn finish(view: &View, scene: &Scene, phase: f32, hdr: &[[f32; 3]], post_on:
     out
 }
 
-/// Bright parts at quarter resolution, blurred.
-fn bloom_buffer(hdr: &[[f32; 3]], w: usize, h: usize) -> Vec<[f32; 3]> {
+/// How much of a pixel's light the lens scatters, by its luminance as exposed: none from
+/// anything dimmer than `th`, all of what is 1.2 brighter than that. In the world `th` is
+/// BLOOM_TH, white paper, so a bright scene does not fog the picture.
+#[inline]
+fn bright_pass(l: f32, th: f32) -> f32 {
+    let t = ((l - th) / 1.2).clamp(0.0, 1.0);
+    t * t.sqrt()
+}
+pub(crate) const BLOOM_TH: f32 = 0.8;
+
+/// What decides which pixels glow: the exposure (a scene exposed up glows sooner), and the
+/// threshold of the sky above row `hy`.
+#[derive(Clone, Copy)]
+pub(crate) struct BloomK { pub exposure: f32, pub sky: f32, pub hy: f32 }
+
+/// The bloom threshold of a scene's sky. What glows in a sky is what outshines the sky round
+/// it: against a day sky only the sun and what it lights to white, against a dark one the
+/// moon, an aurora, the brighter stars and nebulae, though none of them is as bright as paper
+/// in daylight.
+pub(crate) fn sky_threshold(scene: &Scene) -> f32 {
+    use super::texture::rgb_lin;
+    let lum = |c: [u8; 3]| { let c = rgb_lin(c); 0.3 * c[0] + 0.55 * c[1] + 0.15 * c[2] };
+    // (Deep space keeps the world's: its discs, tunnels and star fields are lit to glow as they are.)
+    if !scene.sky.enabled || scene.sky.space.enabled || scene.sky.tunnel.enabled { return BLOOM_TH; }
+    (0.06 + 2.5 * lum(scene.sky.top).max(lum(scene.sky.horizon))).min(BLOOM_TH)
+}
+
+/// The share of the bloom in each of its five blurs, tightest first.
+pub(crate) const BLOOM_W: [f32; 5] = [0.30, 0.25, 0.20, 0.15, 0.10];
+/// Bloom's overall strength at `post.bloom` 1.
+pub(crate) const BLOOM_GAIN: f32 = 1.5;
+
+/// A lens flare's parts (FlareStyle::parts) and strength.
+#[derive(Clone, Copy, Default)]
+pub(crate) struct FlareK { pub rays: u32, pub ghosts: bool, pub amt: f32 }
+
+impl FlareK {
+    pub(crate) fn of(scene: &Scene, post_on: bool) -> FlareK {
+        let f = &scene.post.flare;
+        let (rays, ghosts) = f.style.parts();
+        if !post_on || f.amount <= 0.0 { FlareK::default() } else { FlareK { rays, ghosts, amt: f.amount.min(4.0) } }
+    }
+    pub(crate) fn on(&self) -> bool { self.rays != 0 || self.ghosts }
+}
+
+/// Bright light scattered in the lens, at quarter resolution: the bright parts blurred five times
+/// over, each blur twice as wide as the last, and summed (a tight glow round every light that
+/// falls off into a wide veil), with the flare's rays and ghosts added.
+fn bloom_buffer(hdr: &[[f32; 3]], gbuf: &[GPixel], w: usize, h: usize, bloom: f32, glow: BloomK, flare: FlareK) -> Vec<[f32; 3]> {
     let (qw, qh) = (w.div_ceil(4), h.div_ceil(4));
     let mut q = vec![[0.0f32; 3]; qw * qh];
     q.par_iter_mut().enumerate().for_each(|(i, e)| {
@@ -70,37 +120,126 @@ fn bloom_buffer(hdr: &[[f32; 3]], w: usize, h: usize) -> Vec<[f32; 3]> {
         for y in qy * 4..(qy * 4 + 4).min(h) {
             for x in qx * 4..(qx * 4 + 4).min(w) {
                 let c = hdr[y * w + x];
-                let l = 0.3 * c[0] + 0.55 * c[1] + 0.15 * c[2];
-                let k = ((l - 0.7) / l.max(1e-4)).max(0.0);
+                let th = if (y as f32) < glow.hy && gbuf[y * w + x].id == id::NONE { glow.sky } else { BLOOM_TH };
+                let k = bright_pass((0.3 * c[0] + 0.55 * c[1] + 0.15 * c[2]) * glow.exposure, th);
                 for j in 0..3 { acc[j] += c[j] * k; }
                 n += 1.0;
             }
         }
         *e = [acc[0] / n, acc[1] / n, acc[2] / n];
     });
-    // Two passes of a wide separable blur.
-    for _ in 0..2 {
-        q = blur(&q, qw, qh, true);
-        q = blur(&q, qw, qh, false);
+    // Rays come from the bright parts as they are, so they stay fine; ghosts from a soft blur.
+    let mut sum = if flare.rays != 0 {
+        (0..qw * qh).into_par_iter().map(|i| flare_rays(&q, qw, qh, i % qw, i / qw, flare)).collect()
+    } else { vec![[0.0f32; 3]; qw * qh] };
+    for (k, wk) in BLOOM_W.iter().enumerate() {
+        q = blur(&blur(&q, qw, qh, true, 1 << k), qw, qh, false, 1 << k);
+        let g = wk * bloom * BLOOM_GAIN;
+        sum.iter_mut().zip(&q).for_each(|(s, c)| for j in 0..3 { s[j] += c[j] * g });
+        if k == 2 && flare.ghosts {
+            let add: Vec<[f32; 3]> = (0..qw * qh).into_par_iter().map(|i| flare_ghosts(&q, qw, qh, i % qw, i / qw, flare)).collect();
+            sum.iter_mut().zip(&add).for_each(|(s, c)| for j in 0..3 { s[j] += c[j] });
+        }
     }
-    q
+    sum
 }
 
-fn blur(src: &[[f32; 3]], w: usize, h: usize, horizontal: bool) -> Vec<[f32; 3]> {
-    const K: [f32; 7] = [0.03, 0.1, 0.2, 0.34, 0.2, 0.1, 0.03];
+/// One pass of a five-tap blur with its taps `stride` apart (a B-spline, so repeated at doubling
+/// strides it stays smooth: no grid shows).
+fn blur(src: &[[f32; 3]], w: usize, h: usize, horizontal: bool, stride: i64) -> Vec<[f32; 3]> {
+    const K: [f32; 5] = [0.0625, 0.25, 0.375, 0.25, 0.0625];
     let mut out = vec![[0.0f32; 3]; w * h];
     out.par_chunks_mut(w).enumerate().for_each(|(y, row)| {
         for x in 0..w {
             let mut acc = [0.0f32; 3];
             for (t, k) in K.iter().enumerate() {
-                let o = t as i64 - 3;
-                let (sx, sy) = if horizontal { ((x as i64 + o * 2).clamp(0, w as i64 - 1), y as i64) } else { (x as i64, (y as i64 + o * 2).clamp(0, h as i64 - 1)) };
+                let o = (t as i64 - 2) * stride;
+                let (sx, sy) = if horizontal { ((x as i64 + o).clamp(0, w as i64 - 1), y as i64) } else { (x as i64, (y as i64 + o).clamp(0, h as i64 - 1)) };
                 let c = src[sy as usize * w + sx as usize];
                 for j in 0..3 { acc[j] += c[j] * k; }
             }
             row[x] = acc;
         }
     });
+    out
+}
+
+/// A quarter image read between its pixels; nothing outside it.
+#[inline]
+fn q_at(q: &[[f32; 3]], qw: usize, qh: usize, fx: f32, fy: f32) -> [f32; 3] {
+    if fx < 0.0 || fy < 0.0 || fx > qw as f32 - 1.0 || fy > qh as f32 - 1.0 { return [0.0; 3]; }
+    let (x0, y0) = (fx as usize, fy as usize);
+    let (x1, y1) = ((x0 + 1).min(qw - 1), (y0 + 1).min(qh - 1));
+    let (tx, ty) = (fx - x0 as f32, fy - y0 as f32);
+    let mut out = [0.0f32; 3];
+    for k in 0..3 {
+        let a = q[y0 * qw + x0][k] * (1.0 - tx) + q[y0 * qw + x1][k] * tx;
+        let b = q[y1 * qw + x0][k] * (1.0 - tx) + q[y1 * qw + x1][k] * tx;
+        out[k] = a * (1.0 - ty) + b * ty;
+    }
+    out
+}
+
+/// The directions of a flare's rays (unit vectors, y down), their reach as a share of the quarter
+/// image's height or width, their strength and their colour.
+pub(crate) fn flare_lines(rays: u32) -> &'static [([f32; 2], f32, f32, [f32; 3])] {
+    // cos and sin of 20 and 110 degrees; of 15, 75 and 135; and straight across.
+    const STAR: [([f32; 2], f32, f32, [f32; 3]); 2] = [([0.939_692_6, -0.342_020_1], 0.07, 0.5, [1.0, 0.96, 0.9]), ([0.342_020_1, 0.939_692_6], 0.07, 0.5, [1.0, 0.96, 0.9])];
+    const BURST: [([f32; 2], f32, f32, [f32; 3]); 3] = [([0.965_925_8, -0.258_819], 0.06, 0.4, [1.0, 0.96, 0.9]), ([0.258_819, -0.965_925_8], 0.06, 0.4, [1.0, 0.96, 0.9]), ([-0.707_106_8, -0.707_106_8], 0.06, 0.4, [1.0, 0.96, 0.9])];
+    const STREAK: [([f32; 2], f32, f32, [f32; 3]); 1] = [([1.0, 0.0], 0.3, 1.0, [0.45, 0.65, 1.0])];
+    match rays { 4 => &STAR, 6 => &BURST, 1 => &STREAK, _ => &[] }
+}
+
+/// A flare's rays at quarter pixel (x, y): along each line through it, the bright light either
+/// side, fading with distance.
+fn flare_rays(q: &[[f32; 3]], qw: usize, qh: usize, x: usize, y: usize, f: FlareK) -> [f32; 3] {
+    const STEP: f32 = 1.5;
+    let mut out = [0.0f32; 3];
+    for (dir, reach, gain, tint) in flare_lines(f.rays) {
+        let len = (reach * if f.rays == 1 { qw as f32 } else { qh as f32 }).max(2.0);
+        let n = (3.0 * len / STEP).ceil() as i32;
+        let mut acc = [0.0f32; 3];
+        for t in 1..=n {
+            let s = t as f32 * STEP;
+            let wt = (-s / len).exp();
+            for sign in [-1.0f32, 1.0] {
+                let c = q_at(q, qw, qh, x as f32 + sign * s * dir[0], y as f32 + sign * s * dir[1]);
+                for j in 0..3 { acc[j] += c[j] * wt; }
+            }
+        }
+        let g = gain * f.amt * STEP / len;
+        for j in 0..3 { out[j] += acc[j] * g * tint[j]; }
+    }
+    out
+}
+
+/// A flare's ghosts: reflections of the bright light across the middle of the frame, at (scale,
+/// strength, colour); the last is a ring.
+pub(crate) const GHOSTS: [(f32, f32, [f32; 3]); 5] = [
+    (1.0, 0.30, [1.0, 0.8, 0.6]), (0.55, 0.22, [0.6, 1.0, 0.7]), (1.7, 0.16, [0.6, 0.7, 1.0]), (0.25, 0.20, [1.0, 0.6, 0.9]), (-0.4, 0.14, [0.8, 0.9, 1.0]),
+];
+
+fn flare_ghosts(q: &[[f32; 3]], qw: usize, qh: usize, x: usize, y: usize, f: FlareK) -> [f32; 3] {
+    let (cx, cy) = (0.5 * (qw as f32 - 1.0), 0.5 * (qh as f32 - 1.0));
+    let (dx, dy) = (cx - x as f32, cy - y as f32);
+    let half = (cx * cx + cy * cy).sqrt().max(1.0);
+    let mut out = [0.0f32; 3];
+    for (s, g, tint) in GHOSTS {
+        let (px, py) = (cx + dx * s, cy + dy * s);
+        // Ghosts fade towards the frame's corners.
+        let r = ((px - cx).powi(2) + (py - cy).powi(2)).sqrt() / half;
+        let fade = 1.0 - ((r - 0.55) / 0.4).clamp(0.0, 1.0);
+        if fade <= 0.0 { continue; }
+        let c = q_at(q, qw, qh, px, py);
+        for j in 0..3 { out[j] += c[j] * g * fade * tint[j] * f.amt; }
+    }
+    // The ring: the light seen a fixed distance towards the middle.
+    let d = (dx * dx + dy * dy).sqrt();
+    if d > 1.0 {
+        let k = 0.42 * qh as f32 / d;
+        let c = q_at(q, qw, qh, x as f32 + dx * k, y as f32 + dy * k);
+        for j in 0..3 { out[j] += c[j] * 0.12 * [0.7, 0.8, 1.0][j] * f.amt; }
+    }
     out
 }
 
