@@ -17,8 +17,13 @@ final class Native {
     static native String normalize(String json);
     static native String lastError();
 
-    /** Open a scene; 0 on failure (see lastError). `baseDir` is where its files are, or "". */
-    static native long open(String json, String baseDir);
+    /** Start the GPU renderer: the adapter's name, or "" where there is none (see lastError). */
+    static native String gpuInit();
+    /** Open a scene, drawn on the GPU when `gpu` and there is one; 0 on failure (see lastError).
+     *  `baseDir` is where its files are, or "". A frame the GPU fails is drawn on the CPU. */
+    static native long open(String json, String baseDir, boolean gpu);
+    /** "gpu" or "cpu": which engine draws a handle's frames now. */
+    static native String engine(long handle);
     static native boolean setScene(long handle, String json);
     static native void close(long handle);
     /** [loop length (m), loop seconds, fps, canvas width, canvas height]. */

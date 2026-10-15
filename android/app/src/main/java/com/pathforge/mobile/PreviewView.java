@@ -17,6 +17,10 @@ final class PreviewView extends SurfaceView implements SurfaceHolder.Callback, R
     private final Object lock = new Object();
     private volatile String scene;
     private volatile boolean changed;
+    private volatile boolean reopen;
+    /** Told about twice a second what is drawing and how fast. */
+    interface Stats { void at(String engine, int w, int h, float fps); }
+    private volatile Stats stats;
     private volatile boolean running;
     private Thread thread;
     private boolean surfaceOk;
@@ -34,6 +38,14 @@ final class PreviewView extends SurfaceView implements SurfaceHolder.Callback, R
         scene = json;
         changed = true;
     }
+
+    /** Open the scene again (after the GPU is switched on or off). */
+    void reopen() {
+        reopen = true;
+        changed = true;
+    }
+
+    void setStats(Stats s) { stats = s; }
 
     float distance() { return nowDistance; }
     float time() { return nowTime; }
@@ -77,8 +89,11 @@ final class PreviewView extends SurfaceView implements SurfaceHolder.Callback, R
         Paint paint = Frame.paint(false);
         Matrix m = new Matrix();
         // Render at a 1/div of the screen's width, adapting to how fast this phone draws the scene.
-        int div = 4;
+        int div = 3;
         float avg = 30f;
+        int frames = 0;
+        boolean first = true;
+        long statsAt = SystemClock.uptimeMillis();
         ByteBuffer buf = null;
         Bitmap bmp = null;
         try {
@@ -87,7 +102,9 @@ final class PreviewView extends SurfaceView implements SurfaceHolder.Callback, R
                 if (changed) {
                     changed = false;
                     String s = scene;
-                    if (h == 0) h = Native.open(s, ""); else if (!Native.setScene(h, s)) { Native.close(h); h = Native.open(s, ""); }
+                    if (reopen && h != 0) { Native.close(h); h = 0; first = true; }
+                    reopen = false;
+                    if (h == 0) h = Gpu.open(getContext(), s); else if (!Native.setScene(h, s)) { Native.close(h); h = Gpu.open(getContext(), s); }
                     if (h != 0) {
                         float[] info = Native.info(h);
                         len = info[0];
@@ -114,9 +131,19 @@ final class PreviewView extends SurfaceView implements SurfaceHolder.Callback, R
                     bmp.copyPixelsFromBuffer(buf);
                     buf.rewind();
                     draw(bmp, paint, m);
+                    if (first) { Gpu.rendered(getContext(), h); first = false; }
+                    frames++;
                 }
-                if (avg > 50f && div < 10) { div++; avg = 30f; }
-                else if (avg < 18f && div > 3) { div--; avg = 30f; }
+                long now = SystemClock.uptimeMillis();
+                Stats st = stats;
+                if (now - statsAt >= 500) {
+                    if (st != null) st.at(Native.engine(h), rw, rh, frames * 1000f / (now - statsAt));
+                    frames = 0;
+                    statsAt = now;
+                }
+                // As much of the screen's size as keeps up: halve at best, a tenth at worst.
+                if (avg > 45f && div < 10) { div++; avg = 30f; }
+                else if (avg < 16f && div > 2) { div--; avg = 30f; }
                 // At most about 30 frames a second.
                 long spare = 33 - (SystemClock.uptimeMillis() - frameStart);
                 if (spare > 0) sleep(spare);

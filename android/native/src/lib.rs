@@ -2,17 +2,45 @@
 //! (`com.pathforge.mobile.Native`). A handle is one `Runtime`, used from one thread at a time;
 //! the app's preview and the wallpaper each open their own. Scenes go back and forth as JSON, so
 //! the app edits them with Android's own JSON classes and only the drawing happens here.
+//!
+//! Frames are drawn on the phone's GPU (wgpu on Vulkan) where it can, sharing one GPU renderer
+//! between handles so its pipelines are built once, and on the CPU where it cannot: a frame the
+//! GPU fails is drawn again on the CPU, and from then on every handle stays on the CPU.
 
 use jni::objects::{JByteBuffer, JClass, JString};
 use jni::sys::{jboolean, jfloat, jfloatArray, jint, jlong, jstring, JNI_FALSE, JNI_TRUE};
 use jni::JNIEnv;
 use path_forge::runtime::Runtime;
 use path_forge::scene::{presets, Scene};
+use path_forge::world::gpu::{Gpu, GpuContext};
 use std::panic::{catch_unwind, AssertUnwindSafe};
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 
 /// The last thing that went wrong, for `lastError`.
 static LAST_ERROR: Mutex<String> = Mutex::new(String::new());
+
+/// The GPU renderer every handle shares, made on first use (None: no usable GPU).
+static GPU: OnceLock<Option<(Arc<Gpu>, String)>> = OnceLock::new();
+/// Set once the GPU has failed a frame: everything draws on the CPU from then on.
+static GPU_BROKEN: AtomicBool = AtomicBool::new(false);
+
+/// The shared GPU renderer and its adapter's name, making it on first call.
+fn gpu() -> Option<(Arc<Gpu>, String)> {
+    if GPU_BROKEN.load(Ordering::Relaxed) { return None; }
+    GPU.get_or_init(|| {
+        let made = catch_unwind(|| -> Result<(Arc<Gpu>, String), String> {
+            let ctx = GpuContext::headless()?;
+            let info = ctx.info.clone();
+            Ok((Arc::new(Gpu::new(ctx)?), info))
+        });
+        match made {
+            Ok(Ok(g)) => Some(g),
+            Ok(Err(e)) => { fail(format!("GPU unavailable: {e}")); None }
+            Err(_) => { fail("GPU unavailable: it failed while starting"); None }
+        }
+    }).clone()
+}
 
 fn fail(msg: impl Into<String>) { *LAST_ERROR.lock().unwrap_or_else(|e| e.into_inner()) = msg.into(); }
 
@@ -87,14 +115,34 @@ pub extern "system" fn Java_com_pathforge_mobile_Native_lastError(mut env: JNIEn
     jstr(&mut env, &e)
 }
 
-/// Open a scene (JSON; `base_dir` is where its files are, or empty). 0 on failure (see lastError).
+/// Start the GPU renderer (building its pipelines takes a moment): its adapter's name, or ""
+/// where there is none (see lastError).
 #[no_mangle]
-pub extern "system" fn Java_com_pathforge_mobile_Native_open(mut env: JNIEnv, _: JClass, json: JString, base_dir: JString) -> jlong {
+pub extern "system" fn Java_com_pathforge_mobile_Native_gpuInit(mut env: JNIEnv, _: JClass) -> jstring {
+    let name = gpu().map(|g| g.1).unwrap_or_default();
+    jstr(&mut env, &name)
+}
+
+/// Open a scene (JSON; `base_dir` is where its files are, or empty), drawn on the GPU when
+/// `use_gpu` and there is one. 0 on failure (see lastError).
+#[no_mangle]
+pub extern "system" fn Java_com_pathforge_mobile_Native_open(mut env: JNIEnv, _: JClass, json: JString, base_dir: JString, use_gpu: jboolean) -> jlong {
     guard(0, || {
         let (j, d) = (string(&mut env, &json)?, string(&mut env, &base_dir)?);
-        let rt = Runtime::from_json(&j, (!d.is_empty()).then(|| d.into()))?;
+        #[allow(unused_mut)]
+        let mut rt = Runtime::from_json(&j, (!d.is_empty()).then(|| d.into()))?;
+        if use_gpu == JNI_TRUE {
+            if let Some((g, _)) = gpu() { rt.set_gpu(Some(g)); }
+        }
         Ok(Box::into_raw(Box::new(rt)) as jlong)
     })
+}
+
+/// "gpu" or "cpu": which engine draws a handle's frames now.
+#[no_mangle]
+pub extern "system" fn Java_com_pathforge_mobile_Native_engine(mut env: JNIEnv, _: JClass, h: jlong) -> jstring {
+    let e = guard("cpu", || Ok(rt(h)?.engine()));
+    jstr(&mut env, e)
 }
 
 /// Swap the scene a handle draws.
@@ -140,7 +188,19 @@ pub extern "system" fn Java_com_pathforge_mobile_Native_render(env: JNIEnv, _: J
         let cap = env.get_direct_buffer_capacity(&buf).map_err(|e| e.to_string())?;
         // SAFETY: a direct buffer's memory stays put while Java holds it, as the caller does.
         let out = unsafe { std::slice::from_raw_parts_mut(ptr, cap) };
-        rt(h)?.render_into(distance, time, w as u32, hh as u32, out)?;
+        let r = rt(h)?;
+        if r.engine() == "gpu" {
+            if !GPU_BROKEN.load(Ordering::Relaxed) {
+                match catch_unwind(AssertUnwindSafe(|| r.render_into(distance, time, w as u32, hh as u32, out))) {
+                    Ok(Ok(())) => return Ok(JNI_TRUE),
+                    Ok(Err(e)) => fail(format!("GPU frame failed, drawing on the CPU: {e}")),
+                    Err(_) => fail("GPU frame failed, drawing on the CPU"),
+                }
+                GPU_BROKEN.store(true, Ordering::Relaxed);
+            }
+            r.set_gpu(None);
+        }
+        r.render_into(distance, time, w as u32, hh as u32, out)?;
         Ok(JNI_TRUE)
     })
 }
@@ -160,5 +220,20 @@ mod tests {
         rt.render_into(1.0, 0.5, 36, 64, &mut buf).unwrap();
         assert!(buf.chunks(4).all(|p| p[3] == 255), "every pixel opaque");
         assert!(preset_scene("No Such Place").is_none());
+    }
+
+    #[test]
+    fn the_shared_gpu_draws_what_the_cpu_draws() {
+        let Some((g, name)) = gpu() else { eprintln!("no GPU here, skipped"); return };
+        eprintln!("GPU: {name}");
+        let json = preset_scene("Sunset Pier").unwrap();
+        let (mut a, mut b) = (Runtime::from_json(&json, None).unwrap(), Runtime::from_json(&json, None).unwrap());
+        b.set_gpu(Some(g));
+        assert_eq!((a.engine(), b.engine()), ("cpu", "gpu"));
+        let (mut ca, mut cb) = (vec![0u8; 90 * 160 * 4], vec![0u8; 90 * 160 * 4]);
+        a.render_into(3.0, 1.0, 90, 160, &mut ca).unwrap();
+        b.render_into(3.0, 1.0, 90, 160, &mut cb).unwrap();
+        let worst = ca.iter().zip(&cb).map(|(x, y)| x.abs_diff(*y)).max().unwrap();
+        assert!(worst <= 4, "GPU and CPU differ by {worst}");
     }
 }

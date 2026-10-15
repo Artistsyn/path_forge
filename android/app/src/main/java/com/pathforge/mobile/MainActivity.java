@@ -65,6 +65,9 @@ public final class MainActivity extends Activity {
     private LinearLayout panel;
     private TextView title;
     private TextView speedLabel;
+    private TextView status;
+    /** The GPU's name once it has started, "" if there is none, null until then. */
+    private volatile String gpuName;
     private TextView showButton;
     private Ui.Chips skyChips, cloudChips;
     private final List<View> presetItems = new ArrayList<>();
@@ -114,6 +117,10 @@ public final class MainActivity extends Activity {
             return in;
         });
         setContentView(root);
+        if (Gpu.crashedLastTime(this)) toast("The GPU stopped PathForge last time, so it draws on the CPU now. You can switch back under Draw on.");
+        preview.setStats((engine, w, h, fps) -> ui.post(() -> status.setText(String.format(java.util.Locale.US,
+                "%s  ·  %d×%d  ·  %.0f fps", engine.equals("gpu") ? "GPU" + (gpuName == null || gpuName.isEmpty() ? "" : " " + gpuName) : "CPU", w, h, fps))));
+        if (Gpu.wanted(this)) work.execute(() -> gpuName = Native.gpuInit());
         sceneChanged();
         loadThumbs();
     }
@@ -154,6 +161,12 @@ public final class MainActivity extends Activity {
         head.addView(gap, new LinearLayout.LayoutParams(Ui.dp(this, 8), 1));
         head.addView(Ui.button(this, "Hide", false, v -> showPanel(false)));
         p.addView(head);
+        status = new TextView(this);
+        status.setTextColor(Ui.DIM);
+        status.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
+        status.setSingleLine(true);
+        status.setEllipsize(android.text.TextUtils.TruncateAt.END);
+        p.addView(status);
 
         // Everything else scrolls, so it fits a short screen.
         ScrollView scroll = new ScrollView(this);
@@ -214,6 +227,12 @@ public final class MainActivity extends Activity {
 
         body.addView(Ui.label(this, "Live wallpaper"));
         body.addView(new Ui.Chips(this, Look.QUALITIES, look.quality, i -> { look.quality = i; look.save(this); }).view);
+
+        body.addView(Ui.label(this, "Draw on"));
+        body.addView(new Ui.Chips(this, new String[]{"GPU (fast)", "CPU"}, Gpu.wanted(this) ? 0 : 1, i -> {
+            Gpu.setWanted(this, i == 0);
+            preview.reopen();
+        }).view);
 
         // What to do with it.
         LinearLayout actions = new LinearLayout(this);
@@ -312,7 +331,8 @@ public final class MainActivity extends Activity {
                 File f = new File(dir, "v" + v + "_" + i + ".png");
                 Bitmap b = f.exists() ? BitmapFactory.decodeFile(f.getPath()) : null;
                 if (b == null) {
-                    long hd = Native.open(Native.presetScene(presets[i]), "");
+                    // Frames this small are quicker on the CPU than a trip to the GPU and back.
+                    long hd = Native.open(Native.presetScene(presets[i]), "", false);
                     if (hd == 0) continue;
                     try {
                         if (!Native.render(hd, 0f, 0f, w, h, buf)) continue;
@@ -453,7 +473,7 @@ public final class MainActivity extends Activity {
         work.execute(() -> {
             Bitmap bmp = null;
             String err = null;
-            long h = Native.open(scene, "");
+            long h = Gpu.open(this, scene);
             if (h == 0) err = Native.lastError();
             else {
                 try {

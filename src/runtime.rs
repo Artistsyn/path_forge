@@ -92,6 +92,14 @@ impl Runtime {
         Ok(())
     }
 
+    /// Draw on a GPU renderer shared with other runtimes (its pipelines are made once), or on the
+    /// CPU with `None`.
+    #[cfg(feature = "gpu")]
+    pub fn set_gpu(&mut self, gpu: Option<std::sync::Arc<crate::world::gpu::Gpu>>) { self.renderer.set_gpu(gpu); }
+
+    /// Which engine draws this runtime's frames: "gpu" or "cpu".
+    pub fn engine(&self) -> &'static str { self.renderer.engine() }
+
     /// A journey file: the walk begins at its start stop.
     pub fn from_journey(path: impl AsRef<Path>) -> Result<Runtime, String> {
         let path = path.as_ref();

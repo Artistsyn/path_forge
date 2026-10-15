@@ -34,7 +34,12 @@ Android 10 or later on a 64-bit ARM phone (practically every phone since 2019).
   Balanced (540 px, 20 fps), Smooth (720 px, 30 fps); the GPU scales them to the screen.
 - **The preview adapts to the phone.** It renders a fraction of the screen's size, smaller on a
   slower phone, aiming for 20-30 frames a second, and stops when the app is in the background.
-- Rendering is on the CPU across all cores (the same renderer as the desktop's CPU path).
+- **It draws on the phone's GPU** (Vulkan, through the same wgpu renderer the desktop uses on its
+  GPU), sharing one GPU renderer between the preview, the wallpaper and stills so its shaders are
+  built once. The line under the scene's name says what is drawing, at what size and how fast.
+  Where the GPU cannot draw a frame (a phone with tighter limits), that frame and every one after
+  is drawn on the CPU instead, across all cores. If a GPU driver crashes the app outright, the next
+  start notices and switches to the CPU; **Draw on** switches by hand.
 
 ## Building it yourself
 

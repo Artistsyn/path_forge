@@ -36,7 +36,7 @@ final class Bake {
 
     /** Draw the loop of `scene` for a screen of sw x sh at `quality` into the frames file. */
     static void bake(Context c, String scene, int quality, int sw, int sh, Progress p) throws IOException {
-        long h = Native.open(scene, "");
+        long h = Gpu.open(c, scene);
         if (h == 0) throw new IOException(Native.lastError());
         try {
             float[] info = Native.info(h);
@@ -60,6 +60,7 @@ final class Bake {
                     if (p.cancelled()) throw new InterruptedIOException("cancelled");
                     // Frame i is i / frames of the way round the loop, in distance and in time.
                     if (!Native.render(h, len * i / frames, secs * i / frames, w, hh, buf)) throw new IOException(Native.lastError());
+                    if (i == 0) Gpu.rendered(c, h);
                     buf.rewind();
                     bmp.copyPixelsFromBuffer(buf);
                     buf.rewind();
