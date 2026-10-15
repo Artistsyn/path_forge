@@ -6,6 +6,7 @@ on:
   push:
     paths:
       - 'android/**'
+      - 'mobile/**'
       - 'src/**'
       - 'Cargo.toml'
       - 'Cargo.lock'

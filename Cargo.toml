@@ -5,9 +5,9 @@ edition = "2021"
 description = "Path / corridor environment GIF creator — PathForge 2.0 (Rust port of PathForgeLive.jsx)"
 
 [workspace]
-members = [".", "runtime", "android/native"]
+members = [".", "runtime", "mobile"]
 # `cargo build` at the top builds PathForge; `cargo build -p path_forge_runtime` the game library;
-# `android/native` is the phone app's library (built by android/build-native.sh).
+# `mobile` is the phone apps' library (built by android/build-native.sh and ios/build-native.sh).
 default-members = ["."]
 
 [[bin]]

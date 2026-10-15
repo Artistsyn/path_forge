@@ -47,6 +47,15 @@ final class PreviewView extends SurfaceView implements SurfaceHolder.Callback, R
 
     void setStats(Stats s) { stats = s; }
 
+    /** While editing: the whole frame shown in the top `fraction` of the view, below `top` pixels
+     *  (the status bar); 0 fills the view again. */
+    void setFitTop(float fraction, int top) {
+        fitTop = fraction;
+        fitInset = top;
+    }
+    private volatile float fitTop;
+    private volatile int fitInset;
+
     float distance() { return nowDistance; }
     float time() { return nowTime; }
 
@@ -165,7 +174,13 @@ final class PreviewView extends SurfaceView implements SurfaceHolder.Callback, R
             }
             if (c == null) return;
             try {
-                Frame.cover(c, b, c.getWidth(), c.getHeight(), paint, m);
+                float f = fitTop;
+                if (f > 0) {
+                    c.drawColor(android.graphics.Color.BLACK);
+                    Frame.fit(c, b, 0, fitInset, c.getWidth(), Math.round(c.getHeight() * f) - fitInset, paint, m);
+                } else {
+                    Frame.cover(c, b, c.getWidth(), c.getHeight(), paint, m);
+                }
             } finally {
                 holder.unlockCanvasAndPost(c);
             }

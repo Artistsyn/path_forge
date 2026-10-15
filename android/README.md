@@ -1,8 +1,8 @@
 # PathForge for Android
 
-The phone version of PathForge: pick a scene, give it a sunset or a mixed sky, set the pace, and
-make it your phone's wallpaper. The desktop app is unchanged; this is a separate app built from the
-same renderer (`android/native` wraps `path_forge::runtime` for Java).
+The phone version of PathForge: pick a scene, change anything about it, save your own, and
+make it your phone's wallpaper, with every setting the desktop has. The desktop app is unchanged; this is a separate app built from the
+same renderer (`mobile/` wraps `path_forge::runtime` for Java).
 
 ## Installing
 
@@ -14,13 +14,20 @@ Android 10 or later on a 64-bit ARM phone (practically every phone since 2019).
 
 ## Using it
 
-- **Scenes**: the strip shows every built-in preset. **Import** opens a scene file made on the
-  desktop (`.json`; copy it to the phone first). Scenes that use image files (kits, sprites) show
-  without those images.
-- **Sky**: leave it as designed, or turn it into a Golden, Fiery, Pastel or Dusk sunset (the sun is
-  brought down low; at dusk it has set). **Clouds**: as designed, or a mix of several kinds;
-  **Shuffle** deals another mix.
-- **Walking speed**: from a stroll to a run.
+- **Edit every setting** opens the editor: every setting of the scene, part by part (Sky, Path,
+  Sides, Walls, Ceiling, Light, Weather, Props, Lights, Set pieces, Particles, Ground cover, Camera,
+  Motion, Style; **All settings** adds Post, Canvas, seeds and the rest), as switches, sliders,
+  choices, colours, and lists you can add to, copy from and remove from. It is built from the same
+  description of the scene as the desktop studio's inspector (`path_forge::scene::form`), so new
+  settings appear here by themselves. Long-press a setting for what it does; **Undo** steps back.
+  The scene stays live above it.
+- **Save scene** keeps it as one of yours (★, first in the strip). Long-press one of yours to
+  rename, duplicate, export it to a file (to open on the desktop) or delete it; long-press a preset
+  to save a copy. **Import** opens a scene file made on the desktop (`.json`). Scenes that use image
+  files (kits, sprites) show without those images.
+- Quick changes without the editor: **Sunset** (Golden, Fiery, Pastel or Dusk, the sun brought down
+  low; at dusk it has set), **Clouds** (as designed, or a mix of kinds; **Shuffle** deals another)
+  and **Walking speed**. They change the scene itself, as the editor does.
 - **Set as wallpaper** draws the loop once and makes it a live wallpaper. **Still** sets this moment
   as the home screen, lock screen or both. **Save** puts it in Pictures/PathForge.
 - Tap the scene to hide the controls; **Edit** brings them back.

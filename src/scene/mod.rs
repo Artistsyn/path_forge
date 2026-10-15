@@ -6,6 +6,7 @@
 //! repeats fits in `motion.loop_length`, which makes every loop seamless by construction.
 
 pub mod presets;
+pub mod form;
 pub mod migrate;
 pub mod styles;
 pub mod remix;

@@ -36,6 +36,7 @@ import android.widget.LinearLayout;
 import android.widget.ProgressBar;
 import android.widget.ScrollView;
 import android.widget.SeekBar;
+import android.widget.EditText;
 import android.widget.TextView;
 import android.widget.Toast;
 
@@ -57,21 +58,27 @@ import java.util.concurrent.atomic.AtomicBoolean;
 /** The app: the scene walking past full screen, and under it a panel to pick a scene, give it a
  *  sunset or a mixed sky, set the pace, and make it the phone's wallpaper (live, or a still for the
  *  home and lock screens). Tap the scene to hide the panel. */
-public final class MainActivity extends Activity {
+public final class MainActivity extends Activity implements Editor.Host {
     private static final int PICK_SCENE = 1;
+    private static final int EXPORT_SCENE = 2;
 
     private Look look;
     private PreviewView preview;
     private LinearLayout panel;
+    private Editor editor;
     private TextView title;
-    private TextView speedLabel;
     private TextView status;
-    /** The GPU's name once it has started, "" if there is none, null until then. */
-    private volatile String gpuName;
+    private TextView speedLabel;
+    private SeekBar speedBar;
     private TextView showButton;
     private Ui.Chips skyChips, cloudChips;
-    private final List<View> presetItems = new ArrayList<>();
+    private LinearLayout strip;
+    private int bottomInset, topInset;
+    /** The strip's tiles: (name, one of yours?, its picture). */
+    private final List<Object[]> tiles = new ArrayList<>();
     private String[] presets = new String[0];
+    /** A scene waiting for the file it is to be exported into. */
+    private String exporting;
     private final Handler ui = new Handler(Looper.getMainLooper());
     private final ExecutorService work = Executors.newSingleThreadExecutor();
     private final ExecutorService thumbs = Executors.newSingleThreadExecutor(r -> {
@@ -79,6 +86,9 @@ public final class MainActivity extends Activity {
         t.setPriority(Thread.MIN_PRIORITY);
         return t;
     });
+    /** The GPU's name once it has started, "" if there is none, null until then. */
+    private volatile String gpuName;
+    private final Runnable applyEdit = () -> { look.save(this); preview.setScene(look.scene()); };
 
     @Override
     protected void onCreate(Bundle state) {
@@ -94,25 +104,36 @@ public final class MainActivity extends Activity {
         FrameLayout root = new FrameLayout(this);
         root.setBackgroundColor(Color.BLACK);
         preview = new PreviewView(this);
-        preview.setOnClickListener(v -> showPanel(panel.getVisibility() != View.VISIBLE));
+        preview.setOnClickListener(v -> { if (editor.view.getVisibility() != View.VISIBLE) showPanel(panel.getVisibility() != View.VISIBLE); });
         root.addView(preview, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
 
         panel = buildPanel();
-        FrameLayout.LayoutParams plp = new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.BOTTOM);
-        root.addView(panel, plp);
+        root.addView(panel, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.BOTTOM));
+
+        editor = new Editor(this, Native.form(), this);
+        editor.view.setVisibility(View.GONE);
+        int editorHeight = Math.round(getResources().getDisplayMetrics().heightPixels * 0.6f);
+        root.addView(editor.view, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, editorHeight, Gravity.BOTTOM));
 
         showButton = Ui.button(this, "Edit", false, v -> showPanel(true));
         showButton.setBackground(Ui.round(Ui.PANEL, Ui.dp(this, 22), Color.argb(110, 255, 255, 255), Ui.dp(this, 1)));
         showButton.setVisibility(View.GONE);
-        FrameLayout.LayoutParams slp = new FrameLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.BOTTOM | Gravity.END);
-        root.addView(showButton, slp);
+        root.addView(showButton, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.BOTTOM | Gravity.END));
 
         root.setOnApplyWindowInsetsListener((v, in) -> {
-            int bottom = Build.VERSION.SDK_INT >= 30 ? in.getInsets(WindowInsets.Type.systemBars()).bottom : in.getSystemWindowInsetBottom();
+            if (Build.VERSION.SDK_INT >= 30) {
+                android.graphics.Insets bars = in.getInsets(WindowInsets.Type.systemBars() | WindowInsets.Type.ime());
+                bottomInset = bars.bottom;
+                topInset = bars.top;
+            } else {
+                bottomInset = in.getSystemWindowInsetBottom();
+                topInset = in.getSystemWindowInsetTop();
+            }
             int p = Ui.dp(this, 16);
-            panel.setPadding(p, p, p, p + bottom);
+            panel.setPadding(p, p, p, p + bottomInset);
+            editor.view.setPadding(p, p, p, bottomInset);
             FrameLayout.LayoutParams lp = (FrameLayout.LayoutParams) showButton.getLayoutParams();
-            lp.setMargins(p, p, p, p + bottom);
+            lp.setMargins(p, p, p, p + bottomInset);
             showButton.setLayoutParams(lp);
             return in;
         });
@@ -121,8 +142,8 @@ public final class MainActivity extends Activity {
         preview.setStats((engine, w, h, fps) -> ui.post(() -> status.setText(String.format(java.util.Locale.US,
                 "%s  ·  %d×%d  ·  %.0f fps", engine.equals("gpu") ? "GPU" + (gpuName == null || gpuName.isEmpty() ? "" : " " + gpuName) : "CPU", w, h, fps))));
         if (Gpu.wanted(this)) work.execute(() -> gpuName = Native.gpuInit());
-        sceneChanged();
-        loadThumbs();
+        refreshStrip();
+        sceneChanged(true);
     }
 
     private void edgeToEdge() {
@@ -134,6 +155,12 @@ public final class MainActivity extends Activity {
         } else {
             w.getDecorView().setSystemUiVisibility(View.SYSTEM_UI_FLAG_LAYOUT_STABLE | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN | View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION);
         }
+    }
+
+    private View gap(int dp) {
+        View g = new View(this);
+        g.setLayoutParams(new LinearLayout.LayoutParams(Ui.dp(this, dp), 1));
+        return g;
     }
 
     private LinearLayout buildPanel() {
@@ -157,8 +184,7 @@ public final class MainActivity extends Activity {
         title.setEllipsize(android.text.TextUtils.TruncateAt.END);
         head.addView(title, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
         head.addView(Ui.button(this, "Import", false, v -> pickScene()));
-        View gap = new View(this);
-        head.addView(gap, new LinearLayout.LayoutParams(Ui.dp(this, 8), 1));
+        head.addView(gap(8));
         head.addView(Ui.button(this, "Hide", false, v -> showPanel(false)));
         p.addView(head);
         status = new TextView(this);
@@ -176,54 +202,54 @@ public final class MainActivity extends Activity {
         scroll.addView(body);
         DisplayMetrics dm = getResources().getDisplayMetrics();
         p.addView(scroll, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
-        scroll.setLayoutParams(new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
         scroll.post(() -> {
-            int max = (int) (dm.heightPixels * 0.42f);
+            int max = (int) (dm.heightPixels * 0.36f);
             if (scroll.getHeight() > max) scroll.setLayoutParams(new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, max));
         });
 
-        body.addView(Ui.label(this, "Scenes"));
-        HorizontalScrollView strip = new HorizontalScrollView(this);
-        strip.setHorizontalScrollBarEnabled(false);
-        LinearLayout row = new LinearLayout(this);
-        strip.addView(row);
-        for (int i = 0; i < presets.length; i++) row.addView(presetItem(i));
-        body.addView(strip);
+        body.addView(Ui.label(this, "Scenes  ·  long-press yours to rename, copy, export or delete"));
+        HorizontalScrollView sv = new HorizontalScrollView(this);
+        sv.setHorizontalScrollBarEnabled(false);
+        strip = new LinearLayout(this);
+        sv.addView(strip);
+        body.addView(sv);
 
-        body.addView(Ui.label(this, "Sky"));
-        skyChips = new Ui.Chips(this, Look.SKIES, look.sky, i -> { look.sky = i; sceneChanged(); });
+        body.addView(Ui.label(this, "Sunset"));
+        skyChips = new Ui.Chips(this, Look.SKIES, look.sky(), i -> {
+            if (!look.hasSky()) { toast("This scene has no sky (switch it on under Edit → Sky)"); skyChips.select(0); return; }
+            look.setSky(i);
+            sceneChanged(false);
+        });
         body.addView(skyChips.view);
 
         body.addView(Ui.label(this, "Clouds"));
         LinearLayout clouds = new LinearLayout(this);
         clouds.setGravity(Gravity.CENTER_VERTICAL);
-        cloudChips = new Ui.Chips(this, Look.CLOUDS, look.mixClouds ? 1 : 0, i -> { look.mixClouds = i == 1; sceneChanged(); });
+        cloudChips = new Ui.Chips(this, Look.CLOUDS, look.mixed() ? 1 : 0, i -> { look.setMixed(i == 1, -1); sceneChanged(false); });
         clouds.addView(cloudChips.view);
         clouds.addView(Ui.button(this, "Shuffle", false, v -> {
-            look.mixClouds = true;
-            look.cloudSeed = (int) (Math.random() * 9999);
+            look.setMixed(true, (int) (Math.random() * 9999));
             cloudChips.select(1);
-            sceneChanged();
+            sceneChanged(false);
         }));
         body.addView(clouds);
 
         speedLabel = Ui.label(this, "");
         body.addView(speedLabel);
-        SeekBar speed = new SeekBar(this);
-        speed.setMax(35);
-        speed.setProgress(Math.round((look.speed - 0.25f) / 0.05f));
-        speed.getProgressDrawable().setTint(Ui.ACCENT);
-        speed.getThumb().setTint(Ui.ACCENT);
-        speed.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
+        speedBar = new SeekBar(this);
+        speedBar.setMax(115);
+        speedBar.getProgressDrawable().setTint(Ui.ACCENT);
+        speedBar.getThumb().setTint(Ui.ACCENT);
+        speedBar.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
             @Override public void onProgressChanged(SeekBar s, int v, boolean user) {
-                look.speed = 0.25f + v * 0.05f;
+                if (!user) return;
+                look.setSpeed(Math.round((0.5 + v * 0.1) * 10) / 10.0);
                 showSpeed();
             }
             @Override public void onStartTrackingTouch(SeekBar s) { }
-            @Override public void onStopTrackingTouch(SeekBar s) { sceneChanged(); }
+            @Override public void onStopTrackingTouch(SeekBar s) { sceneChanged(false); }
         });
-        body.addView(speed, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, Ui.dp(this, 40)));
-        showSpeed();
+        body.addView(speedBar, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, Ui.dp(this, 40)));
 
         body.addView(Ui.label(this, "Live wallpaper"));
         body.addView(new Ui.Chips(this, Look.QUALITIES, look.quality, i -> { look.quality = i; look.save(this); }).view);
@@ -231,24 +257,49 @@ public final class MainActivity extends Activity {
         body.addView(Ui.label(this, "Draw on"));
         body.addView(new Ui.Chips(this, new String[]{"GPU (fast)", "CPU"}, Gpu.wanted(this) ? 0 : 1, i -> {
             Gpu.setWanted(this, i == 0);
+            if (i == 0 && (gpuName == null || gpuName.isEmpty())) work.execute(() -> gpuName = Native.gpuInit());
             preview.reopen();
         }).view);
 
+        // Every setting, and keeping it.
+        LinearLayout edit = new LinearLayout(this);
+        edit.setPadding(0, Ui.dp(this, 14), 0, 0);
+        edit.addView(Ui.button(this, "Edit every setting", false, v -> openEditor()), new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1.4f));
+        edit.addView(gap(8));
+        edit.addView(Ui.button(this, "Save scene", false, v -> askSave(look.name, null)), new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        p.addView(edit);
+
         // What to do with it.
         LinearLayout actions = new LinearLayout(this);
-        actions.setPadding(0, Ui.dp(this, 16), 0, 0);
+        actions.setPadding(0, Ui.dp(this, 8), 0, 0);
         actions.addView(Ui.button(this, "Set as wallpaper", true, v -> setLive()), new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1.4f));
-        View g1 = new View(this);
-        actions.addView(g1, new LinearLayout.LayoutParams(Ui.dp(this, 8), 1));
+        actions.addView(gap(8));
         actions.addView(Ui.button(this, "Still", false, v -> askStill()), new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 0.8f));
-        View g2 = new View(this);
-        actions.addView(g2, new LinearLayout.LayoutParams(Ui.dp(this, 8), 1));
-        actions.addView(Ui.button(this, "Save", false, v -> saveImage()), new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 0.8f));
+        actions.addView(gap(8));
+        actions.addView(Ui.button(this, "Image", false, v -> saveImage()), new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 0.8f));
         p.addView(actions);
         return p;
     }
 
-    private View presetItem(int i) {
+    // ── Scenes: yours, then the presets ──────────────────────────────────
+
+    private void refreshStrip() {
+        strip.removeAllViews();
+        tiles.clear();
+        for (String n : Library.names(this)) strip.addView(tile(n, true));
+        if (!tiles.isEmpty()) {
+            View line = new View(this);
+            line.setBackgroundColor(Color.argb(60, 255, 255, 255));
+            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(Ui.dp(this, 1), Ui.dp(this, 120));
+            lp.rightMargin = Ui.dp(this, 10);
+            strip.addView(line, lp);
+        }
+        for (String n : presets) strip.addView(tile(n, false));
+        highlight();
+        loadThumbs();
+    }
+
+    private View tile(String name, boolean mine) {
         LinearLayout item = new LinearLayout(this);
         item.setOrientation(LinearLayout.VERTICAL);
         item.setGravity(Gravity.CENTER_HORIZONTAL);
@@ -258,38 +309,168 @@ public final class MainActivity extends Activity {
         img.setClipToOutline(true);
         img.setPadding(Ui.dp(this, 2), Ui.dp(this, 2), Ui.dp(this, 2), Ui.dp(this, 2));
         item.addView(img, new LinearLayout.LayoutParams(w, Math.round(w * 16f / 9f)));
-        TextView name = new TextView(this);
-        name.setText(presets[i]);
-        name.setTextColor(Ui.TEXT);
-        name.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11);
-        name.setGravity(Gravity.CENTER_HORIZONTAL);
-        name.setMaxLines(2);
-        item.addView(name, new LinearLayout.LayoutParams(w, ViewGroup.LayoutParams.WRAP_CONTENT));
+        TextView label = new TextView(this);
+        label.setText(mine ? "★ " + name : name);
+        label.setTextColor(Ui.TEXT);
+        label.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11);
+        label.setGravity(Gravity.CENTER_HORIZONTAL);
+        label.setMaxLines(2);
+        item.addView(label, new LinearLayout.LayoutParams(w, ViewGroup.LayoutParams.WRAP_CONTENT));
         LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
         lp.rightMargin = Ui.dp(this, 10);
         item.setLayoutParams(lp);
-        item.setTag(img);
         item.setOnClickListener(v -> {
-            String s = Native.presetScene(presets[i]);
+            String s = mine ? Library.load(this, name) : Native.presetScene(name);
             if (s == null) return;
-            look.name = presets[i];
-            look.base = s;
-            sceneChanged();
+            look.name = name;
+            look.mine = mine;
+            look.scene = s;
+            sceneChanged(true);
         });
-        presetItems.add(item);
+        item.setOnLongClickListener(v -> { sceneMenu(name, mine); return true; });
+        tiles.add(new Object[]{name, mine, img});
         return item;
     }
 
-    private void showSpeed() { speedLabel.setText(String.format(java.util.Locale.US, "Walking speed  %.2f×", look.speed)); }
+    private void highlight() {
+        for (Object[] t : tiles) {
+            boolean on = t[0].equals(look.name) && (Boolean) t[1] == look.mine;
+            ((ImageView) t[2]).setBackground(Ui.round(on ? Ui.ACCENT : Color.argb(30, 255, 255, 255), Ui.dp(this, 10), 0, 0));
+        }
+    }
 
-    /** The scene or a change to it: save it, show it. */
-    private void sceneChanged() {
+    private void sceneMenu(String name, boolean mine) {
+        if (!mine) {
+            new AlertDialog.Builder(this).setTitle(name).setItems(new String[]{"Save a copy as one of yours"}, (d, i) -> {
+                String s = Native.presetScene(name);
+                if (s != null) askSave(name + " (mine)", s);
+            }).show();
+            return;
+        }
+        new AlertDialog.Builder(this).setTitle(name).setItems(new String[]{"Rename", "Duplicate", "Export to a file", "Delete"}, (d, i) -> {
+            String s = Library.load(this, name);
+            switch (i) {
+                case 0: askName("Rename", name, to -> {
+                    if (Library.exists(this, to)) { toast("There is already a scene called " + to); return; }
+                    if (!Library.rename(this, name, to)) { toast("Could not rename it"); return; }
+                    String renamed = named(Library.load(this, to), to);
+                    if (renamed != null) Library.save(this, to, renamed);
+                    if (look.mine && look.name.equals(name)) { look.name = to; if (renamed != null) look.scene = renamed; sceneChanged(false); }
+                    refreshStrip();
+                }); break;
+                case 1: if (s != null) askSave(name + " copy", s); break;
+                case 2: if (s != null) exportScene(name, s); break;
+                default:
+                    new AlertDialog.Builder(this).setMessage("Delete " + name + "?").setPositiveButton("Delete", (dd, w) -> {
+                        Library.delete(this, name);
+                        if (look.mine && look.name.equals(name)) look.mine = false;
+                        refreshStrip();
+                        sceneChanged(false);
+                    }).setNegativeButton("Cancel", null).show();
+            }
+        }).show();
+    }
+
+    interface Named { void name(String n); }
+
+    private void askName(String title, String start, Named then) {
+        EditText e = new EditText(this);
+        e.setSingleLine(true);
+        e.setText(start);
+        e.setSelectAllOnFocus(true);
+        FrameLayout box = new FrameLayout(this);
+        int p = Ui.dp(this, 20);
+        box.setPadding(p, p / 2, p, 0);
+        box.addView(e);
+        new AlertDialog.Builder(this).setTitle(title).setView(box).setPositiveButton("OK", (d, w) -> {
+            String n = e.getText().toString().trim();
+            if (n.isEmpty()) { toast("It needs a name"); return; }
+            then.name(n);
+        }).setNegativeButton("Cancel", null).show();
+        e.requestFocus();
+    }
+
+    /** `scene` with its name set to `name`. */
+    private static String named(String scene, String name) {
+        if (scene == null) return null;
+        try {
+            JSONObject o = new JSONObject(scene);
+            o.put("name", name);
+            return o.toString();
+        } catch (JSONException e) {
+            return scene;
+        }
+    }
+
+    /** Keep `scene` (the current one when null) as one of yours, asking for its name. */
+    private void askSave(String suggested, String scene) {
+        askName("Save scene as", suggested, n -> {
+            Runnable save = () -> {
+                String s = named(scene == null ? look.scene() : scene, n);
+                if (!Library.save(this, n, s)) { toast("Could not save it"); return; }
+                look.name = n;
+                look.mine = true;
+                look.scene = s;
+                sceneChanged(true);
+                refreshStrip();
+                toast("Saved " + n);
+            };
+            boolean same = look.mine && look.name.equals(n) && scene == null;
+            if (Library.exists(this, n) && !same) {
+                new AlertDialog.Builder(this).setMessage("Replace your scene " + n + "?").setPositiveButton("Replace", (d, w) -> save.run()).setNegativeButton("Cancel", null).show();
+            } else save.run();
+        });
+    }
+
+    private void exportScene(String name, String scene) {
+        exporting = scene;
+        Intent i = new Intent(Intent.ACTION_CREATE_DOCUMENT);
+        i.addCategory(Intent.CATEGORY_OPENABLE);
+        i.setType("application/json");
+        i.putExtra(Intent.EXTRA_TITLE, name + ".json");
+        try { startActivityForResult(i, EXPORT_SCENE); } catch (ActivityNotFoundException e) { toast("No file picker on this phone"); }
+    }
+
+    // ── The editor ───────────────────────────────────────────────────────
+
+    private void openEditor() {
+        editor.load(look.scene());
+        panel.setVisibility(View.GONE);
+        showButton.setVisibility(View.GONE);
+        editor.view.setVisibility(View.VISIBLE);
+        preview.setFitTop(0.4f, topInset);
+    }
+
+    @Override
+    public void changed(String scene) {
+        look.scene = scene;
+        ui.removeCallbacks(applyEdit);
+        ui.postDelayed(applyEdit, 120);
+    }
+
+    @Override
+    public void done() {
+        ui.removeCallbacks(applyEdit);
+        applyEdit.run();
+        editor.view.setVisibility(View.GONE);
+        preview.setFitTop(0, 0);
+        showPanel(true);
+        sceneChanged(true);
+        if (look.mine) toast("Changed. Save scene keeps the changes in " + look.name);
+    }
+
+    private void showSpeed() { speedLabel.setText(String.format(java.util.Locale.US, "Walking speed  %.1f m/s", look.speed())); }
+
+    /** The scene or a change to it: save it, show it, and (when `controls`) set the controls to it. */
+    private void sceneChanged(boolean controls) {
         look.save(this);
-        title.setText(look.name);
-        for (int i = 0; i < presetItems.size(); i++) {
-            ImageView img = (ImageView) presetItems.get(i).getTag();
-            boolean on = presets[i].equals(look.name);
-            img.setBackground(Ui.round(on ? Ui.ACCENT : Color.argb(30, 255, 255, 255), Ui.dp(this, 10), 0, 0));
+        title.setText(look.mine ? "★ " + look.name : look.name);
+        highlight();
+        if (controls) {
+            skyChips.select(look.sky());
+            cloudChips.select(look.mixed() ? 1 : 0);
+            speedBar.setProgress((int) Math.round((look.speed() - 0.5) / 0.1));
+            showSpeed();
         }
         preview.setScene(look.scene());
     }
@@ -301,11 +482,13 @@ public final class MainActivity extends Activity {
 
     @Override
     public void onBackPressed() {
-        if (panel.getVisibility() != View.VISIBLE) showPanel(true); else super.onBackPressed();
+        if (editor.view.getVisibility() == View.VISIBLE) done();
+        else if (panel.getVisibility() != View.VISIBLE) showPanel(true);
+        else super.onBackPressed();
     }
 
     @Override protected void onResume() { super.onResume(); preview.resume(); }
-    @Override protected void onPause() { preview.pause(); super.onPause(); }
+    @Override protected void onPause() { preview.pause(); look.save(this); super.onPause(); }
 
     @Override
     protected void onDestroy() {
@@ -316,7 +499,8 @@ public final class MainActivity extends Activity {
 
     // ── Thumbnails ───────────────────────────────────────────────────────
 
-    /** A small first frame of every preset, made once per version of the app and kept. */
+    /** A small first frame of every scene in the strip, made once and kept (presets per version
+     *  of the app, yours per save). */
     private void loadThumbs() {
         long version;
         try { version = getPackageManager().getPackageInfo(getPackageName(), 0).getLongVersionCode(); } catch (Exception e) { version = 0; }
@@ -324,15 +508,21 @@ public final class MainActivity extends Activity {
         //noinspection ResultOfMethodCallIgnored
         dir.mkdirs();
         final long v = version;
+        final List<Object[]> todo = new ArrayList<>(tiles);
         thumbs.execute(() -> {
             int w = 90, h = 160;
             ByteBuffer buf = ByteBuffer.allocateDirect(w * h * 4);
-            for (int i = 0; i < presets.length; i++) {
-                File f = new File(dir, "v" + v + "_" + i + ".png");
+            for (Object[] t : todo) {
+                String name = (String) t[0];
+                boolean mine = (Boolean) t[1];
+                String key = mine ? "mine_" + Integer.toHexString(name.hashCode()) + "_" + Library.modified(this, name) : "v" + v + "_" + Integer.toHexString(name.hashCode());
+                File f = new File(dir, key + ".png");
                 Bitmap b = f.exists() ? BitmapFactory.decodeFile(f.getPath()) : null;
                 if (b == null) {
+                    String json = mine ? Library.load(this, name) : Native.presetScene(name);
+                    if (json == null) continue;
                     // Frames this small are quicker on the CPU than a trip to the GPU and back.
-                    long hd = Native.open(Native.presetScene(presets[i]), "", false);
+                    long hd = Native.open(json, "", false);
                     if (hd == 0) continue;
                     try {
                         if (!Native.render(hd, 0f, 0f, w, h, buf)) continue;
@@ -346,8 +536,7 @@ public final class MainActivity extends Activity {
                     try (FileOutputStream out = new FileOutputStream(f)) { b.compress(Bitmap.CompressFormat.PNG, 100, out); } catch (IOException ignored) { }
                 }
                 final Bitmap fb = b;
-                final int k = i;
-                ui.post(() -> ((ImageView) presetItems.get(k).getTag()).setImageBitmap(fb));
+                ui.post(() -> ((ImageView) t[2]).setImageBitmap(fb));
             }
         });
     }
@@ -548,8 +737,24 @@ public final class MainActivity extends Activity {
     @Override
     protected void onActivityResult(int request, int result, Intent data) {
         super.onActivityResult(request, result, data);
-        if (request != PICK_SCENE || result != RESULT_OK || data == null || data.getData() == null) return;
+        if (result != RESULT_OK || data == null || data.getData() == null) return;
         Uri uri = data.getData();
+        if (request == EXPORT_SCENE) {
+            final String scene = exporting;
+            exporting = null;
+            if (scene == null) return;
+            work.execute(() -> {
+                try (OutputStream out = getContentResolver().openOutputStream(uri)) {
+                    if (out == null) throw new IOException("no stream");
+                    out.write(scene.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+                    ui.post(() -> toast("Exported. Open it in PathForge on the desktop."));
+                } catch (IOException e) {
+                    ui.post(() -> toast("Could not export it: " + e.getMessage()));
+                }
+            });
+            return;
+        }
+        if (request != PICK_SCENE) return;
         work.execute(() -> {
             String json;
             try { json = Look.read(getContentResolver().openInputStream(uri)); } catch (IOException | RuntimeException e) { json = null; }
@@ -565,9 +770,10 @@ public final class MainActivity extends Activity {
             final String n = name;
             ui.post(() -> {
                 look.name = n;
-                look.base = scene;
-                sceneChanged();
-                toast("Imported " + n + " (scenes that use image files show without them)");
+                look.mine = false;
+                look.scene = scene;
+                sceneChanged(true);
+                toast("Imported " + n + ". Save scene keeps it with yours. (Scenes that use image files show without them.)");
             });
         });
     }

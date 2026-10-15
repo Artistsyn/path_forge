@@ -2467,7 +2467,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "path_forge_android"
+name = "path_forge_mobile"
 version = "0.1.0"
 dependencies = [
  "jni 0.21.1",

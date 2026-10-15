@@ -2,7 +2,7 @@ package com.pathforge.mobile;
 
 import java.nio.ByteBuffer;
 
-/** PathForge's renderer (android/native, libpathforge.so). Scenes are JSON; a handle is one scene
+/** PathForge's renderer (mobile/, libpathforge.so). Scenes are JSON; a handle is one scene
  *  being drawn, used from one thread at a time. */
 final class Native {
     static { System.loadLibrary("pathforge"); }
@@ -13,6 +13,8 @@ final class Native {
     static native String presetNames();
     /** A preset's scene, or null. */
     static native String presetScene(String name);
+    /** Every scene setting as an editor builds itself from it, as JSON (see scene::form::form). */
+    static native String form();
     /** A scene file read as the desktop reads it (older formats converted), or null (see lastError). */
     static native String normalize(String json);
     static native String lastError();
