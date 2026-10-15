@@ -1311,6 +1311,10 @@ impl WorldRenderer {
         }
 
         prof.mark("sky");
+        // The sky as it is before props are drawn over it, for reflections of the sky behind them.
+        let sky_under_props = (!on_gpu && refl.iter().any(|r| r.r >= 0.002)).then(|| hdr.clone());
+        #[cfg(feature = "gpu")]
+        if let Some((f, has, _)) = gf.as_mut() { if has.reflects { f.keep_sky(); } }
         // Billboards far to near.
         bills.sort_by(|a, b| b.z.partial_cmp(&a.z).unwrap_or(std::cmp::Ordering::Equal));
         let crisp = px > 1;
@@ -1476,7 +1480,7 @@ impl WorldRenderer {
 
         // Reflections in glossy floors, now that everything they could show is drawn.
         if !splat_gpu && refl.iter().any(|r| r.r >= 0.002) {
-            reflect_pass(&ctxs[0], &gbuf, &refl, &mut hdr);
+            reflect_pass(&ctxs[0], &gbuf, &refl, sky_under_props.as_deref(), &mut hdr);
         }
         prof.mark("reflect");
         // The air: mist over everything low, then light scattered in it.
@@ -3612,13 +3616,36 @@ impl ColumnBlur {
     }
 }
 
+/// How much nearer than the ray (a row below) something may be and still be what it meets: a
+/// fraction of the ray's depth, and metres (`reflect.wgsl` uses the same).
+const RAY_NEAR: f32 = 0.85;
+const RAY_SLACK: f32 = 0.3;
+
+/// Whether a pixel is drawn after the sky (props, lights, grass), so the sky is under it.
+fn drawn_over_sky(gid: u8) -> bool { gid == id::PROP || gid == id::FIXTURE || gid == id::TUFT }
+
+/// The sky under the props at row `r0` of column `x`, smeared along the column over `spread`
+/// rows by five taps weighted 1, 2, 3, 2, 1.
+fn sky_under(under: &[[f32; 3]], w: usize, h: usize, x: usize, r0: f32, spread: f32) -> [f32; 3] {
+    let mut c = [0.0f32; 3];
+    for (k, wt) in [(-1.0f32, 1.0f32), (-0.5, 2.0), (0.0, 3.0), (0.5, 2.0), (1.0, 1.0)] {
+        let r = (r0 + k * spread).round().clamp(0.0, h as f32 - 1.0) as usize;
+        c = add3(c, scale3(under[r * w + x], wt / 9.0));
+    }
+    c
+}
+
 /// Mirror reflections on glossy floors, traced against the finished frame. For a level camera the
 /// ray reflected off a flat floor stays in its pixel's column, and its depth at each row has a
 /// closed form: from a floor point at depth d_w seen by an eye h above it, the reflected ray reaches
 /// row r at depth 2 d_w / (1 + k), with k = (r - horizon) d_w / (f h). The first row where the frame
 /// shows something nearer than the ray is what the floor reflects. A camera-facing card crossed this
 /// way is hit exactly where the ray meets it.
-fn reflect_pass(ctx: &Ctx, gbuf: &[GPixel], refl: &[Refl], hdr: &mut [[f32; 3]]) {
+///
+/// Something much nearer than the ray (by more than `RAY_NEAR` and `RAY_SLACK`) is not a hit: the
+/// ray passes behind it. Where the mirrored sky is hidden behind a prop, `under` (the frame as it
+/// was before props were drawn) gives the sky there.
+fn reflect_pass(ctx: &Ctx, gbuf: &[GPixel], refl: &[Refl], under: Option<&[[f32; 3]]>, hdr: &mut [[f32; 3]]) {
     let v = &ctx.view;
     let (w, h) = (v.width, v.height);
     let (hz, f) = (v.horizon_px, v.focal_px);
@@ -3665,6 +3692,10 @@ fn reflect_pass(ctx: &Ctx, gbuf: &[GPixel], refl: &[Refl], hdr: &mut [[f32; 3]])
             // falls to 0.001); "z nearer than the ray" is tested as z (1 + k) <= 2 dw, without dividing.
             let kr = dw / (f * eye);
             let near_ray = |z: f32, r: usize| { let k1 = 1.0 + (r as f32 + 0.5 - hz) * kr; k1 <= 0.001 || z * k1 <= 2.0 * dw };
+            // The ray only ever gets further from the camera, so it meets nothing nearer than it
+            // was a row below. Something well in front of that (a palm's fronds or a lantern
+            // hanging over distant water) is only in the way on screen: the ray passes behind it.
+            let on_ray = |z: f32, r: usize| (z + RAY_SLACK) * (1.0 + (r as f32 + 1.5 - hz) * kr) >= 2.0 * RAY_NEAR * dw;
             let (col, c8, c64) = (&depth[xs * h..(xs + 1) * h], &min8[xs * nb8..(xs + 1) * nb8], &min64[xs * nb64..(xs + 1) * nb64]);
             let r_inf = 2.0 * hz - yc;
             let r_min = r_inf.max(0.0).ceil() as usize;
@@ -3677,7 +3708,7 @@ fn reflect_pass(ctx: &Ctx, gbuf: &[GPixel], refl: &[Refl], hdr: &mut [[f32; 3]])
                 let top8 = ru / 8 * 8;
                 if top8 >= r_min && !near_ray(c8[ru / 8], top8) { r = top8 as isize - 1; continue; }
                 let z = col[ru];
-                if z.is_finite() && near_ray(z, ru) { hit = Some(ru); break; }
+                if z.is_finite() && near_ray(z, ru) && on_ray(z, ru) { hit = Some(ru); break; }
                 r -= 1;
             }
             let tap = |r0: f32| -> [f32; 3] {
@@ -3687,13 +3718,20 @@ fn reflect_pass(ctx: &Ctx, gbuf: &[GPixel], refl: &[Refl], hdr: &mut [[f32; 3]])
                 let spread = rf.rough * (yc - r0).max(0.0) * 0.25;
                 sums.triangle(xs, r0.round() as i64, spread.round() as i64)
             };
+            let sky_row = (r_inf as usize).min(h - 1) * w + xs;
             let col = match hit {
                 Some(rh) => tap(rh as f32),
-                None if r_inf >= 0.0 && gbuf[(r_inf as usize).min(h - 1) * w + xs].id == id::NONE => {
+                None if r_inf >= 0.0 && gbuf[sky_row].id == id::NONE => {
                     // Nothing in the way: the sky, mirrored with its moon, stars and clouds. Fade to
                     // the plain sky colour where the mirror row leaves the top of the frame.
                     let k = smoothstep(0.0, 16.0, r_inf);
                     mix3(rf.env, tap(r_inf), k)
+                }
+                None if r_inf >= 0.0 && drawn_over_sky(gbuf[sky_row].id) && under.is_some() => {
+                    // A prop stands in front of the mirrored sky on screen: the sky as it was
+                    // before the props were drawn, so the moon's path on the water runs on unbroken.
+                    let k = smoothstep(0.0, 16.0, r_inf);
+                    mix3(rf.env, sky_under(under.unwrap(), w, h, xs, r_inf, rf.rough * (yc - r_inf) * 0.25), k)
                 }
                 None => rf.env,
             };
@@ -5302,7 +5340,7 @@ mod tests {
             }
         }
         let mut out = src.clone();
-        reflect_pass(&ctx, &gbuf, &refl, &mut out);
+        reflect_pass(&ctx, &gbuf, &refl, None, &mut out);
         let x = 30;
         for k in 2..((base_row - top_row) as usize - 2) {
             let below = (base_row + k as f32) as usize;
@@ -5315,6 +5353,64 @@ mod tests {
         // Beside the card, only sky.
         let side = (base_row + 5.0) as usize;
         assert!(out[side * w + 5][1] > 0.95 && out[side * w + 5][0] < 0.05);
+    }
+
+    #[test]
+    fn water_beyond_a_near_prop_does_not_reflect_it() {
+        // A red card hangs 3 m ahead high over still water (a palm's fronds, a lantern), green sky
+        // behind it. Water further off than the card cannot see it in its mirror: what the card
+        // hides on screen there is only the sky, taken from the frame before props were drawn.
+        let mut s = preset("Forest Path");
+        s.camera.horizon = 0.5;
+        let (w, h) = (60usize, 200usize);
+        let mut r = WorldRenderer::default();
+        let view = View::new(&s, w, h);
+        let (hz, f, eye) = (view.horizon_px, view.focal_px, view.eye_height);
+        let ctx = Ctx {
+            scene: &s, view: view.clone(), loop_len: 24.0, tphase: 0.0, scroll: 0.0, far: 320.0,
+            path_tex: r.textures.get(&s.path.material), verge_tex: r.textures.get(&s.verge.material),
+            wall_tex: r.textures.get(&s.walls.material), ceil_tex: r.textures.get(&s.ceiling.material),
+            path_tile: 1.0, verge_tile: 1.0, wall_tile: 1.0, ceil_tile: 1.0,
+            bridge: None, fork: None, deck_tex: r.textures.get(&s.path.bridge.deck), bottom_tex: r.textures.get(&s.verge.material),
+            deck_tile: 1.0, bottom_tile: 1.0, ambient: [0.0; 3],
+            sky_lights: vec![], lights: vec![], fog: None, fog_col: [0.0; 3], void_lin: [0.0; 3], realm: 0, bounds: None, facade: None, opening: None, portal: None, front: None, verge_beyond: None, gain: 1.0, wx: weather::Wx::default(), water: None, cover: Vec::new(),
+        };
+        let zc = 3.0f32;
+        let mut gbuf = vec![raster::GPixel::EMPTY; w * h];
+        let mut under = vec![[0.0f32, 1.0, 0.0]; w * h];
+        let mut refl = vec![Refl::default(); w * h];
+        for y in 0..h {
+            let yc = y as f32 + 0.5;
+            for x in 0..w {
+                let i = y * w + x;
+                if yc > hz + 0.5 {
+                    let d = f * eye / (yc - hz);
+                    gbuf[i] = raster::GPixel { depth: d, id: id::GROUND, x: 0.0, y: 0.0, d, realm: 0, pad: 0 };
+                    under[i] = [0.0, 0.0, 1.0];
+                    refl[i] = Refl { r: 1.0, env: [0.0, 0.0, 1.0], rough: 0.0, sx: 0.0 };
+                }
+            }
+        }
+        let mut src = under.clone();
+        for y in 0..(hz - 10.0) as usize {
+            for x in 20..40 {
+                gbuf[y * w + x] = raster::GPixel { depth: zc, id: id::PROP, x: 0.0, y: eye + (hz - y as f32 - 0.5) * zc / f, d: zc, realm: 0, pad: 0 };
+                src[y * w + x] = [1.0, 0.0, 0.0];
+            }
+        }
+        let mut out = src.clone();
+        reflect_pass(&ctx, &gbuf, &refl, Some(&under), &mut out);
+        let x = 30;
+        let mut checked = 0;
+        for y in (hz + 1.0) as usize..h {
+            if gbuf[y * w + x].depth < zc * 1.2 { continue; }
+            // Only rows that mirror the sky inside the frame (the rest fade to the assumed sky).
+            if 2.0 * hz - (y as f32 + 0.5) < 16.0 { continue; }
+            let c = out[y * w + x];
+            assert!(c[0] < 0.05 && c[1] > 0.95, "row {y} (water {:.1} m off) should mirror the sky behind the card, not the card: {c:?}", gbuf[y * w + x].depth);
+            checked += 1;
+        }
+        assert!(checked > 10, "too few rows checked: {checked}");
     }
 
     #[test]
@@ -5365,7 +5461,7 @@ mod tests {
                     }
                 }
             }
-            reflect_pass(&ctx, &gbuf, &refl, &mut out);
+            reflect_pass(&ctx, &gbuf, &refl, None, &mut out);
             crop(&out, bw, v.left, v.top, w, h)
         };
         let guarded = run(frame.guarded(gl, gt));

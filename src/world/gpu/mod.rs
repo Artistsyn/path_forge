@@ -382,6 +382,8 @@ struct Sized {
     racc: wgpu::Buffer,
     /// The reflection pass's per-column tables.
     q2s: wgpu::Buffer, mins: wgpu::Buffer, ends: wgpu::Buffer, blocks: wgpu::Buffer,
+    /// The frame as it was before props were drawn (`keep_sky`): the sky behind them.
+    under: wgpu::Buffer,
     read: wgpu::Buffer,
 }
 
@@ -662,7 +664,7 @@ impl Gpu {
         };
         let reflect = {
             let layout = d.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                label: Some("reflect"), entries: &[world_uniform(0), storage(1, true), storage(2, false), storage(3, true), storage(4, false), storage(5, false), storage(6, false), storage(7, false)],
+                label: Some("reflect"), entries: &[world_uniform(0), storage(1, true), storage(2, false), storage(3, true), storage(4, false), storage(5, false), storage(6, false), storage(7, false), storage(8, true)],
             });
             let pl = d.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: Some("reflect"), bind_group_layouts: &[&layout], push_constant_ranges: &[] });
             let m = ctx.module("reflect.wgsl", include_str!("reflect.wgsl"))?;
@@ -739,6 +741,7 @@ impl Gpu {
                 mins: self.buffer("column minima", (w * (h.div_ceil(8) + h.div_ceil(64)) * 4) as u64, st),
                 ends: self.buffer("column ends", (w * 12 * 4) as u64, st),
                 blocks: self.buffer("column blocks", (w * h.div_ceil(64) * 3 * 2 * 8) as u64, st),
+                under: self.buffer("sky under props", n * 12, st),
                 read: self.buffer("readback", n * 64, U::MAP_READ | U::COPY_DST),
             });
         }
@@ -1146,6 +1149,14 @@ impl<'g> Frame<'g> {
         p.dispatch_workgroups(gx, gy, 1);
     }
 
+    /// Keep the frame as it is now, sky drawn and props not yet, for `reflect` to find the sky
+    /// behind props.
+    pub fn keep_sky(&mut self) {
+        let (hdr, under) = (self.bufs().hdr.clone(), self.bufs().under.clone());
+        let len = (self.n() * 12) as u64;
+        self.enc().copy_buffer_to_buffer(&hdr, 0, &under, 0, len);
+    }
+
     /// Mirror reflections on glossy floors (hdr in place, from refl).
     pub fn reflect(&mut self) {
         let g = self.g;
@@ -1161,6 +1172,7 @@ impl<'g> Frame<'g> {
                 wgpu::BindGroupEntry { binding: 5, resource: sz.mins.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 6, resource: sz.ends.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 7, resource: sz.blocks.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 8, resource: sz.under.as_entire_binding() },
             ],
         });
         let (gx, gy) = self.groups();
