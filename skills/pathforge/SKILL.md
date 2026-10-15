@@ -85,7 +85,12 @@ depth layers or a depth map).
   the verge; `{kind: "Moss", on: "Path"}` for damp stone. Each grass layer costs about 1.5 ms on the
   GPU, so one or two is plenty.
 - **Clouds that read as weather:** `sky.clouds.kind` Rain, Snow or Storm with precipitation; Cumulus
-  or Cirrus for fair days; add height with `sky.cloud_layers`. A path that should wander:
+  or Cirrus for fair days; add height with `sky.cloud_layers`. Several kinds sharing one sky:
+  give layers `patches: 0.5`, or let `sky.cloud_mix: {enabled: true, layers: 3, seed: N}` pick
+  kinds, cover and size at random (change `seed` for another sky; `kinds` limits the choice).
+  A sunset: `sky.sunset: {enabled: true, style: "Golden" | "Fiery" | "Pastel" | "Dusk"}` with the
+  sun low (`sky.sun.pos` y 0.85-0.95); it colours the sky, a glow along the horizon round the
+  sun, the clouds (lit from below) and the light. A path that should wander:
   `path.winding`. A frozen river: `path.waterway.frozen`. Sun glare: `post.bloom` + `post.flare`.
   Under a dark sky `post.bloom` also makes the moon, aurora and brighter stars glow (0.3-0.6 soft). On a
   winding path the sky turns with the camera: sun, moon, stars and clouds slide across the frame and
@@ -153,7 +158,8 @@ depth layers or a depth map).
   0.6 ice, 1 still water) and `ripples` (0 glassy to 1 choppy). Reflections are traced against the
   rendered world, including what stands above and beside the frame (a canopy, a ceiling, lamps
   overhead), so lamps, trees, the moon and clouds show in them, and lamps lay glints on rough wet
-  stone. Glossy scenes render that extra margin, so they cost about a quarter more per frame. Pattern "Water" on the verge makes a lake or swamp; "Ice" a frozen floor. A wet road
+  stone. Something nearer than the water (a palm leaning over it, a lantern above it) is
+  mirrored only where it can be: water further off shows the sky behind it. Glossy scenes render that extra margin, so they cost about a quarter more per frame. Pattern "Water" on the verge makes a lake or swamp; "Ice" a frozen floor. A wet road
   in the rain (`gloss` 0.45, `ripples` 0.08) is the cheapest big upgrade to a night street.
 - **Weather and the air** (every part works in any scene and repeats with the loop; all are
   off until `enabled`):

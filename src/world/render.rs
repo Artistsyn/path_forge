@@ -904,6 +904,12 @@ impl WorldRenderer {
     }
 
     fn render_worlds(&mut self, worlds: &[WorldIn], layout: Option<Layout>, opts: &RenderOptions) -> Image {
+        // A sunset takes a scene's colours towards its own: draw a copy that has them.
+        let baked: Vec<Option<Scene>> = worlds.iter().map(|w| crate::scene::Sunset::bake(w.scene)).collect();
+        if baked.iter().any(Option::is_some) {
+            let ws: Vec<WorldIn> = worlds.iter().zip(&baked).map(|(w, b)| WorldIn { scene: b.as_ref().unwrap_or(w.scene), ..w.clone() }).collect();
+            return self.render_worlds(&ws, layout, opts);
+        }
         let mut prof = Prof::new(self.profile);
         let mut plan = Self::plan(worlds, layout);
         let n = plan.shear.len();
@@ -3359,6 +3365,10 @@ fn gpu_sky(ctx: &Ctx, draw: bool, strike: Option<(&Strike, [f32; 3])>, bank: Opt
             p.md_on = 1;
             p.md = [ox + sdx + sky.moon.body.pos[0] * fw, oy + sky.moon.body.pos[1].clamp(0.0, 1.0) * fhy, sky.moon.body.radius * fhy];
         }
+        if let Some(gl) = clouds::glow(ctx) {
+            (p.ss_on, p.ss_prims) = (1, prims.len() as u32);
+            prims.extend(gl.rec());
+        }
         let stars = star_list(ctx);
         if !stars.is_empty() {
             (p.stars_on, p.star_prims, p.star_bins) = (1, prims.len() as u32, bins.len() as u32);
@@ -4222,6 +4232,15 @@ fn draw_sky_bodies(ctx: &Ctx, gbuf: &[GPixel], hdr: &mut [[f32; 3]]) {
     let moon_disc = sky.moon.body.enabled.then(|| (ox + sdx + sky.moon.body.pos[0] * fw, oy + sky.moon.body.pos[1].clamp(0.0, 1.0) * fhy, sky.moon.body.radius * fhy));
     let behind_moon = |x: i64, y: i64| moon_disc.is_some_and(|(cx, cy, r)| (x as f32 + 0.5 - cx).powi(2) + (y as f32 + 0.5 - cy).powi(2) < r * r);
     space::draw_backdrop(ctx, gbuf, hdr);
+    // A sunset's glow, low along the horizon and round the sun.
+    if let Some(gl) = clouds::glow(ctx) {
+        let rows = (hy.ceil() as usize).min(h);
+        hdr[..rows * w].par_chunks_mut(w).enumerate().for_each(|(y, row)| {
+            for (x, p) in row.iter_mut().enumerate() {
+                if is_sky(x as i64, y as i64) { *p = add3(*p, gl.at(x, y)); }
+            }
+        });
+    }
     for st in star_list(ctx) {
         let (ix, iy, ri) = (st.x.floor() as i64, st.y.floor() as i64, st.ri);
         let col = mix3(STAR_COOL, STAR_WARM, st.t);

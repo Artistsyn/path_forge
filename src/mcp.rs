@@ -445,7 +445,7 @@ fn summary(s: &Scene) -> String {
     if w.drips.enabled { out += "; drips"; }
     if w.wind.enabled { out += &format!("; wind {} m/s", w.wind.speed); }
     for (on, name) in [(w.sandstorm.enabled, "sandstorm"), (w.mist.enabled, "ground mist"), (w.light_shafts.enabled, "light shafts"), (w.heat_shimmer.enabled, "heat shimmer"),
-        (s.sky.clouds.shadows > 0.0, "cloud shadows"), (s.sky.aurora.enabled, "aurora"), (s.sky.rainbow.enabled, "rainbow"), (s.sky.space.enabled, "deep space"), (s.sky.space.enabled && s.sky.space.black_hole.enabled, "black hole"), (s.sky.tunnel.enabled, "tunnel"), (s.path.edge_lights.enabled, "edge lights")] {
+        (s.sky.clouds.shadows > 0.0, "cloud shadows"), (s.sky.cloud_mix.enabled, "cloud mix"), (s.sky.sunset.on(), "sunset"), (s.sky.aurora.enabled, "aurora"), (s.sky.rainbow.enabled, "rainbow"), (s.sky.space.enabled, "deep space"), (s.sky.space.enabled && s.sky.space.black_hole.enabled, "black hole"), (s.sky.tunnel.enabled, "tunnel"), (s.path.edge_lights.enabled, "edge lights")] {
         if on { out += &format!("; {name}"); }
     }
     if w.lens.enabled { out += &format!("; {:?} on the lens", w.lens.kind).to_lowercase(); }

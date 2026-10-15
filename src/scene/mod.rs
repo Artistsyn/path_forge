@@ -544,8 +544,13 @@ pub struct Sky {
     pub stars: Stars,
     pub clouds: Clouds,
     /// More layers of cloud over `clouds`, drawn in order (up to three): cirrus high over
-    /// cumulus, heaps under an overcast.
+    /// cumulus, heaps under an overcast. Give layers `patches` to share the sky between kinds.
     pub cloud_layers: Vec<Clouds>,
+    /// Clouds of several kinds chosen at random from a seed, added over the layers above.
+    pub cloud_mix: CloudMix,
+    /// A sunset (or sunrise): the sky, a glow along the horizon, the clouds and the light all
+    /// take the colours of a low sun.
+    pub sunset: Sunset,
     /// Northern lights: curtains of green and violet light rippling across the sky.
     pub aurora: Aurora,
     pub rainbow: Rainbow,
@@ -559,6 +564,7 @@ impl Default for Sky {
         Self {
             enabled: true, top: [70, 110, 170], horizon: [200, 190, 160],
             sun: SkyBody::default(), moon: Moon::default(), stars: Stars::default(), clouds: Clouds::default(), cloud_layers: Vec::new(),
+            cloud_mix: CloudMix::default(), sunset: Sunset::default(),
             aurora: Aurora::default(), rainbow: Rainbow::default(), space: Space::default(), tunnel: Tunnel::default(),
         }
     }
@@ -953,11 +959,208 @@ pub struct Clouds {
     /// Shadows of clouds drifting over the ground (0..1; needs a light-giving sun). They drift
     /// with the wind when there is one, and work with the clouds themselves switched off too.
     pub shadows: f32,
+    /// How much the layer gathers into patches with open sky between them (0..1): 0 spreads it
+    /// over the whole sky, 1 keeps it to a few parts of it. Layers of different kinds with
+    /// patches share the sky: heaps over here, a mackerel sky over there.
+    pub patches: f32,
     pub seed: u32,
 }
 impl Default for Clouds {
     fn default() -> Self {
-        Self { enabled: false, kind: CloudKind::Cumulus, cover: 0.45, count: 10, drift: 1.0, scale: 1.0, opacity: 0.5, tint: [226, 230, 238], variation: 0.55, shade: 0.55, shadows: 0.0, seed: 0 }
+        Self { enabled: false, kind: CloudKind::Cumulus, cover: 0.45, count: 10, drift: 1.0, scale: 1.0, opacity: 0.5, tint: [226, 230, 238], variation: 0.55, shade: 0.55, shadows: 0.0, patches: 0.0, seed: 0 }
+    }
+}
+
+/// Layers of cloud of several kinds, chosen at random from `seed`: which kinds, how much of the
+/// sky each covers, their size, raggedness and shade. The same seed always gives the same sky;
+/// change it for another. They are drawn over `clouds` and `cloud_layers`, highest first.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
+pub struct CloudMix {
+    pub enabled: bool,
+    /// How many layers to make (1..4).
+    pub layers: u32,
+    /// The kinds to choose from. None ticked: fair-weather kinds (cumulus, towering, stratus,
+    /// mackerel, cirrus). `Soft` reads as cumulus.
+    pub kinds: Vec<CloudKind>,
+    /// How much of the sky they fill, roughly (0..1); each layer varies round it.
+    pub cover: f32,
+    /// How much each layer keeps to its own parts of the sky (0..1; see `Clouds::patches`).
+    pub patches: f32,
+    /// How much the layers differ from each other in size, cover, raggedness and shade (0..1).
+    pub variety: f32,
+    /// Drifts across the sky per loop, as `Clouds::drift`; higher layers drift more slowly.
+    pub drift: f32,
+    pub opacity: f32,
+    pub tint: Rgb,
+    pub seed: u32,
+}
+impl Default for CloudMix {
+    fn default() -> Self {
+        Self { enabled: false, layers: 3, kinds: Vec::new(), cover: 0.45, patches: 0.5, variety: 0.6, drift: 1.0, opacity: 0.5, tint: [226, 230, 238], seed: 0 }
+    }
+}
+
+impl CloudMix {
+    /// The layers the mix makes, in drawing order (highest first).
+    pub fn layers(&self) -> Vec<Clouds> {
+        if !self.enabled || self.layers == 0 { return Vec::new(); }
+        let fair = [CloudKind::Cumulus, CloudKind::Towering, CloudKind::Stratus, CloudKind::Mackerel, CloudKind::Cirrus];
+        let pool: Vec<CloudKind> = if self.kinds.is_empty() { fair.to_vec() } else { self.kinds.clone() };
+        // A small hash of (seed, layer, salt) to 0..1.
+        let h = |i: u32, salt: u32| {
+            let mut x = self.seed.wrapping_mul(0x9E37_79B9) ^ i.wrapping_mul(0x85EB_CA6B) ^ salt.wrapping_mul(0xC2B2_AE35);
+            x ^= x >> 16; x = x.wrapping_mul(0x7FEB_352D); x ^= x >> 15; x = x.wrapping_mul(0x846C_A68B); x ^= x >> 16;
+            x as f32 / u32::MAX as f32
+        };
+        let n = self.layers.clamp(1, 4);
+        let var = self.variety.clamp(0.0, 1.0);
+        // Each kind once before any comes again, in an order the seed shuffles.
+        let mut order: Vec<usize> = (0..pool.len()).collect();
+        order.sort_by(|&a, &b| h(a as u32, 0xA1).total_cmp(&h(b as u32, 0xA1)));
+        let mut out: Vec<Clouds> = (0..n).map(|i| {
+            let kind = pool[order[i as usize % order.len()]];
+            let spread = |salt: u32| 1.0 + var * (h(i, salt) - 0.5);
+            Clouds {
+                enabled: true, kind,
+                cover: (self.cover * spread(0xB2) * 1.1).clamp(0.05, 1.0),
+                drift: self.drift * if matches!(kind, CloudKind::Cirrus | CloudKind::Mackerel) { 0.5 } else { 1.0 },
+                scale: (spread(0xC3) * spread(0xC4)).clamp(0.4, 2.5),
+                opacity: (self.opacity * (1.0 + 0.4 * var * (h(i, 0xD5) - 0.5))).clamp(0.0, 1.0),
+                tint: self.tint,
+                variation: (0.55 * spread(0xE6)).clamp(0.0, 1.0),
+                shade: (0.55 * spread(0xF7)).clamp(0.0, 1.0),
+                patches: self.patches.clamp(0.0, 1.0),
+                seed: self.seed.wrapping_mul(31).wrapping_add(i * 7919 + 17),
+                ..Clouds::default()
+            }
+        }).collect();
+        // Highest first, so lower cloud is drawn over it.
+        let height = |k: CloudKind| match k { CloudKind::Cirrus => 0, CloudKind::Mackerel => 1, CloudKind::Overcast | CloudKind::Snow => 2, CloudKind::Stratus | CloudKind::Rain | CloudKind::Storm => 3, _ => 4 };
+        out.sort_by_key(|c| height(c.kind));
+        out
+    }
+}
+
+/// The colours of a sunset.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub enum SunsetStyle {
+    /// Gold and amber low down under a clear blue sky, clouds gilded and peach.
+    #[default]
+    Golden,
+    /// Blazing orange and red along the horizon, crimson and magenta clouds, a deep blue sky.
+    Fiery,
+    /// Soft peach and rose, a lavender sky, pink clouds: a hazy summer evening.
+    Pastel,
+    /// Just after the sun has gone: a thin red band at the horizon under violet and indigo,
+    /// clouds dark with rose undersides.
+    Dusk,
+}
+
+/// A sunset over the sky. `amount` takes the sky's colours, the sun, the clouds' tint and the
+/// light towards those of the `style`; the glow lies along the horizon, brightest round the
+/// sun's place across the sky (`sky.sun.pos`, even with the sun itself off, as at dusk); clouds
+/// are lit from below, gold and orange near the horizon and the sun, pink higher up, violet
+/// where they turn away. Place the sun low (`pos` y 0.8-1) for the best of it.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
+pub struct Sunset {
+    pub enabled: bool,
+    pub style: SunsetStyle,
+    /// How far the sky, sun, clouds and light go towards the sunset's colours (0..1).
+    pub amount: f32,
+    /// How bright the glow along the horizon is (0..2).
+    pub glow: f32,
+    /// How high the glow climbs, as a fraction of the sky (0.05..1).
+    pub height: f32,
+    /// How far round from the sun the glow reaches, in frame widths (0.1..3).
+    pub spread: f32,
+    /// How much the clouds take its colours (0..1).
+    pub clouds: f32,
+    /// How much the scene's light takes its colours: a warm low sun and a dusky fill (0..1).
+    pub light: f32,
+    /// Set on the copy of a scene whose colours have been taken towards the sunset's, so it is
+    /// done once.
+    #[serde(skip)]
+    #[schemars(skip)]
+    pub baked: bool,
+}
+impl Default for Sunset {
+    fn default() -> Self {
+        Self { enabled: false, style: SunsetStyle::Golden, amount: 1.0, glow: 1.0, height: 0.35, spread: 0.8, clouds: 1.0, light: 0.7, baked: false }
+    }
+}
+
+/// A sunset style's colours (sRGB).
+#[derive(Clone, Copy, Debug)]
+pub struct SunsetColors {
+    pub top: Rgb,
+    pub horizon: Rgb,
+    /// The glow at the horizon, a third of the way up it, and at its top.
+    pub glow: [Rgb; 3],
+    pub sun: Rgb,
+    /// Clouds lit low down and near the sun, lit high up, and turned away from it.
+    pub cloud_low: Rgb,
+    pub cloud_high: Rgb,
+    pub cloud_dark: Rgb,
+    /// The light that fills the shadows, and how bright it is against the scene's.
+    pub ambient: Rgb,
+    pub ambient_k: f32,
+}
+
+impl SunsetStyle {
+    pub fn colors(self) -> SunsetColors {
+        match self {
+            SunsetStyle::Golden => SunsetColors {
+                top: [58, 96, 160], horizon: [255, 190, 120], glow: [[255, 200, 112], [255, 140, 76], [196, 120, 150]], sun: [255, 206, 140],
+                cloud_low: [255, 192, 118], cloud_high: [250, 178, 160], cloud_dark: [104, 88, 124], ambient: [255, 204, 160], ambient_k: 0.9,
+            },
+            SunsetStyle::Fiery => SunsetColors {
+                top: [34, 46, 108], horizon: [255, 128, 52], glow: [[255, 156, 54], [236, 72, 40], [168, 50, 96]], sun: [255, 168, 88],
+                cloud_low: [255, 146, 64], cloud_high: [242, 112, 108], cloud_dark: [74, 44, 82], ambient: [255, 160, 120], ambient_k: 0.8,
+            },
+            SunsetStyle::Pastel => SunsetColors {
+                top: [112, 124, 186], horizon: [255, 200, 172], glow: [[255, 214, 174], [252, 172, 180], [206, 164, 214]], sun: [255, 224, 196],
+                cloud_low: [255, 204, 178], cloud_high: [244, 186, 206], cloud_dark: [146, 128, 168], ambient: [240, 206, 214], ambient_k: 0.95,
+            },
+            SunsetStyle::Dusk => SunsetColors {
+                top: [22, 28, 68], horizon: [226, 112, 72], glow: [[238, 120, 58], [188, 66, 92], [96, 58, 124]], sun: [255, 140, 92],
+                cloud_low: [196, 96, 80], cloud_high: [172, 100, 136], cloud_dark: [40, 34, 66], ambient: [150, 124, 168], ambient_k: 0.6,
+            },
+        }
+    }
+}
+
+impl Sunset {
+    /// Whether it changes anything.
+    pub fn on(&self) -> bool { self.enabled && self.amount > 0.0 }
+
+    /// A copy of `scene` with its colours taken towards the sunset's (sky, sun, cloud tints,
+    /// light, fog and mist), or None when it has no sunset or this is already such a copy. What
+    /// colours cannot say (the glow, clouds lit from below) the renderer draws from `sky.sunset`.
+    pub fn bake(scene: &Scene) -> Option<Scene> {
+        let ss = &scene.sky.sunset;
+        if !ss.on() || ss.baked || !scene.sky.enabled { return None; }
+        let mut s = scene.clone();
+        let (a, pal) = (ss.amount.clamp(0.0, 1.0), ss.style.colors());
+        let mix = |c: Rgb, to: Rgb, k: f32| -> Rgb { [0, 1, 2].map(|i| (c[i] as f32 + (to[i] as f32 - c[i] as f32) * k).round().clamp(0.0, 255.0) as u8) };
+        let sky = &mut s.sky;
+        sky.top = mix(sky.top, pal.top, a);
+        sky.horizon = mix(sky.horizon, pal.horizon, a);
+        sky.sun.color = mix(sky.sun.color, pal.sun, a);
+        // The clouds' own colour goes warm and pale; the light on them comes from the renderer.
+        let ck = a * ss.clouds.clamp(0.0, 1.0);
+        let warm = mix([255, 255, 255], pal.cloud_low, 0.35);
+        sky.clouds.tint = mix(sky.clouds.tint, warm, ck);
+        for c in sky.cloud_layers.iter_mut() { c.tint = mix(c.tint, warm, ck); }
+        sky.cloud_mix.tint = mix(sky.cloud_mix.tint, warm, ck);
+        sky.sunset.baked = true;
+        let lk = a * ss.light.clamp(0.0, 1.0);
+        s.light.ambient_color = mix(s.light.ambient_color, pal.ambient, lk);
+        s.light.ambient *= 1.0 + (pal.ambient_k - 1.0) * lk;
+        if !s.light.fog.match_sky { s.light.fog.color = mix(s.light.fog.color, pal.horizon, 0.5 * lk); }
+        s.weather.mist.color = mix(s.weather.mist.color, mix(pal.horizon, pal.ambient, 0.5), 0.6 * lk);
+        Some(s)
     }
 }
 

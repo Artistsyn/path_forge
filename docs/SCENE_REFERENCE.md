@@ -222,6 +222,25 @@ What kind of cloud a layer is. Whatever the kind, cloud that rain or snow is fal
 | `Storm` | Storm cloud: a black deck with ragged scud driving along under it. |
 | `Soft` | Soft round puffs with no detail, as PathForge drew every cloud before; suits flat and pixel-art styles. (The main layer only: in `cloud_layers` it reads as cumulus.) |
 
+### CloudMix
+
+Layers of cloud of several kinds, chosen at random from `seed`: which kinds, how much of the
+sky each covers, their size, raggedness and shade. The same seed always gives the same sky;
+change it for another. They are drawn over `clouds` and `cloud_layers`, highest first.
+
+| Field | Type | Default | Meaning |
+|---|---|---|---|
+| `enabled` | boolean | `false` |  |
+| `layers` | integer | `3` | How many layers to make (1..4). |
+| `kinds` | list of [CloudKind](#cloudkind) | `[]` | The kinds to choose from. None ticked: fair-weather kinds (cumulus, towering, stratus, mackerel, cirrus). `Soft` reads as cumulus. |
+| `cover` | number | `0.45` | How much of the sky they fill, roughly (0..1); each layer varies round it. |
+| `patches` | number | `0.5` | How much each layer keeps to its own parts of the sky (0..1; see `Clouds::patches`). |
+| `variety` | number | `0.6` | How much the layers differ from each other in size, cover, raggedness and shade (0..1). |
+| `drift` | number | `1.0` | Drifts across the sky per loop, as `Clouds::drift`; higher layers drift more slowly. |
+| `opacity` | number | `0.5` |  |
+| `tint` | integer × 3 | `[226,230,238]` |  |
+| `seed` | integer | `0` |  |
+
 ### Clouds
 
 | Field | Type | Default | Meaning |
@@ -237,6 +256,7 @@ What kind of cloud a layer is. Whatever the kind, cloud that rain or snow is fal
 | `variation` | number | `0.55` | How ragged and billowing their outlines are (0..1). |
 | `shade` | number | `0.55` | How dark their thick parts and undersides are (0..1). |
 | `shadows` | number | `0.0` | Shadows of clouds drifting over the ground (0..1; needs a light-giving sun). They drift with the wind when there is one, and work with the clouds themselves switched off too. |
+| `patches` | number | `0.0` | How much the layer gathers into patches with open sky between them (0..1): 0 spreads it over the whole sky, 1 keeps it to a few parts of it. Layers of different kinds with patches share the sky: heaps over here, a mackerel sky over there. |
 | `seed` | integer | `0` |  |
 
 ### Companion
@@ -954,7 +974,9 @@ One of `Both` \| `Left` \| `Right` \| `Center`.
 | `moon` | [Moon](#moon) | (see the type) |  |
 | `stars` | [Stars](#stars) | (see the type) |  |
 | `clouds` | [Clouds](#clouds) | (see the type) |  |
-| `cloud_layers` | list of [Clouds](#clouds) | `[]` | More layers of cloud over `clouds`, drawn in order (up to three): cirrus high over cumulus, heaps under an overcast. |
+| `cloud_layers` | list of [Clouds](#clouds) | `[]` | More layers of cloud over `clouds`, drawn in order (up to three): cirrus high over cumulus, heaps under an overcast. Give layers `patches` to share the sky between kinds. |
+| `cloud_mix` | [CloudMix](#cloudmix) | (see the type) | Clouds of several kinds chosen at random from a seed, added over the layers above. |
+| `sunset` | [Sunset](#sunset) | (see the type) | A sunset (or sunrise): the sky, a glow along the horizon, the clouds and the light all take the colours of a low sun. |
 | `aurora` | [Aurora](#aurora) | (see the type) | Northern lights: curtains of green and violet light rippling across the sky. |
 | `rainbow` | [Rainbow](#rainbow) | (see the type) |  |
 | `space` | [Space](#space) | (see the type) | Deep space: a dense starfield, nebulae, a galaxy band and planets. |
@@ -1059,6 +1081,36 @@ walker (smoothly over each flight), and the loop still closes: the view one flig
 |---|---|
 | `First`, `Second` |  |
 | `Auto` | The look of the world the camera is in (it switches as the camera crosses). |
+
+### Sunset
+
+A sunset over the sky. `amount` takes the sky's colours, the sun, the clouds' tint and the
+light towards those of the `style`; the glow lies along the horizon, brightest round the
+sun's place across the sky (`sky.sun.pos`, even with the sun itself off, as at dusk); clouds
+are lit from below, gold and orange near the horizon and the sun, pink higher up, violet
+where they turn away. Place the sun low (`pos` y 0.8-1) for the best of it.
+
+| Field | Type | Default | Meaning |
+|---|---|---|---|
+| `enabled` | boolean | `false` |  |
+| `style` | [SunsetStyle](#sunsetstyle) | `"Golden"` |  |
+| `amount` | number | `1.0` | How far the sky, sun, clouds and light go towards the sunset's colours (0..1). |
+| `glow` | number | `1.0` | How bright the glow along the horizon is (0..2). |
+| `height` | number | `0.35` | How high the glow climbs, as a fraction of the sky (0.05..1). |
+| `spread` | number | `0.8` | How far round from the sun the glow reaches, in frame widths (0.1..3). |
+| `clouds` | number | `1.0` | How much the clouds take its colours (0..1). |
+| `light` | number | `0.7` | How much the scene's light takes its colours: a warm low sun and a dusky fill (0..1). |
+
+### SunsetStyle
+
+The colours of a sunset.
+
+| Value | Meaning |
+|---|---|
+| `Golden` | Gold and amber low down under a clear blue sky, clouds gilded and peach. |
+| `Fiery` | Blazing orange and red along the horizon, crimson and magenta clouds, a deep blue sky. |
+| `Pastel` | Soft peach and rose, a lavender sky, pink clouds: a hazy summer evening. |
+| `Dusk` | Just after the sun has gone: a thin red band at the horizon under violet and indigo, clouds dark with rose undersides. |
 
 ### Threshold
 
