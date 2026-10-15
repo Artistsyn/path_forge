@@ -58,11 +58,11 @@ pf presets
 pf render --preset "Forest Path" -o forest.png
 ```
 
-There are 34 presets: Stone Dungeon, Stone Crypt, Mossy Sewer, Forest Path, Desert Canyon, Night
+There are 35 presets: Stone Dungeon, Stone Crypt, Mossy Sewer, Forest Path, Desert Canyon, Night
 Road, Magic Cavern, Ice Dungeon, Ruins Path, Dark Street, Mountain Pass, Volcanic Rift, Haunted
 Forest, Ruined Castle, Fiery Dungeon, Tower Stair, Bog Boardwalk, Desert Ruins, Ice Cave, Star Bridge,
 Hyperspace Run, Wormhole, Starship Flight, Event Horizon, Black Hole Arena, River Run, Canal Lanterns,
-Jungle River, Lagoon Swim, Frozen Channel, Misty River, Dawn Road, Winding Trail and Hyperspace Jump.
+Jungle River, Lagoon Swim, Sunset Pier, Frozen Channel, Misty River, Dawn Road, Winding Trail and Hyperspace Jump.
 Every one loops without a seam (`pf seam` checks them all).
 
 ## 2. Scenes
@@ -108,8 +108,27 @@ speed, and each cloud forms, drifts and dissolves once per loop, so the loop sti
 (dark, heavy decks that read as weather), `Storm` (a black deck with ragged scud under it) or `Soft`
 (the older round puffs). `cover` is how much of the sky they fill, `shade` how dark their undersides
 are. Heaped kinds are lit through their depth from the sun's side, so they have a bright edge and a
-shaded body. `sky.cloud_layers` adds more layers behind the first, each a full set of cloud settings
-(cirrus above cumulus, say). On the GPU a cloud layer costs about 1-2.5 ms at 960 x 1708.
+shaded body. `sky.cloud_layers` adds up to three more layers over the first, each a full set of
+cloud settings (cirrus above cumulus, say). On the GPU a cloud layer costs about 1-2.5 ms at
+960 x 1708.
+
+**Several kinds of cloud in one sky.** A layer's `patches` (0..1) gathers it into patches with open
+sky between them, so layers of different kinds share the sky instead of each covering all of it:
+heaps over here, a mackerel sky over there. `sky.cloud_mix` makes such layers for you, at random:
+`layers` (1-4) of the `kinds` ticked (none ticked: cumulus, towering, stratus, mackerel and cirrus),
+each with its own cover, size, raggedness and shade round `cover`, as different from each other as
+`variety` says, in `patches`. The same `seed` always gives the same sky; the dice next to it in the
+studio picks another. They are drawn over `clouds` and `cloud_layers`, highest first.
+
+**Sunsets.** `sky.sunset` turns the sky into a sunset (or sunrise) of one of four `style`s: `Golden`,
+`Fiery`, `Pastel`, or `Dusk` (just after the sun has gone: switch the sun off and keep its place).
+`amount` takes the sky's colours, the sun, the clouds' tint and the light towards the style's; a
+glow lies along the horizon, brightest under the sun's place across the sky and fading up through
+the style's colours (`glow` how bright, `height` how high it climbs, `spread` how far round it
+reaches); clouds are lit from below, gold and orange near the horizon and the sun, pink higher up,
+violet where they turn away, and darker against the light right by the sun (`clouds` how much);
+`light` warms the sun's light and the fill. Put the sun low (`sky.sun.pos` y 0.85-0.95). Water
+mirrors all of it. The preset Sunset Pier shows one, with a cloud mix.
 
 **The sun** is a small hot disc inside a wide aureole that brightens the sky round it, rather than a
 painted shape; with `post.bloom` and `post.flare` it also glows and flares in the lens.

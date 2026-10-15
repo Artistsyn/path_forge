@@ -28,6 +28,11 @@ const META: &[Meta] = &[
     m("*.radius", 0.0, 0.4, ""), m("*.intensity", 0.0, 5.0, "×"), m("sky.moon.phase", -1.0, 1.0, ""), m("sky.moon.opacity", 0.0, 1.0, ""),
     m("sky.stars.count", 0.0, 1000.0, ""), m("sky.stars.size", 0.2, 4.0, "×"), m("sky.stars.twinkle", 0.0, 1.0, ""),
     m("sky.clouds.count", 0.0, 60.0, ""), m("sky.clouds.cover", 0.0, 1.0, ""), m("sky.clouds.shade", 0.0, 1.0, ""), m("sky.cloud_layers.*.cover", 0.0, 1.0, ""), m("sky.cloud_layers.*.shade", 0.0, 1.0, ""), m("sky.cloud_layers.*.drift", 0.0, 5.0, "×"), m("sky.cloud_layers.*.scale", 0.2, 4.0, "×"), m("sky.cloud_layers.*.opacity", 0.0, 1.0, ""), m("sky.cloud_layers.*.variation", 0.0, 1.0, ""), m("sky.clouds.drift", 0.0, 5.0, "×"), m("sky.clouds.scale", 0.2, 4.0, "×"), m("sky.clouds.opacity", 0.0, 1.0, ""), a("sky.clouds.variation", 0.0, 1.0, ""),
+    m("sky.clouds.patches", 0.0, 1.0, ""), m("sky.cloud_layers.*.patches", 0.0, 1.0, ""),
+    m("sky.cloud_mix.layers", 1.0, 4.0, ""), m("sky.cloud_mix.cover", 0.0, 1.0, ""), m("sky.cloud_mix.patches", 0.0, 1.0, ""), m("sky.cloud_mix.variety", 0.0, 1.0, ""),
+    m("sky.cloud_mix.drift", 0.0, 5.0, "×"), m("sky.cloud_mix.opacity", 0.0, 1.0, ""), m("sky.cloud_mix.seed", 0.0, 9999.0, ""),
+    m("sky.sunset.amount", 0.0, 1.0, ""), m("sky.sunset.glow", 0.0, 2.0, ""), m("sky.sunset.height", 0.05, 1.0, ""), m("sky.sunset.spread", 0.1, 3.0, ""),
+    m("sky.sunset.clouds", 0.0, 1.0, ""), m("sky.sunset.light", 0.0, 1.0, ""),
     m("light.ambient", 0.0, 2.0, ""), m("light.fog.distance", 2.0, 300.0, " m"), m("light.bands", 0.0, 8.0, ""),
     m("fixtures.*.height", 0.0, 6.0, " m"), m("fixtures.*.spacing", 0.5, 48.0, " m"), m("fixtures.*.offset", 0.0, 48.0, " m"),
     m("fixtures.*.lateral", -3.0, 5.0, " m"), m("fixtures.*.size", 0.2, 4.0, "×"), m("fixtures.*.radius", 0.5, 30.0, " m"),
@@ -321,8 +326,20 @@ fn widget(ui: &mut Ui, schema: &Schema, fs: &Value, path: &str, v: &mut Value, o
         if changed { *v = json!(cur); }
         return changed;
     }
+    // A set of choices (the kinds a cloud mix picks from): a tick box each.
+    if let Some(choices) = v.is_array().then(|| schema.items(fs).and_then(|it| schema.enum_values(it))).flatten() {
+        return enum_set(ui, v, &choices);
+    }
     match v {
         Value::Bool(b) => ui.checkbox(b, "").changed(),
+        Value::Number(_) if path.ends_with(".seed") => {
+            let mut changed = false;
+            ui.horizontal(|ui| {
+                changed = number(ui, fs, path, v);
+                if ui.small_button("🎲").on_hover_text("Another random seed").clicked() { *v = json!(random_seed()); changed = true; }
+            });
+            changed
+        }
         Value::Number(_) => number(ui, fs, path, v),
         Value::String(s) => ui.add(egui::TextEdit::singleline(s).desired_width(150.0)).changed(),
         Value::Array(_) if is_colour(v) => {
@@ -345,6 +362,30 @@ fn widget(ui: &mut Ui, schema: &Schema, fs: &Value, path: &str, v: &mut Value, o
         }
         _ => { ui.label(RichText::new(short(v)).weak()); false }
     }
+}
+
+/// Tick boxes for a list of enum values, kept in the order of `choices`.
+fn enum_set(ui: &mut Ui, v: &mut Value, choices: &[String]) -> bool {
+    let have: Vec<String> = v.as_array().map(|a| a.iter().filter_map(|x| x.as_str().map(str::to_owned)).collect()).unwrap_or_default();
+    let mut next = have.clone();
+    ui.horizontal_wrapped(|ui| {
+        ui.set_max_width(260.0);
+        for c in choices {
+            let mut on = have.contains(c);
+            if ui.checkbox(&mut on, spaced(c)).changed() {
+                next = choices.iter().filter(|k| if *k == c { on } else { have.contains(k) }).cloned().collect();
+            }
+        }
+    });
+    if next != have { *v = json!(next); true } else { false }
+}
+
+/// A seed from the clock, for the dice button.
+fn random_seed() -> u32 {
+    let t = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos() as u64).unwrap_or(1);
+    let mut x = t ^ (t >> 29);
+    x = x.wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    (x >> 32) as u32 % 10000
 }
 
 fn spaced(name: &str) -> String {

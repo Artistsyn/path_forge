@@ -16,6 +16,8 @@
 @group(0) @binding(6) var<storage, read_write> ends: array<f32>;
 // Per column and block of 64 rows, per channel: two double-floats (see colsum_a, colsum_b).
 @group(0) @binding(7) var<storage, read_write> blocks: array<vec2<f32>>;
+// The frame before props were drawn (Frame::keep_sky): the sky behind them.
+@group(0) @binding(8) var<storage, read> under: array<f32>;
 
 fn nb8() -> u32 { return (W.height + 7u) / 8u; }
 fn nb64() -> u32 { return (W.height + 63u) / 64u; }
@@ -120,6 +122,29 @@ fn near_ray(z: f32, r: u32, kr: f32, dw: f32) -> bool {
     return k1 <= 0.001 || rnd(z * k1) <= 2.0 * dw;
 }
 
+// render::reflect_pass's on_ray: nothing much nearer than the ray was a row below is a hit
+// (render::RAY_NEAR, RAY_SLACK).
+fn on_ray(z: f32, r: u32, kr: f32, dw: f32) -> bool {
+    let k1 = 1.0 + rnd((f32(r) + 1.5 - W.horizon_px) * kr);
+    return rnd(rnd(z + 0.3) * k1) >= rnd(2.0 * 0.85 * dw);
+}
+
+// render::drawn_over_sky.
+fn drawn_over_sky(id: u32) -> bool { return id == ID_PROP || id == ID_FIXTURE || id == ID_TUFT; }
+
+// render::sky_under.
+fn sky_under(x: u32, r0: f32, spread: f32) -> vec3<f32> {
+    var c = vec3<f32>(0.0);
+    let ks = array<f32, 5>(-1.0, -0.5, 0.0, 0.5, 1.0);
+    let ws = array<f32, 5>(1.0, 2.0, 3.0, 2.0, 1.0);
+    for (var k = 0u; k < 5u; k++) {
+        let r = u32(clamp(rround(r0 + rnd(ks[k] * spread)), 0.0, f32(W.height) - 1.0));
+        let i = (r * W.width + x) * 3u;
+        c += vec3<f32>(under[i], under[i + 1u], under[i + 2u]) * rnd(ws[k] / 9.0);
+    }
+    return c;
+}
+
 fn tap(xs: u32, yc: f32, r0: f32, rough: f32) -> vec3<f32> {
     let spread = rough * max(yc - r0, 0.0) * 0.25;
     return triangle(xs, i32(rround(r0)), i32(rround(spread)));
@@ -158,7 +183,7 @@ fn reflect_main(@builtin(global_invocation_id) gid: vec3<u32>) {
         let top8 = ru / 8u * 8u;
         if i32(top8) >= r_min && !near_ray(mins[xs * n8 + ru / 8u], top8, kr, dw) { r = i32(top8) - 1; continue; }
         let z = gbuf[ru * w + xs].depth;
-        if bitcast<u32>(z) != 0x7F800000u && near_ray(z, ru, kr, dw) { hit = r; break; }
+        if bitcast<u32>(z) != 0x7F800000u && near_ray(z, ru, kr, dw) && on_ray(z, ru, kr, dw) { hit = r; break; }
         r -= 1;
     }
     var col: vec3<f32>;
@@ -167,6 +192,9 @@ fn reflect_main(@builtin(global_invocation_id) gid: vec3<u32>) {
     } else if r_inf >= 0.0 && (gbuf[min(u32(r_inf), h - 1u) * w + xs].idr & 0xFFu) == ID_NONE {
         let k = smoothstep_r(0.0, 16.0, r_inf);
         col = mix3(env, tap(xs, yc, r_inf, rough), k);
+    } else if r_inf >= 0.0 && drawn_over_sky(gbuf[min(u32(r_inf), h - 1u) * w + xs].idr & 0xFFu) {
+        let k = smoothstep_r(0.0, 16.0, r_inf);
+        col = mix3(env, sky_under(xs, r_inf, rnd(rough * max(yc - r_inf, 0.0)) * 0.25), k);
     } else {
         col = env;
     }

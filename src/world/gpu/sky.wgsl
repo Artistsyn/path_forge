@@ -36,7 +36,9 @@ struct Sky {
     // 0: one world (adds to the sky shading left in hdr); 1, 2: one of several worlds, its sky
     // weighted by SkyW::at and seen as sky_seen, written (1, the first) or added (2).
     mode: u32, w_fork: u32, w_base: f32,
-    w_center: f32, w_focal: f32, w_split: f32, w_near: f32, w_keep0: f32, w_keep1: f32, sp_star_var: f32, pad6: u32,
+    w_center: f32, w_focal: f32, w_split: f32, w_near: f32, w_keep0: f32, w_keep1: f32, sp_star_var: f32, ss_prims: u32,
+    // A sunset's glow (render::clouds::Glow::rec, at ss_prims).
+    ss_on: u32, pad7: u32, pad8: u32, pad9: u32,
 }
 
 @group(0) @binding(1) var<uniform> S: Sky;
@@ -661,6 +663,19 @@ fn tunnel_px(x: u32, y: u32) -> vec3<f32> {
     return (tube + c1 * (0.15 * S.tn_core * exp(-q / 0.15))) * S.tn_k;
 }
 
+// ── sunset glow (render::clouds::Glow::at; fields as Glow::rec) ─────────────────────────────
+fn sunset_glow(fx: f32, fy: f32) -> vec3<f32> {
+    let b = S.ss_prims;
+    let t = max((prims[b + 1u] - (fy + 0.5)) / prims[b + 2u], 0.0) / prims[b + 5u];
+    let c0 = vec3<f32>(prims[b + 6u], prims[b + 7u], prims[b + 8u]);
+    let c1 = vec3<f32>(prims[b + 9u], prims[b + 10u], prims[b + 11u]);
+    let c2 = vec3<f32>(prims[b + 12u], prims[b + 13u], prims[b + 14u]);
+    var c: vec3<f32>;
+    if t < 0.33 { c = mix3(c0, c1, t / 0.33); } else { c = mix3(c1, c2, min((t - 0.33) / 0.67, 1.0)); }
+    let du = (fx + 0.5 - prims[b]) / prims[b + 3u];
+    return c * (prims[b + 4u] * exp(-1.8 * t) * (0.3 + 0.7 * exp(-du * du)));
+}
+
 // ── clouds (render::clouds::CloudK: sheet_px, heaps_px, lining; fields as CloudK::rec) ────
 fn clr(b: u32, f: u32) -> f32 { return prims[b + f]; }
 fn cloud_lining(b: u32, u: f32, v: f32, thin: f32) -> vec3<f32> {
@@ -668,6 +683,27 @@ fn cloud_lining(b: u32, u: f32, v: f32, thin: f32) -> vec3<f32> {
     let du = u - clr(b, 25u); let dv = v - clr(b, 26u);
     let near = exp(-(du * du + dv * dv) / 0.09);
     return vec3<f32>(clr(b, 27u), clr(b, 28u), clr(b, 29u)) * (near * (0.25 + 0.9 * thin));
+}
+// CloudK::colors: lit and dark at (u, v), under a sunset lit from below.
+struct CloudCols { lit: vec3<f32>, dark: vec3<f32> }
+fn cloud_cols(b: u32, u: f32, v: f32, lit: vec3<f32>, dark: vec3<f32>) -> CloudCols {
+    let ss = clr(b, 36u);
+    if ss <= 0.0 { return CloudCols(lit, dark); }
+    let du = (u - clr(b, 37u)) / clr(b, 38u);
+    let toward = exp(-du * du);
+    let lo = vec3<f32>(clr(b, 39u), clr(b, 40u), clr(b, 41u));
+    let hi = vec3<f32>(clr(b, 42u), clr(b, 43u), clr(b, 44u));
+    let dk = vec3<f32>(clr(b, 45u), clr(b, 46u), clr(b, 47u));
+    let warm = mix3(hi, lo, smoothstep_r(0.35, 1.0, v));
+    let body = warm * (0.9 - 0.4 * toward);
+    let shade = mix3(dk, warm, 0.25);
+    return CloudCols(mix3(lit, body, ss), mix3(dark, shade, ss));
+}
+// CloudK::patch_k.
+fn cloud_patch(b: u32, uu: f32, pv: f32) -> f32 {
+    let th = clr(b, 15u);
+    if th <= 0.0 { return 1.0; }
+    return smoothstep_r(th - 0.05, th + 0.05, fbm_wrap(uu, pv + clr(b, 23u) + 41.3, 3, 1.0));
 }
 fn cloud_light_dir(b: u32, u: f32, v: f32) -> vec2<f32> {
     if clr(b, 24u) == 0.0 { return vec2<f32>(-0.45, -0.89); }
@@ -685,15 +721,16 @@ fn cloud_sheet(b: u32, u: f32, v: f32) -> vec4<f32> {
     let detail = clr(b, 16u);
     if detail > 0.0 { n = n * (1.0 - detail) + detail * fbm_wrap(uu, z + seed + 3.1, nx * 4, vs * 4.0); }
     let d = (n - clr(b, 4u)) / clr(b, 5u);
-    let a = smoothstep_r(0.0, 1.0, d) * clr(b, 6u) * (1.0 - smoothstep_r(0.86, 1.0, v));
+    let a0 = smoothstep_r(0.0, 1.0, d) * clr(b, 6u) * (1.0 - smoothstep_r(0.86, 1.0, v));
+    if a0 <= 0.0 { return vec4<f32>(0.0); }
+    let a = a0 * cloud_patch(b, uu, 0.8 * z);
     if a <= 0.0 { return vec4<f32>(0.0); }
     let thick = smoothstep_r(0.5, 3.0, d);
     let l = cloud_light_dir(b, u, v);
     let lift = clamp(0.5 + 3.0 * (coarse - fbm_wrap(uu + l.x * 0.4 / fnx, z + seed + l.y * 0.4 / vs, nx, vs)), 0.0, 1.0);
     let shadow = min(0.7 * thick + 0.5 * (1.0 - lift), 1.0);
-    let lit = vec3<f32>(clr(b, 8u), clr(b, 9u), clr(b, 10u));
-    let dark = vec3<f32>(clr(b, 11u), clr(b, 12u), clr(b, 13u));
-    let col = mix3(lit, dark, min(1.5 * clr(b, 7u), 1.0) * shadow) + cloud_lining(b, u, v, 1.0 - thick);
+    let cc = cloud_cols(b, u, v, vec3<f32>(clr(b, 8u), clr(b, 9u), clr(b, 10u)), vec3<f32>(clr(b, 11u), clr(b, 12u), clr(b, 13u)));
+    let col = mix3(cc.lit, cc.dark, min(1.5 * clr(b, 7u), 1.0) * shadow) + cloud_lining(b, u, v, 1.0 - thick);
     return vec4<f32>(col * a, a);
 }
 fn cloud_dome(th: f32, m: f32) -> f32 { return smoothstep_r(th, th + 0.15, m) * (0.55 + 0.45 * smoothstep_r(th + 0.1, th + 0.5, m)); }
@@ -710,8 +747,8 @@ fn cloud_heaps(b: u32, u: f32, v: f32) -> vec4<f32> {
     let span = clr(b, 1u); let vs = clr(b, 3u); let th = clr(b, 4u); let soft = clr(b, 5u); let op = clr(b, 6u);
     let shade = min(1.5 * clr(b, 7u), 1.0);
     let height = clr(b, 21u); let billow = clr(b, 22u);
-    let lit = vec3<f32>(clr(b, 8u), clr(b, 9u), clr(b, 10u));
-    let dark = vec3<f32>(clr(b, 11u), clr(b, 12u), clr(b, 13u));
+    let ccs = cloud_cols(b, u, v, vec3<f32>(clr(b, 8u), clr(b, 9u), clr(b, 10u)), vec3<f32>(clr(b, 11u), clr(b, 12u), clr(b, 13u)));
+    let lit = ccs.lit; let dark = ccs.dark;
     for (var r = 0u; r < rows; r++) {
         let s = clr(b, 30u + r);
         let base = clr(b, 19u) - f32(r) * clr(b, 20u);
@@ -724,10 +761,12 @@ fn cloud_heaps(b: u32, u: f32, v: f32) -> vec4<f32> {
         let mass = fbm_wrap(uu, 0.0, nx, 0.0);
         let env = smoothstep_r(th, th + 0.2, mass);
         if env <= 0.0 { continue; }
+        let pk = cloud_patch(b, uu, 3.7 * f32(r));
+        if pk <= 0.0 { continue; }
         let nb = nx * 4; let arg = (base - v) / s + 11.3 * f32(r + 1u);
         let top = cloud_dome(th, mass);
         let d = cloud_depth(h, cloud_swell(uu, arg, nb, vs), top, billow, env) + 0.22 * env * (fbm_wrap(uu, arg + 5.3, nb * 4, vs * 4.0) - 0.47);
-        let a = smoothstep_r(0.0, soft, d) * op * (0.55 + 0.45 * f32(r + 1u) / f32(rows));
+        let a = smoothstep_r(0.0, soft, d) * op * (0.55 + 0.45 * f32(r + 1u) / f32(rows)) * pk;
         if a <= 0.0 { continue; }
         let du = l.x * 0.14 * height * s / span;
         let top3 = cloud_dome(th, fbm_wrap(uu + 3.0 * du, 0.0, nx, 0.0));
@@ -758,6 +797,7 @@ fn sky_main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let tile = (y / 16u) * S.tile_cols + x / 16u;
     let ntiles = S.tile_cols * ((W.height + 15u) / 16u);
     if S.sp_on != 0u { c = space_backdrop(x, y, c); }
+    if S.ss_on != 0u && above { c += sunset_glow(fx, fy); }
     if S.stars_on != 0u && above {
         let behind = S.md_on != 0u && (fx + 0.5 - S.md_x) * (fx + 0.5 - S.md_x) + (fy + 0.5 - S.md_y) * (fy + 0.5 - S.md_y) < S.md_r * S.md_r;
         if !behind {
@@ -849,7 +889,7 @@ fn sky_main(@builtin(global_invocation_id) gid: vec3<u32>) {
     if S.cl_n != 0u && above {
         let u = (fx + 0.5 - S.ox) / S.fhy; let v = (fy + 0.5 - S.oy) / S.fhy;
         for (var k = 0u; k < S.cl_n; k++) {
-            let b = S.cl_recs + k * 40u;
+            let b = S.cl_recs + k * 48u;
             var pc: vec4<f32>;
             if prims[b] != 0.0 { pc = cloud_heaps(b, u, v); } else { pc = cloud_sheet(b, u, v); }
             if pc.w > 0.0 { c = c * (1.0 - pc.w) + pc.xyz; }

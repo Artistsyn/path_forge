@@ -125,6 +125,39 @@ pub fn bog_boardwalk() -> Scene {
     s
 }
 
+/// A pier out over a still tropical sea at sunset: the sky ablaze low down under a mix of
+/// cloud, palms along the shore either side, lanterns coming on along the rail, and all of it
+/// mirrored in the water.
+pub fn sunset_pier() -> Scene {
+    let mut s = scene("Sunset Pier");
+    s.camera.horizon = 0.36;
+    s.camera.eye_height = 1.4;
+    s.path.half_width = 0.9;
+    s.path.edge_noise = 0.0;
+    s.path.edge_dark = 0.2;
+    s.path.material = Material { gloss: 0.12, ripples: 0.0, rotate: false, ..mat(Pattern::Planks, [118, 90, 66], [34, 24, 18], 1.2) };
+    s.verge = Verge {
+        enabled: true, tufts: false,
+        material: Material { gloss: 1.0, ripples: 0.22, noise: 2, damage: 0.0, ..mat(Pattern::Water, [34, 70, 96], [16, 34, 52], 4.0) },
+        ..Verge::default()
+    };
+    s.walls.enabled = false;
+    s.sky = day_sky([70, 110, 190], [250, 200, 150], [0.62, 0.9]);
+    s.sky.sun.radius = 0.06;
+    s.sky.clouds.enabled = false;
+    s.sky.cloud_mix = CloudMix { enabled: true, layers: 3, cover: 0.42, patches: 0.5, drift: 1.0, seed: 12, ..CloudMix::default() };
+    s.sky.sunset = Sunset { enabled: true, style: SunsetStyle::Fiery, ..Sunset::default() };
+    s.light = outdoor_light(0.4, [200, 150, 130], 80.0);
+    s.light.ambient_color = [255, 190, 170];
+    s.props = vec![
+        PropLayer { density: 0.6, rows: 2, row_spacing: 4.0, jitter: 1.5, ..props(PropKind::Palm, 6.0, 9.0, 1.2, 101) },
+        PropLayer { density: 0.25, jitter: 1.0, sink: 0.5, shadow: false, tint: [90, 80, 74], ..props(PropKind::Rock, 2.5, 11.0, 0.6, 103) },
+    ];
+    s.fixtures = vec![Fixture { kind: FixtureKind::Lantern, mount: Mount::Ground, post: LampPost::Pole, lateral: 0.05, height: 1.5, spacing: 8.0, radius: 6.0, intensity: 0.8, side: Side::Both, ..Fixture::default() }];
+    s.motion.speed = 2.4;
+    s
+}
+
 /// A walkway through deep space: dark planks and iron rails over nothing at all, a ringed gas giant
 /// and a blue world in a starfield, and asteroids drifting past.
 pub fn star_bridge() -> Scene {
@@ -990,6 +1023,7 @@ pub const ALL: &[(&str, fn() -> Scene)] = &[
     ("Canal Lanterns", canal_lanterns),
     ("Jungle River", jungle_river),
     ("Lagoon Swim", lagoon_swim),
+    ("Sunset Pier", sunset_pier),
     ("Frozen Channel", frozen_channel),
     ("Misty River", misty_river),
     ("Dawn Road", dawn_road),

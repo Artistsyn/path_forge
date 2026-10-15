@@ -10,7 +10,7 @@ use super::space::fbm_wrap;
 use crate::scene::{CloudKind, Clouds};
 
 /// Floats in a layer's record for the GPU (`CloudK::rec`).
-pub(super) const REC: usize = 40;
+pub(super) const REC: usize = 48;
 /// How low towards the horizon a sheet's plane is followed: the sky is a dome, not a flat ceiling.
 const E0: f32 = 0.3;
 const E1: f32 = 1.3;
@@ -56,6 +56,16 @@ pub(super) struct CloudK {
     /// Each row's size, and how many clouds' widths it is across the span.
     pub row_scale: [f32; 3],
     pub row_nx: [f32; 3],
+    /// How much it gathers into patches: where the patch noise turns to cloud (0 everywhere).
+    pub patch: f32,
+    /// A sunset's light on it (0 none): its column across the sky and how far round it reaches
+    /// (sky heights), and the colours of cloud lit low and near the sun, lit high, and turned away.
+    pub ss: f32,
+    pub ss_u: f32,
+    pub ss_w: f32,
+    pub ss_lo: [f32; 3],
+    pub ss_hi: [f32; 3],
+    pub ss_dark: [f32; 3],
 }
 
 impl CloudK {
@@ -64,12 +74,36 @@ impl CloudK {
         r[..8].copy_from_slice(&[self.heaps as u32 as f32, self.span, self.nx, self.vs, self.th, self.soft, self.opacity, self.shade]);
         r[8..11].copy_from_slice(&self.lit);
         r[11..14].copy_from_slice(&self.dark);
-        r[14..24].copy_from_slice(&[self.scroll, 0.0, self.detail, self.uc, self.rows, self.base, self.step, self.height, self.billow, self.seed]);
+        r[14..24].copy_from_slice(&[self.scroll, self.patch, self.detail, self.uc, self.rows, self.base, self.step, self.height, self.billow, self.seed]);
         r[24..27].copy_from_slice(&[self.sun, self.su, self.sv]);
         r[27..30].copy_from_slice(&self.sc);
         r[30..33].copy_from_slice(&self.row_scale);
         r[33..36].copy_from_slice(&self.row_nx);
+        r[36..39].copy_from_slice(&[self.ss, self.ss_u, self.ss_w]);
+        r[39..42].copy_from_slice(&self.ss_lo);
+        r[42..45].copy_from_slice(&self.ss_hi);
+        r[45..48].copy_from_slice(&self.ss_dark);
         r
+    }
+
+    /// The colours of its lit and shaded parts at (u, v): its own, or under a sunset lit from
+    /// below, gold and orange low down and towards the sun, pink higher up, violet turned away.
+    fn colors(&self, u: f32, v: f32, lit: [f32; 3], dark: [f32; 3]) -> ([f32; 3], [f32; 3]) {
+        if self.ss <= 0.0 { return (lit, dark); }
+        let du = (u - self.ss_u) / self.ss_w;
+        let toward = (-du * du).exp();
+        // Low cloud catches the orange light, high cloud the pink. Towards the sun a cloud is lit
+        // from behind: its body darker (its thin edges shine with the sun's lining).
+        let warm = mix3(self.ss_hi, self.ss_lo, smoothstep(0.35, 1.0, v));
+        let body = scale3(warm, 0.9 - 0.4 * toward);
+        let shade = mix3(self.ss_dark, warm, 0.25);
+        (mix3(lit, body, self.ss), mix3(dark, shade, self.ss))
+    }
+
+    /// How much of the layer is left at noise coordinate `uu` (0..1 across the span) and `pv`.
+    fn patch_k(&self, uu: f32, pv: f32) -> f32 {
+        if self.patch <= 0.0 { return 1.0; }
+        smoothstep(self.patch - 0.05, self.patch + 0.05, fbm_wrap(uu, pv + self.seed + 41.3, 3, 1.0))
     }
 
     /// The sun through the thin parts of a cloud near it.
@@ -104,13 +138,16 @@ impl CloudK {
         let d = (n - self.th) / self.soft;
         let a = smoothstep(0.0, 1.0, d) * self.opacity * (1.0 - smoothstep(0.86, 1.0, v));
         if a <= 0.0 { return ([0.0; 3], 0.0); }
+        let a = a * self.patch_k(uu, 0.8 * z);
+        if a <= 0.0 { return ([0.0; 3], 0.0); }
         // Seen from below, the thick parts are dark; and each fold is lit on the side it turns to
         // the sun (the coarse noise again, half a cell that way).
         let thick = smoothstep(0.5, 3.0, d);
         let (lx, ly) = self.light_dir(u, v);
         let lift = (0.5 + 3.0 * (coarse - fbm_wrap(uu + lx * 0.4 / self.nx, z + self.seed + ly * 0.4 / self.vs, self.nx as i32, self.vs))).clamp(0.0, 1.0);
         let shadow = (0.7 * thick + 0.5 * (1.0 - lift)).min(1.0);
-        let c = add3(mix3(self.lit, self.dark, (1.5 * self.shade).min(1.0) * shadow), self.lining(u, v, 1.0 - thick));
+        let (lit, dark) = self.colors(u, v, self.lit, self.dark);
+        let c = add3(mix3(lit, dark, (1.5 * self.shade).min(1.0) * shadow), self.lining(u, v, 1.0 - thick));
         (scale3(c, a), a)
     }
 
@@ -118,6 +155,7 @@ impl CloudK {
         let rows = (self.rows as usize).clamp(1, 3);
         let (mut col, mut alpha) = ([0.0f32; 3], 0.0f32);
         let (lx, ly) = self.light_dir(u, v);
+        let (lit, dark) = self.colors(u, v, self.lit, self.dark);
         // Far rows first, low over the horizon; the nearest highest, largest and last.
         for r in 0..rows {
             let s = self.row_scale[r];
@@ -132,6 +170,9 @@ impl CloudK {
             let mass = fbm_wrap(uu, 0.0, nx, 0.0);
             let env = smoothstep(self.th, self.th + 0.2, mass);
             if env <= 0.0 { continue; }
+            // Only some stretches of the row, when it gathers into patches.
+            let pk = self.patch_k(uu, 3.7 * r as f32);
+            if pk <= 0.0 { continue; }
             let (nb, arg) = (nx * 4, (base - v) / s + 11.3 * (r + 1) as f32);
             // How deep inside the cloud a point is: under its dome (steep-sided, level-based),
             // pushed out and in by round swellings with creases between them (the noise folded
@@ -145,7 +186,7 @@ impl CloudK {
             let top = dome(mass);
             // Its edge is frayed into wisps by a finer noise.
             let d = depth(h, swell(uu, arg), top) + 0.22 * env * (fbm_wrap(uu, arg + 5.3, nb * 4, self.vs * 4.0) - 0.47);
-            let a = smoothstep(0.0, self.soft, d) * self.opacity * (0.55 + 0.45 * (r + 1) as f32 / rows as f32);
+            let a = smoothstep(0.0, self.soft, d) * self.opacity * (0.55 + 0.45 * (r + 1) as f32 / rows as f32) * pk;
             if a <= 0.0 { continue; }
             // The light that reaches here has come through the cloud from the sun's side: three
             // steps that way, adding up how much cloud is in between. So the sunward swellings
@@ -159,12 +200,67 @@ impl CloudK {
                 between += (di / 0.3).clamp(0.0, 1.0);
             }
             let light = 0.1 + 0.9 * (-1.1 * between).exp();
-            let c = add3(mix3(self.lit, self.dark, (1.5 * self.shade).min(1.0) * (1.0 - light)), self.lining(u, v, 1.0 - smoothstep(0.0, 0.6, d)));
+            let c = add3(mix3(lit, dark, (1.5 * self.shade).min(1.0) * (1.0 - light)), self.lining(u, v, 1.0 - smoothstep(0.0, 0.6, d)));
             col = add3(scale3(col, 1.0 - a), scale3(c, a));
             alpha += a * (1.0 - alpha);
         }
         (col, alpha)
     }
+}
+
+/// A sunset's glow along the horizon for one frame (pixels): brightest at the horizon below the
+/// sun and fading up the sky through the style's three colours and away round the sky from the
+/// sun. `sky.wgsl` (`sunset_glow`) repeats `Glow::at` from `Glow::rec`.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct Glow {
+    /// The sun's column, the horizon row, the sky's height, how far round it reaches, how bright,
+    /// and how high it climbs (a fraction of the sky's height).
+    pub sx: f32,
+    pub hy: f32,
+    pub fhy: f32,
+    pub reach: f32,
+    pub k: f32,
+    pub height: f32,
+    pub cols: [[f32; 3]; 3],
+}
+
+/// Floats in `Glow::rec`.
+pub(super) const GLOW_REC: usize = 15;
+
+impl Glow {
+    pub(super) fn rec(&self) -> [f32; GLOW_REC] {
+        let mut r = [0.0; GLOW_REC];
+        r[..6].copy_from_slice(&[self.sx, self.hy, self.fhy, self.reach, self.k, self.height]);
+        for (i, c) in self.cols.iter().enumerate() { r[6 + 3 * i..9 + 3 * i].copy_from_slice(c); }
+        r
+    }
+
+    /// The glow added to the sky at pixel (x, y).
+    pub(super) fn at(&self, x: usize, y: usize) -> [f32; 3] {
+        let t = ((self.hy - (y as f32 + 0.5)) / self.fhy).max(0.0) / self.height;
+        let c = if t < 0.33 { mix3(self.cols[0], self.cols[1], t / 0.33) } else { mix3(self.cols[1], self.cols[2], ((t - 0.33) / 0.67).min(1.0)) };
+        let du = (x as f32 + 0.5 - self.sx) / self.reach;
+        scale3(c, self.k * (-1.8 * t).exp() * (0.3 + 0.7 * (-du * du).exp()))
+    }
+}
+
+/// The sunset glow this frame, if the sky has one.
+pub(super) fn glow(ctx: &Ctx) -> Option<Glow> {
+    let sky = &ctx.scene.sky;
+    let ss = &sky.sunset;
+    if !ss.on() || ss.glow <= 0.0 || sky.space.enabled { return None; }
+    let v = &ctx.view;
+    let hy = v.horizon_px.max(2.0);
+    let (ox, oy) = (v.left as f32, v.top as f32);
+    let (fw, fhy) = (v.width as f32 - 2.0 * ox, (hy - oy).max(2.0));
+    let pal = ss.style.colors();
+    Some(Glow {
+        sx: ox + v.sky_dx() + sky.sun.pos[0] * fw, hy, fhy,
+        reach: (ss.spread.clamp(0.1, 3.0) * fw).max(1.0),
+        k: 0.55 * ss.glow.clamp(0.0, 2.0) * ss.amount.clamp(0.0, 1.0),
+        height: ss.height.clamp(0.05, 1.0),
+        cols: pal.glow.map(rgb_lin),
+    })
 }
 
 /// A layer's kind as drawn: `Soft` is the main layer's alone (`render::cloud_list`), and reads
@@ -184,11 +280,25 @@ pub(super) fn layers(ctx: &Ctx) -> Vec<CloudK> {
     let sun = sky.sun.enabled.then(|| (sky.sun.pos[0] * fw / fhy, sky.sun.pos[1].clamp(0.0, 1.0), scale3(rgb_lin(sky.sun.color), 0.6)));
     let span = 1.6 * fw / fhy;
     let mut out = Vec::new();
-    let all = std::iter::once((&sky.clouds, true)).chain(sky.cloud_layers.iter().map(|c| (c, false)));
-    for (li, (cl, main)) in all.take(4).enumerate() {
+    let mix = sky.cloud_mix.layers();
+    let all = std::iter::once((&sky.clouds, true)).chain(sky.cloud_layers.iter().take(3).map(|c| (c, false))).chain(mix.iter().map(|c| (c, false)));
+    // A sunset lights them from below, round the sun's place across the sky.
+    let ss = &sky.sunset;
+    let pal = ss.style.colors();
+    let ss_k = if ss.on() { (ss.amount * ss.clouds).clamp(0.0, 1.0) } else { 0.0 };
+    for (li, (cl, main)) in all.enumerate() {
         let Some(kind) = drawn(cl.kind, main) else { continue };
         if !cl.enabled || cl.opacity <= 0.0 { continue; }
+        let start = out.len();
         out.extend(layer(ctx, cl, kind, li, span, 0.5 * fw / fhy, lit, sun));
+        if ss_k > 0.0 {
+            // Heavy decks let less of it through.
+            let dim = if matches!(kind, CloudKind::Rain | CloudKind::Storm | CloudKind::Snow | CloudKind::Overcast) { 0.55 } else { 1.0 };
+            for k in &mut out[start..] {
+                (k.ss, k.ss_u, k.ss_w) = (ss_k, sky.sun.pos[0] * fw / fhy, (ss.spread.clamp(0.1, 3.0) * fw / fhy).max(0.05));
+                (k.ss_lo, k.ss_hi, k.ss_dark) = (scale3(rgb_lin(pal.cloud_low), dim), scale3(rgb_lin(pal.cloud_high), dim), rgb_lin(pal.cloud_dark));
+            }
+        }
     }
     out
 }
@@ -208,6 +318,7 @@ fn layer(ctx: &Ctx, cl: &Clouds, kind: CloudKind, li: usize, span: f32, uc: f32,
         span, uc, lit: col, dark: grey(1.0), shade: cl.shade.clamp(0.0, 1.0), seed: hf(cl.seed ^ 0x91, li as i64),
         sun: sun.is_some() as u32 as f32, su: sun.map_or(0.0, |s| s.0), sv: sun.map_or(0.0, |s| s.1), sc: sun.map_or([0.0; 3], |s| s.2),
         opacity: (cl.opacity.max(0.0) * 2.0).min(1.0),
+        patch: if cl.patches > 0.0 { 0.3 + 0.28 * cl.patches.min(1.0) } else { 0.0 },
         ..CloudK::default()
     };
     // How much of the noise is cloud, for sheets: none at cover 0, all of it at 1.
@@ -284,6 +395,68 @@ mod tests {
         }
         let (rain, storm, snow) = (sky_mean(CloudKind::Rain, 0.7, 0.0), sky_mean(CloudKind::Storm, 0.7, 0.0), sky_mean(CloudKind::Snow, 0.7, 0.0));
         assert!(storm < rain && rain < snow && rain < clear - 20.0, "storm {storm} rain {rain} snow {snow} clear {clear}");
+    }
+
+    #[test]
+    fn a_cloud_mix_is_the_same_for_a_seed_and_differs_between_seeds() {
+        use crate::scene::CloudMix;
+        let mix = |seed: u32, kinds: Vec<CloudKind>| CloudMix { enabled: true, layers: 4, kinds, seed, ..CloudMix::default() }.layers();
+        assert_eq!(mix(3, vec![]), mix(3, vec![]));
+        assert!((0..8).any(|s| mix(s, vec![]) != mix(3, vec![])), "other seeds should give other skies");
+        // Only the kinds asked for, each once before any repeats, and the highest drawn first.
+        let some = mix(5, vec![CloudKind::Cirrus, CloudKind::Cumulus]);
+        assert_eq!(some.len(), 4);
+        assert!(some.iter().all(|c| matches!(c.kind, CloudKind::Cirrus | CloudKind::Cumulus)));
+        assert_eq!(some.iter().filter(|c| c.kind == CloudKind::Cirrus).count(), 2);
+        assert_eq!(some[0].kind, CloudKind::Cirrus);
+        assert!(CloudMix { layers: 3, ..CloudMix::default() }.layers().is_empty(), "off by default");
+    }
+
+    #[test]
+    fn patches_leave_open_sky_between_them() {
+        let mean = |patches: f32| {
+            let mut s = crate::scene::presets::ALL.iter().find(|(m, _)| *m == "Desert Ruins").unwrap().1();
+            s.props.clear();
+            s.set_pieces.clear();
+            s.sky.cloud_layers.clear();
+            s.sky.clouds = Clouds { enabled: true, kind: CloudKind::Overcast, cover: 0.9, patches, ..Clouds::default() };
+            let img = WorldRenderer::default().render(&s, 3.0, &RenderOptions { size: Some((90, 160)), ..RenderOptions::default() });
+            img.rgba[..90 * 32 * 4].chunks(4).map(|p| p[0] as f32 + p[1] as f32 + p[2] as f32).sum::<f32>() / (90.0 * 32.0 * 3.0)
+        };
+        let (clear, all, some) = (sky_mean(CloudKind::Overcast, 0.0, 0.0), mean(0.0), mean(1.0));
+        // An overcast darkens the sky; in patches, much less of it does.
+        assert!((all - clear).abs() > 2.0 * (some - clear).abs(), "clear {clear}, overcast {all}, in patches {some}");
+    }
+
+    #[test]
+    fn a_sunset_warms_the_sky_and_lights_the_clouds_from_below() {
+        use crate::scene::{Sunset, SunsetStyle};
+        let frame = |sunset: bool| {
+            let mut s = crate::scene::presets::ALL.iter().find(|(m, _)| *m == "Desert Ruins").unwrap().1();
+            s.props.clear();
+            s.set_pieces.clear();
+            s.sky.sun.pos = [0.5, 0.9];
+            s.sky.cloud_layers.clear();
+            s.sky.clouds = Clouds { enabled: true, kind: CloudKind::Stratus, cover: 0.6, ..Clouds::default() };
+            s.sky.sunset = Sunset { enabled: sunset, style: SunsetStyle::Fiery, ..Sunset::default() };
+            WorldRenderer::default().render(&s, 3.0, &RenderOptions { size: Some((90, 160)), ..RenderOptions::default() })
+        };
+        let warmth = |img: &crate::world::Image, rows: std::ops::Range<usize>| {
+            let (mut r, mut b) = (0.0, 0.0);
+            for y in rows { for x in 0..90 { let p = &img.rgba[(y * 90 + x) * 4..]; r += p[0] as f32; b += p[2] as f32; } }
+            r / b.max(1.0)
+        };
+        let (day, eve) = (frame(false), frame(true));
+        let hz = (crate::world::View::new(&crate::scene::presets::ALL.iter().find(|(m, _)| *m == "Desert Ruins").unwrap().1(), 90, 160).horizon_px) as usize;
+        // Low down the sky glows red; higher up it is warmer than the day's too.
+        assert!(warmth(&eve, hz - 8..hz - 2) > 1.5 * warmth(&day, hz - 8..hz - 2), "low sky: day {} sunset {}", warmth(&day, hz - 8..hz - 2), warmth(&eve, hz - 8..hz - 2));
+        assert!(warmth(&eve, 0..hz / 2) > warmth(&day, 0..hz / 2));
+        // The copy with the sunset's colours is made once.
+        let mut s = crate::scene::presets::ALL.iter().find(|(m, _)| *m == "Desert Ruins").unwrap().1();
+        s.sky.sunset.enabled = true;
+        let baked = Sunset::bake(&s).unwrap();
+        assert_ne!(baked.sky.top, s.sky.top);
+        assert!(Sunset::bake(&baked).is_none());
     }
 
     #[test]
