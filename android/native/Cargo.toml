@@ -1,0 +1,15 @@
+[package]
+name = "path_forge_android"
+version = "0.1.0"
+edition = "2021"
+description = "PathForge on Android: the runtime behind the phone app and its live wallpaper, over JNI"
+publish = false
+
+[lib]
+name = "pathforge"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+path_forge = { path = "../..", default-features = false }
+jni = { version = "0.21", default-features = false }
+serde_json = "1"

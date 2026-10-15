@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp" android:height="108dp" android:viewportWidth="108" android:viewportHeight="108">
+    <!-- The sun setting on the horizon, and its path on the water. -->
+    <path android:fillColor="#FFE2A0" android:pathData="M42,58a12,12 0,0 1,24 0z" />
+    <path android:fillColor="#FFC977" android:pathData="M47,61h14v1.6h-14z M45,65h18v1.6h-18z M50,69h8v1.4h-8z" />
+    <!-- The path, running out to the horizon. -->
+    <path android:fillColor="#7A4A2E" android:pathData="M52,58h4l18,30h-40z" />
+    <path android:fillColor="#E0A46A" android:pathData="M53.5,62h1l0.4,4h-1.8z M53.2,70h1.6l0.6,6h-2.8z M52.8,80h2.4l0.8,8h-4z" />
+</vector>

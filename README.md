@@ -17,6 +17,7 @@ the game where things are on screen.
 | `path_forge [scene.json]` | The studio: a live preview, an inspector generated from the scene schema, a timeline, a preset gallery and an export window. It reloads the file when it changes on disk. |
 | `pf` | Headless CLI: `presets`, `dump`, `render`, `sheet`, `gallery`, `styles`, `kit`, `schema`, `seam`, `bench`, `animcheck`, `animsheet`, `gifdiff`, `export`, `transition`, `journey`, `project`, `assets`, `pack`, `skill`. |
 | `pf_mcp` | MCP server on stdio with 20 `pf_*` tools that return images, so an AI agent can design, look at and export scenes. |
+| Android app | `android/`: pick a scene, give it a sunset, and set it as the phone's live or still wallpaper. Built on GitHub Actions into the `android-latest` release; see [android/README.md](android/README.md). |
 
 ```bash
 cargo build --release
