@@ -1,0 +1,4 @@
+build/
+PathForge.xcodeproj/
+*.ipa
+Payload/
