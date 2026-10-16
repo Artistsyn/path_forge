@@ -67,16 +67,22 @@ struct Renderers {
     gpu_backend: bool,
     /// Render as the studio's preview does: with frame stats and pick ids.
     studio: bool,
+    /// Play the camera's flight in (`camera.moves.fly_in`) from the loop's start.
+    intro: bool,
 }
 
 impl Renderers {
-    fn new(gpu_backend: bool) -> Self { Self { world: WorldRenderer::default(), cpu: PathRenderer::default(), gpu: None, gpu_backend, studio: false } }
+    fn new(gpu_backend: bool) -> Self { Self { world: WorldRenderer::default(), cpu: PathRenderer::default(), gpu: None, gpu_backend, studio: false, intro: false } }
 
     /// The renderers a command asked for: `--backend` for the 2.0 engine; the v3 renderer on the
     /// GPU where there is one, `--engine cpu` for the CPU reference, `--engine gpu` to insist.
     fn for_args(args: &Args) -> Result<Self, String> {
         let mut r = Self::new(gpu_backend(args)?);
         r.world = world_for(args)?;
+        // --hour H: the hour of the day on every scene with a sky (sky.day_night).
+        if let Some(h) = args.opts.get("hour") { r.world.set_hour(Some(h.parse().map_err(|_| format!("--hour: cannot read `{h}`"))?)); }
+        // --intro: the camera's flight in plays from the start of the loop.
+        r.intro = args.opts.contains_key("intro");
         Ok(r)
     }
 
@@ -92,7 +98,8 @@ impl Renderers {
     fn frame(&mut self, item: &Item, pos: f32) -> Result<Vec<u8>, String> {
         match item {
             Item::V3(s, dir) => {
-                let opts = RenderOptions { base_dir: dir.clone(), stats: self.studio, pick: self.studio, ..RenderOptions::default() };
+                let intro = self.intro.then(|| pos / s.motion.speed.max(0.01));
+                let opts = RenderOptions { base_dir: dir.clone(), stats: self.studio, pick: self.studio, intro, ..RenderOptions::default() };
                 Ok(self.world.render(s, pos, &opts).rgba)
             }
             Item::V2(s) => {
@@ -146,7 +153,7 @@ fn parse_args() -> Result<Args, String> {
 }
 
 fn usage() -> String {
-    "usage: pf <presets|dump|render|sheet|gallery|styles|kit|schema|seam|bench|animcheck|animsheet|gifdiff|export|transition|journey|project|assets|pack|skill|parity> [--preset NAME | --scene FILE] [options]  (see src/bin/pf.rs)".into()
+    "usage: pf <presets|dump|render|sheet|gallery|styles|kit|schema|seam|bench|animcheck|animsheet|gifdiff|export|transition|journey|project|assets|pack|skill|parity|share|unshare> [--preset NAME | --scene FILE] [options]  (see src/bin/pf.rs)".into()
 }
 
 fn norm(s: &str) -> String { s.to_lowercase().replace([' ', '_', '-'], "") }
@@ -929,6 +936,29 @@ fn main() -> ExitCode {
         "sheet" => cmd_sheet(&args),
         "seam" => cmd_seam(&args),
         "parity" => cmd_parity(&args),
+        // A scene as a share code (`--qr out.png` writes its QR code too); `unshare --code`
+        // turns one back into a scene.
+        "share" => {
+            let (_, item) = one_item(&args)?;
+            let Item::V3(scene, _) = item else { return Err("share needs a v3 scene".into()) };
+            let code = scene::share::encode(&scene)?;
+            if let Some(f) = args.opts.get("qr") {
+                std::fs::write(f, scene::share::qr_png(&code, opt(&args, "scale", 6u32)?)?).map_err(|e| format!("{f}: {e}"))?;
+                eprintln!("wrote {f}");
+            }
+            println!("{code}");
+            Ok(())
+        }
+        "unshare" => {
+            let code = args.opts.get("code").ok_or("unshare needs --code PF1....")?;
+            let s = scene::share::decode(code)?;
+            let json = serde_json::to_string_pretty(&s).map_err(|e| e.to_string())?;
+            match args.opts.get("o").or(args.opts.get("out")) {
+                Some(f) => { std::fs::write(f, json).map_err(|e| format!("{f}: {e}"))?; println!("{}: wrote {f}", s.name); }
+                None => println!("{json}"),
+            }
+            Ok(())
+        }
         "bench" => cmd_bench(&args),
         "gallery" => cmd_gallery(&args),
         "export" => cmd_export(&args),

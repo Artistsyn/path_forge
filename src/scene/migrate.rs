@@ -95,7 +95,7 @@ pub fn from_v2(o: &PathForgeSettings, name: &str) -> Scene {
                 enabled: o.sky.moon_enabled, pos: o.sky.moon_pos, radius: o.sky.moon_radius, color: o.sky.moon_color,
                 emits_light: o.sky.moon_emits_light, intensity: 0.35,
             },
-            phase: o.sky.moon_phase, opacity: o.sky.moon_alpha.clamp(0.0, 1.0), craters: o.sky.moon_texture_enabled,
+            phase: o.sky.moon_phase, opacity: o.sky.moon_alpha.clamp(0.0, 1.0), craters: o.sky.moon_texture_enabled, ..Moon::default()
         },
         stars: Stars { enabled: o.sky.stars_enabled, count: o.sky.stars_count, size: o.sky.stars_size / 1.4, twinkle: o.sky.stars_twinkle, seed: o.sky.stars_seed },
         clouds: Clouds {
@@ -156,7 +156,7 @@ pub fn from_v2(o: &PathForgeSettings, name: &str) -> Scene {
             scale: p.scale, scale_var: p.scale_var.min(0.9), tint_var: 0.0, tint: p.tint, sink: (p.y_sink * 0.04).min(0.3), float: 0.0, float_var: 0.0, orbit: Orbit::default(),
             shadow: p.casts_shadow, shadow_opacity: (p.shadow_opacity * 0.7).clamp(0.0, 1.0),
             sprite: sprite(&p.sprite_path, &p.sprite_pool_paths, p.sprite_pool_enabled, p.sprite_flip_x),
-            seed: p.seed, def: String::new(),
+            seed: p.seed, def: String::new(), facing: None, depth: None,
         }
     }).collect();
 
@@ -166,7 +166,7 @@ pub fn from_v2(o: &PathForgeSettings, name: &str) -> Scene {
         name: name.to_owned(),
         ground_cover: Vec::new(),
         canvas: Canvas { width: o.canvas.w() as u32, height: o.canvas.h() as u32 },
-        camera: Camera { eye_height: eye, horizon: (hy / h).clamp(0.05, 0.95), zoom, lens_curve: o.scene.horizon_curve },
+        camera: Camera { eye_height: eye, horizon: (hy / h).clamp(0.05, 0.95), zoom, lens_curve: o.scene.horizon_curve, ..Camera::default() },
         path,
         verge: Verge {
             enabled: false, tufts: o.scene.grass_enabled, tuft_color: o.scene.grass_color,
@@ -177,7 +177,7 @@ pub fn from_v2(o: &PathForgeSettings, name: &str) -> Scene {
         sky,
         light,
         fixtures,
-        props, set_pieces: Vec::new(), companions: Vec::new(), weather: Weather::default(), prop_defs: Default::default(),
+        props, set_pieces: Vec::new(), companions: Vec::new(), weather: Weather::default(), season: Season::default(), wildlife: Wildlife::default(), waterfalls: Vec::new(), fences: Vec::new(), prop_defs: Default::default(),
         particles,
         post: Post {
             exposure: 1.0, contrast: 1.0,
@@ -187,6 +187,7 @@ pub fn from_v2(o: &PathForgeSettings, name: &str) -> Scene {
             grain: if o.post.grain_enabled { o.post.grain } else { 0.0 },
             tint: [255, 255, 255],
             flare: Flare::default(),
+            focus: Focus::default(),
         },
         style: Style::default(),
         motion: Motion { loop_length, speed: o.anim.play_speed.max(0.01) * loop_length, fps: 24 },

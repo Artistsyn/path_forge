@@ -20,11 +20,39 @@ pub struct ResolvedProp {
     pub hanging: bool,
     pub glow: f32,
     pub light: Option<PropLight>,
+    /// Smoke rising from it.
+    pub smoke: Option<crate::scene::PropSmoke>,
     pub pixelated: bool,
     /// Mirror every image; drawn and built-in props are mirrored at random instead.
     pub flip_x: bool,
     /// Images come from files (fixed orientation unless `flip_x`).
     pub from_files: bool,
+    /// Which way it faces, and how deep it is behind its front (PropDef::facing, depth).
+    pub facing: crate::scene::Facing,
+    pub depth: f32,
+    /// Its other faces (PropDef::faces), each twice when mirrored.
+    pub faces: Vec<Face>,
+    /// The height its faces' metres are measured against: its shape's own height (or, for
+    /// images, `height`). A prop `h` metres tall scales them by `h / natural`.
+    pub natural: f32,
+    /// The definitions it picks from (PropDef::pick), one per prop; empty, it is drawn itself.
+    pub alts: Vec<ResolvedProp>,
+    /// Its cylinders (PropDef::tubes), each twice when mirrored: ends in its space, radius, and
+    /// bark and end colours (linear).
+    pub tubes: Vec<([f32; 3], [f32; 3], f32, [f32; 3], [f32; 3])>,
+}
+impl ResolvedProp {
+    /// What one prop draws, from its hash.
+    pub fn pick(&self, h: u32) -> &ResolvedProp {
+        if self.alts.is_empty() { self } else { &self.alts[h as usize % self.alts.len()] }
+    }
+}
+
+/// A face of a prop, ready to draw: its picture and its top left, top right and bottom left
+/// corners in the prop's space (x across its front, y up, z back).
+pub struct Face {
+    pub sprite: Arc<Sprite>,
+    pub corners: [[f32; 3]; 3],
 }
 
 #[derive(Default)]
@@ -34,7 +62,28 @@ pub struct PropDefs {
 }
 
 /// Kits compiled in, used as `def: "@<name>#<prop>"`: drawn from shapes, so they need no files.
-pub const BUILTIN_KITS: [(&str, &str); 1] = [("wayside", include_str!("../../kits/wayside/kit.json"))];
+/// Every prop of the built-in kits as a layer's `def` names it (`@kit#prop`), with a label for
+/// a picker ("Village: cottage") and its description.
+pub fn builtin_props() -> Vec<(String, String, String)> {
+    let mut out = Vec::new();
+    for (kit, text) in BUILTIN_KITS {
+        let title = match kit { "wayside" => "Wayside", "settlement" => "Village", "waterside" => "Waterside", "wildlife" => "Wildlife", k => k };
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(text) else { continue };
+        let Some(props) = v.get("props").and_then(|p| p.as_object()) else { continue };
+        for (name, d) in props {
+            let desc = d.get("description").and_then(|x| x.as_str()).unwrap_or("").to_owned();
+            out.push((format!("@{kit}#{name}"), format!("{title}: {}", name.replace('_', " ")), desc));
+        }
+    }
+    out
+}
+
+pub const BUILTIN_KITS: [(&str, &str); 4] = [
+    ("wayside", include_str!("../../kits/wayside/kit.json")),
+    ("settlement", include_str!("../../kits/settlement/kit.json")),
+    ("waterside", include_str!("../../kits/waterside/kit.json")),
+    ("wildlife", include_str!("../../kits/wildlife/kit.json")),
+];
 
 fn mtime(p: &Path) -> Option<SystemTime> { std::fs::metadata(p).and_then(|m| m.modified()).ok() }
 
@@ -128,8 +177,12 @@ impl PropDefs {
     /// What a layer draws. A layer whose `def` cannot be found draws nothing (None), and the error
     /// says why; a definition whose images cannot be read draws its `kind` instead.
     pub fn resolve(&mut self, scene: &Scene, base: Option<&Path>, layer: &PropLayer, sprites: &mut SpriteCache) -> (Option<ResolvedProp>, Option<String>) {
+        self.resolve_in(scene, base, layer, sprites, true)
+    }
+
+    fn resolve_in(&mut self, scene: &Scene, base: Option<&Path>, layer: &PropLayer, sprites: &mut SpriteCache, group: bool) -> (Option<ResolvedProp>, Option<String>) {
         let builtin = |kind: PropKind, tint: Rgb| ResolvedProp {
-            sprites: Vec::new(), kind, tint, height: kind.height_m(), hanging: kind.hangs(), glow: kind.glow(), light: None,
+            sprites: Vec::new(), kind, tint, height: kind.height_m(), hanging: kind.hangs(), glow: kind.glow(), light: None, smoke: None, facing: crate::scene::Facing::Camera, depth: 0.0, faces: Vec::new(), natural: kind.height_m(), alts: Vec::new(), tubes: Vec::new(),
             pixelated: false, flip_x: false, from_files: false,
         };
         let here = base.map(Path::to_path_buf).unwrap_or_default();
@@ -148,10 +201,28 @@ impl PropDefs {
             Ok(x) => x,
             Err(e) => return (None, Some(format!("prop def '{}': {e}; the layer draws nothing", layer.def))),
         };
+        // A group: each prop one of its members, named beside it (in its kit, or the scene's).
+        if group && !d.pick.is_empty() {
+            let kit = layer.def.rfind('#').map_or("", |i| &layer.def[..=i]);
+            let (mut alts, mut warn) = (Vec::new(), None);
+            for name in &d.pick {
+                let one = PropLayer { def: format!("{kit}{name}"), ..layer.clone() };
+                let (r, w) = self.resolve_in(scene, base, &one, sprites, false);
+                if let Some(r) = r { alts.push(r); }
+                if w.is_some() && warn.is_none() { warn = w; }
+            }
+            if alts.is_empty() { return (None, Some(warn.unwrap_or_else(|| format!("prop def '{}': none of the definitions it picks from can be drawn", layer.def)))); }
+            let mut r = builtin(d.kind, d.tint.unwrap_or(d.kind.default_tint()));
+            (r.height, r.facing, r.depth) = (alts[0].height, d.facing, d.depth.max(0.0));
+            r.alts = alts;
+            return (Some(r), warn);
+        }
         let mut r = builtin(d.kind, d.tint.unwrap_or(d.kind.default_tint()));
         r.hanging = d.anchor == Anchor::Ceiling;
         r.glow = d.glow.max(0.0);
         r.light = d.light.enabled.then(|| d.light.clone());
+        r.smoke = (d.smoke.enabled && d.smoke.amount > 0.0).then(|| d.smoke.clone());
+        (r.facing, r.depth) = (d.facing, d.depth.max(0.0));
         r.pixelated = d.sprite.pixelated;
         r.flip_x = d.sprite.flip_x;
         let mut warn = None;
@@ -170,11 +241,36 @@ impl PropDefs {
             }
         } else if !d.shape.is_empty() {
             match sprites.shape(&d.shape) {
-                Some((s, h)) => { r.sprites = vec![s]; r.height = h; }
+                Some((s, h)) => { r.sprites = vec![s]; r.height = h; r.natural = h; }
                 None => warn = Some(format!("prop def '{}': its shape covers nothing above the ground", layer.def)),
             }
         }
         if d.height > 0.0 { r.height = d.height; }
+        // (A drawn shape keeps its own height; anything else measures its faces by its height.)
+        if d.sprite.is_set() || d.shape.is_empty() || r.sprites.is_empty() { r.natural = r.height; }
+        r.natural = r.natural.max(1e-3);
+        let dist = |a: [f32; 3], b: [f32; 3]| ((a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2) + (a[2] - b[2]).powi(2)).sqrt();
+        for f in &d.faces {
+            let [tl, tr, bl] = f.corners;
+            let sprite = if !f.image.trim().is_empty() {
+                sprites.file_at(&join(Some(&dir), &f.image), false)
+            } else {
+                sprites.face(&f.shape, dist(tl, tr), dist(tl, bl))
+            };
+            let Some(sprite) = sprite else {
+                warn.get_or_insert_with(|| format!("prop def '{}': a face has no picture (no shape, or an image that cannot be read); it is left out", layer.def));
+                continue;
+            };
+            let m = |c: [f32; 3]| [-c[0], c[1], c[2]];
+            if f.mirror { r.faces.push(Face { sprite: sprite.clone(), corners: [m(tl), m(tr), m(bl)] }); }
+            r.faces.push(Face { sprite, corners: f.corners });
+        }
+        for t in &d.tubes {
+            let (c, e) = (super::texture::rgb_lin(t.color), super::texture::rgb_lin(t.end));
+            let m = |c: [f32; 3]| [-c[0], c[1], c[2]];
+            if t.mirror { r.tubes.push((m(t.from), m(t.to), t.radius.max(0.005), c, e)); }
+            r.tubes.push((t.from, t.to, t.radius.max(0.005), c, e));
+        }
         (Some(r), warn)
     }
 }
@@ -209,7 +305,13 @@ mod tests {
                 t.props = vec![layer(&format!("@{kit}#{name}"))];
                 assert!(def_warnings(&t, None).is_empty(), "@{kit}#{name}: {:?}", def_warnings(&t, None));
                 let (r, _) = PropDefs::default().resolve(&t, None, &t.props[0], &mut SpriteCache::default());
-                assert_eq!(r.unwrap().sprites.len(), 1, "@{kit}#{name} draws its shape");
+                let r = r.unwrap();
+                // A group draws each of the definitions it picks from.
+                assert_eq!(r.alts.len(), d.pick.len(), "@{kit}#{name}");
+                if !d.pick.is_empty() { continue; }
+                assert_eq!(r.sprites.len(), 1, "@{kit}#{name} draws its shape");
+                // Every face has its picture; a mirrored one comes twice.
+                assert_eq!(r.faces.len(), d.faces.iter().map(|f| 1 + f.mirror as usize).sum::<usize>(), "@{kit}#{name}");
             }
         }
     }
@@ -307,5 +409,46 @@ mod tests {
         let rep = crate::review::check_loop(&mut r, &s, &RenderOptions { base_dir: Some(root.clone()), ..RenderOptions::default() }, 6);
         assert!(rep.exact < 1e-6);
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_group_draws_one_of_its_definitions_per_prop_and_says_when_one_is_missing() {
+        let mut s = crate::review::kit_backdrop();
+        let one = |w: f32| PropDef { shape: vec![crate::scene::ShapePart { shape: crate::scene::Shape::Rect { min: [-w, 0.0], max: [w, 1.0] }, ..Default::default() }], ..PropDef::default() };
+        s.prop_defs.insert("a".into(), one(0.5));
+        s.prop_defs.insert("b".into(), one(1.0));
+        s.prop_defs.insert("ab".into(), PropDef { pick: vec!["a".into(), "b".into()], ..PropDef::default() });
+        s.props = vec![layer("ab")];
+        let (r, w) = PropDefs::default().resolve(&s, None, &s.props[0], &mut SpriteCache::default());
+        let r = r.unwrap();
+        assert!(w.is_none() && r.alts.len() == 2);
+        let aspect = |h: u32| r.pick(h).sprites[0].aspect;
+        assert!(aspect(0) != aspect(1), "each prop one of them");
+        s.prop_defs.insert("ab".into(), PropDef { pick: vec!["a".into(), "nope".into()], ..PropDef::default() });
+        let (r, w) = PropDefs::default().resolve(&s, None, &s.props[0], &mut SpriteCache::default());
+        assert!(r.unwrap().alts.len() == 1 && w.is_some_and(|w| w.contains("nope")), "a missing one is left out, and said");
+    }
+}
+#[cfg(test)]
+mod probe_tmp {
+    use super::*;
+    #[test]
+    fn probe_front_rows() {
+        let s = crate::review::kit_backdrop();
+        let mut t = s.clone();
+        t.props = vec![PropLayer { def: "@settlement#log_cabin_small".into(), ..PropLayer::default() }];
+        let (r, _) = PropDefs::default().resolve(&t, None, &t.props[0], &mut SpriteCache::default());
+        let r = r.unwrap();
+        let sp = &r.sprites[0];
+        let (w, h, data) = &sp.levels[0];
+        println!("natural {} height {} sprite {}x{} aspect {}", r.natural, r.height, w, h, sp.aspect);
+        let x = w * 30 / 100;
+        let mut prev = 1.0f32;
+        for y in 0..*h {
+            let p = data[y * w + x];
+            let l = p[0] + p[1] + p[2];
+            if l < 0.06 && prev >= 0.06 { println!("dark row {y} -> metres from bottom {:.3}", (*h - y) as f32 / *h as f32 * r.height); }
+            prev = l;
+        }
     }
 }

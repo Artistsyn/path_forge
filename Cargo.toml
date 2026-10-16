@@ -5,8 +5,9 @@ edition = "2021"
 description = "Path / corridor environment GIF creator — PathForge 2.0 (Rust port of PathForgeLive.jsx)"
 
 [workspace]
-members = [".", "runtime"]
-# `cargo build` at the top builds PathForge; `cargo build -p path_forge_runtime` the game library.
+members = [".", "runtime", "mobile"]
+# `cargo build` at the top builds PathForge; `cargo build -p path_forge_runtime` the game library;
+# `mobile` is the phone apps' library (built by android/build-native.sh and ios/build-native.sh).
 default-members = ["."]
 
 [[bin]]
@@ -45,4 +46,7 @@ rayon = "1"
 png = "0.18"
 schemars = "1"
 base64 = "0.22"
+# Share codes: scenes compressed into a line of text, and QR codes of them.
+miniz_oxide = "0.8"
+qrcode = { version = "0.14", default-features = false }
 webp-animation = "0.10"

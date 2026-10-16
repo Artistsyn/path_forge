@@ -148,14 +148,17 @@ pub(crate) struct WorldParams {
     pub ww_on: u32, pub ww_shift: f32, pub ww_foam: f32, pub ww_foam_col: [f32; 3], pub ww_foam_w: f32,
     pub ww_lap_ph: f32, pub ww_lap_k: f32, pub ww_k1: f32, pub ww_k2: f32, pub ww_wet: f32,
     pub ww_kind: u32, pub ww_dens: f32, pub ww_fcol: [f32; 3], pub ww_fsize: f32, pub ww_period: f32, pub ww_cs: f32, pub ww_seed: u32,
-    /// How far in from the deck's edge a bridge's railing stands (Spans::rail_inset), then words
+    /// How far in from the deck's edge a bridge's railing stands (Spans::rail_inset), the waterway's
+    /// ice and width, the fences' paint (render::fence_paint), then words
     /// kept free for what comes next.
-    pub br_inset: f32, pub ww_frozen: f32, pub ww_hw: f32, pub spare: [f32; 5],
+    pub br_inset: f32, pub ww_frozen: f32, pub ww_hw: f32, pub fence: [f32; 3], pub spare: [f32; 2],
     /// View::wind_now: the path's winding.
     pub wind: [[f32; 4]; 4],
     /// Ground cover (render::cover): how many layers, the wind in them, and each layer's record.
     pub gc_n: u32, pub gc_sway: f32, pub gc_lean: f32, pub gc_phase: f32,
     pub gc: [[f32; 4]; 12],
+    /// The camera turned (View::yaw_c, yaw_s, cam_x; turned as 0 or 1).
+    pub cam_yc: f32, pub cam_ys: f32, pub cam_x: f32, pub cam_turned: u32,
 }
 
 /// The sky pass's parameters; `Sky` in sky.wgsl, field for field.
@@ -191,7 +194,9 @@ pub(crate) struct SkyParams {
     pub mode: u32, pub w_fork: u32, pub w_base: f32,
     pub w_center: f32, pub w_focal: f32, pub w_split: f32, pub w_near: f32, pub w_keep: [f32; 2], pub sp_star_var: f32, pub ss_prims: u32,
     /// A sunset's glow (render::clouds::Glow::rec, at ss_prims).
-    pub ss_on: u32, pub pad: [u32; 3],
+    pub ss_on: u32, pub sx_prims: u32, pub m_seed: u32, pub m_relief: f32,
+    pub m_gain: f32, pub mt_n: u32, pub mt_prims: u32, pub rb_sat: f32,
+    pub hl_n: u32, pub hl_prims: u32, pub pad: [u32; 2],
 }
 
 /// The sky pass's input: parameters, primitives (stars, blobs, bolt segments; 6 floats each) and
@@ -260,6 +265,16 @@ pub(crate) struct CardGpu {
     /// `render::CardWind`.
     pub w_amp: f32, pub w_v: f32, pub w_lean: f32, pub w_t1: f32, pub w_t2: f32,
     pub w_c0: f32, pub w_c1: f32, pub w_trunk: f32, pub w_foot: f32, pub w_kv: f32,
+    /// `render::snow_on_card`'s dust.
+    pub snow_dust: f32,
+    /// A card standing in the world (`render::Card::pan`): 1 when it is one, its pixel-to-picture
+    /// mapping, its depth plane, and the column an end wall shows (below 0 for none).
+    pub pan: u32, pub ph: [f32; 9], pub pq: [f32; 3], pub strip: f32,
+    /// A cylinder (`render::TubeCard`): 1 when it is one, its axis start, unit direction and
+    /// length (camera space), radius, bark and end colours, the light from its six sides, and
+    /// the camera's 1 / focal length and centre.
+    pub tube: u32, pub ta: [f32; 3], pub tu: [f32; 3], pub tlen: f32, pub trad: f32,
+    pub tbark: [f32; 3], pub tend: [f32; 3], pub cube: [f32; 18], pub tkf: f32, pub tcx: f32, pub tcy: f32,
 }
 
 /// A card and the sprite levels it samples (chosen on the CPU, as `Sprite::sample` would).
@@ -445,7 +460,11 @@ pub(crate) struct PostParams {
     pub ln_cell0: f32, pub ln_cell1: f32, pub ln_tt: f32, pub ln_cyc: u32,
     pub ln_fill: f32, pub ln_haze: f32, pub ln_blur: i32, pub ln_reach: f32,
     /// The bloom threshold of the sky (post::sky_threshold).
-    pub bl_sky: f32, pub bl_pad: [f32; 3],
+    pub bl_sky: f32,
+    /// Depth of field (weather::FocusK); it reads h_fsrc and writes h_fdst.
+    pub fo_on: u32, pub fo_tilt: u32, pub fo_dist: f32,
+    pub fo_max: f32, pub fo_band: f32, pub fo_half: f32, pub h_fsrc: u32,
+    pub h_fdst: u32, pub fo_pad: [u32; 3],
 }
 
 /// What post needs besides its settings: the lens drops, the palette and grade tables (cached by
@@ -456,7 +475,7 @@ pub(crate) struct PostIn<'a> {
     pub key: usize,
     pub lut: Option<(u32, &'a [u8], Vec<u32>)>,
     pub cube: Option<&'a [[f32; 3]]>,
-    pub kuwahara: bool, pub shimmer: bool, pub warp: bool, pub bloom: bool,
+    pub kuwahara: bool, pub shimmer: bool, pub focus: bool, pub warp: bool, pub bloom: bool,
     pub want_depth: bool,
 }
 
@@ -506,7 +525,7 @@ pub(crate) struct AirParams {
     /// weather::apply_mist: thinning with height, over the path only (1) reaching `spread` past
     /// its edges, and the glow towards the sun (at sun_x/sun_y, sky `fhy` pixels tall).
     pub soft: f32, pub over: u32, pub spread: f32, pub glow_on: u32,
-    pub sun_x: f32, pub sun_y: f32, pub fhy: f32, pub sun: [f32; 3], pub pad: u32,
+    pub sun_x: f32, pub sun_y: f32, pub fhy: f32, pub sun: [f32; 3], pub from: f32,
 }
 
 /// Textures kept on the GPU (see `Gpu::texel_buffer`): each held texture and where its levels
@@ -694,7 +713,7 @@ impl Gpu {
             let pl = d.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: Some("post"), bind_group_layouts: &[&layout], push_constant_ranges: &[] });
             let m = ctx.module("post.wgsl", include_str!("post.wgsl"))?;
             let mut pipes = std::collections::HashMap::new();
-            for e in ["post_crop", "post_shimmer", "post_frost_rows", "post_frost_mean", "post_lens", "post_bloom_down", "post_bh0", "post_bv0", "post_bh1", "post_bv1", "post_bh2", "post_bv2", "post_bh3", "post_bv3", "post_bh4", "post_bv4", "post_rays", "post_ghosts",
+            for e in ["post_crop", "post_shimmer", "post_focus", "post_frost_rows", "post_frost_mean", "post_lens", "post_bloom_down", "post_bh0", "post_bv0", "post_bh1", "post_bv1", "post_bh2", "post_bv2", "post_bh3", "post_bv3", "post_bh4", "post_bv4", "post_rays", "post_ghosts",
                       "post_finish", "post_kuw_h", "post_kuw_v", "post_grade_outline", "post_warp", "post_quant", "post_stats", "post_out"] {
                 pipes.insert(e, ctx.compute(&m, &pl, e)?);
             }
@@ -1293,6 +1312,7 @@ impl<'g> Frame<'g> {
         let mut cur = ha;
         p.h_crop = ha as u32;
         if pin.shimmer { p.h_shim = hb as u32; cur = hb; }
+        if pin.focus { p.h_fsrc = cur as u32; cur = other(cur); p.h_fdst = cur as u32; }
         let lens = p.lens_kind != 0;
         if lens { p.h_lsrc = cur as u32; cur = other(cur); p.h_ldst = cur as u32; }
         p.h_fin = cur as u32;
@@ -1359,6 +1379,7 @@ impl<'g> Frame<'g> {
         let rows = (h as u32).div_ceil(64);
         let mut steps: Vec<(&'static str, (u32, u32))> = vec![("post_crop", full)];
         if pin.shimmer { steps.push(("post_shimmer", full)); }
+        if pin.focus { steps.push(("post_focus", full)); }
         if lens {
             if params.lens_kind == 2 { steps.push(("post_frost_rows", (rows, 1))); steps.push(("post_frost_mean", (1, 1))); }
             steps.push(("post_lens", full));
@@ -1558,12 +1579,12 @@ mod tests {
     fn world_params_match_the_wgsl_struct_size() {
         // A uniform block's size is a multiple of 16; the WGSL struct has the same fields.
         assert_eq!(std::mem::size_of::<WorldParams>() % 16, 0);
-        assert_eq!(std::mem::size_of::<WorldParams>(), 4 * 292);
-        assert_eq!(std::mem::size_of::<CardGpu>(), 4 * 52);
+        assert_eq!(std::mem::size_of::<WorldParams>(), 4 * 296);
+        assert_eq!(std::mem::size_of::<CardGpu>(), 4 * 103);
         assert_eq!(std::mem::size_of::<SplatGpu>(), 4 * 24);
         assert_eq!(std::mem::size_of::<AirParams>(), 80);
         assert_eq!(std::mem::size_of::<ShaftParams>(), 64);
-        assert_eq!(std::mem::size_of::<PostParams>(), 432);
+        assert_eq!(std::mem::size_of::<PostParams>(), 464);
         assert_eq!(std::mem::size_of::<SkyParams>() % 16, 0, "SkyParams is {} bytes", std::mem::size_of::<SkyParams>());
     }
 

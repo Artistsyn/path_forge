@@ -61,12 +61,14 @@ struct World {
     ww_lap_ph: f32, ww_lap_k: f32, ww_k1: f32, ww_k2: f32, ww_wet: f32,
     ww_kind: u32, ww_dens: f32, ww_fr: f32, ww_fg: f32, ww_fb: f32, ww_fsize: f32, ww_period: f32, ww_cs: f32, ww_seed: u32,
     // Spans::rail_inset, then spare words.
-    br_inset: f32, ww_frozen: f32, ww_hw: f32, sp2: f32, sp3: f32, sp4: f32, sp5: f32, sp6: f32,
+    br_inset: f32, ww_frozen: f32, ww_hw: f32, fence_r: f32, fence_g: f32, fence_b: f32, sp5: f32, sp6: f32,
     // View::wind_now: (amplitude, wave number, phase at the camera, turn) of each wave.
     wind: array<vec4<f32>, 4>,
     // Ground cover (render::cover): layers, the wind in them (Wx::sway_parts), CoverK::rec each.
     gc_n: u32, gc_sway: f32, gc_lean: f32, gc_phase: f32,
     gc: array<vec4<f32>, 12>,
+    // The camera turned (View::to_cam).
+    cam_yc: f32, cam_ys: f32, cam_x: f32, cam_turned: u32,
 }
 
 // Every pass binds the world's parameters here.
@@ -95,12 +97,13 @@ const ID_RAIL: u32 = 20u;
 const RAIL_STONE: u32 = 0u;
 const RAIL_WOOD: u32 = 1u;
 const RAIL_PAINT: u32 = 2u;
+const RAIL_FENCE: u32 = 3u;
 const FACE_INNER: u32 = 0u;
 const FACE_OUTER: u32 = 1u;
 const FACE_TOP: u32 = 2u;
 const FACE_FRONT: u32 = 3u;
 
-fn is_rail(id: u32) -> bool { return id >= ID_RAIL && id < ID_RAIL + 12u; }
+fn is_rail(id: u32) -> bool { return id >= ID_RAIL && id < ID_RAIL + 16u; }
 
 const PI: f32 = 3.14159265358979;
 const TAU: f32 = 6.28318530717959;
@@ -297,8 +300,16 @@ fn path_half_width(d: f32) -> f32 {
     if t <= 0.0 { return a; }
     return a + (flared(W.sp_hw_b, W.sp_flare_b, d) - a) * t;
 }
+// View::rot_dir: a world direction as the turned camera sees it.
+fn rot_dir(v: vec3<f32>) -> vec3<f32> {
+    if W.cam_turned == 0u { return v; }
+    return vec3<f32>(rnd(W.cam_yc * v.x) - rnd(W.cam_ys * v.z), v.y, rnd(W.cam_ys * v.x) + rnd(W.cam_yc * v.z));
+}
 fn to_cam(x: f32, y: f32, d: f32) -> vec3<f32> {
-    return vec3<f32>(x + bend_x(d) + shear_x(d), y - W.eye_height + hill_y(d) + lift(d), d);
+    let c = vec3<f32>(x + bend_x(d) + shear_x(d), y - W.eye_height + hill_y(d) + lift(d), d);
+    if W.cam_turned == 0u { return c; }
+    let px = c.x - W.cam_x;
+    return vec3<f32>(rnd(W.cam_yc * px) - rnd(W.cam_ys * c.z), c.y, rnd(W.cam_ys * px) + rnd(W.cam_yc * c.z));
 }
 
 // ── Ctx helpers (render.rs) ─────────────────────────────────────────────

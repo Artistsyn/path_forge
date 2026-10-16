@@ -6,9 +6,11 @@
 //! repeats fits in `motion.loop_length`, which makes every loop seamless by construction.
 
 pub mod presets;
+pub mod form;
 pub mod migrate;
 pub mod styles;
 pub mod remix;
+pub mod share;
 pub mod transition;
 
 use schemars::JsonSchema;
@@ -43,6 +45,14 @@ pub struct Scene {
     pub particles: Vec<Particles>,
     /// Lightning and fog banks.
     pub weather: Weather,
+    /// The time of year: foliage, grass and the ground through spring, summer, autumn and winter.
+    pub season: Season,
+    /// Things that move about: birds crossing the sky, bats at dusk, fish leaping from the water.
+    pub wildlife: Wildlife,
+    /// Waterfalls beside the path: water pouring down a rock face into foam and spray.
+    pub waterfalls: Vec<Waterfall>,
+    /// Fences along the path: pickets, rails or boards, joined post to post and following its bends.
+    pub fences: Vec<Fence>,
     /// Props described by data, by name: a prop layer uses one with `def: "<name>"`. Kits (folders
     /// with a kit.json) hold more, used as `def: "<folder>#<name>"`.
     #[serde(skip_serializing_if = "std::collections::BTreeMap::is_empty")]
@@ -78,9 +88,131 @@ pub struct Camera {
     pub zoom: f32,
     /// Screen-space lens bend of the horizon (-1..1); 0 is a flat horizon.
     pub lens_curve: f32,
+    /// How the camera moves besides walking: a bob in its step, slow looks to the side, a
+    /// dolly zoom, and a flight down from above at the start.
+    pub moves: CameraMoves,
+    /// Which way the camera looks, degrees from straight down the path (-90 .. 90; positive turns
+    /// right). The whole loop is seen from this angle: 30 looks diagonally across the path; 90 or
+    /// -90 looks straight across it, a side-scroller's view, the walk carrying the world sideways
+    /// past (to the left when the camera looks left, at -90). Turned far, the path's bends are
+    /// straightened and what stands between the camera and the path (walls, the ceiling, props
+    /// nearer than `cutaway`) is left out, so the path is seen.
+    pub yaw: f32,
+    /// Where the camera stands, metres sideways from the middle of the path (positive right). A
+    /// side view wants it well out to the side: 10 m from a path at yaw -90, -10 at 90.
+    pub side: f32,
+    /// In a side view, how far from the camera's side of the path things are left out, metres
+    /// past the path's edge (props, lights, walls): the cut through the near side of the world.
+    pub cutaway: f32,
 }
 impl Default for Camera {
-    fn default() -> Self { Self { eye_height: 1.6, horizon: 0.22, zoom: 1.0, lens_curve: 0.0 } }
+    fn default() -> Self { Self { eye_height: 1.6, horizon: 0.22, zoom: 1.0, lens_curve: 0.0, moves: CameraMoves::default(), yaw: 0.0, side: 0.0, cutaway: 0.4 } }
+}
+
+impl Camera {
+    /// Whether the camera looks far enough to the side that the near side of the world is cut
+    /// away and the path straightened (a side view).
+    pub fn side_view(&self) -> bool { self.yaw.abs() >= 60.0 }
+}
+
+/// Camera moves on top of the walk. Each repeats a whole number of times a loop, so the loop
+/// still closes; the flight in is the exception, played once at the very start (the live
+/// runtime, `pf render --intro`, an export with an intro).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
+pub struct CameraMoves {
+    /// The head's bob as the walker steps: metres up and down at each footfall (0 none, about
+    /// 0.04 a walk, 0.1 a run). It follows the distance walked, so it stops when the walk does.
+    pub bob: f32,
+    /// Metres walked in one step.
+    pub stride: f32,
+    /// The head's sway from side to side with the steps, degrees.
+    pub sway: f32,
+    /// A slow look to one side and back: how far, degrees (0 none; negative looks left first).
+    pub pan: f32,
+    /// Looks to the side and back per loop (whole).
+    pub pans: u32,
+    /// A slow look up and down: degrees (positive looks up first).
+    pub tilt: f32,
+    pub tilts: u32,
+    /// A dolly zoom: the camera draws back while it zooms in (or the reverse when negative), so
+    /// what stands `dolly_focus` metres ahead keeps its size while the background swells and
+    /// shrinks behind it. How far it draws back, metres.
+    pub dolly: f32,
+    pub dolly_focus: f32,
+    /// Dolly zooms per loop (whole).
+    pub dollies: u32,
+    /// The flight in: seconds of coming down from above and over to the walker's eyes (0 none).
+    pub fly_in: f32,
+    /// How high it starts, metres.
+    pub fly_height: f32,
+}
+impl Default for CameraMoves {
+    fn default() -> Self {
+        CameraMoves { bob: 0.0, stride: 0.75, sway: 0.0, pan: 0.0, pans: 1, tilt: 0.0, tilts: 1, dolly: 0.0, dolly_focus: 8.0, dollies: 1, fly_in: 0.0, fly_height: 18.0 }
+    }
+}
+
+/// The camera at one moment of its moves: what to add to the scene's camera.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct CameraPose {
+    /// Metres added to the eye height; looking up (the tangent of the angle: the horizon moves
+    /// down that many focal lengths); and the share of the frame height the horizon moves down
+    /// besides.
+    pub lift: f32,
+    pub tilt: f32,
+    pub horizon: f32,
+    /// The zoom multiplied, and metres the camera stands back along the path.
+    pub zoom: f32,
+    pub back: f32,
+    /// Looking to the side, as the tangent of the angle (positive right).
+    pub pan: f32,
+}
+impl CameraMoves {
+    pub fn any(&self) -> bool { self.bob != 0.0 || self.sway != 0.0 || self.pan != 0.0 || self.tilt != 0.0 || self.dolly != 0.0 || self.fly_in > 0.0 }
+    pub fn loops(&self) -> bool { self.bob != 0.0 || self.sway != 0.0 || self.pan != 0.0 || self.tilt != 0.0 || self.dolly != 0.0 }
+    /// The furthest the camera looks to the side, as a tangent.
+    pub fn pan_max(&self) -> f32 {
+        let deg = |d: f32| (d.abs().min(60.0) * std::f32::consts::PI / 180.0).tan();
+        deg(self.sway) + deg(self.pan)
+    }
+
+    /// Where the moves put the camera: `walked` metres along a loop of `loop_len`, at `phase`
+    /// (0..1) of the loop's time, and `intro` seconds since the start when the flight in
+    /// plays (None when it does not).
+    pub fn pose(&self, walked: f32, loop_len: f32, phase: f32, intro: Option<f32>, eye: f32, horizon: f32) -> CameraPose {
+        use std::f32::consts::{PI, TAU};
+        let mut p = CameraPose { zoom: 1.0, ..CameraPose::default() };
+        let deg = |d: f32| (d.clamp(-60.0, 60.0) * PI / 180.0).tan();
+        if self.bob != 0.0 || self.sway != 0.0 {
+            // Whole pairs of steps a loop, so the left and right feet both come round again.
+            let pairs = (loop_len / (2.0 * self.stride.max(0.2))).round().max(1.0);
+            let u = walked.rem_euclid(loop_len) / loop_len * pairs;
+            // Up over each step and down at each footfall (twice a pair), swaying once a pair.
+            p.lift += self.bob * ((TAU * u).sin().abs() - 2.0 / PI);
+            p.pan += deg(self.sway) * (TAU * u).sin();
+        }
+        if self.pan != 0.0 { p.pan += deg(self.pan) * (TAU * self.pans.max(1) as f32 * phase).sin(); }
+        if self.tilt != 0.0 { p.tilt += deg(self.tilt) * (TAU * self.tilts.max(1) as f32 * phase).sin(); }
+        if self.dolly != 0.0 {
+            let k = 0.5 - 0.5 * (TAU * self.dollies.max(1) as f32 * phase).cos();
+            let back = self.dolly.abs() * k;
+            let f = self.dolly_focus.max(1.0);
+            // Back and zooming in, or forward (never past half the way to the focus) and out.
+            p.back = if self.dolly > 0.0 { back } else { -back.min(0.5 * f) };
+            p.zoom = (f + p.back) / f;
+        }
+        if let Some(t) = intro.filter(|_| self.fly_in > 0.0) {
+            let u = (t / self.fly_in).clamp(0.0, 1.0);
+            // Eased: fast at first, settling gently at the walker's eyes.
+            let e = 1.0 - (1.0 - u).powi(3);
+            let up = (1.0 - e) * (self.fly_height - eye).max(0.0);
+            p.lift += up;
+            // Looking down at the start: the horizon high in the frame, coming down to its own place.
+            p.horizon -= (1.0 - e) * (horizon - 0.04).max(0.0);
+        }
+        p
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -148,13 +280,21 @@ pub struct Waterway {
     /// narrowing channel of open water down the middle, until at 1 it is ice from bank to bank.
     /// The ice is cracked, with snow lying on it in patches, and takes `foam_color`.
     pub frozen: f32,
+    /// Steps of white water across the channel where it tumbles over rock: 0 none .. 1 a
+    /// tumbling drop.
+    #[serde(default)]
+    pub cascades: f32,
+    /// Metres between them.
+    #[serde(default = "default_cascade_spacing")]
+    pub cascade_spacing: f32,
     pub seed: u32,
 }
+fn default_cascade_spacing() -> f32 { 24.0 }
 impl Default for Waterway {
     fn default() -> Self {
         Waterway {
             enabled: false, flow: 2, foam: 0.5, foam_color: [214, 226, 224], foam_width: 0.35, lap: 3, wet: 0.25,
-            floating: Floating::None, float_density: 0.3, float_color: [70, 110, 52], float_size: 0.5, frozen: 0.0, seed: 0,
+            floating: Floating::None, float_density: 0.3, float_color: [70, 110, 52], float_size: 0.5, frozen: 0.0, cascades: 0.0, cascade_spacing: 24.0, seed: 0,
         }
     }
 }
@@ -542,6 +682,8 @@ pub struct Sky {
     pub sun: SkyBody,
     pub moon: Moon,
     pub stars: Stars,
+    /// Shooting stars streaking across the sky (by night, or in space).
+    pub meteors: Meteors,
     pub clouds: Clouds,
     /// More layers of cloud over `clouds`, drawn in order (up to three): cirrus high over
     /// cumulus, heaps under an overcast. Give layers `patches` to share the sky between kinds.
@@ -551,9 +693,15 @@ pub struct Sky {
     /// A sunset (or sunrise): the sky, a glow along the horizon, the clouds and the light all
     /// take the colours of a low sun.
     pub sunset: Sunset,
+    /// A day and night: the sun crosses the sky and sets, the light, sky and fog follow it, the
+    /// stars and moon come out and the lamps light at dusk. Set the hour, or let the days pass
+    /// with the loop; a game can set the hour itself (`Runtime::set_hour`).
+    pub day_night: DayNight,
     /// Northern lights: curtains of green and violet light rippling across the sky.
     pub aurora: Aurora,
     pub rainbow: Rainbow,
+    /// A ring of light round the sun or moon in thin high cloud.
+    pub halo: Halo,
     /// Deep space: a dense starfield, nebulae, a galaxy band and planets.
     pub space: Space,
     /// A tunnel all round the path in place of the sky: hyperspace or a wormhole.
@@ -563,9 +711,9 @@ impl Default for Sky {
     fn default() -> Self {
         Self {
             enabled: true, top: [70, 110, 170], horizon: [200, 190, 160],
-            sun: SkyBody::default(), moon: Moon::default(), stars: Stars::default(), clouds: Clouds::default(), cloud_layers: Vec::new(),
-            cloud_mix: CloudMix::default(), sunset: Sunset::default(),
-            aurora: Aurora::default(), rainbow: Rainbow::default(), space: Space::default(), tunnel: Tunnel::default(),
+            sun: SkyBody::default(), moon: Moon::default(), stars: Stars::default(), meteors: Meteors::default(), clouds: Clouds::default(), cloud_layers: Vec::new(),
+            cloud_mix: CloudMix::default(), sunset: Sunset::default(), day_night: DayNight::default(),
+            aurora: Aurora::default(), rainbow: Rainbow::default(), halo: Halo::default(), space: Space::default(), tunnel: Tunnel::default(),
         }
     }
 }
@@ -624,16 +772,33 @@ pub struct Space {
     /// gaps beside a floating walkway) shows space too, instead of the void colour. The sky's
     /// `top`..`horizon` gradient is mirrored below the horizon.
     pub below: bool,
+    /// How the starfield is drawn. Realistic: a few bright stars among a great many faint ones,
+    /// coloured by temperature, gathered in clouds and lanes. Classic: the even field of small
+    /// dots of earlier versions (and of ball_swing_game).
+    pub star_style: StarStyle,
     /// The dense field of faint stars: 0 none .. 1 a rich field .. 2 a crowded one.
     pub stars: f32,
     pub star_brightness: f32,
     /// The stars' colours: 1 hot blue-white to cool orange; 0 all the faint blue-white of
     /// ball_swing_game's starfield.
     pub star_colors: f32,
+    /// Realistic stars: the faint glow of stars too many and too far to see one by one.
+    pub star_glow: f32,
+    /// Realistic stars: how unevenly they gather, 0 evenly .. 1 in clouds and voids.
+    pub star_clumps: f32,
+    /// Realistic stars: the bright stars' diffraction spikes (as a telescope sees them), 0 none.
+    pub star_spikes: f32,
+    pub spike_shape: SpikeShape,
+    /// How much the stars twinkle (0 steady, as in airless space .. 1 strongly).
+    pub twinkle: f32,
+    /// Whole twinkles per loop for the slowest stars (some go twice as fast), so the loop closes.
+    pub twinkle_speed: u32,
     /// Glowing gas clouds: strength 0 .. 2, two colours, and size (1 about a sky's height across).
     pub nebula: f32,
     pub nebula_colors: [Rgb; 2],
     pub nebula_scale: f32,
+    /// How much dark dust threads the gas and hides the stars behind it.
+    pub nebula_dust: f32,
     /// The band of a galaxy seen edge-on, with dark dust lanes and a brighter core.
     pub galaxy: f32,
     pub galaxy_color: Rgb,
@@ -645,6 +810,10 @@ pub struct Space {
     pub galaxy_height: f32,
     /// Where its bright core sits along the band: -1 left .. 1 right.
     pub galaxy_core: f32,
+    /// How much its dark dust lanes and rifts hide.
+    pub galaxy_dust: f32,
+    /// Up to six things far off in the sky: nebulae, galaxies, star clusters and comets.
+    pub objects: Vec<SpaceObject>,
     /// Up to three planets, drawn in order (later ones in front).
     pub planets: Vec<Planet>,
     /// A black hole: its shadow, a glowing disk lensed round it, and matter falling in.
@@ -654,10 +823,127 @@ pub struct Space {
 impl Default for Space {
     fn default() -> Self {
         Space {
-            enabled: false, below: true, stars: 1.0, star_brightness: 1.0, star_colors: 1.0,
-            nebula: 0.6, nebula_colors: [[190, 70, 200], [60, 120, 255]], nebula_scale: 1.0,
+            enabled: false, below: true, star_style: StarStyle::Realistic, stars: 1.0, star_brightness: 1.0, star_colors: 1.0,
+            star_glow: 0.5, star_clumps: 0.5, star_spikes: 0.4, spike_shape: SpikeShape::Four, twinkle: 0.0, twinkle_speed: 2,
+            nebula: 0.6, nebula_colors: [[190, 70, 200], [60, 120, 255]], nebula_scale: 1.0, nebula_dust: 0.5,
             galaxy: 0.7, galaxy_color: [235, 225, 255], galaxy_angle: 18.0, galaxy_width: 0.22, galaxy_height: 0.55, galaxy_core: 0.25,
-            planets: Vec::new(), black_hole: BlackHole::default(), seed: 0,
+            galaxy_dust: 0.7, objects: Vec::new(), planets: Vec::new(), black_hole: BlackHole::default(), seed: 0,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub enum StarStyle {
+    #[default]
+    Realistic,
+    Classic,
+}
+
+/// The bright stars' diffraction spikes: four (a cross), six or eight points.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub enum SpikeShape {
+    #[default]
+    Four,
+    Six,
+    Eight,
+}
+impl SpikeShape {
+    /// Lines through the star (each makes two spikes).
+    pub fn lines(self) -> u32 { match self { SpikeShape::Four => 2, SpikeShape::Six => 3, SpikeShape::Eight => 4 } }
+}
+
+/// Something far off in the space sky, behind the planets and bent round a black hole like the
+/// stars. `colors` mean something different for each kind (see `SpaceObjectKind`).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
+pub struct SpaceObject {
+    pub enabled: bool,
+    pub kind: SpaceObjectKind,
+    /// Centre: x 0..1 across the frame, y 0 (top) .. 1 (horizon).
+    pub pos: [f32; 2],
+    /// Its radius as a share of the sky's height (a comet: its tail's length).
+    pub size: f32,
+    /// Its turn on screen, degrees (a comet: where its tail points, 0 right, 90 up).
+    pub angle: f32,
+    /// How round it is: 1 round .. 0.1 seen almost edge-on.
+    pub aspect: f32,
+    pub colors: [Rgb; 3],
+    pub brightness: f32,
+    /// Whole turns or passes per loop (0 still): a binary's orbit, a pulsar's beams, a belt's
+    /// drift, a sun's flares, a ship's crossings. Whole numbers keep the loop seamless.
+    pub spin: i32,
+    pub seed: u32,
+}
+impl Default for SpaceObject {
+    fn default() -> Self {
+        SpaceObject {
+            enabled: true, kind: SpaceObjectKind::Emission, pos: [0.5, 0.35], size: 0.3, angle: 0.0, aspect: 1.0,
+            colors: SpaceObjectKind::Emission.colors(), brightness: 1.0, spin: 1, seed: 0,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub enum SpaceObjectKind {
+    /// A glowing cloud of gas lit by the young stars inside it, with dark dust pillars and lanes:
+    /// `colors` its outer gas (hydrogen red), its hot heart (oxygen teal) and the dust's lit edges.
+    #[default]
+    Emission,
+    /// Dust lit blue by a few bright stars inside it: its glow, the stars' halo, its streaks.
+    Reflection,
+    /// A cloud of dust hiding the stars behind it: its lit rim, and its faint body.
+    Dark,
+    /// A dying star's glowing shell round a white dwarf: the outer rim, the inner shell, the halo.
+    Planetary,
+    /// The wisps of an exploded star's shell: two filament colours and the faint fill.
+    Remnant,
+    /// A spiral galaxy: its arms, its core and its pink star-forming knots.
+    Spiral,
+    /// A smooth elliptical galaxy: its glow, its core.
+    Elliptical,
+    /// A star cluster: its stars' tint, its glow.
+    Cluster,
+    /// A comet: its curved dust tail, its straight blue ion tail, its glowing head.
+    Comet,
+    /// Two stars circling each other (`spin` orbits a loop), a stream of gas between them: the
+    /// larger star, the smaller, the stream.
+    Binary,
+    /// A spinning dead star sweeping two beams round (`spin` turns a loop) inside the wisps of
+    /// the star it was: the star, its beams, the wisps.
+    Pulsar,
+    /// A band of asteroids across the sky, `angle` its slope and `size` its half thickness,
+    /// drifting along (`spin` passes a loop): its dust, its rocks, their lit sides.
+    Belt,
+    /// A sun seen close: a glowing disc with spots and a darker rim, its corona streaming out and
+    /// flares licking off its edge (changing `spin` times a loop): disc, corona, flares.
+    Sun,
+    /// A ship far off, crossing the sky `spin` times a loop along `angle` (its length is `size`),
+    /// its engine glowing and leaving a trail: hull, engine, running lights.
+    Ship,
+}
+impl SpaceObjectKind {
+    pub const ALL: [SpaceObjectKind; 14] = [
+        SpaceObjectKind::Emission, SpaceObjectKind::Reflection, SpaceObjectKind::Dark, SpaceObjectKind::Planetary, SpaceObjectKind::Remnant,
+        SpaceObjectKind::Spiral, SpaceObjectKind::Elliptical, SpaceObjectKind::Cluster, SpaceObjectKind::Comet,
+        SpaceObjectKind::Binary, SpaceObjectKind::Pulsar, SpaceObjectKind::Belt, SpaceObjectKind::Sun, SpaceObjectKind::Ship,
+    ];
+    /// Colours that suit it.
+    pub fn colors(self) -> [Rgb; 3] {
+        match self {
+            SpaceObjectKind::Emission => [[235, 70, 110], [90, 220, 215], [255, 180, 120]],
+            SpaceObjectKind::Reflection => [[90, 140, 255], [200, 220, 255], [140, 170, 255]],
+            SpaceObjectKind::Dark => [[255, 140, 90], [40, 24, 20], [0, 0, 0]],
+            SpaceObjectKind::Planetary => [[240, 80, 90], [90, 230, 220], [120, 90, 200]],
+            SpaceObjectKind::Remnant => [[255, 90, 110], [100, 200, 255], [160, 120, 220]],
+            SpaceObjectKind::Spiral => [[170, 195, 255], [255, 225, 175], [255, 110, 170]],
+            SpaceObjectKind::Elliptical => [[255, 225, 190], [255, 240, 215], [0, 0, 0]],
+            SpaceObjectKind::Cluster => [[255, 235, 205], [255, 230, 190], [0, 0, 0]],
+            SpaceObjectKind::Comet => [[255, 235, 190], [110, 170, 255], [230, 255, 250]],
+            SpaceObjectKind::Binary => [[255, 240, 210], [150, 190, 255], [255, 140, 90]],
+            SpaceObjectKind::Pulsar => [[220, 235, 255], [120, 200, 255], [180, 110, 230]],
+            SpaceObjectKind::Belt => [[150, 130, 110], [120, 110, 100], [230, 210, 180]],
+            SpaceObjectKind::Sun => [[255, 220, 150], [255, 245, 225], [255, 120, 60]],
+            SpaceObjectKind::Ship => [[70, 75, 85], [120, 200, 255], [255, 80, 70]],
         }
     }
 }
@@ -738,6 +1024,9 @@ pub enum PlanetKind {
     Ice,
     /// Dark crust (`color`) split by glowing lava (`color2`), which glows on the night side too.
     Lava,
+    /// A dry world of dunes and canyons (`color` the sand, `color2` the rock), thin dust storms
+    /// and small pale caps at its poles.
+    Desert,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -768,7 +1057,32 @@ pub struct Planet {
     /// Earth: city lights on the night side.
     pub city_lights: f32,
     pub rings: Rings,
+    /// Circling another planet of the sky as its moon: it passes in front of it and behind it,
+    /// and casts its shadow across it as it crosses (an eclipse).
+    pub orbit: PlanetOrbit,
     pub seed: u32,
+}
+
+/// A planet's orbit round another (`Planet::orbit`).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
+pub struct PlanetOrbit {
+    pub enabled: bool,
+    /// Which planet of the list it circles (0 the first). Its own `pos` is then ignored.
+    pub around: u32,
+    /// How far out, in the other planet's radii.
+    pub distance: f32,
+    /// How steeply the orbit is seen: 0 edge-on (straight across, in front then behind) .. 90 face-on.
+    pub tilt: f32,
+    /// The orbit's slope on screen, degrees.
+    pub roll: f32,
+    /// Whole orbits per loop (negative the other way; 0 holds it at `phase`).
+    pub turns: i32,
+    /// Where on the orbit it is at the start, 0..1.
+    pub phase: f32,
+}
+impl Default for PlanetOrbit {
+    fn default() -> Self { PlanetOrbit { enabled: false, around: 0, distance: 2.2, tilt: 12.0, roll: -8.0, turns: 1, phase: 0.1 } }
 }
 impl Default for Planet {
     fn default() -> Self {
@@ -776,7 +1090,7 @@ impl Default for Planet {
             enabled: true, kind: PlanetKind::Rocky, pos: [0.7, 0.4], radius: 0.25,
             color: [150, 130, 115], color2: [205, 190, 170], atmosphere: [120, 170, 255], atmosphere_strength: 0.0,
             light_angle: 30.0, night: 0.4, tilt: 15.0, spin: 0, clouds: 0.5, city_lights: 0.0,
-            rings: Rings::default(), seed: 0,
+            rings: Rings::default(), orbit: PlanetOrbit::default(), seed: 0,
         }
     }
 }
@@ -853,9 +1167,28 @@ pub struct Rainbow {
     pub size: f32,
     /// Draw the fainter second bow outside the first.
     pub double: bool,
+    /// How colourful: 1 a rainbow; about 0.2 a moonbow, the pale bow the moon makes at night.
+    pub saturation: f32,
 }
 impl Default for Rainbow {
-    fn default() -> Self { Rainbow { enabled: false, intensity: 0.5, x: 0.5, size: 1.0, double: true } }
+    fn default() -> Self { Rainbow { enabled: false, intensity: 0.5, x: 0.5, size: 1.0, double: true, saturation: 1.0 } }
+}
+
+/// A halo: the ring of light round the sun or moon seen through thin high cloud (ice crystals
+/// bending its light), reddish on its sharp inner edge, fading out beyond.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
+pub struct Halo {
+    pub enabled: bool,
+    /// Round the sun, round the moon (either or both, when they are up).
+    pub sun: bool,
+    pub moon: bool,
+    /// The ring's radius, as a share of the sky's height.
+    pub size: f32,
+    pub strength: f32,
+}
+impl Default for Halo {
+    fn default() -> Self { Halo { enabled: false, sun: true, moon: true, size: 0.32, strength: 0.35 } }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -884,14 +1217,48 @@ pub struct Moon {
     /// -1 waning .. 0 full .. 1 waxing.
     pub phase: f32,
     pub opacity: f32,
+    /// Its seas, craters (with raised rims, bowls and central peaks, catching the sunlight past
+    /// the line between day and night) and the rays of its young craters.
     pub craters: bool,
+    /// How deep the craters look: 0 flat markings .. 1 natural .. 2 rugged.
+    pub relief: f32,
+    /// Which craters: each seed scatters a different field of them.
+    pub seed: u32,
 }
 impl Default for Moon {
     fn default() -> Self {
         Self {
             body: SkyBody { pos: [0.25, 0.3], radius: 0.06, color: [222, 230, 255], intensity: 0.35, ..SkyBody::default() },
-            phase: 0.0, opacity: 0.9, craters: true,
+            phase: 0.0, opacity: 0.9, craters: true, relief: 1.0, seed: 0,
         }
+    }
+}
+
+/// Shooting stars: streaks of light crossing the sky, each flaring and fading as it burns up.
+/// Each one falls at its own moment of the loop, so the loop closes seamlessly.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
+pub struct Meteors {
+    pub enabled: bool,
+    /// How many fall in one loop (a shower: 10 or more).
+    pub count: u32,
+    /// How long each one lasts, seconds.
+    pub duration: f32,
+    /// How far each one travels, as a share of the sky's height.
+    pub length: f32,
+    /// Which way they fall, degrees (0 to the right, -90 straight down; a shower shares one way).
+    pub angle: f32,
+    /// How much their ways vary, degrees (180 from anywhere).
+    pub spread: f32,
+    pub brightness: f32,
+    pub color: Rgb,
+    /// How much some burn green or orange.
+    pub tint: f32,
+    pub seed: u32,
+}
+impl Default for Meteors {
+    fn default() -> Self {
+        Meteors { enabled: false, count: 6, duration: 0.7, length: 0.35, angle: -35.0, spread: 30.0, brightness: 1.0, color: [235, 242, 255], tint: 0.4, seed: 0 }
     }
 }
 
@@ -1164,6 +1531,506 @@ impl Sunset {
     }
 }
 
+/// A day and night (`sky.day_night`). The hour sets everything: the sun's place on its arc and
+/// its colour, the sky's colours (the sunset's `sunset_style` at dusk and dawn, the blue hour,
+/// night), the light and its colour, the fog and mist, the stars and moon, and the lamps. The
+/// scene's own colours keep their hue (`keep_look`) while their brightness follows the hour.
+/// Has no effect under a space sky or a tunnel, or with the sky off.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
+pub struct DayNight {
+    pub enabled: bool,
+    /// The hour of the day, 0..24: 6 sunrise, 12 noon, 18 sunset, 0 midnight (with the default
+    /// `sunrise` and `sunset`).
+    pub hour: f32,
+    /// Whole days that pass in one loop, so a loop runs through dawn, day, dusk and night and
+    /// closes seamlessly (0: the hour stays put).
+    pub days_per_loop: u32,
+    /// When the sun rises and sets, hours.
+    pub sunrise: f32,
+    pub sunset: f32,
+    /// How high the sun climbs at noon, as a share of the sky: past 1 it passes overhead, out of
+    /// the frame (the moon climbs a little lower, and stays in it).
+    pub sun_height: f32,
+    /// Where across the frame the sun rises and where it sets (0 left .. 1 right).
+    pub sun_path: [f32; 2],
+    /// The colours of its dawns and dusks.
+    pub sunset_style: SunsetStyle,
+    /// How bright the dawn and dusk glow is (0..2).
+    pub glow: f32,
+    /// How much of the scene's own colours it keeps: 0 the hour's own sky .. 1 the scene's hues,
+    /// only their brightness following the hour.
+    pub keep_look: f32,
+    /// How bright the night's light is against the day's (0..1).
+    pub night_light: f32,
+    /// The sun crosses the sky (on even when the scene has no sun of its own).
+    pub sun: bool,
+    /// The moon crosses the night sky.
+    pub moon: bool,
+    /// Stars come out after dusk.
+    pub stars: bool,
+    /// The lamps (torches, lanterns, street lamps...) light at dusk and go out at dawn, and
+    /// fireflies come out at night.
+    pub lamps: bool,
+    /// For live wallpapers and games: follow the device's own clock instead of `hour`.
+    pub real_time: bool,
+    /// Set on the copy of a scene whose colours have been set for its hour, so it is done once.
+    #[serde(skip)]
+    #[schemars(skip)]
+    pub baked: bool,
+}
+impl Default for DayNight {
+    fn default() -> Self {
+        DayNight {
+            enabled: false, hour: 12.0, days_per_loop: 0, sunrise: 6.0, sunset: 18.0, sun_height: 1.15, sun_path: [0.15, 0.85],
+            sunset_style: SunsetStyle::Golden, glow: 1.0, keep_look: 0.6, night_light: 0.3, sun: true, moon: true, stars: true,
+            lamps: true, real_time: false, baked: false,
+        }
+    }
+}
+
+/// Where the day stands at an hour (`DayNight::at`), for the renderer and for games.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize)]
+pub struct DayState {
+    /// The hour, 0..24.
+    pub hour: f32,
+    /// The sun's height: 1 at noon, 0 on the horizon at sunrise and sunset, -1 at midnight.
+    pub altitude: f32,
+    /// How far through the day (sunrise 0 .. sunset 1) or the night (sunset 0 .. sunrise 1).
+    pub arc: f32,
+    pub is_day: bool,
+    /// How much daylight there is, 0 (night) .. 1 (full day), smooth through dawn and dusk.
+    pub daylight: f32,
+    /// "night", "dawn", "day" or "dusk".
+    pub phase: &'static str,
+}
+
+/// The hour's own colours and light.
+struct DayKey { top: [f32; 3], horizon: [f32; 3], sun: [f32; 3], ambient: [f32; 3], ambient_k: f32, sun_k: f32 }
+
+impl DayNight {
+    /// Whether it changes anything for this sky.
+    pub fn on(sky: &Sky) -> bool { sky.day_night.enabled && sky.enabled && !sky.space.enabled && !sky.tunnel.enabled }
+
+    /// The hour `loop_phase` (0..1) of the way through a loop.
+    pub fn hour_at(&self, loop_phase: f32) -> f32 { (self.hour + 24.0 * self.days_per_loop as f32 * loop_phase).rem_euclid(24.0) }
+
+    /// Where the day stands at `hour`.
+    pub fn at(&self, hour: f32) -> DayState {
+        let h = hour.rem_euclid(24.0);
+        let rise = self.sunrise.rem_euclid(24.0);
+        let mut set = self.sunset.rem_euclid(24.0);
+        if (set - rise).abs() < 0.5 { set = (rise + 12.0).rem_euclid(24.0); }
+        let day_len = (set - rise).rem_euclid(24.0);
+        let since_rise = (h - rise).rem_euclid(24.0);
+        let pi = std::f32::consts::PI;
+        let (is_day, arc, altitude) = if since_rise <= day_len {
+            let a = since_rise / day_len;
+            (true, a, (pi * a).sin())
+        } else {
+            let a = (since_rise - day_len) / (24.0 - day_len);
+            (false, a, -(pi * a).sin())
+        };
+        let daylight = smooth(-0.12, 0.2, altitude);
+        let phase = if altitude > 0.2 { "day" } else if altitude < -0.12 { "night" } else if (is_day && arc < 0.5) || (!is_day && arc > 0.5) { "dawn" } else { "dusk" };
+        DayState { hour: h, altitude, arc, is_day, daylight, phase }
+    }
+
+    fn key(&self, a: f32) -> DayKey {
+        let st = self.sunset_style.colors();
+        let c = |v: Rgb| v.map(|x| x as f32);
+        let mx = |p: [f32; 3], q: [f32; 3], t: f32| [0, 1, 2].map(|i| p[i] + (q[i] - p[i]) * t);
+        let nk = self.night_light.clamp(0.0, 1.0);
+        // (altitude, top, horizon, sun, ambient, ambient strength, sun strength)
+        let keys: [(f32, [f32; 3], [f32; 3], [f32; 3], [f32; 3], f32, f32); 7] = [
+            (-1.0, [4.0, 6.0, 18.0], [12.0, 18.0, 40.0], c(st.sun), [70.0, 85.0, 140.0], 0.8 * nk, 0.0),
+            (-0.3, [8.0, 12.0, 30.0], [22.0, 30.0, 62.0], c(st.sun), [90.0, 105.0, 160.0], nk, 0.0),
+            (-0.1, [24.0, 32.0, 78.0], mx([96.0, 84.0, 128.0], c(st.glow[2]), 0.3), c(st.sun), [120.0, 120.0, 175.0], nk.max(0.4), 0.0),
+            (0.0, c(st.top), c(st.horizon), c(st.sun), c(st.ambient), 0.65, 0.55),
+            (0.12, mx(c(st.top), [80.0, 130.0, 205.0], 0.5), mx(c(st.horizon), [220.0, 200.0, 170.0], 0.4), mx(c(st.sun), [255.0, 232.0, 190.0], 0.5), mx(c(st.ambient), [230.0, 215.0, 200.0], 0.5), 0.85, 0.85),
+            (0.35, [78.0, 134.0, 212.0], [190.0, 214.0, 238.0], [255.0, 244.0, 224.0], [210.0, 215.0, 230.0], 0.95, 1.0),
+            (1.0, [64.0, 124.0, 210.0], [172.0, 206.0, 238.0], [255.0, 250.0, 240.0], [205.0, 215.0, 235.0], 1.0, 1.0),
+        ];
+        let a = a.clamp(-1.0, 1.0);
+        let i = keys.windows(2).position(|w| a <= w[1].0).unwrap_or(keys.len() - 2);
+        let (p, q) = (&keys[i], &keys[i + 1]);
+        let t = ((a - p.0) / (q.0 - p.0)).clamp(0.0, 1.0);
+        let t = t * t * (3.0 - 2.0 * t);
+        DayKey {
+            top: mx(p.1, q.1, t), horizon: mx(p.2, q.2, t), sun: mx(p.3, q.3, t), ambient: mx(p.4, q.4, t),
+            ambient_k: p.5 + (q.5 - p.5) * t, sun_k: p.6 + (q.6 - p.6) * t,
+        }
+    }
+
+    /// A copy of `scene` set for `hour` (its own `day_night` hour when None): sky, sun, moon,
+    /// stars, light, fog, mist and lamps. None when it has no day and night (`on`) and no hour
+    /// is forced, or this is already such a copy. A forced hour turns the cycle on with the
+    /// scene's own settings. The dawn and dusk glow is left to `sky.sunset`, set here.
+    pub fn bake(scene: &Scene, hour: Option<f32>) -> Option<Scene> {
+        let sky = &scene.sky;
+        let dn = &sky.day_night;
+        if dn.baked || !sky.enabled || sky.space.enabled || sky.tunnel.enabled { return None; }
+        if !dn.enabled && hour.is_none() { return None; }
+        let hour = hour.unwrap_or(dn.hour);
+        let st = dn.at(hour);
+        let a = st.altitude;
+        let k = dn.key(a);
+        let mut s = scene.clone();
+        // In the dimmer light of dawn, dusk and night the hour's own colours take over more.
+        let keep = dn.keep_look.clamp(0.0, 1.0) * (0.3 + 0.7 * smooth(-0.15, 0.3, a));
+        let lum = |c: [f32; 3]| 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2];
+        let to = |c: [f32; 3]| c.map(|x| x.round().clamp(0.0, 255.0) as u8);
+        // The hour the scene was made for: the one whose horizon is as bright as the scene's
+        // (the daytime one, of two).
+        let own_h = lum(scene.sky.horizon.map(|x| x as f32));
+        let mut ref_a = 1.0f32;
+        let mut best = f32::MAX;
+        for i in 0..=40 {
+            let t = 1.0 - i as f32 / 20.0;
+            let e = (lum(dn.key(t).horizon) - own_h).abs();
+            if e < best - 1.0 { (best, ref_a) = (e, t); }
+        }
+        let r = dn.key(ref_a);
+        // The scene's colour relit from its own hour to this one, mixed with the hour's own.
+        let relit = |own: Rgb, key: [f32; 3], at_ref: [f32; 3]| -> Rgb {
+            // A scene made for the night stays moody by day, and a day one dark by night.
+            let f = (lum(key) / lum(at_ref).max(1.0)).min(3.0);
+            let o = own.map(|x| x as f32 * f);
+            // Keep the hue when a channel would clip.
+            let m = o[0].max(o[1]).max(o[2]);
+            let o = if m > 255.0 { o.map(|x| x * 255.0 / m) } else { o };
+            to([0, 1, 2].map(|i| key[i] + (o[i] - key[i]) * keep))
+        };
+        let dim = (lum(k.horizon) / lum(r.horizon).max(1.0)).clamp(0.05, 1.5);
+        let scale = |c: Rgb, f: f32| c.map(|x| (x as f32 * f).round().clamp(0.0, 255.0) as u8);
+        let night = 1.0 - smooth(-0.3, -0.02, a);
+        {
+            let sky = &mut s.sky;
+            sky.top = relit(sky.top, k.top, r.top);
+            sky.horizon = relit(sky.horizon, k.horizon, r.horizon);
+            // The sun on its arc (below the horizon after sunset, as it sinks).
+            let [x0, x1] = dn.sun_path;
+            let sun_arc = if st.is_day { st.arc } else if st.arc < 0.5 { 1.0 + 0.3 * st.arc } else { -0.3 * (1.0 - st.arc) };
+            let base_k = if scene.sky.sun.enabled { scene.sky.sun.intensity / r.sun_k.max(0.3) } else { 1.0 };
+            if dn.sun {
+                sky.sun.enabled = a > -0.12;
+                sky.sun.pos = [x0 + (x1 - x0) * sun_arc, 1.0 - dn.sun_height.clamp(0.05, 2.0) * a];
+                sky.sun.color = to(k.sun);
+                sky.sun.intensity = base_k * k.sun_k;
+                sky.sun.emits_light = true;
+            }
+            if dn.moon {
+                let mk = 1.0 - smooth(-0.15, 0.1, a);
+                let (moon_arc, up) = if st.is_day { (if st.arc < 0.5 { 1.0 } else { 0.0 }, 0.0) } else { (st.arc, (std::f32::consts::PI * st.arc).sin()) };
+                let op = if scene.sky.moon.body.enabled { scene.sky.moon.opacity } else { 0.9 };
+                sky.moon.body.enabled = mk > 0.01 && up > 0.02;
+                sky.moon.body.pos = [x0 + (x1 - x0) * moon_arc, 1.0 - (0.85 * dn.sun_height).clamp(0.05, 0.8) * up];
+                sky.moon.opacity = op * mk;
+                if !scene.sky.moon.body.enabled { sky.moon.body.intensity = 0.35; }
+                sky.moon.body.intensity *= mk;
+            }
+            sky.meteors.brightness *= night;
+            if dn.stars {
+                let base = if scene.sky.stars.enabled { scene.sky.stars.count } else { 180 };
+                sky.stars.count = (base as f32 * night).round() as u32;
+                sky.stars.enabled = sky.stars.count > 0;
+            }
+            // The dawn and dusk glow and the clouds lit low.
+            let g = (a - 0.02) / 0.13;
+            let amount = (-g * g).exp();
+            sky.sunset.enabled = amount > 0.01;
+            sky.sunset.style = dn.sunset_style;
+            sky.sunset.amount = amount;
+            sky.sunset.glow = dn.glow * if scene.sky.sunset.enabled { scene.sky.sunset.glow } else { 1.0 };
+            sky.sunset.light = 0.0;
+            sky.sunset.clouds = 1.0;
+            // Clouds darken into the night.
+            let cl = |t: Rgb| { let d = scale(t, (0.25 + 0.75 * dim).min(1.0)); to([0, 1, 2].map(|i| d[i] as f32 + ([60.0, 70.0, 100.0][i] * dim.clamp(0.3, 1.0) - d[i] as f32) * 0.4 * night)) };
+            sky.clouds.tint = cl(sky.clouds.tint);
+            for c in sky.cloud_layers.iter_mut() { c.tint = cl(c.tint); }
+            sky.cloud_mix.tint = cl(sky.cloud_mix.tint);
+            sky.day_night.baked = true;
+            sky.day_night.enabled = true;
+        }
+        s.light.ambient *= k.ambient_k / r.ambient_k.max(0.1);
+        // Shafts of sunlight stream towards you from a low sun, not from one overhead.
+        s.weather.light_shafts.sun *= (1.3 - a).clamp(0.3, 1.0);
+        s.light.ambient_color = relit(s.light.ambient_color, k.ambient, r.ambient);
+        // Fog and the far distance keep the scene's own colours more: they set its mood.
+        let deep = |own: Rgb| { let o = scale(own, dim); to([0, 1, 2].map(|i| o[i] as f32 + (k.horizon[i] * (lum(o.map(|x| x as f32)) / lum(k.horizon).max(1.0)) - o[i] as f32) * 0.5 * (1.0 - keep))) };
+        // Fog that took the sky's horizon takes the scene's own, dimmed or brightened gently: the
+        // relit sky is too bright for a thick fog by day.
+        if s.light.fog.match_sky {
+            s.light.fog.match_sky = false;
+            s.light.fog.color = deep(scene.sky.horizon);
+        } else {
+            s.light.fog.color = deep(s.light.fog.color);
+        }
+        s.light.void_color = deep(s.light.void_color);
+        s.weather.mist.color = scale(s.weather.mist.color, (0.2 + 0.8 * dim).min(1.0));
+        // Birds fly by day; bats come out at dusk.
+        if st.daylight < 0.15 { s.wildlife.birds.enabled = false; }
+        if s.wildlife.bats.dusk_only && st.daylight > 0.45 { s.wildlife.bats.enabled = false; }
+        if dn.lamps {
+            let lit = 1.0 - smooth(-0.05, 0.15, a);
+            for f in s.fixtures.iter_mut() {
+                use FixtureKind::*;
+                f.intensity *= match f.kind {
+                    Firefly => lit,
+                    Torch | Lantern | Candle | Brazier | StreetLamp | PaperLantern | Campfire | Beacon | Chandelier => 0.1 + 0.9 * lit,
+                    _ => 0.6 + 0.4 * lit,
+                };
+            }
+        }
+        Some(s)
+    }
+}
+
+fn smooth(e0: f32, e1: f32, x: f32) -> f32 { let t = ((x - e0) / (e1 - e0)).clamp(0.0, 1.0); t * t * (3.0 - 2.0 * t) }
+
+/// A waterfall beside the path (`scene.waterfalls`): a rock face with water pouring down it in
+/// streaks, foam and spray boiling up at its foot, and (with the sun out) a little rainbow in the
+/// spray. It repeats every `spacing` metres, like a set piece; its water falls a whole number of
+/// times a loop.
+/// A fence beside the path, built post to post as solid pieces that run along its edge and bend
+/// with it, so it reads as one fence from any angle.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
+pub struct Fence {
+    pub enabled: bool,
+    pub style: FenceStyle,
+    pub side: Side,
+    /// Metres out from the path's edge.
+    pub lateral: f32,
+    /// Metres tall.
+    pub height: f32,
+    /// The paint of pickets and boards. (Every painted fence of a scene takes the first one's
+    /// colour; rails are bare wood, in the colour of a bridge's deck.)
+    pub color: Rgb,
+    /// Runs `length` metres long every `spacing` metres: as long as the spacing, one fence with no
+    /// break; shorter, with a gap (a gate, a lane) between runs. Both snap to divide the loop.
+    pub spacing: f32,
+    pub length: f32,
+    pub offset: f32,
+    /// Metres between posts.
+    pub post_spacing: f32,
+}
+impl Default for Fence {
+    fn default() -> Self {
+        Fence { enabled: true, style: FenceStyle::Picket, side: Side::Both, lateral: 1.2, height: 0.9, color: [236, 232, 220], spacing: 24.0, length: 20.0, offset: 0.0, post_spacing: 2.0 }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub enum FenceStyle {
+    /// White pickets on two rails between posts.
+    #[default]
+    Picket,
+    /// Posts and three bare wooden rails: a field fence.
+    Rails,
+    /// Close boards from the ground up, capped by a rail.
+    Boards,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
+pub struct Waterfall {
+    pub enabled: bool,
+    pub side: Side,
+    /// Metres from the path's edge.
+    pub lateral: f32,
+    pub spacing: f32,
+    pub offset: f32,
+    /// How far it falls, and how wide the water is, metres.
+    pub height: f32,
+    pub width: f32,
+    pub water: Rgb,
+    pub rock: Rgb,
+    /// How much foam and spray at its foot (0..1).
+    pub spray: f32,
+    /// The rainbow in its spray when the sun is out (0 none).
+    pub rainbow: f32,
+    pub seed: u32,
+}
+impl Default for Waterfall {
+    fn default() -> Self {
+        Waterfall { enabled: true, side: Side::Left, lateral: 3.0, spacing: 60.0, offset: 20.0, height: 7.0, width: 2.2, water: [210, 228, 240], rock: [92, 88, 82], spray: 0.7, rainbow: 0.5, seed: 0 }
+    }
+}
+
+/// Animals on the move (`scene.wildlife`). Each goes round a whole number of times a loop, so the
+/// loop closes; with a day and night, birds fly by day and bats come out at dusk.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
+pub struct Wildlife {
+    pub birds: Birds,
+    pub bats: Bats,
+    pub fish: Fish,
+}
+
+/// Flocks of birds crossing the sky in loose vees, wings beating.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
+pub struct Birds {
+    pub enabled: bool,
+    /// Flocks crossing at once.
+    pub flocks: u32,
+    /// Birds in a flock.
+    pub count: u32,
+    /// Wingspan as a share of the sky's height.
+    pub size: f32,
+    /// How high they fly: 0 the top of the sky .. 1 the horizon.
+    pub height: f32,
+    /// Wingbeats a second.
+    pub flap: f32,
+    /// Seconds to cross the frame (rounded so a whole number of crossings fit the loop).
+    pub crossing: f32,
+    pub color: Rgb,
+    pub seed: u32,
+}
+impl Default for Birds {
+    fn default() -> Self { Birds { enabled: false, flocks: 2, count: 7, size: 0.025, height: 0.35, flap: 3.0, crossing: 12.0, color: [30, 30, 36], seed: 0 } }
+}
+
+/// Bats flitting about over the path, darting and fluttering.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
+pub struct Bats {
+    pub enabled: bool,
+    pub count: u32,
+    /// Wingspan, metres.
+    pub size: f32,
+    pub color: Rgb,
+    /// Only after dusk when the scene has a day and night.
+    pub dusk_only: bool,
+    pub seed: u32,
+}
+impl Default for Bats {
+    fn default() -> Self { Bats { enabled: false, count: 8, size: 0.3, color: [24, 20, 22], dusk_only: true, seed: 0 } }
+}
+
+/// Fish leaping from the water beside or along the path in silver arcs, with splash rings.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
+pub struct Fish {
+    pub enabled: bool,
+    /// One every so many metres along the path.
+    pub spacing: f32,
+    /// How far out from the path's middle they leap: from .. to, metres (either side).
+    pub lateral: [f32; 2],
+    /// Leaps each fish makes per loop.
+    pub leaps: u32,
+    /// Its length, metres.
+    pub size: f32,
+    pub color: Rgb,
+    pub seed: u32,
+}
+impl Default for Fish {
+    fn default() -> Self { Fish { enabled: false, spacing: 6.0, lateral: [1.5, 6.0], leaps: 1, size: 0.35, color: [200, 210, 220], seed: 0 } }
+}
+
+/// The time of year (`scene.season`), over the scene's own colours (taken as summer's): fresh light
+/// green and blossom in spring; turning gold, orange and red with leaves falling in autumn; bare
+/// broadleaf trees, straw-coloured grass and lying snow in winter. In between, one season turns
+/// into the next.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
+pub struct Season {
+    pub enabled: bool,
+    /// Where in the year: 0 spring, 1 summer, 2 autumn, 3 winter (4 is spring again; fractions
+    /// are the turn from one to the next).
+    pub season: f32,
+    /// Whole years that pass in one loop (0 holds the season).
+    pub years_per_loop: u32,
+    /// Blossom drifting down in spring, leaves falling in autumn.
+    pub falling: bool,
+    /// Snow lying in winter.
+    pub snow: bool,
+    #[serde(skip)]
+    #[schemars(skip)]
+    pub baked: bool,
+}
+impl Default for Season {
+    fn default() -> Self { Season { enabled: false, season: 1.0, years_per_loop: 0, falling: true, snow: true, baked: false } }
+}
+
+impl Season {
+    /// How much of each season there is at `s` (spring, summer, autumn, winter), summing to 1:
+    /// each holds for most of its quarter and turns into the next at its end.
+    pub fn weights(s: f32) -> [f32; 4] {
+        let s = s.rem_euclid(4.0);
+        let i = (s.floor() as usize).min(3);
+        let t = smooth(0.65, 1.0, s - i as f32);
+        let mut w = [0.0; 4];
+        w[i] = 1.0 - t;
+        w[(i + 1) % 4] += t;
+        w
+    }
+
+    /// A copy of `scene` in its season `loop_phase` (0..1) of the way through its loop, or None
+    /// when it has none or this is already such a copy.
+    pub fn bake(scene: &Scene, loop_phase: f32) -> Option<Scene> {
+        let se = &scene.season;
+        if !se.enabled || se.baked { return None; }
+        let w = Season::weights(se.season + 4.0 * se.years_per_loop as f32 * loop_phase);
+        let mut s = scene.clone();
+        s.season.baked = true;
+        // A colour in each season: spring, the scene's own (summer), autumn, winter.
+        let blend = |own: Rgb, keys: [Option<Rgb>; 4]| -> Rgb {
+            let mut acc = [0.0f32; 3];
+            for (k, wk) in keys.iter().zip(w) {
+                let c = k.unwrap_or(own);
+                for i in 0..3 { acc[i] += c[i] as f32 * wk; }
+            }
+            acc.map(|v| v.round().clamp(0.0, 255.0) as u8)
+        };
+        let mixc = |a: Rgb, b: Rgb, t: f32| -> Rgb { [0, 1, 2].map(|i| (a[i] as f32 + (b[i] as f32 - a[i] as f32) * t).round() as u8) };
+        let winter_now = w[3] >= 0.5;
+        for (li, p) in s.props.iter_mut().enumerate() {
+            // Autumn turns each layer its own mix of gold, orange and red.
+            let h = ((li as u32).wrapping_mul(2_654_435_761) >> 16) as f32 / 65535.0;
+            let autumn = mixc([214, 150, 40], [186, 62, 28], h);
+            match p.kind {
+                PropKind::Tree | PropKind::Willow => {
+                    p.tint = blend(p.tint, [Some(mixc(p.tint, [120, 190, 70], 0.6)), None, Some(autumn), Some(p.tint)]);
+                    if winter_now && se.snow { (p.kind, p.tint) = (PropKind::DeadTree, [84, 70, 56]); }
+                    else if winter_now { (p.kind, p.tint) = (PropKind::DeadTree, [74, 62, 50]); }
+                }
+                PropKind::Bush => p.tint = blend(p.tint, [Some(mixc(p.tint, [120, 190, 70], 0.6)), None, Some(mixc(autumn, [120, 60, 30], 0.3)), Some([96, 80, 62])]),
+                PropKind::Pine => p.tint = blend(p.tint, [Some(mixc(p.tint, [70, 140, 70], 0.25)), None, None, Some(mixc(p.tint, [22, 56, 46], 0.4))]),
+                PropKind::Reeds => p.tint = blend(p.tint, [Some([110, 150, 60]), None, Some([176, 146, 72]), Some([156, 140, 104])]),
+                _ => {}
+            }
+        }
+        let grass = |c: Rgb, hi: bool| blend(c, [Some(if hi { [140, 190, 86] } else { [86, 148, 54] }), None, Some(if hi { [180, 160, 92] } else { [138, 124, 64] }), Some(if hi { [176, 166, 136] } else { [132, 126, 102] })]);
+        for g in s.ground_cover.iter_mut() {
+            match g.kind {
+                CoverKind::Grass | CoverKind::TallGrass => { g.color = grass(g.color, false); g.color2 = grass(g.color2, true); }
+                CoverKind::Wildflowers => { g.color = grass(g.color, false); g.density *= w[0] * 1.3 + w[1] + w[2] * 0.4; }
+                CoverKind::Moss => g.color = blend(g.color, [None, None, Some(mixc(g.color, [120, 110, 50], 0.4)), Some(mixc(g.color, [110, 110, 100], 0.5))]),
+            }
+        }
+        s.verge.tuft_color = grass(s.verge.tuft_color, false);
+        for m in [&mut s.verge.material, &mut s.path.material] {
+            if m.pattern == Pattern::Grass { m.base = grass(m.base, false); m.mortar = grass(m.mortar, false); }
+        }
+        if se.falling {
+            let fall = |kind: ParticleKind, color: Rgb, k: f32| Particles { kind, color, count: (70.0 * k).round() as u32, size: 1.0, speed: 1.0, seed: 0x5EA, enabled: true };
+            if w[0] > 0.05 && scene.sky.enabled { s.particles.push(fall(ParticleKind::Petals, [250, 196, 214], w[0])); }
+            if w[2] > 0.05 { s.particles.push(fall(ParticleKind::Leaves, [206, 112, 40], w[2])); }
+        }
+        if se.snow && w[3] > 0.02 {
+            let sc = &mut s.weather.snow_cover;
+            sc.enabled = true;
+            sc.props = sc.props.max(0.7 * w[3]);
+            sc.ground = sc.ground.max(0.65 * w[3]);
+        }
+        // Winter light is cooler and lower; autumn's warmer.
+        s.light.ambient_color = blend(s.light.ambient_color, [None, None, Some(mixc(s.light.ambient_color, [235, 200, 160], 0.25)), Some(mixc(s.light.ambient_color, [190, 205, 235], 0.3))]);
+        Some(s)
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(default)]
 pub struct Lighting {
@@ -1198,14 +2065,14 @@ impl Default for Fog {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-pub enum FixtureKind { Torch, Lantern, Candle, Brazier, Crystal, Firefly, Magic, GreenFire, IceWisp, StreetLamp, PaperLantern, Campfire, Glowshroom, Beacon, Chandelier }
+pub enum FixtureKind { Torch, Lantern, Candle, Brazier, Crystal, Firefly, Magic, GreenFire, IceWisp, StreetLamp, PaperLantern, Campfire, Glowshroom, Beacon, Chandelier, Neon }
 
 impl FixtureKind {
-    pub const ALL: [FixtureKind; 15] = [
+    pub const ALL: [FixtureKind; 16] = [
         FixtureKind::Torch, FixtureKind::Lantern, FixtureKind::Candle, FixtureKind::Brazier, FixtureKind::Crystal,
         FixtureKind::Firefly, FixtureKind::Magic, FixtureKind::GreenFire, FixtureKind::IceWisp,
         FixtureKind::StreetLamp, FixtureKind::PaperLantern, FixtureKind::Campfire, FixtureKind::Glowshroom, FixtureKind::Beacon,
-        FixtureKind::Chandelier,
+        FixtureKind::Chandelier, FixtureKind::Neon,
     ];
     pub fn name(self) -> &'static str {
         match self {
@@ -1214,6 +2081,7 @@ impl FixtureKind {
             FixtureKind::Magic => "Magic", FixtureKind::GreenFire => "Green Fire", FixtureKind::IceWisp => "Ice Wisp",
             FixtureKind::StreetLamp => "Street Lamp", FixtureKind::PaperLantern => "Paper Lantern", FixtureKind::Campfire => "Campfire",
             FixtureKind::Glowshroom => "Glowshroom", FixtureKind::Beacon => "Beacon", FixtureKind::Chandelier => "Chandelier",
+            FixtureKind::Neon => "Neon Sign",
         }
     }
     /// Light colour.
@@ -1227,6 +2095,8 @@ impl FixtureKind {
             FixtureKind::StreetLamp => [255, 214, 150], FixtureKind::PaperLantern => [255, 120, 60],
             FixtureKind::Campfire => [255, 135, 45], FixtureKind::Glowshroom => [90, 240, 200],
             FixtureKind::Beacon => [255, 60, 40], FixtureKind::Chandelier => [255, 180, 90],
+            // (`tint` colours a neon sign's tubes and light.)
+            FixtureKind::Neon => [255, 70, 190],
         }
     }
     /// Flame gradient from core to edge, or None for a soft orb.
@@ -1238,7 +2108,7 @@ impl FixtureKind {
             FixtureKind::Magic => Some([[230, 210, 255], [150, 100, 255], [90, 50, 230], [45, 15, 190]]),
             FixtureKind::GreenFire => Some([[220, 255, 210], [100, 235, 60], [25, 170, 15], [5, 95, 5]]),
             FixtureKind::IceWisp => Some([[225, 245, 255], [130, 210, 255], [50, 150, 230], [15, 85, 190]]),
-            FixtureKind::Crystal | FixtureKind::Firefly | FixtureKind::StreetLamp | FixtureKind::PaperLantern | FixtureKind::Glowshroom | FixtureKind::Beacon => None,
+            FixtureKind::Crystal | FixtureKind::Firefly | FixtureKind::StreetLamp | FixtureKind::PaperLantern | FixtureKind::Glowshroom | FixtureKind::Beacon | FixtureKind::Neon => None,
         }
     }
     /// What holds it up where there is no wall to hang it on, when `post` is left to choose.
@@ -1431,6 +2301,26 @@ pub struct Weather {
     pub heat_shimmer: HeatShimmer,
     /// Raindrops or frost on the camera's lens.
     pub lens: Lens,
+    /// Snow lying on the scenery and the ground without any falling: a winter scene from any
+    /// scene.
+    pub snow_cover: SnowCover,
+}
+
+/// Snow that has already fallen: laid on trees, rocks and the rest of the scenery (`props`) and on
+/// the ground, walls and railings (`ground`), with no snow falling. Falling snow
+/// (`precipitation`) lays its own; whichever is deeper shows.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
+pub struct SnowCover {
+    pub enabled: bool,
+    /// How much snow lies on trees and the rest of the scenery (0..1): a cap along their tops at
+    /// 0.2, branches laden with it at 1.
+    pub props: f32,
+    /// How much lies on the ground, walls and railings (0..1): a dusting at 0.3, deep at 1.
+    pub ground: f32,
+}
+impl Default for SnowCover {
+    fn default() -> Self { SnowCover { enabled: false, props: 0.7, ground: 0.6 } }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Default)]
@@ -1552,6 +2442,9 @@ pub struct Mist {
     pub spread: f32,
     /// How much brighter it glows looking towards the sun, as mist does lit from behind (0..2).
     pub glow: f32,
+    /// Clear air this many metres ahead before the mist begins: fog lying in the low ground in
+    /// the distance, a valley filled with it (0: from the camera on).
+    pub from: f32,
 }
 
 /// Where mist lies.
@@ -1563,7 +2456,7 @@ pub enum MistOver {
     Path,
 }
 impl Default for Mist {
-    fn default() -> Self { Mist { enabled: false, height: 0.8, density: 0.25, color: [205, 210, 220], patchiness: 0.6, wisps: 0.4, seed: 0, soft: 0.0, over: MistOver::Everywhere, spread: 1.0, glow: 0.0 } }
+    fn default() -> Self { Mist { enabled: false, height: 0.8, density: 0.25, color: [205, 210, 220], patchiness: 0.6, wisps: 0.4, seed: 0, soft: 0.0, over: MistOver::Everywhere, spread: 1.0, glow: 0.0, from: 0.0 } }
 }
 
 /// Light scattered by the air. Stronger in fog, mist, haze and dust.
@@ -1715,8 +2608,38 @@ pub struct Fixture {
     pub place: LightPlace,
     /// For `place: SetPieces`: which of `set_pieces` the lights go with (0 = the first).
     pub set_piece: u32,
+    /// On bridges, stand on the railing's posts instead of at `spacing`: one on each end post of
+    /// every bridge, each side (whatever `place` says).
+    pub bridge_posts: bool,
+    /// With `bridge_posts`: how many more posts (each with its light) stand evenly between the end
+    /// posts: 1 halfway, 2 at the thirds, 3 at the quarters... The railing gains those posts.
+    pub posts_between: u32,
+    /// Strings of little bulbs hung between each light and the next along its side, sagging
+    /// between them: festoon lights for a bridge, a terrace or a market street.
+    pub string_lights: StringLights,
     pub sprite: SpriteRef,
     pub seed: u32,
+}
+
+/// Bulbs on a wire strung between neighbouring lights of a row (`Fixture::string_lights`).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
+pub struct StringLights {
+    pub enabled: bool,
+    /// Bulbs between each pair of lights.
+    pub bulbs: u32,
+    /// How far the wire sags at the middle, metres.
+    pub sag: f32,
+    pub color: Rgb,
+    /// Colour the bulbs in turn through these instead (empty: all `color`).
+    pub colors: Vec<Rgb>,
+    pub brightness: f32,
+    pub size: f32,
+    /// How much they twinkle (0 steady).
+    pub twinkle: f32,
+}
+impl Default for StringLights {
+    fn default() -> Self { StringLights { enabled: false, bulbs: 9, sag: 0.45, color: [255, 214, 140], colors: Vec::new(), brightness: 1.0, size: 1.0, twinkle: 0.2 } }
 }
 impl Default for Fixture {
     fn default() -> Self {
@@ -1724,7 +2647,7 @@ impl Default for Fixture {
             enabled: true, kind: FixtureKind::Torch, side: Side::Both, mount: Mount::Wall, height: 2.1, spacing: 6.0,
             offset: 0.0, lateral: 0.3, size: 1.0, light: true, intensity: 1.0, radius: 6.0, flicker: 1.0, jitter: 0.0,
             jitter_along: 0.0, height_var: 0.0, size_var: 0.0, intensity_var: 0.0, color_var: 0.0, density: 1.0, cluster: 1, stagger: 0.0,
-            tint: [255, 255, 255], post: LampPost::Auto, place: LightPlace::Anywhere, set_piece: 0,
+            tint: [255, 255, 255], post: LampPost::Auto, place: LightPlace::Anywhere, set_piece: 0, bridge_posts: false, posts_between: 0, string_lights: StringLights::default(),
             sprite: SpriteRef::default(), seed: 0,
         }
     }
@@ -1865,6 +2788,13 @@ pub struct PropLayer {
     /// spacing, scale...) still comes from this layer.
     #[serde(skip_serializing_if = "String::is_empty")]
     pub def: String,
+    /// Which way the props face, in place of their definition's (`PropDef::facing`; built-in
+    /// kinds face the camera).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub facing: Option<Facing>,
+    /// How deep they are behind their fronts, in place of their definition's (`PropDef::depth`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub depth: Option<f32>,
 }
 impl Default for PropLayer {
     fn default() -> Self {
@@ -1872,6 +2802,7 @@ impl Default for PropLayer {
             enabled: true, kind: PropKind::Tree, side: Side::Both, lateral: 1.5, spacing: 6.0, offset: 0.0, rows: 1,
             row_spacing: 3.0, jitter: 0.5, jitter_along: 0.0, stagger: 0.0, density: 1.0, scale: 1.0, scale_var: 0.2, lean_var: 0.0, tint_var: 0.12, tint: PropKind::Tree.default_tint(),
             sink: 0.02, float: 0.0, float_var: 0.0, orbit: Orbit::default(), shadow: true, shadow_opacity: 0.6, sprite: SpriteRef::default(), seed: 1, def: String::new(),
+            facing: None, depth: None,
         }
     }
 }
@@ -1923,15 +2854,122 @@ pub struct PropDef {
     pub light: PropLight,
     /// Cut away transparent margins of images, so a sprite stands on its lowest visible pixel.
     pub trim: bool,
+    /// Smoke rising from it: a chimney, a campfire, a smouldering ruin.
+    pub smoke: PropSmoke,
+    /// Which way its picture faces (see `Facing`): the camera (a tree, a rock: the same from every
+    /// side), or the path (a building's front, a fence, a stall), seen at an angle when the camera
+    /// is turned.
+    pub facing: Facing,
+    /// Facing the path: how deep it is behind its front, metres. Its ends are drawn as walls that
+    /// deep (from the edges of its picture), so seen at an angle it reads as a solid block; 0 is a
+    /// flat front.
+    pub depth: f32,
+    /// Facing the path: the rest of it, as flat faces with pictures of their own (a cottage's side
+    /// walls and the slopes of its roof, a chimney's sides), drawn in place of plain end walls.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub faces: Vec<PropFace>,
+    /// Facing the path: round parts as real cylinders (the tails of logs at a cabin's corners,
+    /// posts, pipes), drawn true from any angle with their sawn ends.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub tubes: Vec<PropTube>,
+    /// Variety: each prop picks one of these definitions instead (names in the same kit, or in
+    /// the scene's `prop_defs`), so a row of cottages is not one cottage over and over.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub pick: Vec<String>,
+}
+
+/// A cylinder that is part of a prop (`PropDef::tubes`): from one point to another in the prop's
+/// space (metres at scale 1: `x` across its front, `y` up, `z` back from the path), `radius`
+/// round, its side the colour of bark and its ends sawn: end grain with growth rings.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
+pub struct PropTube {
+    pub from: [f32; 3],
+    pub to: [f32; 3],
+    pub radius: f32,
+    pub color: Rgb,
+    /// Its sawn ends.
+    pub end: Rgb,
+    /// Drawn twice: as given and mirrored across the middle of the front (`x` to `-x`).
+    pub mirror: bool,
+}
+impl Default for PropTube {
+    fn default() -> Self { Self { from: [0.0, 0.5, 0.0], to: [1.0, 0.5, 0.0], radius: 0.15, color: [110, 80, 54], end: [180, 146, 104], mirror: false } }
+}
+
+/// A face of a prop besides its front (`PropDef::faces`): a flat picture standing in the prop's
+/// own space, in metres at scale 1 (the units of its `shape`): `x` across its front, `y` up from
+/// the ground and `z` back from its front, away from the path.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
+pub struct PropFace {
+    /// Seen from the side it faces: its picture's top left, top right and bottom left corners
+    /// (`[x, y, z]`; the fourth corner follows). A roof's slope runs from its ridge down to its eave.
+    pub corners: [[f32; 3]; 3],
+    /// Its picture: parts painted in metres, `x` from its left edge and `y` up from its bottom
+    /// edge, as wide and tall as the face.
+    pub shape: Vec<ShapePart>,
+    /// Or an image stretched over it (relative to the file the definition is in).
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub image: String,
+    /// Drawn twice: as given and mirrored across the middle of the front (`x` to `-x`), for the
+    /// two sides of something symmetric.
+    pub mirror: bool,
+}
+impl Default for PropFace {
+    fn default() -> Self {
+        Self { corners: [[1.0, 1.0, 0.0], [1.0, 1.0, 1.0], [1.0, 0.0, 0.0]], shape: Vec::new(), image: String::new(), mirror: false }
+    }
 }
 impl Default for PropDef {
     fn default() -> Self {
         Self {
             description: String::new(), sprite: SpriteRef::default(), shape: Vec::new(), kind: PropKind::Rock, tint: None,
-            height: 0.0, anchor: Anchor::Ground, glow: 0.0, glow_from: 0.0, light: PropLight::default(), trim: true,
+            height: 0.0, anchor: Anchor::Ground, glow: 0.0, glow_from: 0.0, light: PropLight::default(), trim: true, smoke: PropSmoke::default(),
+            facing: Facing::Camera, depth: 0.0, faces: Vec::new(), tubes: Vec::new(), pick: Vec::new(),
         }
     }
 }
+
+/// Which way a prop's picture faces.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub enum Facing {
+    /// Always toward the camera (a tree, a rock, a lamp: alike from every side).
+    #[default]
+    Camera,
+    /// Always toward the path, standing along it as a building's front does: seen at an angle
+    /// from down the path, and squarely from the side.
+    Path,
+    /// Toward the camera while it looks down the path, toward the path when it is turned
+    /// (`camera.yaw`): a building that looks as it always has from the path, and stands in the
+    /// street when seen from an angle or the side.
+    PathWhenTurned,
+}
+
+/// Smoke rising from a prop (`PropDef::smoke`): puffs that climb, spread, drift with the wind and
+/// thin away, round and round with the loop.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
+pub struct PropSmoke {
+    pub enabled: bool,
+    /// Where it leaves the prop, metres at scale 1: `x` sideways from its centre, `y` up.
+    pub at: [f32; 2],
+    pub color: Rgb,
+    /// How thick (0..1).
+    pub amount: f32,
+    /// How high it climbs before it has thinned away, metres.
+    pub rise: f32,
+    /// How wide a puff grows, metres.
+    pub width: f32,
+    /// For a prop facing the path: how far back from its front it leaves, metres at scale 1 (a
+    /// chimney on the ridge).
+    #[serde(skip_serializing_if = "is_zero")]
+    pub back: f32,
+}
+impl Default for PropSmoke {
+    fn default() -> Self { PropSmoke { enabled: false, at: [0.0, 2.0], color: [150, 150, 155], amount: 0.5, rise: 3.0, width: 0.8, back: 0.0 } }
+}
+fn is_zero(v: &f32) -> bool { *v == 0.0 }
 
 /// Where a prop is fixed.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -2064,6 +3102,35 @@ pub struct Post {
     pub tint: Rgb,
     /// What bright light does in the lens besides bloom.
     pub flare: Flare,
+    /// Depth of field: what is nearer or further than the focus blurs, or (tilt-shift) all but
+    /// a band across the frame does, for the look of a miniature.
+    pub focus: Focus,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
+pub struct Focus {
+    pub enabled: bool,
+    pub mode: FocusMode,
+    /// Depth: metres ahead that are sharp.
+    pub distance: f32,
+    /// How strongly the rest blurs: the widest blur, as a share of the frame height (0..0.03).
+    pub blur: f32,
+    /// Tilt-shift: the sharp band's middle (share of the frame height from the top) and width.
+    pub band: f32,
+    pub band_width: f32,
+}
+impl Default for Focus {
+    fn default() -> Self { Focus { enabled: false, mode: FocusMode::Depth, distance: 8.0, blur: 0.008, band: 0.62, band_width: 0.16 } }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub enum FocusMode {
+    /// A real lens: sharp at `distance`, blurring nearer and further.
+    #[default]
+    Depth,
+    /// A band across the frame sharp and above and below it blurred: a miniature.
+    TiltShift,
 }
 
 /// Lens flare from the sun and bright lights.
@@ -2105,7 +3172,7 @@ impl FlareStyle {
 }
 impl Default for Post {
     fn default() -> Self {
-        Self { exposure: 1.0, contrast: 1.0, saturation: 1.0, bloom: 0.35, vignette: 0.35, grain: 0.0, tint: [255, 255, 255], flare: Flare::default() }
+        Self { exposure: 1.0, contrast: 1.0, saturation: 1.0, bloom: 0.35, vignette: 0.35, grain: 0.0, tint: [255, 255, 255], flare: Flare::default(), focus: Focus::default() }
     }
 }
 

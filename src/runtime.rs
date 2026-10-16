@@ -41,6 +41,10 @@ pub struct Runtime {
     time: f32,
     active: Option<Active>,
     journey: Option<(Journey, Option<PathBuf>, String)>,
+    /// Real seconds one day lasts when the game lets the days pass (`set_day_length`); 0 holds the hour.
+    day_seconds: f32,
+    /// Seconds since play began (not wrapped by the loop), for the camera's flight in.
+    played: f32,
 }
 
 /// A scene the walk is heading into.
@@ -74,12 +78,14 @@ pub struct WalkState {
     pub speed: f32,
     /// At a journey stop that leads nowhere, with nothing under way.
     pub end: bool,
+    /// The day and night, when the scene has one or the game sets the hour (`set_hour`).
+    pub day: Option<scene::DayState>,
 }
 
 impl Runtime {
     /// A scene whose files (sprites, kits, grades) are named relative to `base_dir`.
     pub fn new(scene: Scene, base_dir: Option<PathBuf>) -> Runtime {
-        Runtime { scene, base_dir, renderer: WorldRenderer::default(), rgba: Vec::new(), distance: 0.0, time: 0.0, active: None, journey: None }
+        Runtime { scene, base_dir, renderer: WorldRenderer::default(), rgba: Vec::new(), distance: 0.0, time: 0.0, active: None, journey: None, day_seconds: 0.0, played: 0.0 }
     }
 
     /// Draw frames on the GPU, on a device the game hands over (with wgpu 25, the same one it
@@ -91,6 +97,14 @@ impl Runtime {
         self.renderer.set_gpu(Some(std::sync::Arc::new(crate::world::gpu::Gpu::new(ctx)?)));
         Ok(())
     }
+
+    /// Draw on a GPU renderer shared with other runtimes (its pipelines are made once), or on the
+    /// CPU with `None`.
+    #[cfg(feature = "gpu")]
+    pub fn set_gpu(&mut self, gpu: Option<std::sync::Arc<crate::world::gpu::Gpu>>) { self.renderer.set_gpu(gpu); }
+
+    /// Which engine draws this runtime's frames: "gpu" or "cpu".
+    pub fn engine(&self) -> &'static str { self.renderer.engine() }
 
     /// A journey file: the walk begins at its start stop.
     pub fn from_journey(path: impl AsRef<Path>) -> Result<Runtime, String> {
@@ -182,7 +196,12 @@ impl Runtime {
     /// Walk on by `dt` seconds at `speed` metres per second (0 stands still; time still passes),
     /// through any transition under way. When it ends, the next scene becomes the current one.
     pub fn step(&mut self, dt: f32, speed: f32) {
+        if self.day_seconds > 0.0 {
+            let h = self.hour() + 24.0 * dt / self.day_seconds;
+            self.renderer.set_hour(Some(h));
+        }
         let ds = (speed * dt).max(0.0);
+        self.played += dt.max(0.0);
         self.time = (self.time + dt).rem_euclid(self.loop_seconds().max(1e-3));
         self.distance += ds;
         let done = match &mut self.active {
@@ -215,13 +234,22 @@ impl Runtime {
         if let (Some((_, _, at)), Some(stop)) = (self.journey.as_mut(), next.stop) { *at = stop; }
     }
 
+    /// Play the camera's flight in (`camera.moves.fly_in`) again from the top, as at the start.
+    pub fn restart_intro(&mut self) { self.played = 0.0; }
+
+    /// Seconds into the flight in, while it is playing.
+    fn intro(&self) -> Option<f32> {
+        let f = self.scene.camera.moves.fly_in;
+        (f > 0.0 && self.played < f).then_some(self.played)
+    }
+
     /// The current frame of the runtime's own walk, `width` x `height` RGBA8.
     pub fn frame(&mut self, width: u32, height: u32) -> &[u8] {
         let opts = RenderOptions { size: Some((width.max(1), height.max(1))), ..RenderOptions::default() };
         let a = Place { scene: &self.scene, dir: self.base_dir.as_deref() };
         let img = match &self.active {
             None => {
-                let o = RenderOptions { base_dir: self.base_dir.clone(), time: Some(self.time), ..opts };
+                let o = RenderOptions { base_dir: self.base_dir.clone(), time: Some(self.time), intro: self.intro(), ..opts };
                 self.renderer.render(&self.scene, self.distance, &o)
             }
             Some(Active::Cross { next, walk, travel, clock }) => {
@@ -304,6 +332,36 @@ impl Runtime {
         }
     }
 
+    // ── Day and night ──────────────────────────────────────────────────────
+
+    /// Set the hour of the day (0..24) on every scene the runtime draws, transitions and forks
+    /// included: the sun, sky, light, fog, stars, moon and lamps follow it (`sky.day_night`, on
+    /// with the scene's own settings if it was off). None gives each scene back its own hour.
+    /// Scenes without an open sky (dungeons, space, tunnels) are not touched.
+    pub fn set_hour(&mut self, hour: Option<f32>) { self.renderer.set_hour(hour); }
+
+    /// Let the days pass as the game runs: one day every `seconds` of `step` time, from the hour
+    /// set (or the scene's own). 0 holds the hour where it is.
+    pub fn set_day_length(&mut self, seconds: f32) {
+        if seconds > 0.0 && self.renderer.hour().is_none() { self.renderer.set_hour(Some(self.hour())); }
+        self.day_seconds = seconds.max(0.0);
+    }
+
+    /// The hour now: the one set, else the scene's own (moving with the loop when its days pass
+    /// with it).
+    pub fn hour(&self) -> f32 {
+        let dn = &self.scene.sky.day_night;
+        self.renderer.hour().unwrap_or_else(|| dn.hour_at(self.time / self.loop_seconds().max(1e-3)))
+    }
+
+    /// Where the day stands now (sun height, daylight, "night"/"dawn"/"day"/"dusk"), when the
+    /// scene has a day and night or the hour is set; None for scenes without an open sky.
+    pub fn day(&self) -> Option<scene::DayState> {
+        let sky = &self.scene.sky;
+        let on = sky.enabled && !sky.space.enabled && !sky.tunnel.enabled && (sky.day_night.enabled || self.renderer.hour().is_some());
+        on.then(|| sky.day_night.at(self.hour()))
+    }
+
     /// Where the walk stands.
     pub fn state(&self) -> WalkState {
         let (progress, choose_within) = match &self.active {
@@ -312,7 +370,7 @@ impl Runtime {
             Some(Active::Fork { walk, travel, .. }) => (Some((travel / walk.length()).min(1.0)), walk.chosen.is_none().then(|| (walk.decide_by() - travel).max(0.0))),
         };
         let end = self.active.is_none() && self.journey.as_ref().is_some_and(|(j, _, at)| j.stops.get(at).is_some_and(|s| matches!(s.next, Next::End)));
-        WalkState { scene: self.scene.name.clone(), distance: self.distance, time: self.time, stop: self.journey.as_ref().map(|j| j.2.clone()), progress, choose_within, speed: self.scene.motion.speed, end }
+        WalkState { scene: self.scene.name.clone(), distance: self.distance, time: self.time, stop: self.journey.as_ref().map(|j| j.2.clone()), progress, choose_within, speed: self.scene.motion.speed, end, day: self.day() }
     }
 
     /// The camera of the runtime's own walk now, for a `width` x `height` frame. In a transition,
@@ -374,6 +432,21 @@ mod tests {
         r.render_into(len * 0.25, secs * 0.25, 120, 214, &mut buf).unwrap();
         assert!(buf == a);
         assert!(r.render_into(0.0, 0.0, 120, 214, &mut buf[..10]).is_err());
+    }
+
+    #[test]
+    fn the_flight_in_plays_once_from_the_start() {
+        let mut r = rt("Waterfall Glen");
+        let start = r.frame(60, 107).to_vec();
+        r.step(0.5, 0.0);
+        let early = r.frame(60, 107).to_vec();
+        assert!(start != early, "the camera is coming down");
+        for _ in 0..12 { r.step(0.5, 0.0); }
+        let landed = r.frame(60, 107).to_vec();
+        let opts = RenderOptions { size: Some((60, 107)), time: Some(r.state().time), ..RenderOptions::default() };
+        assert!(landed == WorldRenderer::default().render(r.scene(), r.state().distance, &opts).rgba, "landed, it is the walk's own camera");
+        r.restart_intro();
+        assert!(r.frame(60, 107).to_vec() != landed, "and it can fly in again");
     }
 
     #[test]

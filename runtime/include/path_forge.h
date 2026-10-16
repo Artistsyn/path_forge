@@ -58,11 +58,45 @@ int pf_runtime_fork(PfRuntime *rt, const char *left, const char *right, const ch
 int pf_runtime_choose(PfRuntime *rt, int side);
 /* Walk to where the journey leads from the current stop. 0 on success, -2 with the reason in err. */
 int pf_runtime_go(PfRuntime *rt, char *err, size_t err_len);
-/* Where the walk stands, as JSON: {"scene","distance","time","stop","progress","choose_within"}.
+/* pf_runtime_go, and what it planned: JSON {"kind","notes","warnings"} written into out. Returns
+ * the JSON's full length (call again with a larger buffer if it did not fit), -1 for a null
+ * handle, or -2 with the reason in out. */
+int pf_runtime_go_plan(PfRuntime *rt, char *out, size_t out_len);
+/* Where the walk stands, as JSON: {"scene","distance","time","stop","progress","choose_within","day"}.
  * choose_within is non-null while a fork waits for a choice (metres left). Returns length or -1. */
 int pf_runtime_state(const PfRuntime *rt, char *out, size_t out_len);
 /* Where a point d metres ahead appears now (as pf_runtime_project, for the walk). */
 int pf_runtime_project_now(const PfRuntime *rt, float x, float y, float d, uint32_t width, uint32_t height, float *out_xy);
+
+/* ── Day and night ──────────────────────────────────────────────────────────
+ * Every scene with an open sky can run through the day: the sun crosses the sky and sets, the
+ * light, sky and fog follow it, stars and moon come out and lamps light at dusk. */
+
+/* Set the hour (0..24: 6 sunrise, 12 noon, 18 sunset, 0 midnight) on every scene drawn, turning
+ * its day and night on; a negative hour gives each scene back its own. */
+int pf_runtime_set_hour(PfRuntime *rt, float hour);
+/* Play the camera's flight in (camera.moves.fly_in) again from the top: the camera comes down
+ * from above over the next fly_in seconds of pf_runtime_step (it plays once at the start). */
+int pf_runtime_restart_intro(PfRuntime *rt);
+/* Let the days pass: one day every `seconds` of pf_runtime_step time (0 holds the hour). */
+int pf_runtime_set_day_length(PfRuntime *rt, float seconds);
+/* The day now: writes the hour and the daylight (0 night .. 1 day; either may be NULL) and
+ * returns 1; 0 when the scene has no open sky; -1 for a null handle. pf_runtime_state's "day"
+ * also gives "altitude" (sun height, -1..1), "is_day" and "phase" ("night", "dawn", "day", "dusk"). */
+int pf_runtime_day(const PfRuntime *rt, float *hour, float *daylight);
+
+/* ── For programs that load this library at run time ────────────────────────
+ * An editor's preview, say, which must build whether or not PathForge is installed. */
+
+/* The version of this interface (2 added the three functions below and pf_runtime_go_plan). */
+uint32_t pf_abi_version(void);
+/* Open a place as a journey stop names one: a scene file (relative to base_dir, which may be
+ * NULL) or a built-in preset as "preset:Name". NULL on failure, with the reason in err. */
+PfRuntime *pf_runtime_open_place(const char *name, const char *base_dir, char *err, size_t err_len);
+/* A journey file's outline: JSON {"start","stops":[{"id","scene","next"}],"problems":[...]},
+ * "next" being "end", {"go": to} or {"fork": [left, right]}. Returns the full length, or -2
+ * with the reason in out. */
+int pf_journey_outline(const char *path, char *out, size_t out_len);
 
 #ifdef __cplusplus
 }

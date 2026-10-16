@@ -1,0 +1,19 @@
+[package]
+name = "path_forge_mobile"
+version = "0.1.0"
+edition = "2021"
+description = "PathForge on phones: the renderer behind the Android and iPhone apps, over JNI and a C ABI"
+publish = false
+
+[lib]
+# libpathforge.so for Android (JNI), libpathforge.a for iOS (C).
+name = "pathforge"
+crate-type = ["cdylib", "staticlib", "rlib"]
+
+[dependencies]
+# The GPU renderer (wgpu: Vulkan on Android, Metal on iOS), without the desktop studio.
+path_forge = { path = "..", default-features = false, features = ["gpu"] }
+serde_json = "1"
+
+[target.'cfg(target_os = "android")'.dependencies]
+jni = { version = "0.21", default-features = false }

@@ -1,6 +1,6 @@
 ---
 name: pathforge
-description: Design, critique and export endless looping first-person path backgrounds for 2D games with PathForge (Path of Kings style portrait runners). Use when the user wants a walking-path / corridor / road background, wants to restyle, judge or export a PathForge scene, or needs depth layers, sprite sheets, encounter or biome-transition clips, or camera data for placing enemies on the path. Not for editing PathForge's own Rust code, side-scrolling parallax or top-down maps.
+description: Design, critique and export endless looping first-person path backgrounds for 2D games with PathForge (Path of Kings style portrait runners). Use when the user wants a walking-path / corridor / road background, wants to restyle, judge or export a PathForge scene, or needs depth layers, sprite sheets, encounter or biome-transition clips, or camera data for placing enemies on the path. Also endless side-scrollers seen from a turned camera. Not for editing PathForge's own Rust code or top-down maps.
 metadata:
   version: "1.0"
   tools: "pf_mcp MCP server (pf_* tools) or the pf CLI"
@@ -90,7 +90,10 @@ depth layers or a depth map).
   kinds, cover and size at random (change `seed` for another sky; `kinds` limits the choice).
   A sunset: `sky.sunset: {enabled: true, style: "Golden" | "Fiery" | "Pastel" | "Dusk"}` with the
   sun low (`sky.sun.pos` y 0.85-0.95); it colours the sky, a glow along the horizon round the
-  sun, the clouds (lit from below) and the light. A path that should wander:
+  sun, the clouds (lit from below) and the light. Winter without falling snow:
+  `weather.snow_cover: {enabled: true, props: 0.7, ground: 0.6}`. Lamps on a bridge's posts:
+  a fixture with `bridge_posts: true` (and `posts_between: 1` for one more post halfway).
+  A path that should wander:
   `path.winding`. A frozen river: `path.waterway.frozen`. Sun glare: `post.bloom` + `post.flare`.
   Under a dark sky `post.bloom` also makes the moon, aurora and brighter stars glow (0.3-0.6 soft). On a
   winding path the sky turns with the camera: sun, moon, stars and clouds slide across the frame and
@@ -189,11 +192,17 @@ depth layers or a depth map).
     `accent` knot colours; `height`, `tall`, `speed`; `coverage` how much is lit, `rays`,
     `waves` how much the edge folds, `arc` its bow, `edge` its brightness, `ground_glow`). Turn
     `sky.stars` on with it: over an empty dark sky the folded edge reads as a hill line.
-  - `sky.space` (deep space: `stars`, `nebula`, `galaxy`, up to three `planets` of kind Rocky,
-    Gas, Earth, Ice or Lava with `rings`, `atmosphere`, `night`, whole-turn `spin`). With `below`,
+  - `sky.space` (deep space: `stars` (`star_style` Realistic by default: a few bright among many
+    faint, temperature colours, `star_clumps`, `star_glow`, `star_spikes`, optional `twinkle`),
+    `nebula` (+ `nebula_dust`), `galaxy` (+ `galaxy_dust`), up to six `objects` of kind Emission,
+    Reflection, Dark, Planetary, Remnant, Spiral, Elliptical, Cluster, Comet, Binary, Pulsar,
+    Belt, Sun or Ship (`pos`, `size`, `angle`, `aspect`, three `colors`, whole-number `spin` per
+    loop), and up to three `planets` of kind Rocky, Gas, Earth, Ice, Lava or Desert with `rings`,
+    `atmosphere`, `night`, whole-turn `spin`, and `orbit` to make one a moon of another (it
+    eclipses it)). `sky.meteors` adds shooting stars (night or space). With `below`,
     space fills the drop under a `path.bridge` with `bottom: Void`: one bridge per loop, `length`
     = `spacing` = loop length, and the path material matching the deck, gives an endless walkway
-    in space (preset Star Bridge). Turn fog off for space.
+    in space (presets Star Bridge, Nebula Crossing). Turn fog off for space.
   - `companions` (a ship flying along at `offset` [sideways, height, ahead] metres, `bob` and
     `weave` in whole cycles per loop; `sprite` swaps in any image seen from behind) and prop
     layers with `float` (asteroids beside the deck).
@@ -330,6 +339,41 @@ choose the details unless the plan's warnings say to.
   `pf_runtime_open_journey`, `pf_runtime_step`, `pf_runtime_go`, `pf_runtime_choose`,
   `pf_runtime_state` (JSON). CLI: `pf transition --scene A --to-preset NAME -o sheet.png` (or
   `--left-*`/`--right-*`, `--take`), `pf journey --file F --out DIR`.
+- **Seasons:** `season` (`enabled`, `season` 0 spring / 1 summer / 2 autumn / 3 winter, `years_per_loop`,
+  `falling` blossom and leaves, `snow` in winter) recolours foliage, grass and verges; winter bares
+  broadleaf trees. `sky.halo` rings the sun/moon; `sky.rainbow.saturation` ~0.2 makes a moonbow;
+  `weather.mist.from` keeps the near air clear (valley fog).
+- **Life and water:** `wildlife` (`birds` flocks crossing the sky, `bats` at dusk, `fish` leaping
+  beside the path), `waterfalls[]` (rock faces beside the path with water pouring down, `spray`,
+  `rainbow`; preset Waterfall Glen), `path.waterway.cascades` (white-water steps every
+  `cascade_spacing` m; River Run). Built-in kits `@settlement` (cottage with lit windows and
+  chimney smoke, well, market_stall, picket_fence, haybale, cart, woodpile; Village Evening),
+  `@waterside` (rowboat, lily_pads, mooring_post, buoy; Lily Harbour) and `@wildlife` (deer,
+  deer_grazing, stag, rabbit, heron). A prop def's `smoke` makes a plume. `fences[]` (Picket,
+  Rails, Boards; runs `length` every `spacing` with gate gaps) are joined geometry along the path,
+  better than repeating fence props. `pf share --scene F` gives a short share code (`pf unshare`). Lights:
+  `fixtures.*.string_lights` (festoon bulbs between posts) and `kind: Neon` (signs in `tint`).
+- **Angle / side-scroller:** `camera.yaw` (-90..90 deg) and `camera.side` (m sideways): yaw ~28 with
+  side -1 looks along the path diagonally; yaw -90 with side 5 on an 854x480 canvas is an endless
+  side-scroller (near side cut away past `camera.cutaway`; presets Village Side Scroll, Village Corner).
+  Give buildings and other fronts `facing: Path` (or `PathWhenTurned`, flat to the camera until it
+  turns) and a `depth`, or better `faces` (side walls, roof slopes: pictures placed by three
+  `corners` in the prop's x/y/z metres, `mirror` for both sides), so they stand along the street as
+  solid buildings from any angle. Settlement kit cottages, log cabins, stalls, carts and woodpiles
+  already do; trees and rocks keep `Camera`. `@settlement#cottage` / `#log_cabin` pick a different
+  build per house (a def's `pick` list); `cottage_timber|stone|thatch|brick|board` and
+  `log_cabin_small|porch|sod` name one build. Preset Cabin Woods. Round parts (log tails, posts):
+  `tubes` (`from`, `to`, `radius`, `color`, `end`, `mirror`), real cylinders with sawn ends.
+- **Camera and lens:** `camera.moves` (`bob`/`stride`/`sway` step with the walk, `pan`/`pans` and
+  `tilt`/`tilts` slow looks, `dolly`/`dolly_focus`/`dollies` a dolly zoom: all whole cycles a
+  loop; `fly_in` seconds of coming down from `fly_height` at the start, only in the runtime or
+  `pf render --intro`). `post.focus` (`mode` Depth with `distance`, or TiltShift with `band` and
+  `band_width`; `blur` ~0.01) for depth of field or a miniature look (preset Miniature Village).
+- **Day and night:** `sky.day_night` (`hour`, `days_per_loop` for a whole day each loop, `real_time`
+  for the phone's clock, `sunrise`/`sunset`, `sun_height`, `sun_path`, `sunset_style`, `keep_look`,
+  `night_light`, `sun`/`moon`/`stars`/`lamps`). Games: `Runtime::set_hour`, `set_day_length`,
+  `day()` (daylight, phase); C `pf_runtime_set_hour`, `pf_runtime_set_day_length`, `pf_runtime_day`.
+  Preview any scene at an hour with `pf render --hour H` (preset Day and Night).
 - **Quartz games:** the `quartz_path_forge` crate's `PathForgePlugin` plays a scene or journey on a
   game object (live, or the png export), driven by `RunPlugin "path_forge"` (`next`,
   `choose:left|right`, `stop`, `walk`, `speed:`); in quartz_forge it is a background type

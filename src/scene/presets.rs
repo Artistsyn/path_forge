@@ -76,7 +76,7 @@ fn scene(name: &str) -> Scene {
     Scene {
         version: SCENE_VERSION, name: name.to_owned(), canvas: Canvas::default(), camera: Camera::default(),
         path: PathShape::default(), verge: Verge::default(), ground_cover: vec![], walls: Walls::default(), ceiling: Ceiling::default(),
-        sky: no_sky([0, 0, 0]), light: indoor_light(0.25, [0, 0, 0], 20.0), fixtures: vec![], props: vec![], set_pieces: vec![], companions: vec![], weather: Weather::default(), prop_defs: Default::default(),
+        sky: no_sky([0, 0, 0]), light: indoor_light(0.25, [0, 0, 0], 20.0), fixtures: vec![], props: vec![], set_pieces: vec![], companions: vec![], weather: Weather::default(), season: Season::default(), wildlife: Wildlife::default(), waterfalls: Vec::new(), fences: Vec::new(), prop_defs: Default::default(),
         particles: vec![], post: Post::default(), style: Style::default(), motion: Motion::default(),
     }
 }
@@ -194,6 +194,10 @@ pub fn star_bridge() -> Scene {
                 },
                 Planet { kind: PlanetKind::Rocky, pos: [0.62, 0.17], radius: 0.035, light_angle: 22.0, night: 0.3, seed: 7, ..Planet::default() },
             ],
+            objects: vec![
+                SpaceObject { pos: [0.78, 0.36], size: 0.2, angle: 30.0, brightness: 0.8, seed: 2, ..SpaceObject::default() },
+                SpaceObject { kind: SpaceObjectKind::Spiral, pos: [0.12, 0.08], size: 0.06, angle: -25.0, aspect: 0.45, colors: SpaceObjectKind::Spiral.colors(), seed: 4, ..SpaceObject::default() },
+            ],
             ..Space::default()
         },
         ..Sky::default()
@@ -211,6 +215,73 @@ pub fn star_bridge() -> Scene {
         PropLayer { side: Side::Right, jitter: 2.0, scale_var: 0.3, float: 2.5, float_var: 1.5, offset: 17.0, shadow: false, ..props(PropKind::CargoPod, 6.0, 40.0, 1.0, 87) },
     ];
     s.motion = Motion { loop_length: 40.0, speed: 5.0, fps: 24 };
+    s
+}
+
+/// A walkway across a stellar nursery: glowing pink and teal gas threaded with dark dust, a
+/// dark cloud hiding the stars, a dying star's ring, a comet, and a starfield of a few bright
+/// stars among a great many faint ones.
+pub fn nebula_crossing() -> Scene {
+    let mut s = star_bridge();
+    s.name = "Nebula Crossing".into();
+    s.camera.horizon = 0.45;
+    s.sky.top = [3, 2, 8];
+    s.sky.horizon = [14, 8, 26];
+    // A small far sun at the frame's edge lights the deck.
+    s.sky.sun.pos = [0.97, 0.03];
+    s.sky.sun.radius = 0.012;
+    s.sky.space = Space {
+        enabled: true, stars: 1.2, star_glow: 0.7, star_spikes: 0.6, twinkle: 0.15,
+        nebula: 0.9, nebula_colors: [[200, 60, 120], [50, 110, 220]], nebula_scale: 1.4, nebula_dust: 0.6,
+        galaxy: 0.6, galaxy_angle: -28.0, galaxy_height: 0.75, galaxy_core: 0.4,
+        objects: vec![
+            SpaceObject { pos: [0.42, 0.3], size: 0.36, angle: 15.0, aspect: 0.85, brightness: 1.2, seed: 11, ..SpaceObject::default() },
+            SpaceObject { kind: SpaceObjectKind::Dark, pos: [0.25, 0.42], size: 0.13, angle: 160.0, colors: SpaceObjectKind::Dark.colors(), seed: 3, ..SpaceObject::default() },
+            SpaceObject { kind: SpaceObjectKind::Planetary, pos: [0.83, 0.12], size: 0.05, colors: SpaceObjectKind::Planetary.colors(), seed: 5, ..SpaceObject::default() },
+            SpaceObject { kind: SpaceObjectKind::Comet, pos: [0.8, 0.62], size: 0.3, angle: 140.0, colors: SpaceObjectKind::Comet.colors(), brightness: 0.9, seed: 7, ..SpaceObject::default() },
+        ],
+        planets: vec![
+            Planet { kind: PlanetKind::Ice, pos: [0.12, 0.72], radius: 0.06, color: [190, 210, 230], color2: [240, 250, 255], light_angle: 20.0, night: 0.5, seed: 9, ..Planet::default() },
+        ],
+        seed: 12,
+        ..Space::default()
+    };
+    s.light.ambient = 0.3;
+    s.light.ambient_color = [170, 130, 190];
+    s.post.bloom = 0.4;
+    s.props.retain(|p| p.kind != PropKind::Satellite && p.kind != PropKind::CargoPod);
+    s
+}
+
+/// A deck through an asteroid belt round a desert world: rocks drifting in a band across the sky,
+/// a moon circling the planet and throwing its shadow across it, a close sun with flares, a
+/// pulsar sweeping its beams, a far ship crossing and the odd shooting star.
+pub fn asteroid_belt() -> Scene {
+    let mut s = star_bridge();
+    s.name = "Asteroid Belt".into();
+    s.sky.top = [2, 2, 8];
+    s.sky.horizon = [10, 8, 20];
+    s.sky.sun.pos = [0.95, 0.05];
+    s.sky.sun.radius = 0.01;
+    let obj = |kind: SpaceObjectKind, pos: [f32; 2], size: f32, angle: f32, aspect: f32, spin: i32| SpaceObject { kind, pos, size, angle, aspect, spin, colors: kind.colors(), ..SpaceObject::default() };
+    s.sky.space = Space {
+        enabled: true, stars: 1.1, nebula: 0.4, nebula_colors: [[170, 80, 110], [70, 80, 170]], galaxy: 0.5, galaxy_angle: 30.0, galaxy_height: 0.8,
+        objects: vec![
+            obj(SpaceObjectKind::Sun, [0.86, 0.1], 0.2, 0.0, 1.0, 1),
+            obj(SpaceObjectKind::Belt, [0.5, 0.52], 0.1, -10.0, 0.6, 1),
+            obj(SpaceObjectKind::Pulsar, [0.15, 0.2], 0.07, 0.0, 1.0, 2),
+            obj(SpaceObjectKind::Ship, [0.4, 0.5], 0.035, 8.0, 1.0, 1),
+        ],
+        planets: vec![
+            Planet { kind: PlanetKind::Desert, pos: [0.45, 0.38], radius: 0.16, color: [205, 150, 95], color2: [150, 80, 50], light_angle: 20.0, night: 0.35, clouds: 0.5, tilt: -8.0, seed: 2, ..Planet::default() },
+            Planet { kind: PlanetKind::Rocky, radius: 0.035, light_angle: 20.0, night: 0.35, seed: 4,
+                orbit: PlanetOrbit { enabled: true, around: 0, distance: 1.7, tilt: 8.0, roll: -10.0, turns: 1, phase: 0.1 }, ..Planet::default() },
+        ],
+        seed: 21,
+        ..Space::default()
+    };
+    s.sky.meteors = Meteors { enabled: true, count: 4, angle: -150.0, ..Meteors::default() };
+    s.props.retain(|p| p.kind != PropKind::Satellite && p.kind != PropKind::CargoPod);
     s
 }
 
@@ -294,7 +365,7 @@ pub fn river_run() -> Scene {
     s.path.edge_noise = 0.35;
     s.path.edge_dark = 0.15;
     s.path.material = water([46, 78, 82], [26, 48, 52], 0.3);
-    s.path.waterway = Waterway { floating: Floating::Leaves, float_density: 0.08, float_color: [112, 82, 40], float_size: 0.16, ..waterway(3, 0.55) };
+    s.path.waterway = Waterway { floating: Floating::Leaves, float_density: 0.08, float_color: [112, 82, 40], float_size: 0.16, cascades: 0.5, cascade_spacing: 30.0, ..waterway(3, 0.55) };
     s.verge = Verge { enabled: true, material: mat(Pattern::Grass, [50, 86, 34], [32, 58, 22], 2.0), tufts: true, ..Verge::default() };
     s.walls.enabled = false;
     s.sky = day_sky([80, 136, 200], [200, 218, 210], [0.72, 0.38]);
@@ -508,6 +579,9 @@ pub fn event_horizon() -> Scene {
             enabled: true, stars: 1.0, nebula: 0.35, nebula_colors: [[150, 60, 120], [70, 60, 170]],
             galaxy: 0.5, galaxy_angle: -14.0, galaxy_height: 0.7, galaxy_core: -0.6,
             black_hole: BlackHole { enabled: true, pos: [0.5, 0.5], size: 0.12, tilt: 85.0, light: 1.2, ..BlackHole::default() },
+            objects: vec![
+                SpaceObject { kind: SpaceObjectKind::Cluster, pos: [0.82, 0.18], size: 0.08, colors: SpaceObjectKind::Cluster.colors(), seed: 1, ..SpaceObject::default() },
+            ],
             seed: 4,
             ..Space::default()
         },
@@ -543,7 +617,7 @@ pub fn black_hole_arena() -> Scene {
     s.sky = Sky {
         enabled: true, top: [5, 5, 15], horizon: [5, 5, 15],
         space: Space {
-            enabled: true, stars: 0.03, star_brightness: 2.2, star_colors: 0.0, nebula: 0.0, galaxy: 0.0,
+            enabled: true, star_style: StarStyle::Classic, stars: 0.03, star_brightness: 2.2, star_colors: 0.0, nebula: 0.0, galaxy: 0.0,
             black_hole: BlackHole {
                 enabled: true, pos: [0.5, 0.92], size: 0.24, tilt: 82.0, roll: -6.0,
                 disk_colors: [[210, 255, 245], [200, 90, 240], [70, 30, 150]], brightness: 0.9, doppler: 0.6, spin: 3,
@@ -609,6 +683,9 @@ pub fn starship_flight() -> Scene {
                 },
             ],
             black_hole: BlackHole { enabled: true, pos: [0.5, 0.62], size: 0.09, tilt: 85.0, roll: 6.0, infall: 24, light: 1.0, ..BlackHole::default() },
+            objects: vec![
+                SpaceObject { kind: SpaceObjectKind::Spiral, pos: [0.2, 0.2], size: 0.07, angle: 35.0, aspect: 0.4, colors: SpaceObjectKind::Spiral.colors(), seed: 6, ..SpaceObject::default() },
+            ],
             ..Space::default()
         },
         ..Sky::default()
@@ -752,6 +829,156 @@ pub fn winding_trail() -> Scene {
     // would haze the whole frame.)
     s.weather.light_shafts.enabled = false;
     s.motion = Motion { loop_length: 48.0, speed: 4.0, fps: 24 };
+    s
+}
+
+/// A whole day on a country trail in one loop: dawn, the sun climbing and setting, dusk, stars
+/// and the moon, the lanterns along the way lit at nightfall and out at sunrise.
+pub fn day_and_night() -> Scene {
+    let mut s = winding_trail();
+    s.name = "Day and Night".into();
+    s.sky.day_night = DayNight { enabled: true, hour: 4.0, days_per_loop: 1, ..DayNight::default() };
+    s.sky.clouds.enabled = true;
+    s.sky.clouds.count = 8;
+    s.fixtures = vec![Fixture { kind: FixtureKind::Lantern, mount: Mount::Ground, post: LampPost::Pole, lateral: 0.3, height: 1.6, spacing: 12.0, radius: 7.0, intensity: 1.0, side: Side::Both, ..Fixture::default() }];
+    s.motion = Motion { loop_length: 96.0, speed: 3.0, fps: 24 };
+    s
+}
+
+/// A village street at dusk: timber-framed cottages with lit windows and smoking chimneys, picket
+/// fences, a well and a market stall, festoon lights strung between the lamp posts, and a deer
+/// watching from the edge of the wood.
+pub fn village_evening() -> Scene {
+    let mut s = winding_trail();
+    s.name = "Village Evening".into();
+    s.path.winding.amplitude = 1.2;
+    s.sky.day_night = DayNight { enabled: true, hour: 19.0, ..DayNight::default() };
+    let kit = |name: &str, lateral: f32, spacing: f32, offset: f32, side: Side, seed: u32| PropLayer {
+        def: format!("@settlement#{name}"), side, offset, jitter: 0.0, jitter_along: 0.0, lean_var: 0.0, density: 1.0, tint_var: 0.05,
+        ..props(PropKind::Rock, lateral, spacing, 1.0, seed)
+    };
+    s.props = vec![
+        kit("cottage", 4.2, 16.0, 0.0, Side::Left, 301),
+        kit("cottage", 4.6, 16.0, 8.0, Side::Right, 302),
+        kit("well", 2.6, 48.0, 20.0, Side::Right, 304),
+        kit("market_stall", 2.4, 48.0, 36.0, Side::Left, 305),
+        kit("haybale", 2.8, 24.0, 12.0, Side::Right, 306),
+        PropLayer { def: "@wildlife#deer".into(), side: Side::Left, offset: 30.0, density: 1.0, ..props(PropKind::Rock, 9.0, 48.0, 1.0, 307) },
+        PropLayer { rows: 2, row_spacing: 5.0, jitter: 1.5, density: 0.8, ..props(PropKind::Tree, 11.0, 7.0, 1.1, 308) },
+    ];
+    s.fixtures = vec![Fixture {
+        kind: FixtureKind::Lantern, mount: Mount::Ground, post: LampPost::Pole, lateral: 0.6, height: 2.6, spacing: 8.0, radius: 7.0, intensity: 1.0, side: Side::Both,
+        string_lights: StringLights { enabled: true, colors: vec![[255, 214, 140], [255, 150, 90], [255, 236, 190]], ..StringLights::default() },
+        ..Fixture::default()
+    }];
+    // Picket fences along both sides, with a gate gap in front of each cottage.
+    s.fences = vec![
+        Fence { side: Side::Left, lateral: 1.3, spacing: 16.0, length: 13.0, offset: 1.5, ..Fence::default() },
+        Fence { side: Side::Right, lateral: 1.3, spacing: 16.0, length: 13.0, offset: 9.5, ..Fence::default() },
+    ];
+    s.wildlife.bats.enabled = true;
+    s.motion = Motion { loop_length: 48.0, speed: 2.5, fps: 24 };
+    s
+}
+
+/// A trail up a wooded glen where streams fall over the rocks either side, mist and a rainbow
+/// at their feet, and birds crossing overhead.
+pub fn waterfall_glen() -> Scene {
+    let mut s = winding_trail();
+    s.name = "Waterfall Glen".into();
+    s.waterfalls = vec![
+        Waterfall { enabled: true, side: Side::Left, lateral: 3.5, spacing: 48.0, offset: 14.0, height: 9.0, width: 2.4, seed: 1, ..Waterfall::default() },
+        Waterfall { enabled: true, side: Side::Right, lateral: 4.0, spacing: 48.0, offset: 38.0, height: 6.5, width: 1.6, seed: 2, ..Waterfall::default() },
+    ];
+    s.wildlife.birds.enabled = true;
+    s.camera.moves = CameraMoves { bob: 0.035, sway: 0.4, pan: 6.0, pans: 1, fly_in: 5.0, fly_height: 22.0, ..CameraMoves::default() };
+    s.motion.loop_length = 48.0;
+    s
+}
+
+/// The village street as an endless side-scroller (landscape): the camera stands beside the lane
+/// and looks across it, the walk carrying cottages, the market and the trees beyond past from
+/// right to left, the near side of the world cut away.
+pub fn village_side_scroll() -> Scene {
+    let mut s = village_evening();
+    s.name = "Village Side Scroll".into();
+    s.canvas = Canvas { width: 854, height: 480 };
+    s.sky.day_night.hour = 16.0;
+    s.camera = Camera { yaw: -90.0, side: 5.0, eye_height: 2.0, horizon: 0.5, zoom: 1.3, ..Camera::default() };
+    s.light.fog.distance = 140.0;
+    s
+}
+
+/// The village street seen at an angle: the camera stands at the edge of the lane and looks along
+/// it diagonally, the cottages turned toward it.
+pub fn village_corner() -> Scene {
+    let mut s = village_evening();
+    s.name = "Village Corner".into();
+    s.sky.day_night.hour = 17.5;
+    s.camera.yaw = 28.0;
+    s.camera.side = -1.0;
+    s
+}
+
+/// A trail through the woods at dusk where log cabins stand among the trees, no two alike, smoke
+/// rising from their chimneys, woodpiles stacked by the path and lanterns lit along it.
+pub fn cabin_woods() -> Scene {
+    let mut s = winding_trail();
+    s.name = "Cabin Woods".into();
+    s.path.winding.amplitude = 1.4;
+    s.sky.day_night = DayNight { enabled: true, hour: 17.7, ..DayNight::default() };
+    let kit = |name: &str, lateral: f32, spacing: f32, offset: f32, side: Side, seed: u32| PropLayer {
+        def: format!("@settlement#{name}"), side, offset, jitter: 0.0, jitter_along: 0.0, lean_var: 0.0, density: 1.0, tint_var: 0.06,
+        ..props(PropKind::Rock, lateral, spacing, 1.0, seed)
+    };
+    s.props = vec![
+        kit("log_cabin", 4.4, 24.0, 2.0, Side::Left, 501),
+        kit("log_cabin", 4.8, 24.0, 14.0, Side::Right, 502),
+        kit("woodpile", 2.5, 24.0, 9.0, Side::Left, 503),
+        kit("cart", 2.6, 48.0, 22.0, Side::Right, 504),
+        // The woods: behind the cabins, and a few trees between them nearer the trail.
+        PropLayer { rows: 3, row_spacing: 4.0, jitter: 1.5, density: 0.85, ..props(PropKind::Tree, 12.5, 5.0, 1.15, 505) },
+        PropLayer { jitter: 0.8, density: 0.9, offset: 8.0, ..props(PropKind::Tree, 4.0, 24.0, 1.0, 506) },
+    ];
+    s.fixtures = vec![Fixture {
+        kind: FixtureKind::Lantern, mount: Mount::Ground, post: LampPost::Pole, lateral: 0.5, height: 2.2, spacing: 12.0, radius: 6.0, intensity: 0.9, side: Side::Left,
+        ..Fixture::default()
+    }];
+    s.motion = Motion { loop_length: 48.0, speed: 2.5, fps: 24 };
+    s
+}
+
+/// The village seen from above in the afternoon through a tilt-shift lens: a band across the
+/// middle sharp and the rest blurred, so the street looks like a model.
+pub fn miniature_village() -> Scene {
+    let mut s = village_evening();
+    s.name = "Miniature Village".into();
+    s.sky.day_night.hour = 15.0;
+    s.camera.eye_height = 4.0;
+    s.camera.horizon = 0.16;
+    s.camera.zoom = 1.3;
+    s.light.fog.distance = 160.0;
+    s.post.focus = Focus { enabled: true, mode: FocusMode::TiltShift, blur: 0.012, band: 0.58, band_width: 0.16, ..Focus::default() };
+    s.post.saturation = 1.3;
+    s.post.contrast = 1.1;
+    s
+}
+
+/// A harbour of still water at sunset: rowing boats tied up beside the pier, lily pads, mooring
+/// posts and a buoy blinking out in the bay.
+pub fn lily_harbour() -> Scene {
+    let mut s = sunset_pier();
+    s.name = "Lily Harbour".into();
+    let kit = |name: &str, lateral: f32, spacing: f32, offset: f32, side: Side, seed: u32| PropLayer {
+        def: format!("@waterside#{name}"), side, offset, jitter: 0.4, density: 0.9, shadow: false, ..props(PropKind::Rock, lateral, spacing, 1.0, seed)
+    };
+    s.props.truncate(1);
+    s.props.extend([
+        kit("rowboat", 1.4, 14.0, 3.0, Side::Both, 401),
+        kit("lily_pads", 3.0, 3.5, 0.0, Side::Both, 402),
+        kit("mooring_post", 0.25, 8.0, 4.0, Side::Both, 403),
+        kit("buoy", 8.0, 24.0, 10.0, Side::Right, 404),
+    ]);
     s
 }
 
@@ -1013,7 +1240,17 @@ pub const ALL: &[(&str, fn() -> Scene)] = &[
 ("Bog Boardwalk", bog_boardwalk),
 ("Desert Ruins", desert_ruins),
 ("Ice Cave", ice_cave),
-("Star Bridge", star_bridge),
+("Day and Night", day_and_night),
+    ("Village Evening", village_evening),
+    ("Lily Harbour", lily_harbour),
+    ("Waterfall Glen", waterfall_glen),
+    ("Miniature Village", miniature_village),
+    ("Village Side Scroll", village_side_scroll),
+    ("Village Corner", village_corner),
+    ("Cabin Woods", cabin_woods),
+    ("Star Bridge", star_bridge),
+    ("Nebula Crossing", nebula_crossing),
+    ("Asteroid Belt", asteroid_belt),
 ("Hyperspace Run", hyperspace_run),
 ("Wormhole", wormhole),
 ("Starship Flight", starship_flight),

@@ -1,0 +1,33 @@
+# The iPhone app's Xcode project, made by XcodeGen (`xcodegen` in this folder): the CI build makes
+# it fresh each time, and so can you before opening it in Xcode.
+name: PathForge
+options:
+  bundleIdPrefix: com.pathforge
+  deploymentTarget:
+    iOS: "16.0"
+targets:
+  PathForge:
+    type: application
+    platform: iOS
+    sources:
+      - path: PathForge
+        excludes:
+          - "Info.plist"
+    settings:
+      base:
+        PRODUCT_NAME: PathForge
+        PRODUCT_BUNDLE_IDENTIFIER: com.pathforge.mobile
+        INFOPLIST_FILE: PathForge/Info.plist
+        MARKETING_VERSION: "1.0"
+        CURRENT_PROJECT_VERSION: "1"
+        TARGETED_DEVICE_FAMILY: "1"
+        SWIFT_VERSION: "5.0"
+        SWIFT_OBJC_BRIDGING_HEADER: PathForge/PathForge-Bridging-Header.h
+        LIBRARY_SEARCH_PATHS: $(PROJECT_DIR)/build/native
+        OTHER_LDFLAGS: -lpathforge -framework Metal -framework QuartzCore -framework CoreGraphics -framework Foundation -framework CoreFoundation -framework Security -lobjc -liconv -lc++
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        ENABLE_BITCODE: NO
+        DEAD_CODE_STRIPPING: YES
+        CODE_SIGNING_ALLOWED: NO
+        CODE_SIGNING_REQUIRED: NO
+        CODE_SIGN_IDENTITY: ""

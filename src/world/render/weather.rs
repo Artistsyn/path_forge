@@ -33,6 +33,10 @@ pub(super) struct Wx {
     pub wet: f32,
     pub puddles: f32,
     pub snow: f32,
+    /// Snow lying on the props (0..1): falling snow's, or a snow cover's; and how much of a snow
+    /// cover is caught on the upper sides of their clumps, not only along their tops.
+    pub prop_snow: f32,
+    pub prop_dust: f32,
     pub track: f32,
     /// How hard rain is falling on the puddles (their rings).
     pub rings: f32,
@@ -165,6 +169,14 @@ pub(super) fn conditions(scene: &Scene, tphase: f32, loop_seconds: f32) -> Wx {
             wx.track = p.track.clamp(0.0, 1.0);
         }
     }
+    // Snow already lying, with none falling.
+    let sc = &w.snow_cover;
+    if sc.enabled {
+        wx.snow = wx.snow.max(sc.ground.clamp(0.0, 1.0));
+        wx.prop_snow = sc.props.clamp(0.0, 1.0);
+        wx.prop_dust = wx.prop_snow;
+    }
+    wx.prop_snow = wx.prop_snow.max(wx.snow);
     let c = &scene.sky.clouds;
     if c.shadows > 0.0 && scene.sky.enabled && scene.sky.sun.enabled && scene.sky.sun.emits_light {
         wx.clouds = c.shadows.clamp(0.0, 1.0);
@@ -329,12 +341,20 @@ fn air_light(ctx: &Ctx, x: f32, y: f32, d: f32) -> [f32; 3] { air_light_among(ct
 
 /// `air_light` looking only at the lamps in `near` (the ones that can reach this part of the screen).
 fn air_light_among(ctx: &Ctx, x: f32, y: f32, d: f32, near: Option<&[u16]>) -> [f32; 3] {
-    if d < 18.0 { ctx.light_among(x, y, d, None, 0, 1.0, None, near) } else { ctx.sky_lights.iter().fold(ctx.ambient, |a, s| add3(a, scale3(s.color, 0.5))) }
+    if ctx.view.depth_of(x, d) < 18.0 { ctx.light_among(x, y, d, None, 0, 1.0, None, near) } else { ctx.sky_lights.iter().fold(ctx.ambient, |a, s| add3(a, scale3(s.color, 0.5))) }
 }
 
-/// Half the width of the ground in view at the far end of `range`, or between the walls.
+/// Half the width of the ground in view at the far end of `range`, or between the walls. (A
+/// turned camera looks across the path: the band reaches out to where it stands.)
 fn spread(ctx: &Ctx, range: f32) -> f32 {
-    if ctx.scene.walls.enabled { ctx.wall_x(5.0) } else { 0.5 * ctx.view.width as f32 / ctx.view.focal_px * range + 2.0 }
+    let w = if ctx.scene.walls.enabled { ctx.wall_x(5.0) } else { 0.5 * ctx.view.width as f32 / ctx.view.focal_px * range + 2.0 };
+    if ctx.view.turned { w.max(ctx.view.cam_x.abs() + 0.6 * range) } else { w }
+}
+
+/// The stretch of the path, metres from the camera's place, that weather out to `range` metres
+/// is drawn over: just ahead out to `range`, or round a turned camera.
+fn window(ctx: &Ctx, range: f32) -> (f32, f32) {
+    if ctx.view.turned { (ctx.d_lo.max(-range), ctx.d_hi.min(range)) } else { (0.0, range) }
 }
 
 /// A splash where a drop lands at (x, d), `age` 0..1 through it: a ring spreading on the ground
@@ -376,7 +396,8 @@ pub(super) fn draw_precip(ctx: &Ctx, out: &mut Vec<Splat>) {
     let lat = spread(ctx, range);
     let top = 10.0f32;
     let tint = rgb_lin(p.tint);
-    let copies = (range / ctx.loop_len).ceil() as i64 + 1;
+    let (wlo, whi) = window(ctx, range);
+    let copies = ((whi - wlo) / ctx.loop_len).ceil() as i64 + 1;
     let area = 2.0 * lat * ctx.loop_len;
     #[derive(Clone, Copy, PartialEq)]
     enum Fall { Drop, Flake, Slush, Hail }
@@ -411,8 +432,8 @@ pub(super) fn draw_precip(ctx: &Ctx, out: &mut Vec<Splat>) {
             // Blown across the band and back in at the other side, so a strong wind does not empty it.
             let x = (x0 + wind * f * fall_t + wob + lat).rem_euclid(2.0 * lat) - lat;
             for cpy in 0..copies {
-                let d = (d0 - ctx.scroll).rem_euclid(ctx.loop_len) + cpy as f32 * ctx.loop_len;
-                if d < 0.25 || d > range || !ctx.owns(x, y, d) { continue; }
+                let d = wlo + (d0 - ctx.scroll - wlo).rem_euclid(ctx.loop_len) + cpy as f32 * ctx.loop_len;
+                if (if ctx.view.turned { d > whi } else { d < 0.25 || d > range }) || !ctx.owns(x, y, d) { continue; }
                 let c0 = v.to_cam(x, y, d);
                 if c0[2] < 0.2 { continue; }
                 let Some([sx, sy]) = v.project(c0) else { continue };
@@ -505,7 +526,8 @@ pub(super) fn draw_drips(ctx: &Ctx, out: &mut Vec<Splat>) {
     // The share of each drip's cycle spent forming at the top (the rest falling and splashing).
     let form = (1.0 - (fall_t + 0.15) / period).clamp(0.1, 0.9);
     let range = ctx.far.min(25.0);
-    let copies = (range / ctx.loop_len).ceil() as i64 + 1;
+    let (wlo, whi) = window(ctx, range);
+    let copies = ((whi - wlo) / ctx.loop_len).ceil() as i64 + 1;
     let col = rgb_lin(dr.color);
     let lat = if s.walls.enabled { ctx.wall_x(5.0) } else { ctx.view.path_half_width(5.0) + 1.0 };
     let n = ((dr.rate * ctx.loop_len) as i64).clamp(1, 4000);
@@ -514,8 +536,8 @@ pub(super) fn draw_drips(ctx: &Ctx, out: &mut Vec<Splat>) {
         let d0 = hf(dr.seed ^ 0xD2, k) * ctx.loop_len;
         let a = (hf(dr.seed ^ 0xD3, k) + cd * ctx.tphase).rem_euclid(1.0);
         for cpy in 0..copies {
-            let d = (d0 - ctx.scroll).rem_euclid(ctx.loop_len) + cpy as f32 * ctx.loop_len;
-            if d < 0.3 || d > range || !ctx.owns(x, 0.0, d) { continue; }
+            let d = wlo + (d0 - ctx.scroll - wlo).rem_euclid(ctx.loop_len) + cpy as f32 * ctx.loop_len;
+            if (if ctx.view.turned { d > whi } else { d < 0.3 || d > range }) || !ctx.owns(x, 0.0, d) { continue; }
             let z = v.to_cam(x, 0.0, d)[2];
             // Wet drops catch the light: a little brighter than what lights them.
             let light = |y: f32| ctx.apply_fog(scale3(mul3(air_light(ctx, x, y, d), col), 1.4), z);
@@ -551,7 +573,8 @@ pub(super) fn draw_sandstorm(ctx: &Ctx, out: &mut Vec<Splat>) {
     let speed = ctx.wx.wind.abs().max(5.0 + 9.0 * k);
     let range = ctx.far.min(30.0);
     let lat = spread(ctx, range);
-    let copies = (range / ctx.loop_len).ceil() as i64 + 1;
+    let (wlo, whi) = window(ctx, range);
+    let copies = ((whi - wlo) / ctx.loop_len).ceil() as i64 + 1;
     let col = rgb_lin(st.color);
     let cl = cycles(2.0, ls);
     let life = ls / cl;
@@ -565,8 +588,8 @@ pub(super) fn draw_sandstorm(ctx: &Ctx, out: &mut Vec<Splat>) {
         let d0 = hf(st.seed ^ 0xE4, key) * ctx.loop_len;
         let alpha = (std::f32::consts::PI * a).sin() * 0.45;
         for cpy in 0..copies {
-            let d = (d0 - ctx.scroll).rem_euclid(ctx.loop_len) + cpy as f32 * ctx.loop_len;
-            if d < 0.3 || d > range || !ctx.owns(x, y, d) { continue; }
+            let d = wlo + (d0 - ctx.scroll - wlo).rem_euclid(ctx.loop_len) + cpy as f32 * ctx.loop_len;
+            if (if ctx.view.turned { d > whi } else { d < 0.3 || d > range }) || !ctx.owns(x, y, d) { continue; }
             let c0 = v.to_cam(x, y, d);
             let (Some(s0), Some(s1)) = (v.project(c0), v.project(v.to_cam(x - dir * speed * 0.03, y, d))) else { continue };
             if s0[0] < -60.0 || s0[0] > w as f32 + 60.0 || s0[1] < 0.0 || s0[1] > h as f32 { continue; }
@@ -589,7 +612,8 @@ pub(super) fn draw_wisps(ctx: &Ctx, out: &mut Vec<Splat>) {
     let range = ctx.far.min(30.0);
     let lat = if m.over == MistOver::Path { water::water_edge(ctx, 5.0) + 0.5 * m.spread.max(0.0) }
         else if ctx.scene.walls.enabled { ctx.wall_x(5.0) } else { ctx.view.path_half_width(5.0) + 5.0 };
-    let copies = (range / ctx.loop_len).ceil() as i64 + 1;
+    let (wlo, whi) = window(ctx, range);
+    let copies = ((whi - wlo) / ctx.loop_len).ceil() as i64 + 1;
     let col = rgb_lin(m.color);
     let n = ((m.wisps.clamp(0.0, 1.0) * 1.6 * ctx.loop_len) as i64).min(2000);
     for j in 0..n {
@@ -602,8 +626,8 @@ pub(super) fn draw_wisps(ctx: &Ctx, out: &mut Vec<Splat>) {
         let size = 0.45 + 0.7 * a;
         let alpha = 0.22 * m.wisps.min(1.0) * (std::f32::consts::PI * a).sin();
         for cpy in 0..copies {
-            let d = (d0 - ctx.scroll).rem_euclid(ctx.loop_len) + cpy as f32 * ctx.loop_len;
-            if d < 0.8 || d > range || !ctx.owns(x, y, d) { continue; }
+            let d = wlo + (d0 - ctx.scroll - wlo).rem_euclid(ctx.loop_len) + cpy as f32 * ctx.loop_len;
+            if (if ctx.view.turned { d > whi } else { d < 0.8 || d > range }) || !ctx.owns(x, y, d) { continue; }
             let c = v.to_cam(x, y, d);
             let Some([sx, sy]) = v.project(c) else { continue };
             let r = v.px_per_m(c[2]) * size;
@@ -709,7 +733,9 @@ pub(super) fn apply_mist(ctxs: &[Ctx], gbuf: &[GPixel], hdr: &mut [[f32; 3]]) {
                 let e = water::water_edge(ctx, gd) + 0.5 * m.spread.max(0.0);
                 if lx.abs() <= e { 1.0 } else { e / lx.abs() }
             } else { 1.0 };
-            let len = z * stretch * f * mist_mean(soft, top, eye, eye + (y_end - eye) * f);
+            // Only beyond the clear air in front (fog lying in the low ground ahead).
+            let near = if m.from > 0.0 { ((z - m.from) / z.max(1e-3)).clamp(0.0, 1.0) } else { 1.0 };
+            let len = z * stretch * f * near * mist_mean(soft, top, eye, eye + (y_end - eye) * f);
             if len <= 1e-3 { continue; }
             let tau = m.density.max(0.0) * mist_patch(ctx, gx * f, gd * f) * len;
             let a = 1.0 - (-tau).exp();
@@ -1084,7 +1110,48 @@ pub(super) fn aurora(ctx: &Ctx, gbuf: &[GPixel], hdr: &mut [[f32; 3]]) {
 }
 
 /// A rainbow round a point below the horizon, red outside, and a fainter, reversed second bow.
+/// The halos round the sun and moon this frame: centre (x, y), radius in pixels, and the light
+/// of the ring (its body's colour and brightness), as both renderers draw them.
+pub(super) fn halo_list(ctx: &Ctx) -> Vec<[f32; 6]> {
+    let sky = &ctx.scene.sky;
+    let h = &sky.halo;
+    if !sky.enabled || !h.enabled || h.strength <= 0.0 || sky.space.enabled || sky.tunnel.enabled { return Vec::new(); }
+    let v = &ctx.view;
+    let hy = v.horizon_px.max(2.0);
+    let (ox, oy) = (v.left as f32 + v.sky_dx(), v.top as f32);
+    let (fw, fhy) = (v.width as f32 - 2.0 * v.left as f32, (hy - v.top as f32).max(2.0));
+    let mut out = Vec::new();
+    for (on, body, k) in [(h.sun, &sky.sun, 0.04), (h.moon, &sky.moon.body, 0.18)] {
+        if !on || !body.enabled || body.pos[1] > 1.05 { continue; }
+        let c = scale3(rgb_lin(body.color), k * h.strength * body.intensity.max(0.0).min(3.0));
+        out.push([ox + body.pos[0] * fw, oy + body.pos[1] * fhy, (h.size * fhy).max(2.0), c[0], c[1], c[2]]);
+    }
+    out
+}
+
+/// A halo's light at (px, py): sharp and reddish on the inside, whiter and fading outwards.
+pub(super) fn halo_px(hl: &[f32; 6], px: f32, py: f32) -> [f32; 3] {
+    let d = ((px - hl[0]).powi(2) + (py - hl[1]).powi(2)).sqrt();
+    let r = hl[2];
+    let t = (d - r) / (0.07 * r);
+    let k = if t < 0.0 { (-(t * 4.8) * (t * 4.8)).exp() } else { (-t).exp() };
+    let tint = mix3([1.0, 0.55, 0.35], [0.9, 0.95, 1.0], ((d - r) / (0.1 * r) + 0.5).clamp(0.0, 1.0));
+    [hl[3] * tint[0] * k, hl[4] * tint[1] * k, hl[5] * tint[2] * k]
+}
+
 pub(super) fn rainbow(ctx: &Ctx, gbuf: &[GPixel], hdr: &mut [[f32; 3]]) {
+    let halos = halo_list(ctx);
+    if !halos.is_empty() {
+        let w = ctx.view.width;
+        let hy = ctx.view.horizon_px.max(2.0);
+        hdr.par_chunks_mut(w).enumerate().for_each(|(y, row)| {
+            if y as f32 >= hy { return; }
+            for (x, px) in row.iter_mut().enumerate() {
+                if gbuf[y * w + x].id != id::NONE { continue; }
+                for hl in &halos { *px = add3(*px, halo_px(hl, x as f32 + 0.5, y as f32 + 0.5)); }
+            }
+        });
+    }
     let r = &ctx.scene.sky.rainbow;
     if !r.enabled || r.intensity <= 0.0 { return; }
     let v = &ctx.view;
@@ -1101,6 +1168,7 @@ pub(super) fn rainbow(ctx: &Ctx, gbuf: &[GPixel], hdr: &mut [[f32; 3]]) {
     let (rad2, band2) = (1.21 * rad, 1.7 * band);
     let sun = ctx.sky_lights.first().map_or(0.6, |s| lum(s.color).clamp(0.2, 2.0));
     let k = r.intensity.max(0.0) * 0.32 * sun;
+    let sat = r.saturation.clamp(0.0, 1.0);
     let spectrum = |t: f32| -> [f32; 3] {
         // Violet (0) to red (1).
         let t = t.clamp(0.0, 1.0);
@@ -1121,7 +1189,12 @@ pub(super) fn rainbow(ctx: &Ctx, gbuf: &[GPixel], hdr: &mut [[f32; 3]]) {
                 let t2 = (d - (rad2 - band2 * 0.5)) / band2;
                 if (0.0..1.0).contains(&t2) { c = add3(c, scale3(spectrum(1.0 - t2), 0.4 * (std::f32::consts::PI * t2).sin().sqrt())); }
             }
-            if c != [0.0; 3] { *px = add3(*px, scale3(c, k * low)); }
+            if c != [0.0; 3] {
+                // A moonbow is pale: most of its colour washed out.
+                let g = (c[0] + c[1] + c[2]) / 3.0;
+                let c = mix3([g; 3], c, sat);
+                *px = add3(*px, scale3(c, k * low));
+            }
         }
     });
 }
@@ -1151,6 +1224,163 @@ pub(super) fn heat_shimmer(ctxs: &[Ctx], gbuf: &[GPixel], hdr: &mut Vec<[f32; 3]
             let dx = amp * (0.6 * (0.31 * fy + 0.05 * fx + c1 * t).sin() + 0.4 * (0.77 * fy - 0.09 * fx - c2 * t + 1.3).sin());
             let dy = amp * 0.3 * (0.21 * fx + 0.45 * fy + c2 * t).sin();
             *px = bilinear(&src, w, h, x as f32 + dx, y as f32 + dy);
+        }
+    });
+}
+
+/// Depth of field (`post.focus`): the blur each pixel takes, in pixels. A real lens blurs
+/// by how far a thing is from the focus (as |1 - focus / depth|, so all of the far distance
+/// blurs alike); tilt-shift by how far its row is from the sharp band.
+#[derive(Clone, Copy)]
+pub(crate) struct FocusK { pub tilt: bool, pub dist: f32, pub max_r: f32, pub band: f32, pub half: f32 }
+impl FocusK {
+    pub(crate) fn of(scene: &Scene, h: usize, on: bool) -> Option<FocusK> {
+        let f = &scene.post.focus;
+        let max_r = (f.blur.clamp(0.0, 0.03) * h as f32).min(20.0);
+        (on && f.enabled && max_r >= 0.5).then(|| FocusK {
+            tilt: f.mode == crate::scene::FocusMode::TiltShift, dist: f.distance.max(0.1), max_r,
+            band: f.band.clamp(0.0, 1.0), half: 0.5 * f.band_width.clamp(0.0, 1.0),
+        })
+    }
+    #[inline]
+    pub(crate) fn coc(&self, depth: f32, sky: bool, y: usize, h: usize) -> f32 {
+        let c = if self.tilt {
+            let v = ((y as f32 + 0.5) / h as f32 - self.band).abs();
+            smoothstep(self.half, self.half + 0.3, v)
+        } else {
+            let z = if sky { 1.0e5 } else { depth.max(0.05) };
+            (((1.0 - self.dist / z).abs() - 0.04) / 0.96).clamp(0.0, 1.0)
+        };
+        self.max_r * c
+    }
+}
+
+/// Taps of the blur: five rings filling the unit disc, 6, 12 .. 30 taps round, every other
+/// ring turned by half a step (x, y, distance from the middle).
+pub(super) const FOCUS_TAPS: [[f32; 3]; 90] = [
+    [0.17320507764816284, 0.10000000149011612, 0.20000000298023224],
+    [1.2246467698671066e-17, 0.20000000298023224, 0.20000000298023224],
+    [-0.17320507764816284, 0.10000000149011612, 0.20000000298023224],
+    [-0.17320507764816284, -0.10000000149011612, 0.20000000298023224],
+    [-3.6739405577555036e-17, -0.20000000298023224, 0.20000000298023224],
+    [0.17320507764816284, -0.10000000149011612, 0.20000000298023224],
+    [0.4000000059604645, 0.0, 0.4000000059604645],
+    [0.3464101552963257, 0.20000000298023224, 0.4000000059604645],
+    [0.20000000298023224, 0.3464101552963257, 0.4000000059604645],
+    [2.4492935397342132e-17, 0.4000000059604645, 0.4000000059604645],
+    [-0.20000000298023224, 0.3464101552963257, 0.4000000059604645],
+    [-0.3464101552963257, 0.20000000298023224, 0.4000000059604645],
+    [-0.4000000059604645, 4.8985870794684264e-17, 0.4000000059604645],
+    [-0.3464101552963257, -0.20000000298023224, 0.4000000059604645],
+    [-0.20000000298023224, -0.3464101552963257, 0.4000000059604645],
+    [-7.347881115511007e-17, -0.4000000059604645, 0.4000000059604645],
+    [0.20000000298023224, -0.3464101552963257, 0.4000000059604645],
+    [0.3464101552963257, -0.20000000298023224, 0.4000000059604645],
+    [0.5908846259117126, 0.10418890416622162, 0.6000000238418579],
+    [0.5196152329444885, 0.30000001192092896, 0.6000000238418579],
+    [0.38567256927490234, 0.4596266746520996, 0.6000000238418579],
+    [0.2052120864391327, 0.5638155937194824, 0.6000000238418579],
+    [3.6739405577555036e-17, 0.6000000238418579, 0.6000000238418579],
+    [-0.2052120864391327, 0.5638155937194824, 0.6000000238418579],
+    [-0.38567256927490234, 0.4596266746520996, 0.6000000238418579],
+    [-0.5196152329444885, 0.30000001192092896, 0.6000000238418579],
+    [-0.5908846259117126, 0.10418890416622162, 0.6000000238418579],
+    [-0.5908846259117126, -0.10418890416622162, 0.6000000238418579],
+    [-0.5196152329444885, -0.30000001192092896, 0.6000000238418579],
+    [-0.38567256927490234, -0.4596266746520996, 0.6000000238418579],
+    [-0.2052120864391327, -0.5638155937194824, 0.6000000238418579],
+    [-1.1021821011522021e-16, -0.6000000238418579, 0.6000000238418579],
+    [0.2052120864391327, -0.5638155937194824, 0.6000000238418579],
+    [0.38567256927490234, -0.4596266746520996, 0.6000000238418579],
+    [0.5196152329444885, -0.30000001192092896, 0.6000000238418579],
+    [0.5908846259117126, -0.10418890416622162, 0.6000000238418579],
+    [0.800000011920929, 0.0, 0.800000011920929],
+    [0.7727406620979309, 0.2070552408695221, 0.800000011920929],
+    [0.6928203105926514, 0.4000000059604645, 0.800000011920929],
+    [0.5656854510307312, 0.5656854510307312, 0.800000011920929],
+    [0.4000000059604645, 0.6928203105926514, 0.800000011920929],
+    [0.2070552408695221, 0.7727406620979309, 0.800000011920929],
+    [4.8985870794684264e-17, 0.800000011920929, 0.800000011920929],
+    [-0.2070552408695221, 0.7727406620979309, 0.800000011920929],
+    [-0.4000000059604645, 0.6928203105926514, 0.800000011920929],
+    [-0.5656854510307312, 0.5656854510307312, 0.800000011920929],
+    [-0.6928203105926514, 0.4000000059604645, 0.800000011920929],
+    [-0.7727406620979309, 0.2070552408695221, 0.800000011920929],
+    [-0.800000011920929, 9.797174158936853e-17, 0.800000011920929],
+    [-0.7727406620979309, -0.2070552408695221, 0.800000011920929],
+    [-0.6928203105926514, -0.4000000059604645, 0.800000011920929],
+    [-0.5656854510307312, -0.5656854510307312, 0.800000011920929],
+    [-0.4000000059604645, -0.6928203105926514, 0.800000011920929],
+    [-0.2070552408695221, -0.7727406620979309, 0.800000011920929],
+    [-1.4695762231022014e-16, -0.800000011920929, 0.800000011920929],
+    [0.2070552408695221, -0.7727406620979309, 0.800000011920929],
+    [0.4000000059604645, -0.6928203105926514, 0.800000011920929],
+    [0.5656854510307312, -0.5656854510307312, 0.800000011920929],
+    [0.6928203105926514, -0.4000000059604645, 0.800000011920929],
+    [0.7727406620979309, -0.2070552408695221, 0.800000011920929],
+    [0.9945219159126282, 0.10452846437692642, 1.0],
+    [0.9510565400123596, 0.30901700258255005, 1.0],
+    [0.8660253882408142, 0.5, 1.0],
+    [0.7431448101997375, 0.6691306233406067, 1.0],
+    [0.5877852439880371, 0.80901700258255, 1.0],
+    [0.4067366421222687, 0.9135454297065735, 1.0],
+    [0.2079116851091385, 0.9781476259231567, 1.0],
+    [2.832769343193999e-16, 1.0, 1.0],
+    [-0.2079116851091385, 0.9781476259231567, 1.0],
+    [-0.4067366421222687, 0.9135454297065735, 1.0],
+    [-0.5877852439880371, 0.80901700258255, 1.0],
+    [-0.7431448101997375, 0.6691306233406067, 1.0],
+    [-0.8660253882408142, 0.5, 1.0],
+    [-0.9510565400123596, 0.30901700258255005, 1.0],
+    [-0.9945219159126282, 0.10452846437692642, 1.0],
+    [-0.9945219159126282, -0.10452846437692642, 1.0],
+    [-0.9510565400123596, -0.30901700258255005, 1.0],
+    [-0.8660253882408142, -0.5, 1.0],
+    [-0.7431448101997375, -0.6691306233406067, 1.0],
+    [-0.5877852439880371, -0.80901700258255, 1.0],
+    [-0.4067366421222687, -0.9135454297065735, 1.0],
+    [-0.2079116851091385, -0.9781476259231567, 1.0],
+    [-1.8369701465288538e-16, -1.0, 1.0],
+    [0.2079116851091385, -0.9781476259231567, 1.0],
+    [0.4067366421222687, -0.9135454297065735, 1.0],
+    [0.5877852439880371, -0.80901700258255, 1.0],
+    [0.7431448101997375, -0.6691306233406067, 1.0],
+    [0.8660253882408142, -0.5, 1.0],
+    [0.9510565400123596, -0.30901700258255005, 1.0],
+    [0.9945219159126282, -0.10452846437692642, 1.0],
+];
+
+/// Blur by depth (or row): each pixel gathers the taps round it whose own blur reaches it, so
+/// what is sharp keeps its edges and nothing behind a thing bleeds over it unless that thing is
+/// blurred too.
+pub(super) fn focus(k: &FocusK, gbuf: &[GPixel], hdr: &mut Vec<[f32; 3]>, w: usize, h: usize) {
+    let src = hdr.clone();
+    let coc_at = |j: usize| { let g = &gbuf[j]; k.coc(g.depth, g.id == id::NONE, j / w, h) };
+    hdr.par_chunks_mut(w).enumerate().for_each(|(y, row)| {
+        for (x, px) in row.iter_mut().enumerate() {
+            let i = y * w + x;
+            let cc = coc_at(i);
+            if cc < 0.5 { continue; }
+            let zi = if gbuf[i].id == id::NONE { 1.0e5 } else { gbuf[i].depth };
+            let mut sum = src[i];
+            let mut wsum = 1.0f32;
+            for t in FOCUS_TAPS {
+                let (fx, fy) = (x as f32 + t[0] * cc, y as f32 + t[1] * cc);
+                // What stands there (the nearest pixel) decides the weight; the colour is
+                // sampled smoothly between pixels so the rings leave no gaps.
+                let tx = (fx + 0.5).floor().clamp(0.0, w as f32 - 1.0) as usize;
+                let ty = (fy + 0.5).floor().clamp(0.0, h as f32 - 1.0) as usize;
+                let j = ty * w + tx;
+                let cj = coc_at(j);
+                let zj = if gbuf[j].id == id::NONE { 1.0e5 } else { gbuf[j].depth };
+                let cov = if zj > zi { cj.min(cc) } else { cj };
+                let wt = (cov - t[2] * cc + 1.0).clamp(0.0, 1.0);
+                if wt <= 0.0 { continue; }
+                let c = bilinear(&src, w, h, fx, fy);
+                for k in 0..3 { sum[k] += c[k] * wt; }
+                wsum += wt;
+            }
+            *px = [sum[0] / wsum, sum[1] / wsum, sum[2] / wsum];
         }
     });
 }

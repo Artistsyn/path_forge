@@ -58,11 +58,13 @@ pf presets
 pf render --preset "Forest Path" -o forest.png
 ```
 
-There are 35 presets: Stone Dungeon, Stone Crypt, Mossy Sewer, Forest Path, Desert Canyon, Night
+There are 45 presets: Stone Dungeon, Stone Crypt, Mossy Sewer, Forest Path, Desert Canyon, Night
 Road, Magic Cavern, Ice Dungeon, Ruins Path, Dark Street, Mountain Pass, Volcanic Rift, Haunted
-Forest, Ruined Castle, Fiery Dungeon, Tower Stair, Bog Boardwalk, Desert Ruins, Ice Cave, Star Bridge,
-Hyperspace Run, Wormhole, Starship Flight, Event Horizon, Black Hole Arena, River Run, Canal Lanterns,
-Jungle River, Lagoon Swim, Sunset Pier, Frozen Channel, Misty River, Dawn Road, Winding Trail and Hyperspace Jump.
+Forest, Ruined Castle, Fiery Dungeon, Tower Stair, Bog Boardwalk, Desert Ruins, Ice Cave, Day and
+Night, Village Evening, Lily Harbour, Waterfall Glen, Miniature Village, Village Side Scroll, Village Corner, Cabin Woods, Star Bridge, Nebula Crossing, Asteroid Belt,
+Hyperspace Run, Wormhole, Starship Flight, Event Horizon, Black Hole Arena, River Run, Canal
+Lanterns, Jungle River, Lagoon Swim, Sunset Pier, Frozen Channel, Misty River, Dawn Road, Winding
+Trail and Hyperspace Jump.
 Every one loops without a seam (`pf seam` checks them all).
 
 ## 2. Scenes
@@ -74,7 +76,7 @@ times in seconds.
 | Part | What it controls |
 |---|---|
 | `canvas` | Output size in pixels (default 480 × 854, portrait). |
-| `camera` | Eye height, horizon position, zoom, lens curve. |
+| `camera` | Eye height, horizon position, zoom, lens curve, the angle it looks from (`yaw`, `side`; side-scrollers): see [Camera angle and side-scrollers](#camera-angle-and-side-scrollers), and `moves`: see [Camera moves](#camera-moves). |
 | `path` | The road: width, flare, bend (curving left or right), hill (rising or dipping), ragged edges, material and pattern (cobblestone, brick, stone block, sand, dirt, grass, planks, water, ice, and the futuristic panels, grid, hex and circuit, whose lit parts glow with `material.glow`), stairs, bridges, side paths, roads that divide in two or three, side passages that branch off as scenery, and `edge_lights` (glowing lines along both edges, solid or dashed, the dashes running ahead with `flow`). `surface: false` draws no ground at all: the camera flies the route through open space (Starship Flight, Hyperspace Jump), with floating props, companions and the sky all round. |
 | `verge` | The ground beside an open path: its material and grass tufts. Off, the path edge drops into void (walls usually cover it). |
 | `walls` | Walls either side (a corridor, a canyon, a street) and their material. |
@@ -89,7 +91,7 @@ times in seconds.
 | `particles` | Dust, embers, fireflies, rain, snow, leaves, ash, spores, sand, petals. They drift with the wind. |
 | `weather` | Rain, snow, sleet and hail with what they do to the ground, drips, wind, sandstorms, mist, light shafts, heat shimmer, drops or frost on the lens, lightning and fog banks. See [Weather and the air](#weather-and-the-air). |
 | `prop_defs` | Props described by data, named for the scene's prop layers to use. |
-| `post` | Exposure, contrast, saturation, bloom (a tight glow round every flame and the sun, falling off into a wide veil), `flare` (what bright light does in the lens: a `style` of streaks, ghosts or haloes, with `strength`), vignette, grain, tint. |
+| `post` | Exposure, contrast, saturation, bloom (a tight glow round every flame and the sun, falling off into a wide veil), `flare` (what bright light does in the lens: a `style` of streaks, ghosts or haloes, with `strength`), vignette, grain, tint, and `focus`: depth of field or tilt-shift (see [Camera moves](#camera-moves)). |
 | `style` | How the picture is drawn: pixel size, palette, dither, outline, paint, grade (§4). |
 | `motion` | Loop length (metres), walking speed (m/s) and fps for exports. |
 
@@ -119,6 +121,12 @@ heaps over here, a mackerel sky over there. `sky.cloud_mix` makes such layers fo
 each with its own cover, size, raggedness and shade round `cover`, as different from each other as
 `variety` says, in `patches`. The same `seed` always gives the same sky; the dice next to it in the
 studio picks another. They are drawn over `clouds` and `cloud_layers`, highest first.
+
+**Snow cover.** `weather.snow_cover` lays snow that has already fallen, with none falling: on
+trees, rocks and the rest of the scenery (`props`: a cap along their tops at 0.2, branches laden
+with it at 1, caught on the tops of their clumps in patches) and on the ground, walls and railings
+(`ground`). Any scene becomes a winter one; falling snow (`weather.precipitation`) lays its own, and
+whichever is deeper shows.
 
 **Sunsets.** `sky.sunset` turns the sky into a sunset (or sunrise) of one of four `style`s: `Golden`,
 `Fiery`, `Pastel`, or `Dusk` (just after the sun has gone: switch the sun off and keep its place).
@@ -152,7 +160,9 @@ out. `floating` sets what drifts down on the current: `Foam` (patches or ice flo
 `LilyPads` (a few in flower), at `float_density` per cell, `float_size` metres across, in
 `float_color`. `floating: Ice` drifts floes down it, and `frozen` (0..1) freezes it over from the
 banks inwards: a shelf of cracked, snow-dusted ice with open water left in the middle, until at 1
-it is closed from bank to bank (Frozen Channel). Rain rings the water instead of wetting it, and snow does not lie on it. For a
+it is closed from bank to bank (Frozen Channel). `cascades` (0..1) adds steps of white water across
+the channel every `cascade_spacing` metres, where it tumbles over rock and carries foam away
+downstream (River Run). Rain rings the water instead of wetting it, and snow does not lie on it. For a
 swimmer, put `camera.eye_height` near 0.3 and the horizon low (Lagoon Swim); for a boat, 1-1.3 m.
 Light shafts fill the whole air under an open sky, so leave them off unless trees or walls break
 the sun up.
@@ -187,6 +197,85 @@ at each end of every railing: stone for parapets, balustrades and iron, wood for
 Every railing is built as solid pieces, with faces on all the sides the camera can see. In the
 studio, switching between Iron and Rope also switches `rail_color`, unless you have chosen a colour yourself.
 
+### Camera angle and side-scrollers
+
+`camera.yaw` turns the camera for the whole loop, in degrees from straight down the path (-90 ..
+90, positive to the right), and `camera.side` sets where it stands, metres sideways from the
+middle of the path. Everything is drawn from that angle (the ground, walls, bridges, fences,
+props, lights, weather), the loop still closes, and the GPU draws the same frame as the CPU.
+
+- **An angle on the path**: yaw 20-35 with the camera at the path's edge (`side` -1 for a turn
+  to the right) looks along the path diagonally (preset Village Corner).
+- **A side-scroller**: yaw -90 with the camera 4-10 m out to the right (`side` 5) looks straight
+  across the path; the walk carries the world past from right to left, with true parallax (near
+  things pass faster than far ones), seamlessly. Yaw 90 with `side` -5 looks the other way. A
+  landscape canvas (854 x 480) suits it (preset Village Side Scroll). Seen from the side the
+  path's bends are straightened, set pieces that span the path are left out, and the wall,
+  ceiling, fences, lights and props on the camera's side are cut away beyond `camera.cutaway`
+  metres past the path's edge, so the walking lane stays in view. Raise `eye_height` and lower
+  `horizon` to see more of the lane.
+
+**Props from an angle.** A prop's `facing` says which way its picture faces. `Camera` (the
+default, and every built-in kind) keeps it turned to the camera: right for trees, rocks and lamps,
+which look alike from every side. `Path` stands it along the path like a building's front, so from
+an angle it is seen obliquely and from the side squarely; `PathWhenTurned` faces the camera while it
+looks down the path and the path once `yaw` turns it, so a scene looks as it always has head-on and
+its buildings line the street from any angle. With `depth` (metres behind the front) the picture's
+ends are drawn as plain side walls that deep, so a building seen from an angle reads as a solid
+block, not a card. Set both on a prop definition, or per layer (`props.*.facing`, `props.*.depth`)
+over it.
+
+**Faces.** For the rest of a building as it really looks, a definition lists its `faces`: flat
+pictures standing in the prop's own space (metres at scale 1, `x` across its front, `y` up, `z`
+back from the path), each placed by its picture's top left, top right and bottom left `corners`
+as seen from the side it faces, and painted from `shape` parts (metres from its bottom left
+corner) or an `image`. `mirror: true` draws it again on the other side (`x` to `-x`). A cottage's
+faces are its long side walls with their windows, the two slopes of its roof running back from
+the gable and its chimney's sides; they replace the plain end walls. The settlement kit's
+cottages, log cabins, market stall, cart and woodpile have them and face the path (`Path`), so even looking
+straight down a village street you see their side walls and roofs in perspective, as in a real
+street. A layer with `facing: PathWhenTurned` brings back the flat front that faces the camera
+until the camera turns.
+
+**Tubes.** Round parts are better as `tubes`: real cylinders, each `from` one point `to` another
+in the prop's space with a `radius`, a bark `color` and an `end` colour for its sawn ends (with
+growth rings), `mirror` for both sides. They are drawn true from any angle, their outlines soft,
+shaded round across their height by the same curve as the kit's painted logs, so a tail continues
+its wall log seamlessly. The log cabins' corners are tubes: each wall's logs run on past the corner as tails,
+the two walls' a half log apart in height, so the tails stack out both ways by turns.
+
+**Variety.** A definition with `pick` (a list of other definitions' names, in the same kit or the
+scene's `prop_defs`) is drawn as one of them per prop, the same one each time round the loop, so
+a street is not one house over and over. `@settlement#cottage` picks among five builds: timber
+framed (`cottage_timber`), stone (`cottage_stone`), whitewashed under thatch (`cottage_thatch`),
+two storeys of brick (`cottage_brick`) and weatherboarded (`cottage_board`); `@settlement#log_cabin`
+among a small cabin with a stone chimney up its side (`log_cabin_small`), one with a front porch
+(`log_cabin_porch`) and one with a turf roof (`log_cabin_sod`). Name one of them to use just that
+build. The preset Cabin Woods walks a woodland trail past log cabins at dusk. A smoke plume's
+`back` sets how far behind the front it rises (a chimney on the ridge). To look down
+on a scene, raise `eye_height` and move `horizon` up: verticals stay vertical.
+
+### Camera moves
+
+`camera.moves` moves the camera on top of the walk. Everything here repeats a whole number of
+times a loop, so loops still close, except the flight in, which plays once.
+
+| Field | What it does |
+|---|---|
+| `bob`, `stride`, `sway` | The head bobbing at each step (metres; 0.03-0.05 a walk, 0.1 a run), the length of a step, and a sway from side to side with the steps (degrees). It follows the distance walked, so it stops when the walk does. |
+| `pan`, `pans` | Looking slowly to the side and back: degrees (negative looks left first), and how many times a loop. The sky turns with the rest. |
+| `tilt`, `tilts` | Looking slowly up and down. |
+| `dolly`, `dolly_focus`, `dollies` | A dolly zoom: the camera draws back `dolly` metres while zooming in, so what stands `dolly_focus` metres ahead keeps its size while the background swells and shrinks round it (negative pushes in and zooms out). |
+| `fly_in`, `fly_height` | The flight in: over `fly_in` seconds the camera comes down from `fly_height` metres, looking down, to the walker's eyes. It plays at the start of the live runtime (`restart_intro` plays it again) and with `pf render --intro` / `pf sheet --intro`; loops and exports leave it out. Best under an open sky. |
+
+`post.focus` is depth of field: with `mode: Depth` what stands `distance` metres ahead is sharp
+and nearer and further things blur (the far distance and sky the most), up to `blur` (the widest
+blur, as a share of the frame height, 0.005-0.015). Lights and stars become soft discs. With
+`mode: TiltShift` a band across the frame (`band` its middle, from the top, `band_width` its
+width) stays sharp and the rest blurs, which with a raised camera and some extra saturation
+makes the scene look like a model (preset Miniature Village). The vignette and grain are in
+`post` too. Waterfall Glen bobs gently, looks round once a loop and flies in at the start.
+
 ### Lights
 
 `fixtures.*.kind` sets what the light is; the rest sets where it stands and how it varies.
@@ -195,11 +284,17 @@ studio, switching between Iron and Rope also switches `rail_color`, unless you h
 |---|---|
 | `post` | What holds it up where there is no wall: `Auto` (a street lamp on a pole, a paper lantern from a crook, a wall light with no wall on a pole, anything else raised on a pedestal), `Off`, `Pole`, `Crook` (a tall post with an arm the light hangs from) or `Pedestal`. |
 | `place` | `Anywhere`, `Bridges` (only on the path's bridges), `OffBridges`, or `SetPieces`: one at each repeat of `set_pieces[set_piece]`, at that set piece's spacing, with `offset` measured from it (torches on every arch). |
+| `bridge_posts`, `posts_between` | On the path's bridges, stand on the railing's posts instead of at `spacing`: one on each end post of every bridge, each side, and `posts_between` more evenly between them (1 halfway, 2 at the thirds, 3 at the quarters...); the railing gains those posts. The light stands above the post's top (higher if `height` says so). |
 | `tint` | A colour multiplied over the light and its flame. |
 | `jitter`, `jitter_along`, `height_var` | Random placement: sideways (metres), along the path (as a share of the spacing) and in height (metres). |
 | `size_var`, `intensity_var`, `color_var` | Each one a little larger or smaller, brighter or dimmer, warmer or cooler. |
 | `density`, `cluster` | The share of places that hold a light, and how many stand at each (1..8). A cluster with jitter is a swarm: fireflies at every height. |
 | `stagger` | With lights on both sides, how far the right-hand row is out of step (0.5 = left and right take turns). |
+| `string_lights` | Festoon lights strung between the lights' posts (or brackets), sagging in a curve: `bulbs` per span, `sag` (metres at the middle), `color` or a repeating list of `colors`, `brightness`, `size`, and `twinkle`. The wires are drawn too (Village Evening). |
+
+`kind: Neon` is a neon sign for city streets: bent tubes on a dark board that glow in the
+fixture's `tint` and buzz with `flicker`. Flames sway, lick at their tips and throw embers; a
+brazier is a forged basket glowing from the coals.
 
 A beacon pulses; a chandelier carries five flames; glass, paper and glowing caps are lit from
 inside. A post is not lit by its own lamp, so it reads dark against the glow.
@@ -240,19 +335,27 @@ falling. Each is off until `enabled`. Field by field, see
 | Drips | `weather.drips` | Beads form on the ceiling (or the tops of the walls), fall and splash, from the same spots every time. For caves, sewers and crypts. |
 | Wind | `weather.wind` | `speed` in m/s (negative blows left) with `gusts`. Rain and snow slant and drift, particles are carried, and trees, reeds, palms, grass and banners bend and sway (`sway`); leaves stir within a tree's crown and a willow's strands swing and trail downwind while trunks stand (`flutter`); rocks, pillars and crates stay put. |
 | Sandstorm | `weather.sandstorm` | Sand streaming past, a sand-coloured haze that hides the distance, the sun dimmed to a disc. Follows the wind's direction. |
-| Mist | `weather.mist` | Mist lying below `height` metres, drifting in banks (`patchiness`), with wisps rising. Each pixel takes as much mist as its line of sight passes through, so the ground near the camera stays clear and the distance goes white. Keep `density` near 0.1-0.2. `soft` 1 makes it thickest at the ground and thin smoothly to nothing at `height` (morning ground fog, dew lifting off a field), with no flat top. `over: Path` keeps it over the path only (the water of a river, a road), fading out `spread` metres past the edges, and the wisps then lift off the path like steam. `glow` brightens it looking towards the sun, as mist does lit from behind (Misty River, Dawn Road). |
+| Mist | `weather.mist` | Mist lying below `height` metres, drifting in banks (`patchiness`), with wisps rising. Each pixel takes as much mist as its line of sight passes through, so the ground near the camera stays clear and the distance goes white. Keep `density` near 0.1-0.2. `soft` 1 makes it thickest at the ground and thin smoothly to nothing at `height` (morning ground fog, dew lifting off a field), with no flat top. `over: Path` keeps it over the path only (the water of a river, a road), fading out `spread` metres past the edges, and the wisps then lift off the path like steam. `glow` brightens it looking towards the sun, as mist does lit from behind (Misty River, Dawn Road). `from` leaves that many metres of clear air before it begins: fog lying in the low ground ahead, a valley filled with it. |
 | Light shafts | `weather.light_shafts` | `sun`: rays streaming past trees, walls and arches near the sun. `lamps`: glowing haloes in the air round every light. Both are stronger in fog, mist and haze. |
 | Cloud shadows | `sky.clouds.shadows` | Shadows drifting over the ground and walls, with the wind if there is one. They need a sun that gives light, and work with the clouds themselves switched off. |
 | Heat shimmer | `weather.heat_shimmer` | The distance wavers just above the horizon. Deserts, lava fields. |
 | Aurora | `sky.aurora` | A band of curtains across a night sky: a thin bright folding edge (`low`), rays rising from it, a violet veil above (`high`) and pink knots (`accent`), each part fading in and out on its own. `coverage`, `rays`, `waves`, `arc`, `tall`, `edge` shape it; `ground_glow` tints the ground. |
-| Deep space | `sky.space` | A sky with no air: a dense starfield (`stars`), glowing nebulae (`nebula`, two `nebula_colors`), a galaxy band with dust lanes and a bright core (`galaxy_*`), and up to three `planets`. With `below` on, space also fills everything below the horizon where nothing is drawn, such as a bridge's bottomless drop (`path.bridge.bottom: Void`), so a walkway floats in space. The sun loses its glow in the air and keeps only a tight glare. |
-| Planets | `sky.space.planets[]` | `kind` Rocky, Gas (bands and a storm), Earth (oceans, land, ice caps, cloud, city lights on the night side), Ice or Lava (glowing cracks); `pos`, `radius`, two colours, `atmosphere` glow round the rim, `light_angle` and `night` for where the sunlight falls, `tilt`, `spin` in whole turns per loop, and `rings` (near half in front, far half behind, the planet's shadow across them). |
+| Seasons | `season` | The time of year over the scene's own colours (taken as summer's): `season` 0 spring (fresh light green, blossom drifting down), 1 summer, 2 autumn (trees turning gold, orange and red, grass golden, leaves falling), 3 winter (broadleaf trees bare, grass straw, snow lying with `snow`, cooler light); fractions turn one into the next. `years_per_loop` runs whole years through a loop. `falling` adds the blossom and leaves. |
+| Halo | `sky.halo` | The ring round the sun or moon (`sun`, `moon`) seen through thin high cloud: sharp and reddish on its inside, fading outwards; `size` its radius, `strength`. |
+| Day and night | `sky.day_night` | The hour of the day (`hour`, 0..24) sets everything at once: the sun on its arc from `sun_path[0]` to `sun_path[1]` (as high as `sun_height`; past 1 it passes overhead, out of the frame) and its colour, the sky (dawns and dusks in `sunset_style`, with their glow, then the blue hour and night), the light and its colour, the fog and mist, the stars coming out after dusk, the moon crossing the night, and the lamps lighting at nightfall (`lamps`; fireflies only at night). The scene keeps its own hues (`keep_look`) while their brightness follows the hour, so a night scene stays moody by day and a sunny one goes dark at night (`night_light`). `days_per_loop` runs whole days through each loop, seamlessly (preset Day and Night); `real_time` follows the phone's clock (the Android wallpaper redraws as the hours pass). Games set the hour themselves (§12). `sunrise`/`sunset` move the day. No effect under space or a tunnel, or with the sky off. `pf render --hour H` draws any scene at hour H. |
+| Deep space | `sky.space` | A sky with no air. `star_style` Realistic (the default) draws stars as a sky photograph shows them: a few bright ones among a great many faint ones, coloured by temperature (most yellow-white, fewer orange or blue; `star_colors` how strongly), gathered in clouds and voids (`star_clumps`) over the faint glow of stars too far to see one by one (`star_glow`), the brightest with diffraction `star_spikes` (`spike_shape` Four, Six or Eight). `twinkle` makes them shimmer, `twinkle_speed` whole times per loop. Classic keeps the even field of small dots of earlier versions. Glowing gas (`nebula`, two `nebula_colors`, `nebula_scale`) drifts in folded wisps and bright filaments, threaded with dark dust that hides the stars behind it (`nebula_dust`); the galaxy band (`galaxy_*`) is the glow of countless stars, mottled with star clouds, warmer at its core and split by dark rifts and lanes (`galaxy_dust`). Up to six `objects` (below) and up to three `planets`. With `below` on, space also fills everything below the horizon where nothing is drawn, such as a bridge's bottomless drop (`path.bridge.bottom: Void`), so a walkway floats in space. The sun loses its glow in the air and keeps only a tight glare. |
+| Objects | `sky.space.objects[]` | Things far off in the sky, behind the planets and bent round a black hole like the stars: `kind` Emission (a stellar nursery: glowing gas, a hot heart, dark dust pillars and young stars), Reflection (blue dust lit by a few bright stars), Dark (a dust cloud blotting out the stars, its edge lit), Planetary (a dying star's glowing ring round a white dwarf), Remnant (the filaments of an exploded star's shell), Spiral and Elliptical galaxies, Cluster (a ball of stars) Comet (a glowing head, a curved dust tail and a straight blue ion tail, pointing along `angle`), Binary (two stars circling each other, gas streaming between them), Pulsar (a dead star sweeping two beams round inside its wisps), Belt (a band of asteroids right across the sky, `size` its half thickness, drifting along), Sun (a sun seen close: a spotted disc darker to its rim, its corona, flares licking off its edge) and Ship (a far ship crossing the sky along `angle`, its engine glowing and trailing, wingtip lights blinking). `pos`, `size`, `angle`, `aspect` (1 round .. 0.1 edge-on), three `colors` (each kind's meaning is in the reference), `brightness`, `spin` (whole orbits, turns, drifts or crossings per loop), `seed`. Nebula Crossing and Asteroid Belt show several. |
+| Shooting stars | `sky.meteors` | Streaks of light crossing the sky, flaring and fading as they burn up, by night or in space: `count` a loop (a shower: 10 or more), `duration`, `length`, `angle` and `spread` of their ways, `brightness`, `color`, `tint` (some burn green or orange), `seed`. Each falls at its own moment of the loop, so the loop closes; with a day and night they show only after dark. |
+| Planets | `sky.space.planets[]` | `kind` Rocky, Gas (bands and a storm), Earth (oceans, land, ice caps, cloud, city lights on the night side), Ice, Lava (glowing cracks) or Desert (dunes, canyons, dust storms, small pale caps); `orbit` makes one a moon of another (`around` which, `distance`, `tilt`, `roll`, whole `turns` a loop, `phase`): it passes in front of its planet and behind it, and casts its shadow across it as it crosses; `pos`, `radius`, two colours, `atmosphere` glow round the rim, `light_angle` and `night` for where the sunlight falls, `tilt`, `spin` in whole turns per loop, and `rings` (near half in front, far half behind, the planet's shadow across them). |
 | Black hole | `sky.space.black_hole` | A black hole that bends the light round it: the stars, nebulae and galaxy behind are lensed into arcs, and the far side of its accretion disk shows over the top and under the bottom of the dark shadow, edged by a thin photon ring. `pos`, `size` (the shadow's radius), `tilt` (0 face-on, about 85 the classic edge-on look) and `roll`; the disk's `disk_inner`/`disk_outer` (in horizon radii), three `disk_colors` (hot inner to cool outer), `brightness`, `doppler` (the side turning towards you brighter and bluer), `spin` (whole turns of its inner edge per loop; the outer part turns slower); `lensing`; `infall` streaks of gas spiralling in from beyond the disk's edge, and `nodes` shaped like ball_swing_game's hook nodes (`node_size` as a share of the frame's width, `node_colors`): each floats in slowly and level from its side at play depth, untouched until it nears the middle, then is pulled back towards the hole `distance` times further off, shrinking in perspective to a speck and crawling on screen as it recedes (which is what says the hole is far away), settling into the disk's plane, reddening and fading at the rim. Every trip rolls its own side, height, size and pace, with pauses between (`infall_speed` trips per loop, `infall_color`); `light` on the scene. Planets are not lensed, so keep them clear of it (Event Horizon, Starship Flight, Black Hole Arena). `sky.space.star_colors` 0 makes every star the faint blue-white of the game's starfield. |
 | Tunnel | `sky.tunnel` | A tube all round the path in place of the sky, filling everything not drawn (below the horizon too): `kind` Hyperspace (streaks of starlight rushing past) or Wormhole (swirling bands spiralling to a bright throat). `radius`, three `colors` (walls, streaks or bands, the far end's light), `rush` (extra loop lengths per loop), `twist` and `spin` (whole turns), `density`, `core`, `light` (tints the path). Pair it with a bridge over a void, as Hyperspace Run and Wormhole do. |
-| Rainbow | `sky.rainbow` | An arc with a fainter, reversed second bow. `size` 1 spans the frame: a real 42-degree bow is wider than a portrait view. |
+| Rainbow | `sky.rainbow` | An arc with a fainter, reversed second bow. `size` 1 spans the frame: a real 42-degree bow is wider than a portrait view. `saturation` about 0.2 makes a moonbow: the pale bow the moon casts at night. |
 | On the lens | `weather.lens` | `Drops`: rain on a lens or windscreen: fine beads that bend the view, heavy drops that gather and run down in wavering trails leaving beads behind, and a haze where the glass is wet (`size`, `trails`, `blur`). `Frost`: crystals creeping in from the edges. |
 | Lightning | `weather.lightning` | Flashes that light the scene from the sky, and bolts where the sky shows. The export metadata gives each strike's frame, for thunder. |
 | Fog banks | `weather.fog_banks` | Thick stretches of fog the camera walks into and out of. |
+| Wildlife | `wildlife` | `birds`: flocks in V formation crossing the sky, wings flapping (`flocks`, `count`, `size`, `height`, `flap`, `crossing` seconds; not at night). `bats`: flitting low over the path at dusk (`dusk_only`) or all night. `fish`: leaping from the water beside the path and splashing back with a ring (`spacing`, `lateral` range, `leaps` a loop). Deer, stags, rabbits and herons stand in the kit `@wildlife`. |
+| Waterfalls | `waterfalls[]` | Streams pouring over a rock face beside the path, the water drawn pixel by pixel: a dark glassy tongue over the lip, then a curtain of fine white threads that speed up as they fall (patterns carried down in falling time, so they stretch lower down), translucent where thin and fraying at the edges, with a splash crown, churn and a drifting plume of spray at the foot: `side`, `lateral`, `spacing`, `offset`, `height` and `width` in metres, `water` and `rock` colours, foam and `spray` at the foot and a `rainbow` in it when the sun is out (Waterfall Glen). |
+| Fences | `fences[]` | Fences along the path, built post to post as solid pieces that follow its edge and bends (not cards), so they join up from any angle: `style` Picket (pickets on two rails, painted `color`), Rails (posts and three bare wooden rails, in the bridge deck's wood) or Boards (close boards under a capping rail); `side`, `lateral` metres out from the path's edge, `height`, `post_spacing`. Runs are `length` metres long every `spacing` metres: as long as the spacing it is one fence without a break, shorter leaves gaps for gates (Village Evening puts one in front of each cottage). Painted fences of a scene share the first one's colour. |
 
 **Cost.** Falling rain and snow, splashes, mist and most effects cost little. Wet ground and puddles
 cost what any glossy floor costs: the reflections roughly double a frame's render time (Dark
@@ -344,11 +447,19 @@ with its height in metres, whether it stands on the ground or hangs from the cei
 
 Definitions live in a scene's `prop_defs` (used as `"def": "<name>"`), or in a **kit**: a folder
 holding `kit.json` beside its images, used from any scene below it as `"def": "kits/<name>#<prop>"`.
-The built-in kit `@wayside` (lantern posts, hanging lanterns, glowing mushrooms, signposts, fences,
-barrels, crates) is drawn from shapes and needs no files.
+The built-in kits are drawn from shapes and need no files:
+
+- `@wayside`: lantern posts, hanging lanterns, glowing mushrooms, signposts, fences, barrels, crates;
+- `@settlement`: a cottage with lit windows and a smoking chimney, a well, a market stall, picket
+  fences, hay bales, a cart and a woodpile (Village Evening);
+- `@waterside`: rowing boats, lily pads, mooring posts and a blinking buoy (Lily Harbour);
+- `@wildlife`: deer (standing or grazing), a stag, a rabbit and a heron.
+
+A definition's `smoke` (`at` within the image, `color`, `amount`, `rise`, `width`) gives it a
+plume rising and drifting with the wind: a chimney, a campfire.
 
 ```bash
-pf kit --kit @wayside -o wayside.png
+pf kit --kit @settlement -o settlement.png
 ```
 
 **What glows and what casts a shadow.** Props, lights and set pieces are flat images (PNG with
@@ -599,19 +710,28 @@ rt.step(dt, speed);                 // each frame
 let rgba = rt.frame(270, 480);
 rt.go()?;                           // walk on to where the journey leads (returns the plan)
 rt.choose(Branch::Right);           // at a fork, before the junction
-let s = rt.state();                 // scene, stop, progress, choose_within, speed, end
+let s = rt.state();                 // scene, stop, progress, choose_within, speed, end, day
+
+// Day and night, from the game's own clock:
+rt.set_hour(Some(19.5));            // dusk on every scene with an open sky
+rt.set_day_length(600.0);           // or let a day pass every 10 minutes of step time
+if rt.day().is_some_and(|d| d.daylight < 0.2) { /* night: spawn the bats */ }
+rt.restart_intro();                 // fly in again (camera.moves.fly_in), as at the start
 ```
 
 | Method | Purpose |
 |---|---|
 | `new`, `from_file`, `from_json`, `from_journey` | Open a scene or a journey. |
 | `render(distance, time, w, h)`, `render_into` | Draw one frame (RGBA8, rows top to bottom). |
-| `step(dt, speed)`, `frame(w, h)` | Let the runtime walk; draw where it stands. |
+| `step(dt, speed)`, `frame(w, h)` | Let the runtime walk; draw where it stands (with the camera's flight in at the start, `restart_intro` to play it again; C `pf_runtime_restart_intro`). |
 | `go()` | Walk on to the journey's next stop: a transition, or the approach to a fork. |
 | `transition_to(scene, dir, transition)`, `fork(left, right, fork)` | Start a transition or fork to any scene at run time. |
 | `choose(branch)` | Take a branch of the fork ahead. Returns false when there is none or it is too late. |
 | `finish()` | Jump to the end of what is under way. |
 | `state()` | Where the walk stands: `scene`, `distance`, `time`, `stop`, `progress` (0..1 through a transition), `choose_within` (metres left to choose), `speed`, `end`. |
+| `set_hour(Some(h))`, `set_hour(None)` | Set the hour of the day (0..24) on every scene drawn (transitions and forks too), turning `sky.day_night` on with the scene's own settings; None gives each scene its own hour back. |
+| `set_day_length(seconds)`, `hour()` | Let a day pass every `seconds` of `step` time (0 holds the hour); the hour now. |
+| `day()` | Where the day stands: `hour`, `altitude` (sun height, -1..1), `is_day`, `daylight` (0 night .. 1 day), `phase` ("night", "dawn", "day", "dusk"); None without an open sky. Also in `state().day`. |
 | `project(…)`, `project_now(x, y, d, w, h)` | A point x m right of the path, y m up and d m ahead → screen pixels. |
 | `ground_distance(…)`, `ground_distance_now(row, w, h)` | A screen row → metres ahead. |
 | `path_edges`, `view`, `camera_now` | Path edges at a distance; the camera. |
@@ -628,7 +748,8 @@ Functions: `pf_runtime_open`, `pf_runtime_from_json`, `pf_runtime_open_journey`,
 `pf_runtime_free`, `pf_runtime_canvas`, `pf_runtime_loop_length`, `pf_runtime_loop_seconds`,
 `pf_runtime_render`, `pf_runtime_project`, `pf_runtime_ground_distance`, `pf_runtime_step`,
 `pf_runtime_frame`, `pf_runtime_go`, `pf_runtime_transition_to`, `pf_runtime_fork`,
-`pf_runtime_choose`, `pf_runtime_state` (JSON), `pf_runtime_project_now`. Return codes and
+`pf_runtime_choose`, `pf_runtime_state` (JSON), `pf_runtime_project_now`, `pf_runtime_set_hour`,
+`pf_runtime_set_day_length`, `pf_runtime_day`. Return codes and
 buffer sizes are documented in the header.
 
 ## 13. Quartz games and quartz_forge
@@ -675,6 +796,13 @@ Scenes are given as `--preset NAME` or `--scene FILE`.
 | Exporting | `export` (loops, encounters, transitions, forks) |
 | Transitions, forks, journeys | `transition`, `journey` |
 | Projects and the skill | `project`, `assets`, `pack`, `preset-save`, `mask`, `skill` |
+| Sharing | `share` (a scene as a share code; `--qr out.png` writes its QR code), `unshare --code PF1... [-o scene.json]` |
+
+**Share codes.** `pf share` turns a scene into one line of text starting `PF1.`, short enough
+for a message or a QR code: each part of the scene is written as what it changes from the
+nearest preset's, compressed (a preset with a few edits is a few dozen characters; a remix, a few
+hundred). `pf unshare` (or the phone apps' Open a code) gives the scene back exactly. Codes name
+the presets they build on, so they open in later versions of PathForge too.
 
 `pf` with no arguments lists the commands; the top of `src/bin/pf.rs` gives every command with all
 its options.

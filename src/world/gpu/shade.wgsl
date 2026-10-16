@@ -28,7 +28,7 @@ struct Air {
     travel: f32, seed: u32, mist_r: f32, mist_g: f32,
     mist_b: f32, soft: f32, over: u32, spread: f32,
     glow_on: u32, sun_x: f32, sun_y: f32, fhy: f32,
-    sun_r: f32, sun_g: f32, sun_b: f32, pad0: u32,
+    sun_r: f32, sun_g: f32, sun_b: f32, mist_from: f32,
 }
 @group(0) @binding(9) var<uniform> A: Air;
 
@@ -623,6 +623,7 @@ fn light_at(x: f32, y: f32, d: f32, n: vec3<f32>, skip: u32, sun_mask: f32, px: 
     }
     if W.n_lights > 0u {
         let p = to_cam(x, y, d);
+        let nc = rot_dir(n);
         let r = tile_range(px, py);
         for (var k = r.x; k < r.y; k++) {
             let li = light_index(k);
@@ -633,7 +634,7 @@ fn light_at(x: f32, y: f32, d: f32, n: vec3<f32>, skip: u32, sun_mask: f32, px: 
             if d2 >= r2 { continue; }
             let wgt = 1.0 - d2 / r2;
             let att = wgt * wgt / (1.0 + 0.3 * d2);
-            let ndl = max(dot(n, v) / max(sqrt(d2), 1e-4), 0.0) * 0.85 + 0.15;
+            let ndl = max(dot(nc, v) / max(sqrt(d2), 1e-4), 0.0) * 0.85 + 0.15;
             l += light_col(li) * (att * ndl);
         }
     }
@@ -715,7 +716,9 @@ fn shade_px(g: GPix, i: u32, x: u32, y: u32, own: bool) -> Shaded {
     if tex == 7u {
         let lw = vec3<f32>(0.3, 0.59, 0.11);
         let grain = clamp(dot(albedo, lw) / max(dot(vec3<f32>(W.deck_base_r, W.deck_base_g, W.deck_base_b), lw), 1e-3), 0.6, 1.3);
-        albedo = vec3<f32>(W.rail_r, W.rail_g, W.rail_b) * grain;
+        var paint = vec3<f32>(W.rail_r, W.rail_g, W.rail_b);
+        if (id - ID_RAIL) / 4u == RAIL_FENCE { paint = vec3<f32>(W.fence_r, W.fence_g, W.fence_b); }
+        albedo = paint * grain;
     }
     // A waterway: the foam and what floats on the water, and the bank or walls wet beside it.
     var gloss_k = 1.0; var wet_g = 0.0;
@@ -824,7 +827,7 @@ fn shade_px(g: GPix, i: u32, x: u32, y: u32, own: bool) -> Shaded {
         let eye = max(-p.y, 0.05);
         let footprint = max(p.z * p.z / (W.focal_px * eye), p.z / W.focal_px);
         let rs = ripple_slope(g.x, W.scroll + g.d, s.ripples, footprint) + s.rings;
-        let n = normalize(vec3<f32>(-rs.x, 1.0, -rs.y));
+        let n = rot_dir(normalize(vec3<f32>(-rs.x, 1.0, -rs.y)));
         let ndv = max(dot(n, vv), 1e-3);
         let r = gloss * fres(ndv);
         let rough = min(0.04 + 0.45 * (1.0 - gloss) + 0.12 * s.ripples, 0.7);
@@ -861,7 +864,7 @@ fn shade_px(g: GPix, i: u32, x: u32, y: u32, own: bool) -> Shaded {
             spec += light_col(li) * (norm * pow(max(dot(n, hv), 0.0), e) * fres(max(dot(hv, vv), 0.0)) * ndl * gloss * (wgt * wgt / (1.0 + 0.3 * d2)));
         }
         for (var k = 0u; k < W.n_sky; k++) {
-            let l = sky_dir(k);
+            let l = rot_dir(sky_dir(k));
             let ndl = dot(n, l);
             if ndl <= 0.0 { continue; }
             let hv = (l + vv) / max(length(l + vv), 1e-5);
@@ -969,11 +972,11 @@ fn sky_air() -> vec3<f32> {
 
 // weather::air_light (light_among with no normal), every lamp in index order.
 fn air_light(x: f32, y: f32, d: f32) -> vec3<f32> {
-    if d >= 18.0 { return sky_air(); }
+    if to_cam(x, 0.0, d).z >= 18.0 { return sky_air(); }
     var l = vec3<f32>(W.amb_r, W.amb_g, W.amb_b);
     for (var k = 0u; k < W.n_sky; k++) {
         let dir = sky_dir(k);
-        let ndl = clamp(0.45 - 0.35 * dir.z, 0.15, 0.8);
+        let ndl = clamp(0.45 - 0.35 * rot_dir(dir).z, 0.15, 0.8);
         let vis = sky_visibility(x, y, d, dir, 0u);
         if vis > 0.0 { l += sky_col(k) * (ndl * vis); }
     }
@@ -1033,7 +1036,9 @@ fn mist_main(@builtin(global_invocation_id) gid: vec3<u32>) {
         let e = water_edge(gd) + 0.5 * max(A.spread, 0.0);
         if abs(lx) > e { f = div(e, abs(lx)); }
     }
-    let len = z * stretch * f * mist_mean(top, eye, eye + (y_end - eye) * f);
+    var near = 1.0;
+    if A.mist_from > 0.0 { near = clamp(div(z - A.mist_from, max(z, 1e-3)), 0.0, 1.0); }
+    let len = z * stretch * f * near * mist_mean(top, eye, eye + (y_end - eye) * f);
     if len <= 1e-3 { return; }
     let tau = max(A.density, 0.0) * mist_patch(gx * f, gd * f) * len;
     let a = 1.0 - exp(-tau);

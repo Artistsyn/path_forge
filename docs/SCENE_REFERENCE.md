@@ -25,6 +25,10 @@ See [MANUAL.md](MANUAL.md) for what each part does and how to use it.
 | `companions` | list of [Companion](#companion) | `[]` | Things travelling along with the camera: a ship flying beside the path, a drone, a bird. |
 | `particles` | list of [Particles](#particles) | (see the type) |  |
 | `weather` | [Weather](#weather) | (see the type) | Lightning and fog banks. |
+| `season` | [Season](#season) | (see the type) | The time of year: foliage, grass and the ground through spring, summer, autumn and winter. |
+| `wildlife` | [Wildlife](#wildlife) | (see the type) | Things that move about: birds crossing the sky, bats at dusk, fish leaping from the water. |
+| `waterfalls` | list of [Waterfall](#waterfall) | `[]` | Waterfalls beside the path: water pouring down a rock face into foam and spray. |
+| `fences` | list of [Fence](#fence) | `[]` | Fences along the path: pickets, rails or boards, joined post to post and following its bends. |
 | `prop_defs` | map of name → [PropDef](#propdef) |  | Props described by data, by name: a prop layer uses one with `def: "<name>"`. Kits (folders with a kit.json) hold more, used as `def: "<folder>#<name>"`. |
 | `post` | [Post](#post) | (see the type) |  |
 | `style` | [Style](#style) | (see the type) |  |
@@ -112,6 +116,35 @@ Where a prop is fixed.
 | `ground_glow` | number | `0.5` | How much the aurora lights the ground green (a faint, even glow). |
 | `seed` | integer | `0` |  |
 
+### Bats
+
+Bats flitting about over the path, darting and fluttering.
+
+| Field | Type | Default | Meaning |
+|---|---|---|---|
+| `enabled` | boolean | `false` |  |
+| `count` | integer | `8` |  |
+| `size` | number | `0.3` | Wingspan, metres. |
+| `color` | integer × 3 | `[24,20,22]` |  |
+| `dusk_only` | boolean | `true` | Only after dusk when the scene has a day and night. |
+| `seed` | integer | `0` |  |
+
+### Birds
+
+Flocks of birds crossing the sky in loose vees, wings beating.
+
+| Field | Type | Default | Meaning |
+|---|---|---|---|
+| `enabled` | boolean | `false` |  |
+| `flocks` | integer | `2` | Flocks crossing at once. |
+| `count` | integer | `7` | Birds in a flock. |
+| `size` | number | `0.025` | Wingspan as a share of the sky's height. |
+| `height` | number | `0.35` | How high they fly: 0 the top of the sky .. 1 the horizon. |
+| `flap` | number | `3.0` | Wingbeats a second. |
+| `crossing` | number | `12.0` | Seconds to cross the frame (rounded so a whole number of crossings fit the loop). |
+| `color` | integer × 3 | `[30,30,36]` |  |
+| `seed` | integer | `0` |  |
+
 ### BlackHole
 
 A black hole in the space sky. Its gravity bends light: the stars and nebulae behind it are
@@ -186,6 +219,31 @@ the path crosses on a deck. Walls carry on down into the gap.
 | `horizon` | number | `0.22` | Horizon position as a fraction of the canvas height from the top (0.1..0.9). |
 | `zoom` | number | `1.0` | Zoom: 1.0 puts the ground at `eye_height` metres ahead on the bottom row. Higher = narrower view. |
 | `lens_curve` | number | `0.0` | Screen-space lens bend of the horizon (-1..1); 0 is a flat horizon. |
+| `moves` | [CameraMoves](#cameramoves) | (see the type) | How the camera moves besides walking: a bob in its step, slow looks to the side, a dolly zoom, and a flight down from above at the start. |
+| `yaw` | number | `0.0` | Which way the camera looks, degrees from straight down the path (-90 .. 90; positive turns right). The whole loop is seen from this angle: 30 looks diagonally across the path; 90 or -90 looks straight across it, a side-scroller's view, the walk carrying the world sideways past (to the left when the camera looks left, at -90). Turned far, the path's bends are straightened and what stands between the camera and the path (walls, the ceiling, props nearer than `cutaway`) is left out, so the path is seen. |
+| `side` | number | `0.0` | Where the camera stands, metres sideways from the middle of the path (positive right). A side view wants it well out to the side: 10 m from a path at yaw -90, -10 at 90. |
+| `cutaway` | number | `0.4` | In a side view, how far from the camera's side of the path things are left out, metres past the path's edge (props, lights, walls): the cut through the near side of the world. |
+
+### CameraMoves
+
+Camera moves on top of the walk. Each repeats a whole number of times a loop, so the loop
+still closes; the flight in is the exception, played once at the very start (the live
+runtime, `pf render --intro`, an export with an intro).
+
+| Field | Type | Default | Meaning |
+|---|---|---|---|
+| `bob` | number | `0.0` | The head's bob as the walker steps: metres up and down at each footfall (0 none, about 0.04 a walk, 0.1 a run). It follows the distance walked, so it stops when the walk does. |
+| `stride` | number | `0.75` | Metres walked in one step. |
+| `sway` | number | `0.0` | The head's sway from side to side with the steps, degrees. |
+| `pan` | number | `0.0` | A slow look to one side and back: how far, degrees (0 none; negative looks left first). |
+| `pans` | integer | `1` | Looks to the side and back per loop (whole). |
+| `tilt` | number | `0.0` | A slow look up and down: degrees (positive looks up first). |
+| `tilts` | integer | `1` |  |
+| `dolly` | number | `0.0` | A dolly zoom: the camera draws back while it zooms in (or the reverse when negative), so what stands `dolly_focus` metres ahead keeps its size while the background swells and shrinks behind it. How far it draws back, metres. |
+| `dolly_focus` | number | `8.0` |  |
+| `dollies` | integer | `1` | Dolly zooms per loop (whole). |
+| `fly_in` | number | `0.0` | The flight in: seconds of coming down from above and over to the walker's eyes (0 none). |
+| `fly_height` | number | `18.0` | How high it starts, metres. |
 
 ### Canvas
 
@@ -299,6 +357,33 @@ Where a layer of ground cover grows.
 
 One of `Verge` \| `Path` \| `Both`.
 
+### DayNight
+
+A day and night (`sky.day_night`). The hour sets everything: the sun's place on its arc and
+its colour, the sky's colours (the sunset's `sunset_style` at dusk and dawn, the blue hour,
+night), the light and its colour, the fog and mist, the stars and moon, and the lamps. The
+scene's own colours keep their hue (`keep_look`) while their brightness follows the hour.
+Has no effect under a space sky or a tunnel, or with the sky off.
+
+| Field | Type | Default | Meaning |
+|---|---|---|---|
+| `enabled` | boolean | `false` |  |
+| `hour` | number | `12.0` | The hour of the day, 0..24: 6 sunrise, 12 noon, 18 sunset, 0 midnight (with the default `sunrise` and `sunset`). |
+| `days_per_loop` | integer | `0` | Whole days that pass in one loop, so a loop runs through dawn, day, dusk and night and closes seamlessly (0: the hour stays put). |
+| `sunrise` | number | `6.0` | When the sun rises and sets, hours. |
+| `sunset` | number | `18.0` |  |
+| `sun_height` | number | `1.15` | How high the sun climbs at noon, as a share of the sky: past 1 it passes overhead, out of the frame (the moon climbs a little lower, and stays in it). |
+| `sun_path` | number × 2 | `[0.15,0.85]` | Where across the frame the sun rises and where it sets (0 left .. 1 right). |
+| `sunset_style` | [SunsetStyle](#sunsetstyle) | `"Golden"` | The colours of its dawns and dusks. |
+| `glow` | number | `1.0` | How bright the dawn and dusk glow is (0..2). |
+| `keep_look` | number | `0.6` | How much of the scene's own colours it keeps: 0 the hour's own sky .. 1 the scene's hues, only their brightness following the hour. |
+| `night_light` | number | `0.3` | How bright the night's light is against the day's (0..1). |
+| `sun` | boolean | `true` | The sun crosses the sky (on even when the scene has no sun of its own). |
+| `moon` | boolean | `true` | The moon crosses the night sky. |
+| `stars` | boolean | `true` | Stars come out after dusk. |
+| `lamps` | boolean | `true` | The lamps (torches, lanterns, street lamps...) light at dusk and go out at dawn, and fireflies come out at night. |
+| `real_time` | boolean | `false` | For live wallpapers and games: follow the device's own clock instead of `hour`. |
+
 ### Dither
 
 One of `None` \| `Bayer2` \| `Bayer4` \| `Bayer8`.
@@ -328,6 +413,60 @@ them; far away they widen to a pixel and dim to match, so they do not flicker.
 | `inset` | number | `0.08` | How far in from the path's edge, metres. |
 | `dash` | number | `0.0` | Dashes: one dash and one gap every this many metres (snapped to divide the loop); 0 an unbroken line. |
 | `flow` | integer | `0` | How many dashes the lights run ahead in one loop, on top of the walk (negative: toward the camera). Whole numbers keep the loop seamless. |
+
+### Facing
+
+Which way a prop's picture faces.
+
+| Value | Meaning |
+|---|---|
+| `Camera` | Always toward the camera (a tree, a rock, a lamp: alike from every side). |
+| `Path` | Always toward the path, standing along it as a building's front does: seen at an angle from down the path, and squarely from the side. |
+| `PathWhenTurned` | Toward the camera while it looks down the path, toward the path when it is turned (`camera.yaw`): a building that looks as it always has from the path, and stands in the street when seen from an angle or the side. |
+
+### Fence
+
+A waterfall beside the path (`scene.waterfalls`): a rock face with water pouring down it in
+streaks, foam and spray boiling up at its foot, and (with the sun out) a little rainbow in the
+spray. It repeats every `spacing` metres, like a set piece; its water falls a whole number of
+times a loop.
+A fence beside the path, built post to post as solid pieces that run along its edge and bend
+with it, so it reads as one fence from any angle.
+
+| Field | Type | Default | Meaning |
+|---|---|---|---|
+| `enabled` | boolean | `true` |  |
+| `style` | [FenceStyle](#fencestyle) | `"Picket"` |  |
+| `side` | [Side](#side) | `"Both"` |  |
+| `lateral` | number | `1.2` | Metres out from the path's edge. |
+| `height` | number | `0.9` | Metres tall. |
+| `color` | integer × 3 | `[236,232,220]` | The paint of pickets and boards. (Every painted fence of a scene takes the first one's colour; rails are bare wood, in the colour of a bridge's deck.) |
+| `spacing` | number | `24.0` | Runs `length` metres long every `spacing` metres: as long as the spacing, one fence with no break; shorter, with a gap (a gate, a lane) between runs. Both snap to divide the loop. |
+| `length` | number | `20.0` |  |
+| `offset` | number | `0.0` |  |
+| `post_spacing` | number | `2.0` | Metres between posts. |
+
+### FenceStyle
+
+| Value | Meaning |
+|---|---|
+| `Picket` | White pickets on two rails between posts. |
+| `Rails` | Posts and three bare wooden rails: a field fence. |
+| `Boards` | Close boards from the ground up, capped by a rail. |
+
+### Fish
+
+Fish leaping from the water beside or along the path in silver arcs, with splash rings.
+
+| Field | Type | Default | Meaning |
+|---|---|---|---|
+| `enabled` | boolean | `false` |  |
+| `spacing` | number | `6.0` | One every so many metres along the path. |
+| `lateral` | number × 2 | `[1.5,6.0]` | How far out from the path's middle they leap: from .. to, metres (either side). |
+| `leaps` | integer | `1` | Leaps each fish makes per loop. |
+| `size` | number | `0.35` | Its length, metres. |
+| `color` | integer × 3 | `[200,210,220]` |  |
+| `seed` | integer | `0` |  |
 
 ### Fixture
 
@@ -361,12 +500,15 @@ A repeating light source along the path: torches, lanterns, fireflies, crystals.
 | `post` | [LampPost](#lamppost) | `"Auto"` | What it stands on or hangs from where there is no wall (ground mounts, and wall mounts in a scene without walls). |
 | `place` | [LightPlace](#lightplace) | `"Anywhere"` | Where along the path the row is allowed to stand. |
 | `set_piece` | integer | `0` | For `place: SetPieces`: which of `set_pieces` the lights go with (0 = the first). |
+| `bridge_posts` | boolean | `false` | On bridges, stand on the railing's posts instead of at `spacing`: one on each end post of every bridge, each side (whatever `place` says). |
+| `posts_between` | integer | `0` | With `bridge_posts`: how many more posts (each with its light) stand evenly between the end posts: 1 halfway, 2 at the thirds, 3 at the quarters... The railing gains those posts. |
+| `string_lights` | [StringLights](#stringlights) | (see the type) | Strings of little bulbs hung between each light and the next along its side, sagging between them: festoon lights for a bridge, a terrace or a market street. |
 | `sprite` | [SpriteRef](#spriteref) | (see the type) |  |
 | `seed` | integer | `0` |  |
 
 ### FixtureKind
 
-One of `Torch` \| `Lantern` \| `Candle` \| `Brazier` \| `Crystal` \| `Firefly` \| `Magic` \| `GreenFire` \| `IceWisp` \| `StreetLamp` \| `PaperLantern` \| `Campfire` \| `Glowshroom` \| `Beacon` \| `Chandelier`.
+One of `Torch` \| `Lantern` \| `Candle` \| `Brazier` \| `Crystal` \| `Firefly` \| `Magic` \| `GreenFire` \| `IceWisp` \| `StreetLamp` \| `PaperLantern` \| `Campfire` \| `Glowshroom` \| `Beacon` \| `Chandelier` \| `Neon`.
 
 ### Flare
 
@@ -401,6 +543,24 @@ Things floating on a waterway.
 | `Leaves` | Fallen leaves. |
 | `LilyPads` | Lily pads, a few in flower. |
 | `Ice` | Ice floes: flat straight-sided plates, snow on top and bare blue ice round the rim. |
+
+### Focus
+
+| Field | Type | Default | Meaning |
+|---|---|---|---|
+| `enabled` | boolean | `false` |  |
+| `mode` | [FocusMode](#focusmode) | `"Depth"` |  |
+| `distance` | number | `8.0` | Depth: metres ahead that are sharp. |
+| `blur` | number | `0.008` | How strongly the rest blurs: the widest blur, as a share of the frame height (0..0.03). |
+| `band` | number | `0.62` | Tilt-shift: the sharp band's middle (share of the frame height from the top) and width. |
+| `band_width` | number | `0.16` |  |
+
+### FocusMode
+
+| Value | Meaning |
+|---|---|
+| `Depth` | A real lens: sharp at `distance`, blurring nearer and further. |
+| `TiltShift` | A band across the frame sharp and above and below it blurred: a miniature. |
 
 ### Fog
 
@@ -474,6 +634,19 @@ One layer of ground cover. It stands on the ground itself (not at the path's edg
 | `color2` | integer × 3 | `[112,150,52]` | Grass: the colour of the tips. Wildflowers: the flowers. Moss: its second shade. |
 | `patchiness` | number | `0.2` | 0 grows evenly; towards 1 it grows in patches with bare ground between. |
 | `seed` | integer | `0` |  |
+
+### Halo
+
+A halo: the ring of light round the sun or moon seen through thin high cloud (ice crystals
+bending its light), reddish on its sharp inner edge, fading out beyond.
+
+| Field | Type | Default | Meaning |
+|---|---|---|---|
+| `enabled` | boolean | `false` |  |
+| `sun` | boolean | `true` | Round the sun, round the moon (either or both, when they are up). |
+| `moon` | boolean | `true` |  |
+| `size` | number | `0.32` | The ring's radius, as a share of the sky's height. |
+| `strength` | number | `0.35` |  |
 
 ### HeatShimmer
 
@@ -585,6 +758,24 @@ A tiling surface material generated procedurally.
 | `ripples` | number | `0.0` | Ripples (water) or roughness (wet stone) that break reflections up: 0 glassy .. 1 choppy. |
 | `glow` | number | `0.0` | How brightly the lit parts of a futuristic pattern shine (Panels' light bars, Grid lines, Hex seams, Circuit traces, in the `mortar` colour): 0 they are only inlays, 1 bright. |
 
+### Meteors
+
+Shooting stars: streaks of light crossing the sky, each flaring and fading as it burns up.
+Each one falls at its own moment of the loop, so the loop closes seamlessly.
+
+| Field | Type | Default | Meaning |
+|---|---|---|---|
+| `enabled` | boolean | `false` |  |
+| `count` | integer | `6` | How many fall in one loop (a shower: 10 or more). |
+| `duration` | number | `0.7` | How long each one lasts, seconds. |
+| `length` | number | `0.35` | How far each one travels, as a share of the sky's height. |
+| `angle` | number | `-35.0` | Which way they fall, degrees (0 to the right, -90 straight down; a shower shares one way). |
+| `spread` | number | `30.0` | How much their ways vary, degrees (180 from anywhere). |
+| `brightness` | number | `1.0` |  |
+| `color` | integer × 3 | `[235,242,255]` |  |
+| `tint` | number | `0.4` | How much some burn green or orange. |
+| `seed` | integer | `0` |  |
+
 ### Mist
 
 Mist lying low over the ground, drifting, with wisps rising from it.
@@ -602,6 +793,7 @@ Mist lying low over the ground, drifting, with wisps rising from it.
 | `over` | [MistOver](#mistover) | `"Everywhere"` | Where it lies: everywhere, or only over the path (a river's water, a road) and `spread` metres past its edges, fading out across them. |
 | `spread` | number | `1.0` | How far past the path's edges mist `over` the path reaches, metres. |
 | `glow` | number | `0.0` | How much brighter it glows looking towards the sun, as mist does lit from behind (0..2). |
+| `from` | number | `0.0` | Clear air this many metres ahead before the mist begins: fog lying in the low ground in the distance, a valley filled with it (0: from the camera on). |
 
 ### MistOver
 
@@ -619,7 +811,9 @@ Where mist lies.
 | `body` | [SkyBody](#skybody) | (see the type) |  |
 | `phase` | number | `0.0` | -1 waning .. 0 full .. 1 waxing. |
 | `opacity` | number | `0.9` |  |
-| `craters` | boolean | `true` |  |
+| `craters` | boolean | `true` | Its seas, craters (with raised rims, bowls and central peaks, catching the sunlight past the line between day and night) and the rays of its young craters. |
+| `relief` | number | `1.0` | How deep the craters look: 0 flat markings .. 1 natural .. 2 rugged. |
+| `seed` | integer | `0` | Which craters: each seed scatters a different field of them. |
 
 ### Motion
 
@@ -737,6 +931,7 @@ One of `Cobblestone` \| `Brick` \| `StoneBlock` \| `Sand` \| `Dirt` \| `Grass` \
 | `clouds` | number | `0.5` | Earth and gas giants: how much white cloud. |
 | `city_lights` | number | `0.0` | Earth: city lights on the night side. |
 | `rings` | [Rings](#rings) | (see the type) |  |
+| `orbit` | [PlanetOrbit](#planetorbit) | (see the type) | Circling another planet of the sky as its moon: it passes in front of it and behind it, and casts its shadow across it as it crosses (an eclipse). |
 | `seed` | integer | `0` |  |
 
 ### PlanetKind
@@ -750,6 +945,21 @@ What a planet's surface is made of.
 | `Earth` | Oceans (`color`), land (`color2`), ice caps and white cloud; city lights on the night side. |
 | `Ice` | Pale ice (`color`) with bright cracks (`color2`). |
 | `Lava` | Dark crust (`color`) split by glowing lava (`color2`), which glows on the night side too. |
+| `Desert` | A dry world of dunes and canyons (`color` the sand, `color2` the rock), thin dust storms and small pale caps at its poles. |
+
+### PlanetOrbit
+
+A planet's orbit round another (`Planet::orbit`).
+
+| Field | Type | Default | Meaning |
+|---|---|---|---|
+| `enabled` | boolean | `false` |  |
+| `around` | integer | `0` | Which planet of the list it circles (0 the first). Its own `pos` is then ignored. |
+| `distance` | number | `2.2` | How far out, in the other planet's radii. |
+| `tilt` | number | `12.0` | How steeply the orbit is seen: 0 edge-on (straight across, in front then behind) .. 90 face-on. |
+| `roll` | number | `-8.0` | The orbit's slope on screen, degrees. |
+| `turns` | integer | `1` | Whole orbits per loop (negative the other way; 0 holds it at `phase`). |
+| `phase` | number | `0.1` | Where on the orbit it is at the start, 0..1. |
 
 ### Post
 
@@ -763,6 +973,7 @@ What a planet's surface is made of.
 | `grain` | number | `0.0` |  |
 | `tint` | integer × 3 | `[255,255,255]` | Colour multiplied over the final image. |
 | `flare` | [Flare](#flare) | `{"style":"None","amount":0.5}` | What bright light does in the lens besides bloom. |
+| `focus` | [Focus](#focus) | (see the type) | Depth of field: what is nearer or further than the focus blurs, or (tilt-shift) all but a band across the frame does, for the look of a miniature. |
 
 ### Precipitation
 
@@ -808,6 +1019,25 @@ parts. Lives in `scene.prop_defs` or in a kit (a folder holding kit.json and its
 | `glow_from` | number | `0.0` | For images: only texels at least this light (0..1) glow, like the flame in a lantern; 0 = the whole prop glows by `glow`. |
 | `light` | [PropLight](#proplight) | (see the type) | Light it gives off, like a lamp. |
 | `trim` | boolean | `true` | Cut away transparent margins of images, so a sprite stands on its lowest visible pixel. |
+| `smoke` | [PropSmoke](#propsmoke) | (see the type) | Smoke rising from it: a chimney, a campfire, a smouldering ruin. |
+| `facing` | [Facing](#facing) | `"Camera"` | Which way its picture faces (see `Facing`): the camera (a tree, a rock: the same from every side), or the path (a building's front, a fence, a stall), seen at an angle when the camera is turned. |
+| `depth` | number | `0.0` | Facing the path: how deep it is behind its front, metres. Its ends are drawn as walls that deep (from the edges of its picture), so seen at an angle it reads as a solid block; 0 is a flat front. |
+| `faces` | list of [PropFace](#propface) |  | Facing the path: the rest of it, as flat faces with pictures of their own (a cottage's side walls and the slopes of its roof, a chimney's sides), drawn in place of plain end walls. |
+| `tubes` | list of [PropTube](#proptube) |  | Facing the path: round parts as real cylinders (the tails of logs at a cabin's corners, posts, pipes), drawn true from any angle with their sawn ends. |
+| `pick` | list of string |  | Variety: each prop picks one of these definitions instead (names in the same kit, or in the scene's `prop_defs`), so a row of cottages is not one cottage over and over. |
+
+### PropFace
+
+A face of a prop besides its front (`PropDef::faces`): a flat picture standing in the prop's
+own space, in metres at scale 1 (the units of its `shape`): `x` across its front, `y` up from
+the ground and `z` back from its front, away from the path.
+
+| Field | Type | Default | Meaning |
+|---|---|---|---|
+| `corners` | number × 3 × 3 | `[[1.0,1.0,0.0],[1.0,1.0,1.0],[1.0,0.0,0.0]]` | Seen from the side it faces: its picture's top left, top right and bottom left corners (`[x, y, z]`; the fourth corner follows). A roof's slope runs from its ridge down to its eave. |
+| `shape` | list of [ShapePart](#shapepart) | `[]` | Its picture: parts painted in metres, `x` from its left edge and `y` up from its bottom edge, as wide and tall as the face. |
+| `image` | string |  | Or an image stretched over it (relative to the file the definition is in). |
+| `mirror` | boolean | `false` | Drawn twice: as given and mirrored across the middle of the front (`x` to `-x`), for the two sides of something symmetric. |
 
 ### PropKind
 
@@ -845,6 +1075,8 @@ A repeating row (or several rows) of props beside the path.
 | `sprite` | [SpriteRef](#spriteref) | (see the type) |  |
 | `seed` | integer | `1` |  |
 | `def` | string |  | A prop described by data instead of `kind`: the name of one in `prop_defs`, or `"<kit folder>#<name>"` for one in a kit (relative to the scene file). Placement (side, spacing, scale...) still comes from this layer. |
+| `facing` | [Facing](#facing) or null |  | Which way the props face, in place of their definition's (`PropDef::facing`; built-in kinds face the camera). |
+| `depth` | number or null |  | How deep they are behind their fronts, in place of their definition's (`PropDef::depth`). |
 
 ### PropLight
 
@@ -858,6 +1090,36 @@ Light a prop gives off.
 | `radius` | number | `4.0` | Reach, metres. |
 | `at` | number | `0.8` | Where the light sits, as a fraction of the prop's height from its base. |
 | `flicker` | number | `0.0` | 0 steady, 1 like a flame. |
+
+### PropSmoke
+
+Smoke rising from a prop (`PropDef::smoke`): puffs that climb, spread, drift with the wind and
+thin away, round and round with the loop.
+
+| Field | Type | Default | Meaning |
+|---|---|---|---|
+| `enabled` | boolean | `false` |  |
+| `at` | number × 2 | `[0.0,2.0]` | Where it leaves the prop, metres at scale 1: `x` sideways from its centre, `y` up. |
+| `color` | integer × 3 | `[150,150,155]` |  |
+| `amount` | number | `0.5` | How thick (0..1). |
+| `rise` | number | `3.0` | How high it climbs before it has thinned away, metres. |
+| `width` | number | `0.8` | How wide a puff grows, metres. |
+| `back` | number |  | For a prop facing the path: how far back from its front it leaves, metres at scale 1 (a chimney on the ridge). |
+
+### PropTube
+
+A cylinder that is part of a prop (`PropDef::tubes`): from one point to another in the prop's
+space (metres at scale 1: `x` across its front, `y` up, `z` back from the path), `radius`
+round, its side the colour of bark and its ends sawn: end grain with growth rings.
+
+| Field | Type | Default | Meaning |
+|---|---|---|---|
+| `from` | number × 3 | `[0.0,0.5,0.0]` |  |
+| `to` | number × 3 | `[1.0,0.5,0.0]` |  |
+| `radius` | number | `0.15` |  |
+| `color` | integer × 3 | `[110,80,54]` |  |
+| `end` | integer × 3 | `[180,146,104]` | Its sawn ends. |
+| `mirror` | boolean | `false` | Drawn twice: as given and mirrored across the middle of the front (`x` to `-x`). |
 
 ### Railing
 
@@ -881,6 +1143,7 @@ A rainbow: an arc round the point opposite the sun, with a faint second bow outs
 | `x` | number | `0.5` | Where its centre is across the sky (0 left .. 1 right). |
 | `size` | number | `1.0` | Size: 1 spans the frame's width (a real 42-degree bow is wider than a portrait view). |
 | `double` | boolean | `true` | Draw the fainter second bow outside the first. |
+| `saturation` | number | `1.0` | How colourful: 1 a rainbow; about 0.2 a moonbow, the pale bow the moon makes at night. |
 
 ### Rings
 
@@ -907,6 +1170,21 @@ a sand-coloured haze that hides the distance, and the sun dimmed to a disc.
 | `intensity` | number | `0.5` | 0.2 blowing sand .. 1 a wall of sand. |
 | `color` | integer × 3 | `[214,172,116]` |  |
 | `seed` | integer | `0` |  |
+
+### Season
+
+The time of year (`scene.season`), over the scene's own colours (taken as summer's): fresh light
+green and blossom in spring; turning gold, orange and red with leaves falling in autumn; bare
+broadleaf trees, straw-coloured grass and lying snow in winter. In between, one season turns
+into the next.
+
+| Field | Type | Default | Meaning |
+|---|---|---|---|
+| `enabled` | boolean | `false` |  |
+| `season` | number | `1.0` | Where in the year: 0 spring, 1 summer, 2 autumn, 3 winter (4 is spring again; fractions are the turn from one to the next). |
+| `years_per_loop` | integer | `0` | Whole years that pass in one loop (0 holds the season). |
+| `falling` | boolean | `true` | Blossom drifting down in spring, leaves falling in autumn. |
+| `snow` | boolean | `true` | Snow lying in winter. |
 
 ### SetPiece
 
@@ -973,12 +1251,15 @@ One of `Both` \| `Left` \| `Right` \| `Center`.
 | `sun` | [SkyBody](#skybody) | (see the type) |  |
 | `moon` | [Moon](#moon) | (see the type) |  |
 | `stars` | [Stars](#stars) | (see the type) |  |
+| `meteors` | [Meteors](#meteors) | (see the type) | Shooting stars streaking across the sky (by night, or in space). |
 | `clouds` | [Clouds](#clouds) | (see the type) |  |
 | `cloud_layers` | list of [Clouds](#clouds) | `[]` | More layers of cloud over `clouds`, drawn in order (up to three): cirrus high over cumulus, heaps under an overcast. Give layers `patches` to share the sky between kinds. |
 | `cloud_mix` | [CloudMix](#cloudmix) | (see the type) | Clouds of several kinds chosen at random from a seed, added over the layers above. |
 | `sunset` | [Sunset](#sunset) | (see the type) | A sunset (or sunrise): the sky, a glow along the horizon, the clouds and the light all take the colours of a low sun. |
+| `day_night` | [DayNight](#daynight) | (see the type) | A day and night: the sun crosses the sky and sets, the light, sky and fog follow it, the stars and moon come out and the lamps light at dusk. Set the hour, or let the days pass with the loop; a game can set the hour itself (`Runtime::set_hour`). |
 | `aurora` | [Aurora](#aurora) | (see the type) | Northern lights: curtains of green and violet light rippling across the sky. |
 | `rainbow` | [Rainbow](#rainbow) | (see the type) |  |
+| `halo` | [Halo](#halo) | (see the type) | A ring of light round the sun or moon in thin high cloud. |
 | `space` | [Space](#space) | (see the type) | Deep space: a dense starfield, nebulae, a galaxy band and planets. |
 | `tunnel` | [Tunnel](#tunnel) | (see the type) | A tunnel all round the path in place of the sky: hyperspace or a wormhole. |
 
@@ -993,6 +1274,18 @@ One of `Both` \| `Left` \| `Right` \| `Center`.
 | `emits_light` | boolean | `true` | Lights the world and casts shadows. |
 | `intensity` | number | `1.0` |  |
 
+### SnowCover
+
+Snow that has already fallen: laid on trees, rocks and the rest of the scenery (`props`) and on
+the ground, walls and railings (`ground`), with no snow falling. Falling snow
+(`precipitation`) lays its own; whichever is deeper shows.
+
+| Field | Type | Default | Meaning |
+|---|---|---|---|
+| `enabled` | boolean | `false` |  |
+| `props` | number | `0.7` | How much snow lies on trees and the rest of the scenery (0..1): a cap along their tops at 0.2, branches laden with it at 1. |
+| `ground` | number | `0.6` | How much lies on the ground, walls and railings (0..1): a dusting at 0.3, deep at 1. |
+
 ### Space
 
 The sky seen from space. It sits at infinity, so it stays put while the camera walks.
@@ -1001,21 +1294,74 @@ The sky seen from space. It sits at infinity, so it stays put while the camera w
 |---|---|---|---|
 | `enabled` | boolean | `false` |  |
 | `below` | boolean | `true` | Space all round: where nothing is drawn below the horizon (a bridge's bottomless drop, the gaps beside a floating walkway) shows space too, instead of the void colour. The sky's `top`..`horizon` gradient is mirrored below the horizon. |
+| `star_style` | [StarStyle](#starstyle) | `"Realistic"` | How the starfield is drawn. Realistic: a few bright stars among a great many faint ones, coloured by temperature, gathered in clouds and lanes. Classic: the even field of small dots of earlier versions (and of ball_swing_game). |
 | `stars` | number | `1.0` | The dense field of faint stars: 0 none .. 1 a rich field .. 2 a crowded one. |
 | `star_brightness` | number | `1.0` |  |
 | `star_colors` | number | `1.0` | The stars' colours: 1 hot blue-white to cool orange; 0 all the faint blue-white of ball_swing_game's starfield. |
+| `star_glow` | number | `0.5` | Realistic stars: the faint glow of stars too many and too far to see one by one. |
+| `star_clumps` | number | `0.5` | Realistic stars: how unevenly they gather, 0 evenly .. 1 in clouds and voids. |
+| `star_spikes` | number | `0.4` | Realistic stars: the bright stars' diffraction spikes (as a telescope sees them), 0 none. |
+| `spike_shape` | [SpikeShape](#spikeshape) | `"Four"` |  |
+| `twinkle` | number | `0.0` | How much the stars twinkle (0 steady, as in airless space .. 1 strongly). |
+| `twinkle_speed` | integer | `2` | Whole twinkles per loop for the slowest stars (some go twice as fast), so the loop closes. |
 | `nebula` | number | `0.6` | Glowing gas clouds: strength 0 .. 2, two colours, and size (1 about a sky's height across). |
 | `nebula_colors` | integer × 3 × 2 | `[[190,70,200],[60,120,255]]` |  |
 | `nebula_scale` | number | `1.0` |  |
+| `nebula_dust` | number | `0.5` | How much dark dust threads the gas and hides the stars behind it. |
 | `galaxy` | number | `0.7` | The band of a galaxy seen edge-on, with dark dust lanes and a brighter core. |
 | `galaxy_color` | integer × 3 | `[235,225,255]` |  |
 | `galaxy_angle` | number | `18.0` | Tilt of the band in degrees (0 level, positive rising to the right). |
 | `galaxy_width` | number | `0.22` | Its width, as a share of the sky's height. |
 | `galaxy_height` | number | `0.55` | Where the band crosses the middle of the frame, in sky heights above the horizon. |
 | `galaxy_core` | number | `0.25` | Where its bright core sits along the band: -1 left .. 1 right. |
+| `galaxy_dust` | number | `0.7` | How much its dark dust lanes and rifts hide. |
+| `objects` | list of [SpaceObject](#spaceobject) | `[]` | Up to six things far off in the sky: nebulae, galaxies, star clusters and comets. |
 | `planets` | list of [Planet](#planet) | `[]` | Up to three planets, drawn in order (later ones in front). |
 | `black_hole` | [BlackHole](#blackhole) | (see the type) | A black hole: its shadow, a glowing disk lensed round it, and matter falling in. |
 | `seed` | integer | `0` |  |
+
+### SpaceObject
+
+Something far off in the space sky, behind the planets and bent round a black hole like the
+stars. `colors` mean something different for each kind (see `SpaceObjectKind`).
+
+| Field | Type | Default | Meaning |
+|---|---|---|---|
+| `enabled` | boolean | `true` |  |
+| `kind` | [SpaceObjectKind](#spaceobjectkind) | `"Emission"` |  |
+| `pos` | number × 2 | `[0.5,0.35]` | Centre: x 0..1 across the frame, y 0 (top) .. 1 (horizon). |
+| `size` | number | `0.3` | Its radius as a share of the sky's height (a comet: its tail's length). |
+| `angle` | number | `0.0` | Its turn on screen, degrees (a comet: where its tail points, 0 right, 90 up). |
+| `aspect` | number | `1.0` | How round it is: 1 round .. 0.1 seen almost edge-on. |
+| `colors` | integer × 3 × 3 | `[[235,70,110],[90,220,215],[255,180,120]]` |  |
+| `brightness` | number | `1.0` |  |
+| `spin` | integer | `1` | Whole turns or passes per loop (0 still): a binary's orbit, a pulsar's beams, a belt's drift, a sun's flares, a ship's crossings. Whole numbers keep the loop seamless. |
+| `seed` | integer | `0` |  |
+
+### SpaceObjectKind
+
+| Value | Meaning |
+|---|---|
+| `Emission` | A glowing cloud of gas lit by the young stars inside it, with dark dust pillars and lanes: `colors` its outer gas (hydrogen red), its hot heart (oxygen teal) and the dust's lit edges. |
+| `Reflection` | Dust lit blue by a few bright stars inside it: its glow, the stars' halo, its streaks. |
+| `Dark` | A cloud of dust hiding the stars behind it: its lit rim, and its faint body. |
+| `Planetary` | A dying star's glowing shell round a white dwarf: the outer rim, the inner shell, the halo. |
+| `Remnant` | The wisps of an exploded star's shell: two filament colours and the faint fill. |
+| `Spiral` | A spiral galaxy: its arms, its core and its pink star-forming knots. |
+| `Elliptical` | A smooth elliptical galaxy: its glow, its core. |
+| `Cluster` | A star cluster: its stars' tint, its glow. |
+| `Comet` | A comet: its curved dust tail, its straight blue ion tail, its glowing head. |
+| `Binary` | Two stars circling each other (`spin` orbits a loop), a stream of gas between them: the larger star, the smaller, the stream. |
+| `Pulsar` | A spinning dead star sweeping two beams round (`spin` turns a loop) inside the wisps of the star it was: the star, its beams, the wisps. |
+| `Belt` | A band of asteroids across the sky, `angle` its slope and `size` its half thickness, drifting along (`spin` passes a loop): its dust, its rocks, their lit sides. |
+| `Sun` | A sun seen close: a glowing disc with spots and a darker rim, its corona streaming out and flares licking off its edge (changing `spin` times a loop): disc, corona, flares. |
+| `Ship` | A ship far off, crossing the sky `spin` times a loop along `angle` (its length is `size`), its engine glowing and leaving a trail: hull, engine, running lights. |
+
+### SpikeShape
+
+The bright stars' diffraction spikes: four (a cross), six or eight points.
+
+One of `Four` \| `Six` \| `Eight`.
 
 ### SpriteRef
 
@@ -1053,12 +1399,31 @@ walker (smoothly over each flight), and the loop still closes: the view one flig
 | `twinkle` | number | `0.5` |  |
 | `seed` | integer | `0` |  |
 
+### StarStyle
+
+One of `Realistic` \| `Classic`.
+
 ### Stop
 
 | Field | Type | Default | Meaning |
 |---|---|---|---|
 | `scene` | string | `""` | Scene file (relative to the journey) or `preset:<name>`. |
 | `next` | [Next](#next) | `"End"` |  |
+
+### StringLights
+
+Bulbs on a wire strung between neighbouring lights of a row (`Fixture::string_lights`).
+
+| Field | Type | Default | Meaning |
+|---|---|---|---|
+| `enabled` | boolean | `false` |  |
+| `bulbs` | integer | `9` | Bulbs between each pair of lights. |
+| `sag` | number | `0.45` | How far the wire sags at the middle, metres. |
+| `color` | integer × 3 | `[255,214,140]` |  |
+| `colors` | list of integer × 3 | `[]` | Colour the bulbs in turn through these instead (empty: all `color`). |
+| `brightness` | number | `1.0` |  |
+| `size` | number | `1.0` |  |
+| `twinkle` | number | `0.2` | How much they twinkle (0 steady). |
 
 ### Style
 
@@ -1174,6 +1539,23 @@ Ground beside the path. Disabled = void beyond the path edge (walls usually cove
 | `base_shadow` | number | `0.55` | Darkening where the wall meets the ground (0..1). |
 | `material` | [Material](#material) | (see the type) |  |
 
+### Waterfall
+
+| Field | Type | Default | Meaning |
+|---|---|---|---|
+| `enabled` | boolean | `true` |  |
+| `side` | [Side](#side) | `"Left"` |  |
+| `lateral` | number | `3.0` | Metres from the path's edge. |
+| `spacing` | number | `60.0` |  |
+| `offset` | number | `20.0` |  |
+| `height` | number | `7.0` | How far it falls, and how wide the water is, metres. |
+| `width` | number | `2.2` |  |
+| `water` | integer × 3 | `[210,228,240]` |  |
+| `rock` | integer × 3 | `[92,88,82]` |  |
+| `spray` | number | `0.7` | How much foam and spray at its foot (0..1). |
+| `rainbow` | number | `0.5` | The rainbow in its spray when the sun is out (0 none). |
+| `seed` | integer | `0` |  |
+
 ### Waterway
 
 The path as a waterway, for games where the player steers a boat or swims: a current, foam
@@ -1195,6 +1577,8 @@ water runs to the walls, as a canal's does.
 | `float_color` | integer × 3 | `[70,110,52]` |  |
 | `float_size` | number | `0.5` | How big each one is, metres across. |
 | `frozen` | number | `0.0` | How much of the water is frozen over (0..1): ice grows out from the banks, leaving a narrowing channel of open water down the middle, until at 1 it is ice from bank to bank. The ice is cracked, with snow lying on it in patches, and takes `foam_color`. |
+| `cascades` | number | `0.0` | Steps of white water across the channel where it tumbles over rock: 0 none .. 1 a tumbling drop. |
+| `cascade_spacing` | number | `24.0` | Metres between them. |
 | `seed` | integer | `0` |  |
 
 ### Weather
@@ -1214,6 +1598,18 @@ Every part works in any scene and repeats exactly with the loop.
 | `light_shafts` | [LightShafts](#lightshafts) | `{"enabled":false,"sun":0.6,"lamps":0.4}` | Light made visible by the air: shafts from the sun past trees and walls, haloes round lamps. |
 | `heat_shimmer` | [HeatShimmer](#heatshimmer) | `{"enabled":false,"strength":0.5,"speed":1.0}` | Heat haze: the air shimmers over the ground in the distance. |
 | `lens` | [Lens](#lens) | (see the type) | Raindrops or frost on the camera's lens. |
+| `snow_cover` | [SnowCover](#snowcover) | `{"enabled":false,"props":0.7,"ground":0.6}` | Snow lying on the scenery and the ground without any falling: a winter scene from any scene. |
+
+### Wildlife
+
+Animals on the move (`scene.wildlife`). Each goes round a whole number of times a loop, so the
+loop closes; with a day and night, birds fly by day and bats come out at dusk.
+
+| Field | Type | Default | Meaning |
+|---|---|---|---|
+| `birds` | [Birds](#birds) | (see the type) |  |
+| `bats` | [Bats](#bats) | (see the type) |  |
+| `fish` | [Fish](#fish) | (see the type) |  |
 
 ### Wind
 
