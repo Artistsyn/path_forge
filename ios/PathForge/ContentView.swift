@@ -83,13 +83,7 @@ struct ContentView: View {
             }
         }
         .background(Color.clear.sheet(isPresented: $model.askingAnimation) { AnimationSheet(model: model) })
-        .background(Color.clear.sheet(isPresented: $model.askingLocks) { LocksSheet(model: model) })
-        .background(Color.clear.sheet(item: $model.sharing) { c in CodeSheet(code: c) })
-        .background(Color.clear.alert("Open a share code", isPresented: $model.openingCode) {
-            TextField("PF1.…", text: $model.codeText)
-            Button("Open") { model.open(code: model.codeText) }
-            Button("Cancel", role: .cancel) { }
-        })
+        .modifier(CodeSheets(model: model))
         .background(Color.clear.sheet(item: Binding(get: { model.shareURL.map { SharedFile(url: $0) } }, set: { if $0 == nil { model.shareURL = nil } })) { f in
             ShareSheet(items: [f.url])
         })
@@ -200,16 +194,7 @@ struct Panel: View {
                 Button("Edit every setting") { model.openEditor() }.buttonStyle(Pill())
                 Button("Save scene") { model.save(suggest: model.look.name) }.buttonStyle(Pill())
             }
-            HStack {
-                Button("Surprise me") { model.surprise() }.buttonStyle(Pill())
-                    .simultaneousGesture(LongPressGesture().onEnded { _ in model.askingLocks = true })
-                Button("Locks") { model.askingLocks = true }.buttonStyle(Pill())
-                Button("Back") { model.back() }.buttonStyle(Pill()).disabled(!model.canGoBack).opacity(model.canGoBack ? 1 : 0.4)
-            }
-            HStack {
-                Button("Share code / QR") { model.shareCode() }.buttonStyle(Pill())
-                Button("Open a code") { model.openCode() }.buttonStyle(Pill())
-            }
+            SurpriseRows(model: model)
             HStack {
                 Button("Still") { model.saveStill() }.buttonStyle(Pill(primary: true))
                 Button("Live Photo") { model.saveLivePhoto() }.buttonStyle(Pill(primary: true))
@@ -364,5 +349,41 @@ struct CodeSheet: View {
         guard let out = f.outputImage?.transformed(by: CGAffineTransform(scaleX: 8, y: 8)),
               let cg = CIContext().createCGImage(out, from: out.extent) else { return nil }
         return UIImage(cgImage: cg)
+    }
+}
+
+/// The sheets of Surprise me and of share codes (kept apart so the main view type-checks quickly).
+struct CodeSheets: ViewModifier {
+    @ObservedObject var model: AppModel
+
+    func body(content: Content) -> some View {
+        content
+            .background(Color.clear.sheet(isPresented: $model.askingLocks) { LocksSheet(model: model) })
+            .background(Color.clear.sheet(item: $model.sharing) { c in CodeSheet(code: c) })
+            .background(Color.clear.alert("Open a share code", isPresented: $model.openingCode) {
+                TextField("PF1.…", text: $model.codeText)
+                Button("Open") { model.open(code: model.codeText) }
+                Button("Cancel", role: .cancel) { }
+            })
+    }
+}
+
+/// Surprise me (with its locks and Back), and share codes.
+struct SurpriseRows: View {
+    @ObservedObject var model: AppModel
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Button("Surprise me") { model.surprise() }.buttonStyle(Pill())
+                    .simultaneousGesture(LongPressGesture().onEnded { _ in model.askingLocks = true })
+                Button("Locks") { model.askingLocks = true }.buttonStyle(Pill())
+                Button("Back") { model.back() }.buttonStyle(Pill()).disabled(!model.canGoBack).opacity(model.canGoBack ? 1 : 0.4)
+            }
+            HStack {
+                Button("Share code / QR") { model.shareCode() }.buttonStyle(Pill())
+                Button("Open a code") { model.openCode() }.buttonStyle(Pill())
+            }
+        }
     }
 }
