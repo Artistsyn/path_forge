@@ -1023,6 +1023,7 @@ parts. Lives in `scene.prop_defs` or in a kit (a folder holding kit.json and its
 | `facing` | [Facing](#facing) | `"Camera"` | Which way its picture faces (see `Facing`): the camera (a tree, a rock: the same from every side), or the path (a building's front, a fence, a stall), seen at an angle when the camera is turned. |
 | `depth` | number | `0.0` | Facing the path: how deep it is behind its front, metres. Its ends are drawn as walls that deep (from the edges of its picture), so seen at an angle it reads as a solid block; 0 is a flat front. |
 | `faces` | list of [PropFace](#propface) |  | Facing the path: the rest of it, as flat faces with pictures of their own (a cottage's side walls and the slopes of its roof, a chimney's sides), drawn in place of plain end walls. |
+| `tubes` | list of [PropTube](#proptube) |  | Facing the path: round parts as real cylinders (the tails of logs at a cabin's corners, posts, pipes), drawn true from any angle with their sawn ends. |
 | `pick` | list of string |  | Variety: each prop picks one of these definitions instead (names in the same kit, or in the scene's `prop_defs`), so a row of cottages is not one cottage over and over. |
 
 ### PropFace
@@ -1104,6 +1105,21 @@ thin away, round and round with the loop.
 | `rise` | number | `3.0` | How high it climbs before it has thinned away, metres. |
 | `width` | number | `0.8` | How wide a puff grows, metres. |
 | `back` | number |  | For a prop facing the path: how far back from its front it leaves, metres at scale 1 (a chimney on the ridge). |
+
+### PropTube
+
+A cylinder that is part of a prop (`PropDef::tubes`): from one point to another in the prop's
+space (metres at scale 1: `x` across its front, `y` up, `z` back from the path), `radius`
+round, its side the colour of bark and its ends sawn: end grain with growth rings.
+
+| Field | Type | Default | Meaning |
+|---|---|---|---|
+| `from` | number × 3 | `[0.0,0.5,0.0]` |  |
+| `to` | number × 3 | `[1.0,0.5,0.0]` |  |
+| `radius` | number | `0.15` |  |
+| `color` | integer × 3 | `[110,80,54]` |  |
+| `end` | integer × 3 | `[180,146,104]` | Its sawn ends. |
+| `mirror` | boolean | `false` | Drawn twice: as given and mirrored across the middle of the front (`x` to `-x`). |
 
 ### Railing
 

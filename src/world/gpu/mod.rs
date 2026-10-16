@@ -270,6 +270,11 @@ pub(crate) struct CardGpu {
     /// A card standing in the world (`render::Card::pan`): 1 when it is one, its pixel-to-picture
     /// mapping, its depth plane, and the column an end wall shows (below 0 for none).
     pub pan: u32, pub ph: [f32; 9], pub pq: [f32; 3], pub strip: f32,
+    /// A cylinder (`render::TubeCard`): 1 when it is one, its axis start, unit direction and
+    /// length (camera space), radius, bark and end colours, the light from its six sides, and
+    /// the camera's 1 / focal length and centre.
+    pub tube: u32, pub ta: [f32; 3], pub tu: [f32; 3], pub tlen: f32, pub trad: f32,
+    pub tbark: [f32; 3], pub tend: [f32; 3], pub cube: [f32; 18], pub tkf: f32, pub tcx: f32, pub tcy: f32,
 }
 
 /// A card and the sprite levels it samples (chosen on the CPU, as `Sprite::sample` would).
@@ -1575,7 +1580,7 @@ mod tests {
         // A uniform block's size is a multiple of 16; the WGSL struct has the same fields.
         assert_eq!(std::mem::size_of::<WorldParams>() % 16, 0);
         assert_eq!(std::mem::size_of::<WorldParams>(), 4 * 296);
-        assert_eq!(std::mem::size_of::<CardGpu>(), 4 * 67);
+        assert_eq!(std::mem::size_of::<CardGpu>(), 4 * 103);
         assert_eq!(std::mem::size_of::<SplatGpu>(), 4 * 24);
         assert_eq!(std::mem::size_of::<AirParams>(), 80);
         assert_eq!(std::mem::size_of::<ShaftParams>(), 64);

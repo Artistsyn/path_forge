@@ -313,6 +313,13 @@ impl View {
         [self.yaw_c * px - self.yaw_s * c[2], c[1], self.yaw_s * px + self.yaw_c * c[2]]
     }
 
+    /// A direction the camera sees, back in the world (x, y, d): `rot_dir` undone.
+    #[inline]
+    pub fn unrot_dir(&self, v: [f32; 3]) -> [f32; 3] {
+        if !self.turned { return v; }
+        [self.yaw_c * v[0] + self.yaw_s * v[2], v[1], -self.yaw_s * v[0] + self.yaw_c * v[2]]
+    }
+
     /// A direction in the world (x, y, d) as the camera sees it (turned with it).
     #[inline]
     pub fn rot_dir(&self, v: [f32; 3]) -> [f32; 3] {

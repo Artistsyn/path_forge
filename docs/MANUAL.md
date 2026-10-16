@@ -237,6 +237,12 @@ straight down a village street you see their side walls and roofs in perspective
 street. A layer with `facing: PathWhenTurned` brings back the flat front that faces the camera
 until the camera turns.
 
+**Tubes.** Round parts are better as `tubes`: real cylinders, each `from` one point `to` another
+in the prop's space with a `radius`, a bark `color` and an `end` colour for its sawn ends (with
+growth rings), `mirror` for both sides. They are drawn true from any angle, their outlines soft,
+lit round. The log cabins' corners are tubes: each wall's logs run on past the corner as tails,
+the two walls' a half log apart in height, so the tails stack out both ways by turns.
+
 **Variety.** A definition with `pick` (a list of other definitions' names, in the same kit or the
 scene's `prop_defs`) is drawn as one of them per prop, the same one each time round the loop, so
 a street is not one house over and over. `@settlement#cottage` picks among five builds: timber

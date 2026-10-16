@@ -14,6 +14,8 @@ struct Card {
     w_amp: f32, w_v: f32, w_lean: f32, w_t1: f32, w_t2: f32, w_c0: f32, w_c1: f32, w_trunk: f32, w_foot: f32, w_kv: f32,
     snow_dust: f32,
     pan: u32, ph: array<f32, 9>, pq0: f32, pq1: f32, pq2: f32, strip: f32,
+    tube: u32, ta0: f32, ta1: f32, ta2: f32, tu0: f32, tu1: f32, tu2: f32, tlen: f32, trad: f32,
+    tb0: f32, tb1: f32, tb2: f32, te0: f32, te1: f32, te2: f32, cube: array<f32, 18>, tkf: f32, tcx: f32, tcy: f32,
 }
 
 struct Pass { tile_cols: u32, pick: u32, n_cards: u32, pad: u32 }
@@ -69,6 +71,79 @@ fn snow_on_card(cd: Card, u: f32, v: f32, lit: vec3<f32>) -> vec3<f32> {
     return mix3(lit, snow, k);
 }
 
+// render::dot3, its products rounded one by one as the CPU rounds them.
+fn dot3r(a: vec3<f32>, b: vec3<f32>) -> f32 { return rnd(rnd(rnd(a.x * b.x) + rnd(a.y * b.y)) + rnd(a.z * b.z)); }
+fn sc3(a: vec3<f32>, k: f32) -> vec3<f32> { return vec3<f32>(rnd(a.x * k), rnd(a.y * k), rnd(a.z * k)); }
+
+// render::tube_light.
+fn tube_light(cd: Card, n: vec3<f32>) -> vec3<f32> {
+    var l = vec3<f32>(0.0);
+    for (var i = 0u; i < 3u; i++) {
+        let c = n[i];
+        var o = i * 3u;
+        if c < 0.0 { o = (i + 3u) * 3u; }
+        let w = rnd(c * c);
+        l = vec3<f32>(rnd(l.x + rnd(w * cd.cube[o])), rnd(l.y + rnd(w * cd.cube[o + 1u])), rnd(l.z + rnd(w * cd.cube[o + 2u])));
+    }
+    return l;
+}
+
+// render::tube_at: depth, cover, then the colour as lit; depth 0 where it is not.
+struct TubeHit { z: f32, cover: f32, lit: vec3<f32> }
+fn tube_at(cd: Card, fx: f32, fy: f32) -> TubeHit {
+    let d = vec3<f32>(rnd((fx - cd.tcx) * cd.tkf), rnd((cd.tcy - fy) * cd.tkf), 1.0);
+    let a = vec3<f32>(cd.ta0, cd.ta1, cd.ta2);
+    let u = vec3<f32>(cd.tu0, cd.tu1, cd.tu2);
+    let r = cd.trad;
+    let bark = vec3<f32>(cd.tb0, cd.tb1, cd.tb2);
+    let endc = vec3<f32>(cd.te0, cd.te1, cd.te2);
+    let du = dot3r(d, u);
+    let au = dot3r(a, u);
+    let dp = d - sc3(u, du);
+    let ap = a - sc3(u, au);
+    let qa = dot3r(dp, dp);
+    let qb = dot3r(dp, ap);
+    let aa = dot3r(ap, ap);
+    var best = TubeHit(0.0, 0.0, vec3<f32>(0.0));
+    if qa > 1e-12 {
+        let tc = div(qb, qa);
+        let rho = sqrt(max(aa - rnd(qb * tc), 0.0));
+        let pix = rnd(max(tc, 0.05) * cd.tkf);
+        let cover = clamp(div(r - rho, pix) + 0.5, 0.0, 1.0);
+        if cover > 0.0 {
+            var th = tc;
+            if rho < r { th = tc - sqrt(div(rnd(r * r) - rnd(rho * rho), qa)); }
+            let s = rnd(th * du) - au;
+            if th > 0.05 && s >= 0.0 && s <= cd.tlen {
+                var n = sc3(d, th) - a - sc3(u, s);
+                let nl = max(sqrt(dot3r(n, n)), 1e-9);
+                n = vec3<f32>(div(n.x, nl), div(n.y, nl), div(n.z, nl));
+                let facing = div(-dot3r(n, d), sqrt(dot3r(d, d)));
+                let k = rnd(rnd(0.72 + rnd(0.28 * facing)) * rnd(0.94 + rnd(0.06 * sin(rnd(9.0 * s)))));
+                let tl = tube_light(cd, n);
+                let b = sc3(bark, k);
+                best = TubeHit(th, cover, vec3<f32>(rnd(b.x * tl.x), rnd(b.y * tl.y), rnd(b.z * tl.z)));
+            }
+        }
+    }
+    if abs(du) > 1e-6 {
+        for (var e = 0u; e < 2u; e++) {
+            var sc = 0.0; var sg = -1.0;
+            if e == 1u { sc = cd.tlen; sg = 1.0; }
+            let tq = div(au + sc, du);
+            if tq <= 0.05 || (best.z > 0.0 && best.z <= tq) { continue; }
+            let p = sc3(d, tq) - a - sc3(u, sc);
+            let q = div(sqrt(dot3r(p, p)), r);
+            if q > 1.0 { continue; }
+            var col: vec3<f32>;
+            if q > 0.86 { col = sc3(bark, 0.7); } else if q < 0.07 { col = sc3(endc, 0.62); } else { col = sc3(endc, rnd(0.86 + rnd(0.14 * cos(rnd(26.0 * q))))); }
+            let tl = tube_light(cd, vec3<f32>(sg * u.x, sg * u.y, sg * u.z));
+            best = TubeHit(tq, 1.0, vec3<f32>(rnd(col.x * tl.x), rnd(col.y * tl.y), rnd(col.z * tl.z)));
+        }
+    }
+    return best;
+}
+
 // Sprite::sample at one (already chosen) level.
 fn sprite_sample(off: u32, w: u32, h: u32, u: f32, v: f32, nearest: bool) -> vec4<f32> {
     if nearest {
@@ -111,6 +186,21 @@ fn cards_main(@builtin(global_invocation_id) gid: vec3<u32>) {
     for (var k = a0; k < a1; k++) {
         let cd = cards[bins[ntiles + 1u + k]];
         if px < cd.x0 || px > cd.x1 || py < cd.y0 || py > cd.y1 { continue; }
+        if cd.tube != 0u {
+            // A cylinder (render::Card::draw_rows, its tube).
+            let th = tube_at(cd, f32(px) + 0.5, f32(py) + 0.5);
+            if th.z <= 0.0 || th.z < 0.05 || th.z >= g.depth { continue; }
+            var tcol: vec3<f32>;
+            if cd.plain != 0u { tcol = mix3(vec3<f32>(cd.fog_r, cd.fog_g, cd.fog_b), th.lit, cd.fog_t); }
+            else { tcol = th.lit * cd.fog_mul + vec3<f32>(cd.add_r, cd.add_g, cd.add_b); }
+            c = mix3(c, tcol, th.cover);
+            touched = true;
+            if th.cover >= 0.5 {
+                g = GPix(th.z, cd.wx, cd.wy, cd.wd, cd.id | (cd.realm << 8u));
+                pk = cd.source; wrote_pick = true;
+            }
+            continue;
+        }
         if cd.pan != 0u {
             // A card standing in the world (render::Card::draw_rows, its panel).
             let fx = f32(px) + 0.5; let fy = f32(py) + 0.5;

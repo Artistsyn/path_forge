@@ -37,6 +37,9 @@ pub struct ResolvedProp {
     pub natural: f32,
     /// The definitions it picks from (PropDef::pick), one per prop; empty, it is drawn itself.
     pub alts: Vec<ResolvedProp>,
+    /// Its cylinders (PropDef::tubes), each twice when mirrored: ends in its space, radius, and
+    /// bark and end colours (linear).
+    pub tubes: Vec<([f32; 3], [f32; 3], f32, [f32; 3], [f32; 3])>,
 }
 impl ResolvedProp {
     /// What one prop draws, from its hash.
@@ -179,7 +182,7 @@ impl PropDefs {
 
     fn resolve_in(&mut self, scene: &Scene, base: Option<&Path>, layer: &PropLayer, sprites: &mut SpriteCache, group: bool) -> (Option<ResolvedProp>, Option<String>) {
         let builtin = |kind: PropKind, tint: Rgb| ResolvedProp {
-            sprites: Vec::new(), kind, tint, height: kind.height_m(), hanging: kind.hangs(), glow: kind.glow(), light: None, smoke: None, facing: crate::scene::Facing::Camera, depth: 0.0, faces: Vec::new(), natural: kind.height_m(), alts: Vec::new(),
+            sprites: Vec::new(), kind, tint, height: kind.height_m(), hanging: kind.hangs(), glow: kind.glow(), light: None, smoke: None, facing: crate::scene::Facing::Camera, depth: 0.0, faces: Vec::new(), natural: kind.height_m(), alts: Vec::new(), tubes: Vec::new(),
             pixelated: false, flip_x: false, from_files: false,
         };
         let here = base.map(Path::to_path_buf).unwrap_or_default();
@@ -261,6 +264,12 @@ impl PropDefs {
             let m = |c: [f32; 3]| [-c[0], c[1], c[2]];
             if f.mirror { r.faces.push(Face { sprite: sprite.clone(), corners: [m(tl), m(tr), m(bl)] }); }
             r.faces.push(Face { sprite, corners: f.corners });
+        }
+        for t in &d.tubes {
+            let (c, e) = (super::texture::rgb_lin(t.color), super::texture::rgb_lin(t.end));
+            let m = |c: [f32; 3]| [-c[0], c[1], c[2]];
+            if t.mirror { r.tubes.push((m(t.from), m(t.to), t.radius.max(0.005), c, e)); }
+            r.tubes.push((t.from, t.to, t.radius.max(0.005), c, e));
         }
         (Some(r), warn)
     }

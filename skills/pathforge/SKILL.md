@@ -362,7 +362,8 @@ choose the details unless the plan's warnings say to.
   solid buildings from any angle. Settlement kit cottages, log cabins, stalls, carts and woodpiles
   already do; trees and rocks keep `Camera`. `@settlement#cottage` / `#log_cabin` pick a different
   build per house (a def's `pick` list); `cottage_timber|stone|thatch|brick|board` and
-  `log_cabin_small|porch|sod` name one build. Preset Cabin Woods.
+  `log_cabin_small|porch|sod` name one build. Preset Cabin Woods. Round parts (log tails, posts):
+  `tubes` (`from`, `to`, `radius`, `color`, `end`, `mirror`), real cylinders with sawn ends.
 - **Camera and lens:** `camera.moves` (`bob`/`stride`/`sway` step with the walk, `pan`/`pans` and
   `tilt`/`tilts` slow looks, `dolly`/`dolly_focus`/`dollies` a dolly zoom: all whole cycles a
   loop; `fly_in` seconds of coming down from `fly_height` at the start, only in the runtime or

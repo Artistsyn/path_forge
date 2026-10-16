@@ -134,7 +134,7 @@ def wall(sp, x0, x1, top, openings, posts=None, clip=None, base=0.0, rnd=None):
                 s.append(rect(x0, plinth, x1, plinth + 0.3, mix(sp["fill"], [120, 116, 104], 0.18), 0.3))
                 if plinth: s.append(rect(x0, 0, x1, plinth, sp["tar"], 0.4))
         elif st == "log":
-            s += logs(sp, x0, x1, y0, top, clip, sp.get("ends", 0.0))
+            s += logs(sp, x0, x1, y0, top, clip, 0.0)
     return s
 
 def frange(a, b, step):
@@ -200,33 +200,36 @@ def end_grain(sp, cx, cy, r, rnd):
         s.append(line([cx + 0.88 * r * math.cos(a), cy + 0.88 * r * math.sin(a)], [cx + (0.88 - f) * r * math.cos(a), cy + (0.88 - f) * r * math.sin(a)], r * 0.05, dark(end, 0.55), 0.2))
     return s
 
-def log_corners(sp, hw, D, wy, e, rnd):
-    """The corners of a round-log cabin, saddle-notched: each wall's logs run on past the corner
-    as tails, the two walls' logs a half log apart in height, so the tails stack out of the
-    corner both ways by turns. The walls' pictures carry the tails' bark; here are their sawn
-    ends, facing along the logs (the front wall's sideways, the side walls' toward the path), and
-    the back wall's tails where the side wall ends. The pictures are the walls' outer faces, so
-    a log's middle lies a radius inside them."""
+def log_corners(sp, hw, D, wy, e, k):
+    """The corners of a round-log cabin, saddle-notched, as real cylinders: each wall's logs run
+    on past the corner as tails `e` beyond the other wall, the two walls' logs a half log apart
+    in height, so the tails stack out of the corner both ways by turns, each with its sawn end.
+    The walls' pictures are their outer faces, so a log's axis lies a radius inside them (and a
+    hair more, so a tail never ties with the picture it runs behind)."""
     h = sp["log_h"]
     r = h / 2
+    a = r + 0.012
     front = [(k + 0.5) * h for k in range(50) if (k + 0.5) * h < wy - 0.04]
-    side = [k * h for k in range(1, 50) if k * h < wy - 0.04]
-    def caps(ys):
-        out = []
-        for y in ys: out += end_grain(sp, r, y, r * 0.98, rnd)
-        return out
-    col = sp["log"]
-    bark = []
-    for y in front: bark += log_band(0, e, y - r, y + r, col)
-    return [
-        # The front wall's tails end beyond the side wall; the side walls' come out toward the path.
-        face([hw + e, wy, 0], [hw + e, wy, 2 * r], [hw + e, 0, 0], caps(front), mirror=True),
-        face([hw - 2 * r, wy, -e], [hw, wy, -e], [hw - 2 * r, 0, -e], caps(side), mirror=True),
-        # At the back: the side walls' tails, and the back wall's coming out past the side wall.
-        face([hw, wy, D + e], [hw - 2 * r, wy, D + e], [hw, 0, D + e], caps(side), mirror=True),
-        face([hw + e, wy, D - 2 * r], [hw + e, wy, D], [hw + e, 0, D - 2 * r], caps(front), mirror=True),
-        face([hw, wy, D - 2 * r], [hw + e, wy, D - 2 * r], [hw, 0, D - 2 * r], bark, mirror=True),
-    ]
+    side = [k * h for k in range(0, 50) if k * h < wy - 0.04]
+    end = mix(sp["log_end"], sp["log"], 0.25)
+    # Lit as solids, their bark is toned to match the painted logs of the walls beside them.
+    g = sum(sp["log"]) // 3
+    bark = dark(mix(sp["log"], [g, g, g], 0.3), 0.2)
+    def tube(p, q):
+        return {"from": [r3(v) for v in p], "to": [r3(v) for v in q], "radius": r3(r * 0.97), "color": bark, "end": end, "mirror": True}
+    out = []
+    for y in front:
+        # Under the eaves the roof runs out over the tails: each is cut short to tuck under it
+        # (its underside falls `k` a metre outward from the wall's top at `wy`), the top ones
+        # shorter by turns, and one with no room at all is left flush.
+        reach = min(e, (wy - 0.03 - (y + r)) / k) if k > 0 else e
+        if reach < 0.08: continue
+        out.append(tube([hw - 2 * r, y, a], [hw + reach, y, a]))          # the front wall's, out past the side
+        out.append(tube([hw - 2 * r, y, D - a], [hw + reach, y, D - a]))  # the back wall's
+    for y in side:
+        out.append(tube([hw - a, y, 2 * r], [hw - a, y, -e]))             # the side wall's, out toward the path
+        out.append(tube([hw - a, y, D - 2 * r], [hw - a, y, D + e]))      # and out the back
+    return out
 
 # ── Openings ───────────────────────────────────────────────────────────────
 
@@ -354,7 +357,8 @@ def building(sp, seed):
     ex = hw + o
     ey = wy - o * k
     tv = t * math.hypot(1.0, k)
-    ends = sp.get("ends", 0.0)
+    tail = sp.get("ends", 0.0)
+    ends = 0.0  # (the pictures stop at the corners: a log cabin's tails are tubes)
     # The front: the gable end, with its door and windows.
     openings = [(cx - w / 2, y0, cx + w / 2, y0 + h) for (cx, y0, w, h, *_ ) in sp["front_windows"]]
     dcx, dw, dh, dy = sp["door_at"]
@@ -397,8 +401,7 @@ def building(sp, seed):
              face([0, R + tv, -oz], [0, R + tv, D + oz], [ex, ey + tv, -oz], roof_picture(sp, W, L, rnd), mirror=True),
              face([ex, ey + tv, -oz], [ex, ey + tv, D + oz], [ex, ey, -oz], edge_picture(sp, W, tv), mirror=True),
              face([hw, wy, -oz], [hw, wy, D + oz], [ex, ey, -oz], under_picture(sp, W, math.hypot(o, wy - ey)), mirror=True)]
-    if sp["wall"] == "log":
-        faces += log_corners(sp, hw, D, wy, ends, rnd)
+    tubes = log_corners(sp, hw, D, wy, tail, k) if sp["wall"] == "log" else []
     smoke = None
     for ch in sp.get("chimneys", []):
         x, z, w, dz, top = ch["x"], ch["z"], ch["w"], ch["dz"], ch["top"]
@@ -416,6 +419,7 @@ def building(sp, seed):
     d = {"description": sp["description"], "shape": s, "facing": "Path", "depth": D,
          "light": {"enabled": True, "color": [255, 186, 110], "intensity": 0.45, "radius": 6.0, "at": 0.3, "flicker": 0.15}, "faces": faces}
     if smoke: d["smoke"] = smoke
+    if tubes: d["tubes"] = tubes
     return d
 
 def shift(part, dx):

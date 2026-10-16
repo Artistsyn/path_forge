@@ -2868,10 +2868,33 @@ pub struct PropDef {
     /// walls and the slopes of its roof, a chimney's sides), drawn in place of plain end walls.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub faces: Vec<PropFace>,
+    /// Facing the path: round parts as real cylinders (the tails of logs at a cabin's corners,
+    /// posts, pipes), drawn true from any angle with their sawn ends.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub tubes: Vec<PropTube>,
     /// Variety: each prop picks one of these definitions instead (names in the same kit, or in
     /// the scene's `prop_defs`), so a row of cottages is not one cottage over and over.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub pick: Vec<String>,
+}
+
+/// A cylinder that is part of a prop (`PropDef::tubes`): from one point to another in the prop's
+/// space (metres at scale 1: `x` across its front, `y` up, `z` back from the path), `radius`
+/// round, its side the colour of bark and its ends sawn: end grain with growth rings.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
+pub struct PropTube {
+    pub from: [f32; 3],
+    pub to: [f32; 3],
+    pub radius: f32,
+    pub color: Rgb,
+    /// Its sawn ends.
+    pub end: Rgb,
+    /// Drawn twice: as given and mirrored across the middle of the front (`x` to `-x`).
+    pub mirror: bool,
+}
+impl Default for PropTube {
+    fn default() -> Self { Self { from: [0.0, 0.5, 0.0], to: [1.0, 0.5, 0.0], radius: 0.15, color: [110, 80, 54], end: [180, 146, 104], mirror: false } }
 }
 
 /// A face of a prop besides its front (`PropDef::faces`): a flat picture standing in the prop's
@@ -2903,7 +2926,7 @@ impl Default for PropDef {
         Self {
             description: String::new(), sprite: SpriteRef::default(), shape: Vec::new(), kind: PropKind::Rock, tint: None,
             height: 0.0, anchor: Anchor::Ground, glow: 0.0, glow_from: 0.0, light: PropLight::default(), trim: true, smoke: PropSmoke::default(),
-            facing: Facing::Camera, depth: 0.0, faces: Vec::new(), pick: Vec::new(),
+            facing: Facing::Camera, depth: 0.0, faces: Vec::new(), tubes: Vec::new(), pick: Vec::new(),
         }
     }
 }

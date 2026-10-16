@@ -244,6 +244,83 @@ struct Billboard {
     /// Standing in the world facing one way (a building's front along the path, `Facing::Path`)
     /// rather than turned toward the camera: drawn in perspective.
     panel: Option<Panel>,
+    /// Or a cylinder (`PropDef::tubes`): drawn true, ray by ray.
+    tube: Option<Tube>,
+}
+
+/// A cylinder standing in the world (`PropDef::tubes`): its axis from `a` to `b` (x, y, d), `r`
+/// round, its bark and its sawn ends' colours (linear).
+#[derive(Clone, Copy, Debug)]
+struct Tube { a: [f32; 3], b: [f32; 3], r: f32, bark: [f32; 3], end: [f32; 3] }
+
+/// A tube as the camera sees it, for `tube_at`: its axis from `a` along the unit `u` for `len`
+/// (camera space), `r` round, its colours, the light falling on it from each side (+x, +y, +z,
+/// -x, -y, -z of the camera), and the camera's 1 / focal length and centre in pixels.
+#[derive(Clone, Copy, Debug)]
+struct TubeCard { a: [f32; 3], u: [f32; 3], len: f32, r: f32, bark: [f32; 3], end: [f32; 3], cube: [[f32; 3]; 6], kf: f32, cx: f32, cy: f32 }
+
+/// A tube at pixel centre (fx, fy): its depth there, how much of the pixel it covers, and its
+/// colour as lit; None where it is not. Its side is found as where the pixel's ray comes within
+/// `r` of its axis (a half pixel beyond for the soft edge of its outline), its ends as the ray
+/// crossing the discs that close it. `cards.wgsl` repeats it step for step.
+fn tube_at(t: &TubeCard, fx: f32, fy: f32) -> Option<(f32, f32, [f32; 3])> {
+    let d = [(fx - t.cx) * t.kf, (t.cy - fy) * t.kf, 1.0];
+    let (a, u, r) = (t.a, t.u, t.r);
+    let du = dot3(d, u);
+    let au = dot3(a, u);
+    // Across the axis: the ray d t and the axis point a, less their parts along it.
+    let dp = [d[0] - du * u[0], d[1] - du * u[1], d[2] - du * u[2]];
+    let ap = [a[0] - au * u[0], a[1] - au * u[1], a[2] - au * u[2]];
+    let qa = dot3(dp, dp);
+    let qb = dot3(dp, ap);
+    let aa = dot3(ap, ap);
+    let mut best: Option<(f32, f32, [f32; 3])> = None;
+    if qa > 1e-12 {
+        let tc = qb / qa;
+        let rho = (aa - qb * tc).max(0.0).sqrt();
+        let pix = tc.max(NEAR) * t.kf;
+        let cover = ((r - rho) / pix + 0.5).clamp(0.0, 1.0);
+        if cover > 0.0 {
+            // Its near side where the ray meets it, or its outline where it only grazes it.
+            let th = if rho < r { tc - ((r * r - rho * rho) / qa).sqrt() } else { tc };
+            let s = th * du - au;
+            if th > NEAR && (0.0..=t.len).contains(&s) {
+                let n = [th * d[0] - a[0] - s * u[0], th * d[1] - a[1] - s * u[1], th * d[2] - a[2] - s * u[2]];
+                let nl = dot3(n, n).sqrt().max(1e-9);
+                let n = [n[0] / nl, n[1] / nl, n[2] / nl];
+                // Bark: darker toward its outline, as a round thing is, and in faint bands along it.
+                let facing = -dot3(n, d) / dot3(d, d).sqrt();
+                let k = (0.72 + 0.28 * facing) * (0.94 + 0.06 * (9.0 * s).sin());
+                let lit = mul3(scale3(t.bark, k), tube_light(t, n));
+                best = Some((th, cover, lit));
+            }
+        }
+    }
+    // Its sawn ends: rings round the pith, a rim of bark.
+    if du.abs() > 1e-6 {
+        for (sc, sg) in [(0.0f32, -1.0f32), (t.len, 1.0)] {
+            let tq = (au + sc) / du;
+            if tq <= NEAR || best.is_some_and(|b| b.0 <= tq) { continue; }
+            let p = [tq * d[0] - a[0] - sc * u[0], tq * d[1] - a[1] - sc * u[1], tq * d[2] - a[2] - sc * u[2]];
+            let q = dot3(p, p).sqrt() / r;
+            if q > 1.0 { continue; }
+            let col = if q > 0.86 { scale3(t.bark, 0.7) } else if q < 0.07 { scale3(t.end, 0.62) } else { scale3(t.end, 0.86 + 0.14 * (26.0 * q).cos()) };
+            let n = [sg * u[0], sg * u[1], sg * u[2]];
+            best = Some((tq, 1.0, mul3(col, tube_light(t, n))));
+        }
+    }
+    best
+}
+
+/// The light on a tube's surface turned along `n` (camera space), from its six sides.
+fn tube_light(t: &TubeCard, n: [f32; 3]) -> [f32; 3] {
+    let mut l = [0.0f32; 3];
+    for (i, &c) in n.iter().enumerate() {
+        let side = if c >= 0.0 { t.cube[i] } else { t.cube[i + 3] };
+        let w = c * c;
+        for j in 0..3 { l[j] += w * side[j]; }
+    }
+    l
 }
 
 /// A card standing in the world (x, y, d): its picture's top left corner is at `tl`, and its
@@ -1228,7 +1305,7 @@ impl WorldRenderer {
                 let z = ctxs[0].view.to_cam(0.0, 0.0, zb)[2];
                 bills.push(Billboard {
                     z: z - 0.05, world: [0.0, 0.0, zb - 0.05], height, sprite, flip: false, nearest: false, id: id::PROP,
-                    emissive: if kind == SetPieceKind::Portal { 0.9 } else { 0.0 }, shadow: 0.6, own_light: None, source: 0, realm: 0, panel: None, sway: 0.0, tint: [1.0; 3], wind: CardWind::default(),
+                    emissive: if kind == SetPieceKind::Portal { 0.9 } else { 0.0 }, shadow: 0.6, own_light: None, source: 0, realm: 0, panel: None, tube: None, sway: 0.0, tint: [1.0; 3], wind: CardWind::default(),
                 });
             }
         }
@@ -2066,7 +2143,7 @@ impl WorldRenderer {
                             bills.push(Billboard {
                                 z, world: [x, base, d], height: body_h, sprite: sprite.clone(),
                                 flip: sign > 0.0 && (matches!(f.mount, Mount::Wall) || on_pole), nearest: f.sprite.pixelated,
-                                id: id::FIXTURE, emissive, shadow: 0.0, own_light: None, source: PICK_FIXTURES | fi as u16, realm: ctx.realm, panel: None, sway: 0.0,
+                                id: id::FIXTURE, emissive, shadow: 0.0, own_light: None, source: PICK_FIXTURES | fi as u16, realm: ctx.realm, panel: None, tube: None, sway: 0.0,
                                 // A neon sign's tubes take its colour, and stutter with it.
                                 tint: if f.kind == FixtureKind::Neon && !f.sprite.is_set() { let g = glow; let m = g[0].max(g[1]).max(g[2]).max(1e-3); scale3(g, flicker.min(1.2) / m) } else { [1.0; 3] },
                                 wind: CardWind::default() });
@@ -2147,7 +2224,7 @@ impl WorldRenderer {
                     let z = ctx.view.to_cam(x, base, d + 0.3)[2];
                     bills.push(Billboard {
                         z, world: [x, base, d + 0.3], height: h * 1.25, sprite, sway: 0.0, tint: [1.0; 3], wind: CardWind::default(),
-                        flip: sign > 0.0, nearest: false, id: id::PROP, emissive: 0.0, shadow: 0.0, own_light: None, source: 0, realm: ctx.realm, panel: None,
+                        flip: sign > 0.0, nearest: false, id: id::PROP, emissive: 0.0, shadow: 0.0, own_light: None, source: 0, realm: ctx.realm, panel: None, tube: None,
                     });
                     ctx.falls.push(([x, h * 1.05, d], wf.width, wi));
                 }
@@ -2206,7 +2283,7 @@ impl WorldRenderer {
                 bills.push(Billboard {
                     z, world: [0.0, 0.0, d], height, sprite, flip: false, nearest: p.sprite.pixelated, id: id::PROP,
                     emissive: if p.kind == SetPieceKind::Portal { 0.9 } else { 0.0 },
-                    shadow: p.shadow.clamp(0.0, 1.0), own_light: None, source: PICK_SET_PIECES | li as u16, realm: ctx.realm, panel: None, sway, tint: [1.0; 3], wind: CardWind::default() });
+                    shadow: p.shadow.clamp(0.0, 1.0), own_light: None, source: PICK_SET_PIECES | li as u16, realm: ctx.realm, panel: None, tube: None, sway, tint: [1.0; 3], wind: CardWind::default() });
             }
         }
     }
@@ -2248,7 +2325,7 @@ impl WorldRenderer {
             let z = ctx.view.to_cam(x, base, d)[2];
             bills.push(Billboard {
                 z, world: [x, base, d], height, sprite, flip: c.sprite.flip_x, nearest: c.sprite.pixelated, id: id::PROP,
-                emissive: 0.0, shadow: 0.0, own_light, source: PICK_COMPANIONS | ci as u16, realm: ctx.realm, panel: None, sway: 0.0, tint: [1.0; 3], wind: CardWind::default(),
+                emissive: 0.0, shadow: 0.0, own_light, source: PICK_COMPANIONS | ci as u16, realm: ctx.realm, panel: None, tube: None, sway: 0.0, tint: [1.0; 3], wind: CardWind::default(),
             });
         }
     }
@@ -2397,7 +2474,7 @@ impl WorldRenderer {
                             Billboard {
                                 z: ctx.view.to_cam(mid[0], mid[1], mid[2])[2], world: mid, height: len(down), sprite, sway: 0.0, tint, wind: CardWind::default(), flip: false,
                                 nearest: look.pixelated, id: id::PROP, emissive: look.glow, shadow: 0.0, own_light, source, realm: ctx.realm,
-                                panel: Some(Panel { tl, across, down, strip }),
+                                panel: Some(Panel { tl, across, down, strip }), tube: None,
                             }
                         };
                         // The rest of it: its own faces, placed from its space (x across its front, y up,
@@ -2411,7 +2488,22 @@ impl WorldRenderer {
                                 let sub = |a: [f32; 3], b: [f32; 3]| [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
                                 bills.push(face(f.sprite.clone(), tl, sub(tr, tl), sub(bl, tl), None));
                             }
-                        } else if let Some(pn) = panel {
+                        }
+                        if stands && !look.tubes.is_empty() {
+                            let k = height / look.natural;
+                            let fx = if flip { -1.0 } else { 1.0 };
+                            let at = |c: [f32; 3]| [x + sign * c[2] * k, base + c[1] * k, d - sign * fx * c[0] * k];
+                            for &(f, t, rad, bark, end) in &look.tubes {
+                                let (a, b) = (at(f), at(t));
+                                let mid = [0.5 * (a[0] + b[0]), 0.5 * (a[1] + b[1]), 0.5 * (a[2] + b[2])];
+                                bills.push(Billboard {
+                                    z: ctx.view.to_cam(mid[0], mid[1], mid[2])[2], world: mid, height: 2.0 * rad * k, sprite: sprite.clone(), sway: 0.0, tint,
+                                    wind: CardWind::default(), flip: false, nearest: false, id: id::PROP, emissive: 0.0, shadow: 0.0, own_light, source, realm: ctx.realm,
+                                    panel: None, tube: Some(Tube { a, b, r: rad * k, bark, end }),
+                                });
+                            }
+                        }
+                        if let Some(pn) = panel.filter(|_| look.faces.is_empty()) {
                             // Or with depth, its ends are walls that deep, drawn from the edges of its picture.
                             let depth = p.depth.unwrap_or(look.depth).max(0.0);
                             if depth > 0.01 {
@@ -2426,7 +2518,7 @@ impl WorldRenderer {
                         bills.push(Billboard {
                             z, world: [x, base, d], height, sprite, sway, tint, wind, flip,
                             nearest: look.pixelated, id: id::PROP, emissive: look.glow,
-                            shadow, own_light, source, realm: ctx.realm, panel });
+                            shadow, own_light, source, realm: ctx.realm, panel, tube: None });
                     }
                 }
             }
@@ -2509,7 +2601,7 @@ fn post_billboard(ctx: &Ctx, sprite: &Arc<Sprite>, x: f32, top: f32, d: f32, siz
     let z = ctx.view.to_cam(x, 0.0, d)[2];
     Billboard {
         z: z + 0.001, world: [x, 0.0, d], height: top, sprite: sprite.clone(), flip: false, nearest: false,
-        id: id::FIXTURE, emissive: 0.0, shadow: 0.35 * size.min(1.0), own_light: None, source: 0, realm: ctx.realm, panel: None, sway: 0.0, tint: [1.0; 3], wind: CardWind::default(),
+        id: id::FIXTURE, emissive: 0.0, shadow: 0.35 * size.min(1.0), own_light: None, source: 0, realm: ctx.realm, panel: None, tube: None, sway: 0.0, tint: [1.0; 3], wind: CardWind::default(),
     }
 }
 
@@ -4956,6 +5048,8 @@ struct Card<'a> {
     /// u = (h0 X + h1 Y + h2) / w, v = (h3 X + h4 Y + h5) / w with w = h6 X + h7 Y + h8, and its
     /// depth there is 1 / (q0 X + q1 Y + q2); `strip` (or below 0) is the column an end wall shows.
     pan: Option<([f32; 9], [f32; 3], f32)>,
+    /// A cylinder (`Billboard::tube`), drawn by `tube_at`.
+    tube: Option<TubeCard>,
 }
 
 /// The mapping from pixels to a world-standing card's picture and depth (see `Card::pan`), for a
@@ -5033,6 +5127,7 @@ impl<'a> Card<'a> {
         let (w, h) = (v.width, v.height);
         let [x, y, d] = b.world;
         if let Some(pn) = b.panel { return Card::panel(ctx, b, pn, crisp); }
+        if let Some(t) = b.tube { return Card::tube(ctx, b, t); }
         let base = v.to_cam(x, y, d);
         if base[2] < NEAR { return None; }
         let [sx, sy_base] = v.project(base)?;
@@ -5060,7 +5155,47 @@ impl<'a> Card<'a> {
         let (fog_mul, fog_add) = ctx.fog_affine(z);
         Some(Card {
             b, w, sx, wp, hp, sy_top, sway_px, x0, x1, y0, y1, light, snow, z, nearest: b.nearest || crisp,
+            fog: (plain, ctx.fog_t(z), ctx.fog_col, fog_mul, fog_add), pan: None, tube: None,
+        })
+    }
+
+    /// A cylinder (`Billboard::tube`): its axis in camera space, the pixels round it, and the
+    /// light falling on it from each side.
+    fn tube(ctx: &Ctx, b: &'a Billboard, t: Tube) -> Option<Card<'a>> {
+        let v = &ctx.view;
+        let (w, h) = (v.width, v.height);
+        let (ca, cb) = (v.to_cam(t.a[0], t.a[1], t.a[2]), v.to_cam(t.b[0], t.b[1], t.b[2]));
+        if ca[2] + t.r < NEAR && cb[2] + t.r < NEAR { return None; }
+        let ax = [cb[0] - ca[0], cb[1] - ca[1], cb[2] - ca[2]];
+        let len = dot3(ax, ax).sqrt();
+        if len < 1e-4 { return None; }
+        let u = scale3(ax, 1.0 / len);
+        // Its pixel box: round its ends and their radius, or the whole frame when it reaches
+        // behind the camera.
+        let (x0, x1, y0, y1) = match (v.project(ca), v.project(cb)) {
+            (Some(pa), Some(pb)) if ca[2] - t.r >= NEAR && cb[2] - t.r >= NEAR => {
+                let (ra, rb) = (v.px_per_m(ca[2] - t.r) * t.r + 1.0, v.px_per_m(cb[2] - t.r) * t.r + 1.0);
+                (((pa[0] - ra).min(pb[0] - rb).floor() as i64).max(0), ((pa[0] + ra).max(pb[0] + rb).ceil() as i64).min(w as i64 - 1),
+                 ((pa[1] - ra).min(pb[1] - rb).floor() as i64).max(0), ((pa[1] + ra).max(pb[1] + rb).ceil() as i64).min(h as i64 - 1))
+            }
+            _ => (0, w as i64 - 1, 0, h as i64 - 1),
+        };
+        if x0 > x1 || y0 > y1 { return None; }
+        let [mx, my, md] = b.world;
+        let z = v.to_cam(mx, my, md)[2].max(NEAR);
+        let hp = v.px_per_m(z) * 2.0 * t.r;
+        if hp < 0.5 { return None; }
+        let shade = weather::cloud_shade(ctx, mx, md);
+        let mut cube = [[0.0f32; 3]; 6];
+        for (i, e) in [[1.0f32, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0], [-1.0, 0.0, 0.0], [0.0, -1.0, 0.0], [0.0, 0.0, -1.0]].into_iter().enumerate() {
+            cube[i] = mul3(ctx.light_except(mx, my, md, Some(v.unrot_dir(e)), 0, shade, b.own_light), b.tint);
+        }
+        let plain = ctx.front.is_none() && ctx.gain == 1.0;
+        let (fog_mul, fog_add) = ctx.fog_affine(z);
+        Some(Card {
+            b, w, sx: 0.0, wp: 1.0, hp, sy_top: 0.0, sway_px: 0.0, x0, x1, y0, y1, light: cube[1], snow: None, z, nearest: false,
             fog: (plain, ctx.fog_t(z), ctx.fog_col, fog_mul, fog_add), pan: None,
+            tube: Some(TubeCard { a: ca, u, len, r: t.r, bark: t.bark, end: t.end, cube, kf: 1.0 / v.focal_px, cx: v.center_px, cy: v.horizon_px }),
         })
     }
 
@@ -5123,7 +5258,7 @@ impl<'a> Card<'a> {
         let (fog_mul, fog_add) = ctx.fog_affine(z);
         Some(Card {
             b, w, sx: 0.0, wp: 1.0, hp, sy_top: 0.0, sway_px: 0.0, x0, x1, y0, y1, light, snow, z, nearest: b.nearest || crisp,
-            fog: (plain, ctx.fog_t(z), ctx.fog_col, fog_mul, fog_add), pan: Some((hm, q, pn.strip.unwrap_or(-1.0))),
+            fog: (plain, ctx.fog_t(z), ctx.fog_col, fog_mul, fog_add), pan: Some((hm, q, pn.strip.unwrap_or(-1.0))), tube: None,
         })
     }
 
@@ -5144,6 +5279,13 @@ impl<'a> Card<'a> {
             pan: self.pan.is_some() as u32, ph: self.pan.map_or([0.0; 9], |p| p.0), pq: self.pan.map_or([0.0; 3], |p| p.1), strip: self.pan.map_or(-1.0, |p| p.2),
             ..Default::default()
         };
+        let mut card = card;
+        if let Some(t) = &self.tube {
+            card.tube = 1;
+            (card.ta, card.tu, card.tlen, card.trad, card.tbark, card.tend) = (t.a, t.u, t.len, t.r, t.bark, t.end);
+            for (i, c) in t.cube.iter().enumerate() { card.cube[3 * i..3 * i + 3].copy_from_slice(c); }
+            (card.tkf, card.tcx, card.tcy) = (t.kf, t.cx, t.cy);
+        }
         super::gpu::CardIn {
             card, sprite: b.sprite.clone(), lod: b.sprite.lod(self.hp),
             glow: b.sprite.glow.as_ref().map(|g| (g.clone(), g.lod(self.hp))),
@@ -5157,6 +5299,23 @@ impl<'a> Card<'a> {
         let (ya, yb) = (self.y0.max(row0 as i64), self.y1.min(row0 as i64 + rows - 1));
         let [x, y, d] = b.world;
         let (plain, fog_t, fog_c, fog_mul, fog_add) = self.fog;
+        if let Some(t) = &self.tube {
+            for py in ya..=yb {
+                let fy = py as f32 + 0.5;
+                for px in self.x0..=self.x1 {
+                    let i = (py - row0 as i64) as usize * w + px as usize;
+                    let Some((z, a, lit)) = tube_at(t, px as f32 + 0.5, fy) else { continue };
+                    if z < NEAR || z >= gbuf[i].depth { continue; }
+                    let c = if plain { mix3(fog_c, lit, fog_t) } else { add3(scale3(lit, fog_mul), fog_add) };
+                    hdr[i] = mix3(hdr[i], c, a);
+                    if a >= 0.5 {
+                        gbuf[i] = GPixel { depth: z, id: b.id, x, y, d, realm: b.realm, pad: 0 };
+                        if let Some(p) = pick.as_deref_mut() { p[i] = b.source; }
+                    }
+                }
+            }
+            return;
+        }
         if let Some((hm, q, strip)) = self.pan {
             for py in ya..=yb {
                 let fy = py as f32 + 0.5;
@@ -6969,5 +7128,22 @@ mod tests {
         assert!(changed > 400, "only {changed} pixels show the rest of the building");
         let (len, secs) = (s.motion.loop_length, s.motion.loop_seconds());
         assert_eq!(r.render(&s, 0.0, &o(0.0)).rgba, r.render(&s, len, &o(secs)).rgba, "the loop must close");
+    }
+
+    #[test]
+    fn a_tube_shows_its_round_side_and_its_sawn_ends_with_a_soft_outline() {
+        let lit = [[1.0f32; 3]; 6];
+        // A log 2 m long, 0.15 m round, lying across the view 5 m ahead (focal 100 px, centre 50, 50).
+        let t = TubeCard { a: [-1.0, 0.0, 5.0], u: [1.0, 0.0, 0.0], len: 2.0, r: 0.15, bark: [0.4, 0.3, 0.2], end: [0.7, 0.6, 0.4], cube: lit, kf: 0.01, cx: 50.0, cy: 50.0 };
+        let (z, cover, _) = tube_at(&t, 50.0, 50.0).expect("its middle");
+        assert!((z - 4.85).abs() < 1e-3 && cover == 1.0, "its near side, a radius before its axis: {z}");
+        assert!(tube_at(&t, 50.0, 50.0 - 4.0).is_none(), "nothing beyond its radius (3 px at 5 m)");
+        let edge = tube_at(&t, 50.0, 50.0 - 3.0).map_or(0.0, |h| h.1);
+        assert!(edge > 0.0 && edge < 1.0, "its outline is soft: {edge}");
+        assert!(tube_at(&t, 50.0 + 25.0, 50.0).is_none(), "nothing past its end");
+        // Seen end on, its sawn end: rings, not bark.
+        let e = TubeCard { a: [0.0, 0.0, 5.0], u: [0.0, 0.0, 1.0], len: 2.0, ..t };
+        let (z, _, c) = tube_at(&e, 50.5, 50.5).expect("its end");
+        assert!((z - 5.0).abs() < 1e-4 && c[0] > 0.4, "the near end, end grain: {z} {c:?}");
     }
 }
