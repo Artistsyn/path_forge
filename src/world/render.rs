@@ -288,10 +288,12 @@ fn tube_at(t: &TubeCard, fx: f32, fy: f32) -> Option<(f32, f32, [f32; 3])> {
                 let n = [th * d[0] - a[0] - s * u[0], th * d[1] - a[1] - s * u[1], th * d[2] - a[2] - s * u[2]];
                 let nl = dot3(n, n).sqrt().max(1e-9);
                 let n = [n[0] / nl, n[1] / nl, n[2] / nl];
-                // Bark: darker toward its outline, as a round thing is, and in faint bands along it.
-                let facing = -dot3(n, d) / dot3(d, d).sqrt();
-                let k = (0.72 + 0.28 * facing) * (0.94 + 0.06 * (9.0 * s).sin());
-                let lit = mul3(scale3(t.bark, k), tube_light(t, n));
+                // Bark, shaded round as a log's painted picture is (by the height on it its
+                // surface faces), lit as a wall facing out from it is.
+                let k = log_shade(0.5 + 0.5 * n[1]);
+                let h = (n[0] * n[0] + n[2] * n[2]).sqrt();
+                let out = if h > 1e-3 { [n[0] / h, 0.0, n[2] / h] } else { [0.0, 0.0, -1.0] };
+                let lit = mul3(scale3(t.bark, k), tube_light(t, out));
                 best = Some((th, cover, lit));
             }
         }
@@ -310,6 +312,13 @@ fn tube_at(t: &TubeCard, fx: f32, fy: f32) -> Option<(f32, f32, [f32; 3])> {
         }
     }
     best
+}
+
+/// How a round log is shaded across its height, from its underside (0) to its top (1): the
+/// kit's painted logs use the same curve (`roundness` in tools/kit_buildings.py).
+fn log_shade(v: f32) -> f32 {
+    let v = v.clamp(0.0, 1.0);
+    (0.25 + 0.75 * (std::f32::consts::PI * v).sin().max(0.0).sqrt()) * (0.8 + 0.4 * v)
 }
 
 /// The light on a tube's surface turned along `n` (camera space), from its six sides.

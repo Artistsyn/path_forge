@@ -240,6 +240,8 @@ until the camera turns.
 **Tubes.** Round parts are better as `tubes`: real cylinders, each `from` one point `to` another
 in the prop's space with a `radius`, a bark `color` and an `end` colour for its sawn ends (with
 growth rings), `mirror` for both sides. They are drawn true from any angle, their outlines soft,
+shaded round across their height by the same curve as the kit's painted logs (so a tail continues its
+wall log seamlessly),
 lit round. The log cabins' corners are tubes: each wall's logs run on past the corner as tails,
 the two walls' a half log apart in height, so the tails stack out both ways by turns.
 

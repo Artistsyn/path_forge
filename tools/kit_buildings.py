@@ -172,17 +172,26 @@ def logs(sp, x0, x1, y0, top, clip, ends, offset=0.0):
         y += h
     return s
 
-def log_band(x0, x1, a, b, col):
-    """One round log seen from the side: a deep groove of shadow where it sits on the log below,
-    its belly in shade, lit across its upper curve, rolling away into shade again at its top."""
-    hh = b - a
-    return [rect(x0, a, x1, b, col, 0.6),
-            rect(x0, a, x1, a + 0.1 * hh, dark(col, 0.7), 0.2),
-            rect(x0, a + 0.1 * hh, x1, a + 0.24 * hh, dark(col, 0.45), 0.3),
-            rect(x0, a + 0.24 * hh, x1, a + 0.4 * hh, dark(col, 0.2), 0.3),
-            rect(x0, a + 0.6 * hh, x1, a + 0.8 * hh, light(col, 0.2), 0.3),
-            rect(x0, a + 0.9 * hh, x1, b, dark(col, 0.3), 0.3),
-            line([x0, a + 0.52 * hh], [x1, a + 0.5 * hh], 0.01, dark(col, 0.3))]
+def roundness(v):
+    """How a round log is shaded across its height, from its underside (v = 0) to its top (1):
+    the shadowed groove where it sits on the log below, lit across its upper curve, rolling away
+    a little at the top. The renderer's tubes (render::log_shade) shade by the same curve, so a
+    painted log and its cylinder tail match."""
+    return (0.25 + 0.75 * math.sqrt(max(math.sin(math.pi * v), 0.0))) * (0.8 + 0.4 * v)
+
+def to_lin(c): return [(x / 255 / 12.92) if x / 255 <= 0.04045 else ((x / 255 + 0.055) / 1.055) ** 2.4 for x in c]
+def to_srgb(l): return [max(0, min(255, int((v * 12.92 if v <= 0.0031308 else 1.055 * v ** (1 / 2.4) - 0.055) * 255 + 0.5))) for v in l]
+
+def log_band(x0, x1, a, b, col, steps=12):
+    """One round log seen from the side, painted flat in `steps` bands by `roundness`, the
+    colours worked in linear light as the renderer lights them."""
+    lin = to_lin(col)
+    out = []
+    for i in range(steps):
+        v = (i + 0.5) / steps
+        f = roundness(v)
+        out.append(rect(x0, a + (b - a) * i / steps, x1, a + (b - a) * (i + 1) / steps + 0.002, to_srgb([c * f for c in lin]), 0.0))
+    return out
 
 def end_grain(sp, cx, cy, r, rnd):
     """A log's sawn end, weathered: a rim of bark, growth rings round an off-centre pith, and the
@@ -212,9 +221,7 @@ def log_corners(sp, hw, D, wy, e, k):
     front = [(k + 0.5) * h for k in range(50) if (k + 0.5) * h < wy - 0.04]
     side = [k * h for k in range(0, 50) if k * h < wy - 0.04]
     end = mix(sp["log_end"], sp["log"], 0.25)
-    # Lit as solids, their bark is toned to match the painted logs of the walls beside them.
-    g = sum(sp["log"]) // 3
-    bark = dark(mix(sp["log"], [g, g, g], 0.3), 0.2)
+    bark = sp["log"]  # (shaded as the painted logs are: `roundness`)
     def tube(p, q):
         return {"from": [r3(v) for v in p], "to": [r3(v) for v in q], "radius": r3(r * 0.97), "color": bark, "end": end, "mirror": True}
     # Under the eaves the roof runs out over the tails (its underside falls `k` a metre outward

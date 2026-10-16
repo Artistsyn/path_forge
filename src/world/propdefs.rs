@@ -429,3 +429,26 @@ mod tests {
         assert!(r.unwrap().alts.len() == 1 && w.is_some_and(|w| w.contains("nope")), "a missing one is left out, and said");
     }
 }
+#[cfg(test)]
+mod probe_tmp {
+    use super::*;
+    #[test]
+    fn probe_front_rows() {
+        let s = crate::review::kit_backdrop();
+        let mut t = s.clone();
+        t.props = vec![PropLayer { def: "@settlement#log_cabin_small".into(), ..PropLayer::default() }];
+        let (r, _) = PropDefs::default().resolve(&t, None, &t.props[0], &mut SpriteCache::default());
+        let r = r.unwrap();
+        let sp = &r.sprites[0];
+        let (w, h, data) = &sp.levels[0];
+        println!("natural {} height {} sprite {}x{} aspect {}", r.natural, r.height, w, h, sp.aspect);
+        let x = w * 30 / 100;
+        let mut prev = 1.0f32;
+        for y in 0..*h {
+            let p = data[y * w + x];
+            let l = p[0] + p[1] + p[2];
+            if l < 0.06 && prev >= 0.06 { println!("dark row {y} -> metres from bottom {:.3}", (*h - y) as f32 / *h as f32 * r.height); }
+            prev = l;
+        }
+    }
+}

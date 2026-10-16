@@ -75,6 +75,12 @@ fn snow_on_card(cd: Card, u: f32, v: f32, lit: vec3<f32>) -> vec3<f32> {
 fn dot3r(a: vec3<f32>, b: vec3<f32>) -> f32 { return rnd(rnd(rnd(a.x * b.x) + rnd(a.y * b.y)) + rnd(a.z * b.z)); }
 fn sc3(a: vec3<f32>, k: f32) -> vec3<f32> { return vec3<f32>(rnd(a.x * k), rnd(a.y * k), rnd(a.z * k)); }
 
+// render::log_shade.
+fn log_shade(v0: f32) -> f32 {
+    let v = clamp(v0, 0.0, 1.0);
+    return rnd(rnd(0.25 + rnd(0.75 * sqrt(max(sin(rnd(3.14159274 * v)), 0.0)))) * rnd(0.8 + rnd(0.4 * v)));
+}
+
 // render::tube_light.
 fn tube_light(cd: Card, n: vec3<f32>) -> vec3<f32> {
     var l = vec3<f32>(0.0);
@@ -118,9 +124,11 @@ fn tube_at(cd: Card, fx: f32, fy: f32) -> TubeHit {
                 var n = sc3(d, th) - a - sc3(u, s);
                 let nl = max(sqrt(dot3r(n, n)), 1e-9);
                 n = vec3<f32>(div(n.x, nl), div(n.y, nl), div(n.z, nl));
-                let facing = div(-dot3r(n, d), sqrt(dot3r(d, d)));
-                let k = rnd(rnd(0.72 + rnd(0.28 * facing)) * rnd(0.94 + rnd(0.06 * sin(rnd(9.0 * s)))));
-                let tl = tube_light(cd, n);
+                let k = log_shade(0.5 + rnd(0.5 * n.y));
+                let hh = sqrt(rnd(rnd(n.x * n.x) + rnd(n.z * n.z)));
+                var outn = vec3<f32>(0.0, 0.0, -1.0);
+                if hh > 1e-3 { outn = vec3<f32>(div(n.x, hh), 0.0, div(n.z, hh)); }
+                let tl = tube_light(cd, outn);
                 let b = sc3(bark, k);
                 best = TubeHit(th, cover, vec3<f32>(rnd(b.x * tl.x), rnd(b.y * tl.y), rnd(b.z * tl.z)));
             }
