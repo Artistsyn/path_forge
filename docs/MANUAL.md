@@ -58,12 +58,13 @@ pf presets
 pf render --preset "Forest Path" -o forest.png
 ```
 
-There are 38 presets: Stone Dungeon, Stone Crypt, Mossy Sewer, Forest Path, Desert Canyon, Night
+There are 41 presets: Stone Dungeon, Stone Crypt, Mossy Sewer, Forest Path, Desert Canyon, Night
 Road, Magic Cavern, Ice Dungeon, Ruins Path, Dark Street, Mountain Pass, Volcanic Rift, Haunted
-Forest, Ruined Castle, Fiery Dungeon, Tower Stair, Bog Boardwalk, Desert Ruins, Ice Cave, Star Bridge,
-Nebula Crossing, Asteroid Belt, Hyperspace Run, Wormhole, Starship Flight, Event Horizon, Black Hole Arena, River Run, Canal Lanterns,
-Jungle River, Lagoon Swim, Sunset Pier, Frozen Channel, Misty River, Dawn Road, Winding Trail, Day and Night and
-Hyperspace Jump.
+Forest, Ruined Castle, Fiery Dungeon, Tower Stair, Bog Boardwalk, Desert Ruins, Ice Cave, Day and
+Night, Village Evening, Lily Harbour, Waterfall Glen, Star Bridge, Nebula Crossing, Asteroid Belt,
+Hyperspace Run, Wormhole, Starship Flight, Event Horizon, Black Hole Arena, River Run, Canal
+Lanterns, Jungle River, Lagoon Swim, Sunset Pier, Frozen Channel, Misty River, Dawn Road, Winding
+Trail and Hyperspace Jump.
 Every one loops without a seam (`pf seam` checks them all).
 
 ## 2. Scenes
@@ -159,7 +160,9 @@ out. `floating` sets what drifts down on the current: `Foam` (patches or ice flo
 `LilyPads` (a few in flower), at `float_density` per cell, `float_size` metres across, in
 `float_color`. `floating: Ice` drifts floes down it, and `frozen` (0..1) freezes it over from the
 banks inwards: a shelf of cracked, snow-dusted ice with open water left in the middle, until at 1
-it is closed from bank to bank (Frozen Channel). Rain rings the water instead of wetting it, and snow does not lie on it. For a
+it is closed from bank to bank (Frozen Channel). `cascades` (0..1) adds steps of white water across
+the channel every `cascade_spacing` metres, where it tumbles over rock and carries foam away
+downstream (River Run). Rain rings the water instead of wetting it, and snow does not lie on it. For a
 swimmer, put `camera.eye_height` near 0.3 and the horizon low (Lagoon Swim); for a boat, 1-1.3 m.
 Light shafts fill the whole air under an open sky, so leave them off unless trees or walls break
 the sun up.
@@ -208,6 +211,11 @@ studio, switching between Iron and Rope also switches `rail_color`, unless you h
 | `size_var`, `intensity_var`, `color_var` | Each one a little larger or smaller, brighter or dimmer, warmer or cooler. |
 | `density`, `cluster` | The share of places that hold a light, and how many stand at each (1..8). A cluster with jitter is a swarm: fireflies at every height. |
 | `stagger` | With lights on both sides, how far the right-hand row is out of step (0.5 = left and right take turns). |
+| `string_lights` | Festoon lights strung between the lights' posts (or brackets), sagging in a curve: `bulbs` per span, `sag` (metres at the middle), `color` or a repeating list of `colors`, `brightness`, `size`, and `twinkle`. The wires are drawn too (Village Evening). |
+
+`kind: Neon` is a neon sign for city streets: bent tubes on a dark board that glow in the
+fixture's `tint` and buzz with `flicker`. Flames sway, lick at their tips and throw embers; a
+brazier is a forged basket glowing from the coals.
 
 A beacon pulses; a chandelier carries five flames; glass, paper and glowing caps are lit from
 inside. A post is not lit by its own lamp, so it reads dark against the glow.
@@ -266,6 +274,8 @@ falling. Each is off until `enabled`. Field by field, see
 | On the lens | `weather.lens` | `Drops`: rain on a lens or windscreen: fine beads that bend the view, heavy drops that gather and run down in wavering trails leaving beads behind, and a haze where the glass is wet (`size`, `trails`, `blur`). `Frost`: crystals creeping in from the edges. |
 | Lightning | `weather.lightning` | Flashes that light the scene from the sky, and bolts where the sky shows. The export metadata gives each strike's frame, for thunder. |
 | Fog banks | `weather.fog_banks` | Thick stretches of fog the camera walks into and out of. |
+| Wildlife | `wildlife` | `birds`: flocks in V formation crossing the sky, wings flapping (`flocks`, `count`, `size`, `height`, `flap`, `crossing` seconds; not at night). `bats`: flitting low over the path at dusk (`dusk_only`) or all night. `fish`: leaping from the water beside the path and splashing back with a ring (`spacing`, `lateral` range, `leaps` a loop). Deer, stags, rabbits and herons stand in the kit `@wildlife`. |
+| Waterfalls | `waterfalls[]` | Streams pouring over a rock face beside the path: `side`, `lateral`, `spacing`, `offset`, `height` and `width` in metres, `water` and `rock` colours, foam and `spray` at the foot and a `rainbow` in it when the sun is out (Waterfall Glen). |
 
 **Cost.** Falling rain and snow, splashes, mist and most effects cost little. Wet ground and puddles
 cost what any glossy floor costs: the reflections roughly double a frame's render time (Dark
@@ -357,11 +367,19 @@ with its height in metres, whether it stands on the ground or hangs from the cei
 
 Definitions live in a scene's `prop_defs` (used as `"def": "<name>"`), or in a **kit**: a folder
 holding `kit.json` beside its images, used from any scene below it as `"def": "kits/<name>#<prop>"`.
-The built-in kit `@wayside` (lantern posts, hanging lanterns, glowing mushrooms, signposts, fences,
-barrels, crates) is drawn from shapes and needs no files.
+The built-in kits are drawn from shapes and need no files:
+
+- `@wayside`: lantern posts, hanging lanterns, glowing mushrooms, signposts, fences, barrels, crates;
+- `@settlement`: a cottage with lit windows and a smoking chimney, a well, a market stall, picket
+  fences, hay bales, a cart and a woodpile (Village Evening);
+- `@waterside`: rowing boats, lily pads, mooring posts and a blinking buoy (Lily Harbour);
+- `@wildlife`: deer (standing or grazing), a stag, a rabbit and a heron.
+
+A definition's `smoke` (`at` within the image, `color`, `amount`, `rise`, `width`) gives it a
+plume rising and drifting with the wind: a chimney, a campfire.
 
 ```bash
-pf kit --kit @wayside -o wayside.png
+pf kit --kit @settlement -o settlement.png
 ```
 
 **What glows and what casts a shadow.** Props, lights and set pieces are flat images (PNG with

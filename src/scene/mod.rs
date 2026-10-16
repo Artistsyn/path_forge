@@ -46,6 +46,10 @@ pub struct Scene {
     pub weather: Weather,
     /// The time of year: foliage, grass and the ground through spring, summer, autumn and winter.
     pub season: Season,
+    /// Things that move about: birds crossing the sky, bats at dusk, fish leaping from the water.
+    pub wildlife: Wildlife,
+    /// Waterfalls beside the path: water pouring down a rock face into foam and spray.
+    pub waterfalls: Vec<Waterfall>,
     /// Props described by data, by name: a prop layer uses one with `def: "<name>"`. Kits (folders
     /// with a kit.json) hold more, used as `def: "<folder>#<name>"`.
     #[serde(skip_serializing_if = "std::collections::BTreeMap::is_empty")]
@@ -151,13 +155,21 @@ pub struct Waterway {
     /// narrowing channel of open water down the middle, until at 1 it is ice from bank to bank.
     /// The ice is cracked, with snow lying on it in patches, and takes `foam_color`.
     pub frozen: f32,
+    /// Steps of white water across the channel where it tumbles over rock: 0 none .. 1 a
+    /// tumbling drop.
+    #[serde(default)]
+    pub cascades: f32,
+    /// Metres between them.
+    #[serde(default = "default_cascade_spacing")]
+    pub cascade_spacing: f32,
     pub seed: u32,
 }
+fn default_cascade_spacing() -> f32 { 24.0 }
 impl Default for Waterway {
     fn default() -> Self {
         Waterway {
             enabled: false, flow: 2, foam: 0.5, foam_color: [214, 226, 224], foam_width: 0.35, lap: 3, wet: 0.25,
-            floating: Floating::None, float_density: 0.3, float_color: [70, 110, 52], float_size: 0.5, frozen: 0.0, seed: 0,
+            floating: Floating::None, float_density: 0.3, float_color: [70, 110, 52], float_size: 0.5, frozen: 0.0, cascades: 0.0, cascade_spacing: 24.0, seed: 0,
         }
     }
 }
@@ -1631,6 +1643,9 @@ impl DayNight {
         }
         s.light.void_color = deep(s.light.void_color);
         s.weather.mist.color = scale(s.weather.mist.color, (0.2 + 0.8 * dim).min(1.0));
+        // Birds fly by day; bats come out at dusk.
+        if st.daylight < 0.15 { s.wildlife.birds.enabled = false; }
+        if s.wildlife.bats.dusk_only && st.daylight > 0.45 { s.wildlife.bats.enabled = false; }
         if dn.lamps {
             let lit = 1.0 - smooth(-0.05, 0.15, a);
             for f in s.fixtures.iter_mut() {
@@ -1647,6 +1662,107 @@ impl DayNight {
 }
 
 fn smooth(e0: f32, e1: f32, x: f32) -> f32 { let t = ((x - e0) / (e1 - e0)).clamp(0.0, 1.0); t * t * (3.0 - 2.0 * t) }
+
+/// A waterfall beside the path (`scene.waterfalls`): a rock face with water pouring down it in
+/// streaks, foam and spray boiling up at its foot, and (with the sun out) a little rainbow in the
+/// spray. It repeats every `spacing` metres, like a set piece; its water falls a whole number of
+/// times a loop.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
+pub struct Waterfall {
+    pub enabled: bool,
+    pub side: Side,
+    /// Metres from the path's edge.
+    pub lateral: f32,
+    pub spacing: f32,
+    pub offset: f32,
+    /// How far it falls, and how wide the water is, metres.
+    pub height: f32,
+    pub width: f32,
+    pub water: Rgb,
+    pub rock: Rgb,
+    /// How much foam and spray at its foot (0..1).
+    pub spray: f32,
+    /// The rainbow in its spray when the sun is out (0 none).
+    pub rainbow: f32,
+    pub seed: u32,
+}
+impl Default for Waterfall {
+    fn default() -> Self {
+        Waterfall { enabled: true, side: Side::Left, lateral: 3.0, spacing: 60.0, offset: 20.0, height: 7.0, width: 2.2, water: [210, 228, 240], rock: [92, 88, 82], spray: 0.7, rainbow: 0.5, seed: 0 }
+    }
+}
+
+/// Animals on the move (`scene.wildlife`). Each goes round a whole number of times a loop, so the
+/// loop closes; with a day and night, birds fly by day and bats come out at dusk.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
+pub struct Wildlife {
+    pub birds: Birds,
+    pub bats: Bats,
+    pub fish: Fish,
+}
+
+/// Flocks of birds crossing the sky in loose vees, wings beating.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
+pub struct Birds {
+    pub enabled: bool,
+    /// Flocks crossing at once.
+    pub flocks: u32,
+    /// Birds in a flock.
+    pub count: u32,
+    /// Wingspan as a share of the sky's height.
+    pub size: f32,
+    /// How high they fly: 0 the top of the sky .. 1 the horizon.
+    pub height: f32,
+    /// Wingbeats a second.
+    pub flap: f32,
+    /// Seconds to cross the frame (rounded so a whole number of crossings fit the loop).
+    pub crossing: f32,
+    pub color: Rgb,
+    pub seed: u32,
+}
+impl Default for Birds {
+    fn default() -> Self { Birds { enabled: false, flocks: 2, count: 7, size: 0.025, height: 0.35, flap: 3.0, crossing: 12.0, color: [30, 30, 36], seed: 0 } }
+}
+
+/// Bats flitting about over the path, darting and fluttering.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
+pub struct Bats {
+    pub enabled: bool,
+    pub count: u32,
+    /// Wingspan, metres.
+    pub size: f32,
+    pub color: Rgb,
+    /// Only after dusk when the scene has a day and night.
+    pub dusk_only: bool,
+    pub seed: u32,
+}
+impl Default for Bats {
+    fn default() -> Self { Bats { enabled: false, count: 8, size: 0.3, color: [24, 20, 22], dusk_only: true, seed: 0 } }
+}
+
+/// Fish leaping from the water beside or along the path in silver arcs, with splash rings.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
+pub struct Fish {
+    pub enabled: bool,
+    /// One every so many metres along the path.
+    pub spacing: f32,
+    /// How far out from the path's middle they leap: from .. to, metres (either side).
+    pub lateral: [f32; 2],
+    /// Leaps each fish makes per loop.
+    pub leaps: u32,
+    /// Its length, metres.
+    pub size: f32,
+    pub color: Rgb,
+    pub seed: u32,
+}
+impl Default for Fish {
+    fn default() -> Self { Fish { enabled: false, spacing: 6.0, lateral: [1.5, 6.0], leaps: 1, size: 0.35, color: [200, 210, 220], seed: 0 } }
+}
 
 /// The time of year (`scene.season`), over the scene's own colours (taken as summer's): fresh light
 /// green and blossom in spring; turning gold, orange and red with leaves falling in autumn; bare
@@ -1784,14 +1900,14 @@ impl Default for Fog {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-pub enum FixtureKind { Torch, Lantern, Candle, Brazier, Crystal, Firefly, Magic, GreenFire, IceWisp, StreetLamp, PaperLantern, Campfire, Glowshroom, Beacon, Chandelier }
+pub enum FixtureKind { Torch, Lantern, Candle, Brazier, Crystal, Firefly, Magic, GreenFire, IceWisp, StreetLamp, PaperLantern, Campfire, Glowshroom, Beacon, Chandelier, Neon }
 
 impl FixtureKind {
-    pub const ALL: [FixtureKind; 15] = [
+    pub const ALL: [FixtureKind; 16] = [
         FixtureKind::Torch, FixtureKind::Lantern, FixtureKind::Candle, FixtureKind::Brazier, FixtureKind::Crystal,
         FixtureKind::Firefly, FixtureKind::Magic, FixtureKind::GreenFire, FixtureKind::IceWisp,
         FixtureKind::StreetLamp, FixtureKind::PaperLantern, FixtureKind::Campfire, FixtureKind::Glowshroom, FixtureKind::Beacon,
-        FixtureKind::Chandelier,
+        FixtureKind::Chandelier, FixtureKind::Neon,
     ];
     pub fn name(self) -> &'static str {
         match self {
@@ -1800,6 +1916,7 @@ impl FixtureKind {
             FixtureKind::Magic => "Magic", FixtureKind::GreenFire => "Green Fire", FixtureKind::IceWisp => "Ice Wisp",
             FixtureKind::StreetLamp => "Street Lamp", FixtureKind::PaperLantern => "Paper Lantern", FixtureKind::Campfire => "Campfire",
             FixtureKind::Glowshroom => "Glowshroom", FixtureKind::Beacon => "Beacon", FixtureKind::Chandelier => "Chandelier",
+            FixtureKind::Neon => "Neon Sign",
         }
     }
     /// Light colour.
@@ -1813,6 +1930,8 @@ impl FixtureKind {
             FixtureKind::StreetLamp => [255, 214, 150], FixtureKind::PaperLantern => [255, 120, 60],
             FixtureKind::Campfire => [255, 135, 45], FixtureKind::Glowshroom => [90, 240, 200],
             FixtureKind::Beacon => [255, 60, 40], FixtureKind::Chandelier => [255, 180, 90],
+            // (`tint` colours a neon sign's tubes and light.)
+            FixtureKind::Neon => [255, 70, 190],
         }
     }
     /// Flame gradient from core to edge, or None for a soft orb.
@@ -1824,7 +1943,7 @@ impl FixtureKind {
             FixtureKind::Magic => Some([[230, 210, 255], [150, 100, 255], [90, 50, 230], [45, 15, 190]]),
             FixtureKind::GreenFire => Some([[220, 255, 210], [100, 235, 60], [25, 170, 15], [5, 95, 5]]),
             FixtureKind::IceWisp => Some([[225, 245, 255], [130, 210, 255], [50, 150, 230], [15, 85, 190]]),
-            FixtureKind::Crystal | FixtureKind::Firefly | FixtureKind::StreetLamp | FixtureKind::PaperLantern | FixtureKind::Glowshroom | FixtureKind::Beacon => None,
+            FixtureKind::Crystal | FixtureKind::Firefly | FixtureKind::StreetLamp | FixtureKind::PaperLantern | FixtureKind::Glowshroom | FixtureKind::Beacon | FixtureKind::Neon => None,
         }
     }
     /// What holds it up where there is no wall to hang it on, when `post` is left to choose.
@@ -2330,8 +2449,32 @@ pub struct Fixture {
     /// With `bridge_posts`: how many more posts (each with its light) stand evenly between the end
     /// posts: 1 halfway, 2 at the thirds, 3 at the quarters... The railing gains those posts.
     pub posts_between: u32,
+    /// Strings of little bulbs hung between each light and the next along its side, sagging
+    /// between them: festoon lights for a bridge, a terrace or a market street.
+    pub string_lights: StringLights,
     pub sprite: SpriteRef,
     pub seed: u32,
+}
+
+/// Bulbs on a wire strung between neighbouring lights of a row (`Fixture::string_lights`).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
+pub struct StringLights {
+    pub enabled: bool,
+    /// Bulbs between each pair of lights.
+    pub bulbs: u32,
+    /// How far the wire sags at the middle, metres.
+    pub sag: f32,
+    pub color: Rgb,
+    /// Colour the bulbs in turn through these instead (empty: all `color`).
+    pub colors: Vec<Rgb>,
+    pub brightness: f32,
+    pub size: f32,
+    /// How much they twinkle (0 steady).
+    pub twinkle: f32,
+}
+impl Default for StringLights {
+    fn default() -> Self { StringLights { enabled: false, bulbs: 9, sag: 0.45, color: [255, 214, 140], colors: Vec::new(), brightness: 1.0, size: 1.0, twinkle: 0.2 } }
 }
 impl Default for Fixture {
     fn default() -> Self {
@@ -2339,7 +2482,7 @@ impl Default for Fixture {
             enabled: true, kind: FixtureKind::Torch, side: Side::Both, mount: Mount::Wall, height: 2.1, spacing: 6.0,
             offset: 0.0, lateral: 0.3, size: 1.0, light: true, intensity: 1.0, radius: 6.0, flicker: 1.0, jitter: 0.0,
             jitter_along: 0.0, height_var: 0.0, size_var: 0.0, intensity_var: 0.0, color_var: 0.0, density: 1.0, cluster: 1, stagger: 0.0,
-            tint: [255, 255, 255], post: LampPost::Auto, place: LightPlace::Anywhere, set_piece: 0, bridge_posts: false, posts_between: 0,
+            tint: [255, 255, 255], post: LampPost::Auto, place: LightPlace::Anywhere, set_piece: 0, bridge_posts: false, posts_between: 0, string_lights: StringLights::default(),
             sprite: SpriteRef::default(), seed: 0,
         }
     }
@@ -2538,14 +2681,36 @@ pub struct PropDef {
     pub light: PropLight,
     /// Cut away transparent margins of images, so a sprite stands on its lowest visible pixel.
     pub trim: bool,
+    /// Smoke rising from it: a chimney, a campfire, a smouldering ruin.
+    pub smoke: PropSmoke,
 }
 impl Default for PropDef {
     fn default() -> Self {
         Self {
             description: String::new(), sprite: SpriteRef::default(), shape: Vec::new(), kind: PropKind::Rock, tint: None,
-            height: 0.0, anchor: Anchor::Ground, glow: 0.0, glow_from: 0.0, light: PropLight::default(), trim: true,
+            height: 0.0, anchor: Anchor::Ground, glow: 0.0, glow_from: 0.0, light: PropLight::default(), trim: true, smoke: PropSmoke::default(),
         }
     }
+}
+
+/// Smoke rising from a prop (`PropDef::smoke`): puffs that climb, spread, drift with the wind and
+/// thin away, round and round with the loop.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
+pub struct PropSmoke {
+    pub enabled: bool,
+    /// Where it leaves the prop, metres at scale 1: `x` sideways from its centre, `y` up.
+    pub at: [f32; 2],
+    pub color: Rgb,
+    /// How thick (0..1).
+    pub amount: f32,
+    /// How high it climbs before it has thinned away, metres.
+    pub rise: f32,
+    /// How wide a puff grows, metres.
+    pub width: f32,
+}
+impl Default for PropSmoke {
+    fn default() -> Self { PropSmoke { enabled: false, at: [0.0, 2.0], color: [150, 150, 155], amount: 0.5, rise: 3.0, width: 0.8 } }
 }
 
 /// Where a prop is fixed.

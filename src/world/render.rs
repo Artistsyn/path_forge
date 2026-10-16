@@ -22,6 +22,7 @@ use std::sync::Arc;
 mod weather;
 mod splat;
 mod space;
+mod wildlife;
 mod blackhole;
 mod water;
 mod lens;
@@ -321,6 +322,13 @@ struct Ctx<'a> {
     ambient: [f32; 3],
     sky_lights: Vec<DirLight>,
     lights: Vec<PointLight>,
+    /// Smoke rising from props this frame: where it leaves them (path space), how it looks, and
+    /// a seed for its puffs.
+    smokes: Vec<([f32; 3], crate::scene::PropSmoke, u32)>,
+    /// Wires of strings of lights: close points along them (path space).
+    wire_pts: Vec<[f32; 3]>,
+    /// Waterfalls in view: (x of the water's middle, top height, d, width, index into scene.waterfalls).
+    falls: Vec<([f32; 3], f32, usize)>,
     fog: Option<([f32; 3], f32)>,
     /// Colour fog fades to (also used by fog banks when the even fog is off).
     fog_col: [f32; 3],
@@ -1139,6 +1147,7 @@ impl WorldRenderer {
             if layers.props {
                 self.collect_props(&mut ctxs[r], &o, &mut bills);
                 self.collect_set_pieces(&mut ctxs[r], &o, &mut bills);
+                self.collect_waterfalls(&mut ctxs[r], &mut bills);
                 self.collect_companions(&mut ctxs[r], &o, &mut bills);
             }
         }
@@ -1424,6 +1433,11 @@ impl WorldRenderer {
         prof.mark("flames");
         if layers.particles {
             for (r, ctx) in ctxs.iter().enumerate() {
+                wildlife::draw(ctx, &mut splats);
+                draw_falls(ctx, &mut splats);
+                draw_cascades(ctx, &mut splats);
+                draw_wires(ctx, &mut splats);
+                draw_smoke(ctx, &mut splats);
                 weather::draw_wisps(ctx, &mut splats);
                 run(&mut splats, &mut gbuf, &mut hdr);
                 prof.mark("wisps");
@@ -1681,7 +1695,7 @@ impl WorldRenderer {
             deck_tile: snap_to_loop(scene.path.bridge.deck.tile_size, loop_len),
             bottom_tile: snap_to_loop(if scene.verge.enabled { scene.verge.material.tile_size } else { scene.path.material.tile_size }, loop_len),
             ambient: add3(add3(scale3(rgb_lin(scene.light.ambient_color), scene.light.ambient.max(0.0)), scale3(flash, 0.12)), add3(weather::aurora_glow(&scene.sky.aurora), add3(space::tunnel_glow(&scene.sky), blackhole::bh_glow(&scene.sky)))),
-            sky_lights, lights: Vec::new(), fog, fog_col, void_lin: rgb_lin(scene.light.void_color),
+            sky_lights, lights: Vec::new(), smokes: Vec::new(), wire_pts: Vec::new(), falls: Vec::new(), fog, fog_col, void_lin: rgb_lin(scene.light.void_color),
             realm, bounds, facade: None, opening: None, portal: None, front: None, verge_beyond: None, gain: 1.0, wx,
         };
         (ctx, loop_seconds, strike, flash)
@@ -1858,6 +1872,8 @@ impl WorldRenderer {
             };
             // A post on each side of the deck, whatever the side.
             let signs: &[f32] = if on_posts.is_some() && f.side == Side::Center { &[-1.0, 1.0] } else { f.side.signs() };
+            // Where each light hangs, for strings of bulbs between neighbours: (side, d, [x, y]).
+            let mut anchors: Vec<(usize, f32, [f32; 2])> = Vec::new();
             for (key, d0) in places {
                 for (si, &sign) in signs.iter().enumerate() { for c in 0..cluster {
                     // (The first of a cluster keeps the key a lone light has, so old scenes stand as they did.)
@@ -1919,6 +1935,11 @@ impl WorldRenderer {
                     let steady = match f.kind { FixtureKind::StreetLamp | FixtureKind::Glowshroom => 0.12, FixtureKind::PaperLantern => 0.4, _ => 1.0 };
                     let flicker = if f.kind == FixtureKind::Beacon {
                         0.12 + 1.5 * (TAU * pulse * ctx.tphase + ph).sin().max(0.0).powi(6)
+                    } else if f.kind == FixtureKind::Neon {
+                        // A neon tube hums steady, then stutters off and on now and then.
+                        let buzz = (cycles(0.6, loop_seconds) * ctx.tphase + ph / TAU).rem_euclid(1.0);
+                        let stutter = if f.flicker > 0.0 && buzz < 0.04 * f.flicker.min(2.0) { 0.15 + 0.6 * (TAU * 9.0 * buzz / 0.04).sin().abs() } else { 1.0 };
+                        stutter * (1.0 + 0.015 * (TAU * flick_m2 * ctx.tphase + ph).sin())
                     } else {
                         1.0 + steady * f.flicker * (0.12 * (TAU * flick_m1 * ctx.tphase + ph).sin() + 0.06 * (TAU * flick_m2 * ctx.tphase + ph * 2.3).sin())
                     };
@@ -1939,6 +1960,7 @@ impl WorldRenderer {
                             radius: reach.max(0.5),
                         });
                     }
+                    if f.string_lights.enabled { anchors.push((si, d, [x + lamp_dx, flame_y])); }
                     if d < NEAR { continue; }
                     // Fixture body, placed so its flame point sits at the flame height.
                     let mut body_w = 0.0;
@@ -1977,7 +1999,10 @@ impl WorldRenderer {
                             bills.push(Billboard {
                                 z, world: [x, base, d], height: body_h, sprite: sprite.clone(),
                                 flip: sign > 0.0 && (matches!(f.mount, Mount::Wall) || on_pole), nearest: f.sprite.pixelated,
-                                id: id::FIXTURE, emissive, shadow: 0.0, own_light: None, source: PICK_FIXTURES | fi as u16, realm: ctx.realm, sway: 0.0, tint: [1.0; 3], wind: CardWind::default() });
+                                id: id::FIXTURE, emissive, shadow: 0.0, own_light: None, source: PICK_FIXTURES | fi as u16, realm: ctx.realm, sway: 0.0,
+                                // A neon sign's tubes take its colour, and stutter with it.
+                                tint: if f.kind == FixtureKind::Neon && !f.sprite.is_set() { let g = glow; let m = g[0].max(g[1]).max(g[2]).max(1e-3); scale3(g, flicker.min(1.2) / m) } else { [1.0; 3] },
+                                wind: CardWind::default() });
                         }
                     }
                     let flame_size = match f.kind {
@@ -2002,8 +2027,61 @@ impl WorldRenderer {
                         }
                         continue;
                     }
-                    flames.push(Flame { halo_only: lamp.is_some(), world: [x + lamp_dx, flame_y, d], size: flame_size, colors, glow: glow_f, flicker, phase, embers, seed: fseed, realm: ctx.realm });
+                    flames.push(Flame { halo_only: lamp.is_some() || f.kind == FixtureKind::Neon, world: [x + lamp_dx, flame_y, d], size: flame_size, colors, glow: glow_f, flicker, phase, embers, seed: fseed, realm: ctx.realm });
                 } }
+            }
+            if f.string_lights.enabled && f.string_lights.bulbs > 0 {
+                let sl = &f.string_lights;
+                anchors.sort_by(|a, b| (a.0, a.1).partial_cmp(&(b.0, b.1)).unwrap_or(std::cmp::Ordering::Equal));
+                let tw = cycles(0.7, loop_seconds);
+                for pair in anchors.windows(2) {
+                    let ((sa, da, pa), (sb, db, pb)) = (pair[0], pair[1]);
+                    // Only between neighbours on the same side.
+                    if sa != sb || db - da > 1.6 * sp + 0.5 || db <= da { continue; }
+                    let at = |t: f32| [pa[0] + (pb[0] - pa[0]) * t, pa[1] + (pb[1] - pa[1]) * t - sl.sag * 4.0 * t * (1.0 - t), da + (db - da) * t];
+                    // The wire, as close dots along its curve.
+                    let span = ((pb[0] - pa[0]).powi(2) + (db - da).powi(2)).sqrt();
+                    let steps = (span / 0.12).ceil().clamp(4.0, 400.0) as usize;
+                    for k in 0..=steps { ctx.wire_pts.push(at(k as f32 / steps as f32)); }
+                    let n_b = sl.bulbs.min(64);
+                    for k in 1..=n_b {
+                        let t = k as f32 / (n_b + 1) as f32;
+                        let p = at(t);
+                        let idx = ((da * 7.0).round() as i64).wrapping_mul(64) + k as i64;
+                        let col = if sl.colors.is_empty() { sl.color } else { sl.colors[(k as usize - 1) % sl.colors.len()] };
+                        let twk = 1.0 + sl.twinkle.clamp(0.0, 1.0) * 0.5 * (TAU * (tw * ctx.tphase + hf(seed ^ 0x5B, idx))).sin();
+                        flames.push(Flame { halo_only: false, world: [p[0], p[1] - 0.05, p[2]], size: 0.35 * sl.size.max(0.05), colors: None,
+                            glow: scale3(rgb_lin(col), 0.6 * sl.brightness.max(0.0)), flicker: twk, phase: [0.0; 2], embers: 0, seed: 0, realm: ctx.realm });
+                    }
+                }
+            }
+        }
+    }
+
+    /// Waterfalls beside the path: their rock faces (cards), and where the water falls for the
+    /// splat pass (`draw_falls`).
+    fn collect_waterfalls(&mut self, ctx: &mut Ctx, bills: &mut Vec<Billboard>) {
+        let scene = ctx.scene;
+        for (wi, wf) in scene.waterfalls.iter().enumerate().filter(|(_, w)| w.enabled && w.height > 0.0) {
+            let sp = snap_to_loop(wf.spacing.max(5.0), ctx.loop_len);
+            let k_lo = ((ctx.scroll - 2.0 - wf.offset) / sp).ceil() as i64;
+            let k_hi = ((ctx.scroll + ctx.far.min(150.0) - wf.offset) / sp).floor() as i64;
+            let n = (ctx.loop_len / sp).round() as i64;
+            for k in k_lo..=k_hi {
+                let d = k as f32 * sp + wf.offset - ctx.scroll;
+                if d < NEAR { continue; }
+                for &sign in wf.side.signs() {
+                    let x = sign * (ctx.view.path_half_width(d) + wf.lateral + 0.5 * wf.width);
+                    let h = wf.height.max(0.5);
+                    let sprite = self.sprites.cliff(wf.rock, hash(wf.seed ^ 0xC2, k.rem_euclid(n)) as u32);
+                    let base = -0.05;
+                    let z = ctx.view.to_cam(x, base, d + 0.3)[2];
+                    bills.push(Billboard {
+                        z, world: [x, base, d + 0.3], height: h * 1.25, sprite, sway: 0.0, tint: [1.0; 3], wind: CardWind::default(),
+                        flip: sign > 0.0, nearest: false, id: id::PROP, emissive: 0.0, shadow: 0.0, own_light: None, source: 0, realm: ctx.realm,
+                    });
+                    ctx.falls.push(([x, h * 1.05, d], wf.width, wi));
+                }
             }
         }
     }
@@ -2203,6 +2281,11 @@ impl WorldRenderer {
                                     radius: l.radius.max(0.5),
                                 });
                             }
+                        }
+                        if let Some(sm) = &look.smoke {
+                            let flipped = if look.from_files { look.flip_x } else { variant & 0x100 != 0 };
+                            let sx = if flipped { -sm.at[0] } else { sm.at[0] } * sc;
+                            ctx.smokes.push(([x + sx, base + sm.at[1] * sc, d], sm.clone(), hash(seed ^ 0x5E0, ikey) as u32));
                         }
                         let z = ctx.view.to_cam(x, base, d)[2];
                         let mut sway = if hanging { 0.0 } else { ctx.wx.sway_at(hf(seed ^ 0x3C, ikey) * TAU) * weather::sway_factor(look.kind) * height };
@@ -4820,6 +4903,236 @@ fn draw_flame(ctx: &Ctx, f: &Flame, out: &mut Vec<Splat>) {
     }
 }
 
+/// Waterfalls' water: streaks pouring down the face, a pale sheet behind them, foam and spray
+/// boiling up at the foot, and a rainbow in the spray when the sun is out.
+fn draw_falls(ctx: &Ctx, out: &mut Vec<Splat>) {
+    let v = &ctx.view;
+    let loop_seconds = ctx.scene.motion.loop_seconds();
+    let sun = ctx.scene.sky.enabled && ctx.scene.sky.sun.enabled && ctx.scene.sky.sun.pos[1] < 1.0;
+    for (at, width, wi) in &ctx.falls {
+        let wf = &ctx.scene.waterfalls[*wi];
+        let (x0, top, d) = (at[0], at[1], at[2] - 0.05);
+        let water = rgb_lin(wf.water);
+        let lit = add3(ctx.light_at(x0, 0.5 * top, d, None, 0, 1.0), [0.1; 3]);
+        let col = ctx.apply_fog(mul3(water, lit), d);
+        let cyc = cycles(0.9, loop_seconds).max(1.0);
+        // The sheet: still, thin, see-through falls of water from lip to foot, darker at the
+        // edges where it is thinner.
+        let n_sheet = ((width * 16.0).round() as i64).clamp(8, 90);
+        for i in 0..n_sheet {
+            let u = (i as f32 + 0.5) / n_sheet as f32;
+            let x = x0 + (u - 0.5) * width + (hf(wf.seed ^ 0xE1, i) - 0.5) * 0.04;
+            let edge = 1.0 - (2.0 * u - 1.0).powi(4);
+            let (c0, c1) = (v.to_cam(x, top, d + 0.02), v.to_cam(x + (hf(wf.seed ^ 0xE2, i) - 0.5) * 0.1, 0.0, d + 0.02));
+            if c0[2] < NEAR { continue; }
+            let (Some([sx0, sy0]), Some([sx1, sy1])) = (v.project(c0), v.project(c1)) else { continue };
+            let wpx = (v.px_per_m(c0[2]) * width / n_sheet as f32 * 1.3).max(0.8);
+            splat::streak(out, c0[2], (sx0, sy0), (sx1, sy1), scale3(col, 0.8 + 0.25 * hf(wf.seed ^ 0xE3, i)), 0.32 * edge, wpx);
+        }
+        // A pool at the foot.
+        {
+            let c = v.to_cam(x0, 0.02, d - 0.3);
+            if c[2] >= NEAR {
+                if let Some([sx, sy]) = v.project(c) {
+                    let rx = v.px_per_m(c[2]) * width * 0.95;
+                    let ry = rx * 0.22;
+                    let (w, hgt) = (v.width as i64, v.height as i64);
+                    let (x0p, x1p) = (((sx - rx).floor() as i64).max(0), ((sx + rx).ceil() as i64).min(w - 1));
+                    let (y0p, y1p) = (((sy - ry).floor() as i64).max(0), ((sy + ry).ceil() as i64).min(hgt - 1));
+                    if x0p <= x1p && y0p <= y1p {
+                        out.push(Splat { z: c[2], gate: None, shape: Shape::Wisp { sx, sy, rx, ry, x0: x0p, x1: x1p, y0: y0p, y1: y1p, lit: scale3(col, 0.85), alpha: 0.7 } });
+                    }
+                }
+            }
+        }
+        let n_str = ((width * 18.0).round() as i64).clamp(8, 100);
+        for i in 0..n_str {
+            let h = |k: u32| hf(wf.seed ^ k, i);
+            let x = x0 + (h(0xF0) - 0.5) * width;
+            for j in 0..3 {
+                let p = (cyc * ctx.tphase + h(0xF1) + j as f32 / 3.0).rem_euclid(1.0);
+                // Falling faster as it goes.
+                let y1 = top * (1.0 - p * p);
+                let len = (0.4 + 0.9 * h(0xF2)) * (0.5 + p);
+                let y0 = (y1 + len).min(top);
+                let (c0, c1) = (v.to_cam(x, y0, d), v.to_cam(x, y1.max(0.0), d));
+                if c0[2] < NEAR { continue; }
+                let (Some([sx0, sy0]), Some([sx1, sy1])) = (v.project(c0), v.project(c1)) else { continue };
+                let wpx = (v.px_per_m(c0[2]) * 0.07).max(0.8);
+                splat::streak(out, c0[2], (sx0, sy0), (sx1, sy1), scale3(col, 1.25), 0.5 * (0.6 + 0.4 * p), wpx);
+            }
+        }
+        // Foam and spray at the foot.
+        let n_puff = (12.0 * wf.spray.clamp(0.0, 1.0)).round() as i64;
+        let pc = cycles(0.5, loop_seconds).max(1.0);
+        for i in 0..n_puff {
+            let h = |k: u32| hf(wf.seed ^ k, i);
+            let p = (pc * ctx.tphase + h(0xF5)).rem_euclid(1.0);
+            let (x, y) = (x0 + (h(0xF6) - 0.5) * width * (1.0 + p), 0.1 + 1.6 * p * h(0xF7));
+            let c = v.to_cam(x, y, d - 0.2);
+            if c[2] < NEAR { continue; }
+            let Some([sx, sy]) = v.project(c) else { continue };
+            let r = (v.px_per_m(c[2]) * width * (0.25 + 0.5 * p)).max(1.0);
+            let (w, hgt) = (v.width as i64, v.height as i64);
+            let (x0p, x1p) = (((sx - r).floor() as i64).max(0), ((sx + r).ceil() as i64).min(w - 1));
+            let (y0p, y1p) = (((sy - r).floor() as i64).max(0), ((sy + r).ceil() as i64).min(hgt - 1));
+            if x0p > x1p || y0p > y1p { continue; }
+            let alpha = 0.45 * wf.spray * (1.0 - p);
+            out.push(Splat { z: c[2], gate: None, shape: Shape::Wisp { sx, sy, rx: r, ry: 0.7 * r, x0: x0p, x1: x1p, y0: y0p, y1: y1p, lit: ctx.apply_fog(mul3([0.92, 0.95, 1.0], lit), c[2]), alpha } });
+        }
+        // A rainbow in the spray, low over the foot.
+        if sun && wf.rainbow > 0.0 {
+            let rad = width * 0.9;
+            for b in 0..5 {
+                let t = b as f32 / 4.0;
+                let spec = [smoothstep(0.45, 0.85, t) + 0.35 * (1.0 - smoothstep(0.0, 0.15, t)), smoothstep(0.2, 0.5, t) * (1.0 - smoothstep(0.7, 0.9, t)), 1.0 - smoothstep(0.25, 0.55, t)];
+                let rr = rad * (1.0 + 0.06 * t);
+                for k in 0..24 {
+                    // Only the part of the bow in front of the spray shows.
+                    let f = k as f32 / 23.0;
+                    let an = std::f32::consts::PI * (0.2 + 0.6 * f);
+                    let fade = (std::f32::consts::PI * f).sin();
+                    let (x, y) = (x0 + rr * an.cos(), 0.3 + rr * 0.8 * an.sin());
+                    let c = v.to_cam(x, y, d - 0.4);
+                    if c[2] < NEAR { continue; }
+                    let Some([sx, sy]) = v.project(c) else { continue };
+                    splat::dot(out, c[2], (sx, sy), (v.px_per_m(c[2]) * rad * 0.06).max(0.8), scale3(spec, 1.4), 0.1 * fade * wf.rainbow.min(1.0));
+                }
+            }
+        }
+    }
+}
+
+/// White water where a waterway tumbles over a step of rock: a ridge of foam across the
+/// channel, water pouring over it, and foam carried away downstream.
+fn draw_cascades(ctx: &Ctx, out: &mut Vec<Splat>) {
+    let ww = &ctx.scene.path.waterway;
+    if !ww.enabled || ww.cascades <= 0.0 { return; }
+    let v = &ctx.view;
+    let (w, hgt) = (v.width as i64, v.height as i64);
+    let loop_seconds = ctx.scene.motion.loop_seconds();
+    let size = ww.cascades.min(1.0);
+    let sp = snap_to_loop(ww.cascade_spacing.max(6.0), ctx.loop_len);
+    let n = (ctx.loop_len / sp).round().max(1.0) as i64;
+    // Downstream is towards the camera unless the current runs away.
+    let dir = if ww.flow < 0 { 1.0 } else { -1.0 };
+    let foam = rgb_lin(ww.foam_color);
+    let offset = 0.37 * sp;
+    let k_lo = ((ctx.scroll - 3.0 - offset) / sp).ceil() as i64;
+    let k_hi = ((ctx.scroll + ctx.far.min(120.0) - offset) / sp).floor() as i64;
+    let cyc = cycles(1.1, loop_seconds).max(1.0);
+    let fc = cycles(0.35, loop_seconds).max(1.0);
+    for k in k_lo..=k_hi {
+        let d = k as f32 * sp + offset - ctx.scroll;
+        if d < NEAR { continue; }
+        let seed = ww.seed ^ hash(0xCA5C, k.rem_euclid(n)) as u32;
+        let hw = v.path_half_width(d).max(0.3);
+        let ridge = 0.08 + 0.3 * size;
+        let lit = add3(ctx.light_at(0.0, 0.2, d, None, 0, 1.0), [0.08; 3]);
+        let col = ctx.apply_fog(mul3(foam, lit), d);
+        let cols = ((hw * 2.0 * 18.0).round() as i64).clamp(12, 220);
+        for i in 0..cols {
+            let h = |q: u32| hf(seed ^ q, i);
+            let u = (i as f32 + h(1)) / cols as f32;
+            // The rock step is not straight across.
+            let x = (2.0 * u - 1.0) * hw * 0.97;
+            let bend = 0.6 * (u * 5.0 + hf(seed, 0) * 6.0).sin() * size;
+            let dd = d + bend;
+            let top = ridge * (0.6 + 0.6 * h(2)) * (1.0 - (2.0 * u - 1.0).powi(8));
+            // The white water itself: overlapping soft puffs along the step make a band.
+            {
+                let c = v.to_cam(x, 0.5 * top, dd + dir * 0.15);
+                if c[2] >= NEAR {
+                    if let Some([sx, sy]) = v.project(c) {
+                        let ppm = v.px_per_m(c[2]);
+                        let rx = (ppm * 2.4 * hw / cols as f32).max(1.0);
+                        let ry = (ppm * (0.6 * top + 0.04)).max(1.0);
+                        let (x0, x1) = (((sx - rx).floor() as i64).max(0), ((sx + rx).ceil() as i64).min(w - 1));
+                        let (y0, y1) = (((sy - ry).floor() as i64).max(0), ((sy + ry).ceil() as i64).min(hgt - 1));
+                        if x0 <= x1 && y0 <= y1 {
+                            let tumble = 0.75 + 0.25 * (TAU * (cyc * ctx.tphase + h(8))).sin();
+                            out.push(Splat { z: c[2], gate: None, shape: Shape::Wisp { sx, sy, rx, ry, x0, x1, y0, y1, lit: scale3(col, 0.95), alpha: 0.5 * tumble } });
+                        }
+                    }
+                }
+            }
+            // Water pouring over, here and there: a curve from the lip down to the pool below.
+            if i % 2 == 1 {
+                let p = (cyc * ctx.tphase + h(3)).rem_euclid(1.0);
+                let (ya, yb) = (top * (1.0 - p * p), top * (1.0 - (p + 0.35).min(1.0).powi(2)));
+                let (da, db) = (dd + dir * 0.5 * p, dd + dir * 0.5 * (p + 0.35).min(1.0));
+                let (c0, c1) = (v.to_cam(x, ya, da), v.to_cam(x + (h(4) - 0.5) * 0.05, yb.max(0.0), db));
+                if c0[2] < NEAR || c1[2] < NEAR { continue; }
+                let (Some(a), Some(b)) = (v.project(c0), v.project(c1)) else { continue };
+                let wpx = (v.px_per_m(c0[2]) * 0.022).max(0.6);
+                splat::streak(out, c0[2], (a[0], a[1]), (b[0], b[1]), scale3(col, 1.15 + 0.3 * h(5)), 0.4, wpx);
+            }
+            // Foam tumbling at the foot, then carried off downstream.
+            {
+                let p = (fc * ctx.tphase + h(6)).rem_euclid(1.0);
+                let (x, y, dz) = (x + (h(7) - 0.5) * 0.3, 0.03 + top * 0.5 * (1.0 - p), dd + dir * (0.4 + 3.5 * size * p));
+                let c = v.to_cam(x, y, dz);
+                if c[2] < NEAR { continue; }
+                let Some([sx, sy]) = v.project(c) else { continue };
+                let r = (v.px_per_m(c[2]) * (0.07 + 0.1 * size) * (0.6 + 0.9 * p)).max(1.0);
+                let (rx, ry) = (r, r * 0.4);
+                let (x0, x1) = (((sx - rx).floor() as i64).max(0), ((sx + rx).ceil() as i64).min(w - 1));
+                let (y0, y1) = (((sy - ry).floor() as i64).max(0), ((sy + ry).ceil() as i64).min(hgt - 1));
+                if x0 > x1 || y0 > y1 { continue; }
+                out.push(Splat { z: c[2], gate: None, shape: Shape::Wisp { sx, sy, rx, ry, x0, x1, y0, y1, lit: col, alpha: 0.5 * (1.0 - p) * (p / 0.1).min(1.0) } });
+            }
+        }
+    }
+}
+
+/// The wires of strings of lights: thin dark lines (dots close along them), lit a little by the
+/// bulbs and the scene.
+fn draw_wires(ctx: &Ctx, out: &mut Vec<Splat>) {
+    let v = &ctx.view;
+    for p in &ctx.wire_pts {
+        let c = v.to_cam(p[0], p[1], p[2]);
+        if c[2] < NEAR { continue; }
+        let Some([sx, sy]) = v.project(c) else { continue };
+        let ppm = v.px_per_m(c[2]);
+        let r = (ppm * 0.008).max(0.35);
+        let col = ctx.apply_fog(scale3(ctx.light_at(p[0], p[1], p[2], None, 0, 1.0), 0.04), c[2]);
+        out.push(Splat { z: c[2], gate: None, shape: Shape::Dot { sx, sy, r, col, alpha: 0.75 } });
+    }
+}
+
+/// Smoke rising from props: puffs leaving each one in turn, climbing, spreading and drifting with
+/// the wind, thinning away as they go; each puff goes round a whole number of times a loop.
+fn draw_smoke(ctx: &Ctx, out: &mut Vec<Splat>) {
+    let v = &ctx.view;
+    let (w, h) = (v.width as i64, v.height as i64);
+    let loop_seconds = ctx.scene.motion.loop_seconds();
+    const PUFFS: i64 = 9;
+    for (at, sm, seed) in &ctx.smokes {
+        let cyc = cycles(0.22, loop_seconds);
+        let base_col = rgb_lin(sm.color);
+        for i in 0..PUFFS {
+            let p = (cyc * ctx.tphase + (i as f32 + hf(*seed, i)) / PUFFS as f32).rem_euclid(1.0);
+            let rise = sm.rise.max(0.2) * p;
+            let wob = 0.25 * sm.width * (TAU * (p * 1.5 + hf(*seed ^ 0x11, i))).sin();
+            let drift = ctx.wx.wind * 0.12 * rise;
+            let (x, y, d) = (at[0] + wob + drift, at[1] + rise, at[2] + 0.15 * rise);
+            let c = v.to_cam(x, y, d);
+            if c[2] < NEAR { continue; }
+            let Some([sx, sy]) = v.project(c) else { continue };
+            let ppm = v.px_per_m(c[2]);
+            let r = (ppm * sm.width.max(0.05) * (0.25 + 0.75 * p)).max(1.0);
+            let (rx, ry) = (r, 0.8 * r);
+            let alpha = sm.amount.clamp(0.0, 1.0) * 0.4 * (1.0 - p) * (p / 0.08).min(1.0) * ctx.fog_t(c[2]);
+            if alpha < 0.01 { continue; }
+            let lit = mul3(base_col, ctx.light_at(x, y, d, None, 0, 1.0));
+            let (x0, x1) = (((sx - rx).floor() as i64).max(0), ((sx + rx).ceil() as i64).min(w - 1));
+            let (y0, y1) = (((sy - ry).floor() as i64).max(0), ((sy + ry).ceil() as i64).min(h - 1));
+            if x0 > x1 || y0 > y1 { continue; }
+            out.push(Splat { z: c[2], gate: None, shape: Shape::Wisp { sx, sy, rx, ry, x0, x1, y0, y1, lit, alpha } });
+        }
+    }
+}
+
 fn draw_tufts(ctx: &Ctx, out: &mut Vec<Splat>) {
     let v = &ctx.view;
     let w = v.width;
@@ -5364,7 +5677,7 @@ mod tests {
                 path_tile: 1.0, verge_tile: 1.0, wall_tile: 1.0, ceil_tile: 1.0,
                 bridge: Spans::new(&s.path.bridge, 24.0, &s.fixtures), fork: Forks::new(&s.path.fork, s.path.edge_noise, 24.0), deck_tex: r.textures.get(&s.path.bridge.deck), bottom_tex: r.textures.get(&s.verge.material),
                 deck_tile: 1.0, bottom_tile: 1.0, ambient: [0.0; 3],
-                sky_lights: vec![], lights: vec![], fog: None, fog_col: [0.0; 3], void_lin: [0.0; 3], realm: 0, bounds: None, facade: None, opening: None, portal: None, front: None, verge_beyond: None, gain: 1.0, wx: weather::Wx::default(), water: None, cover: Vec::new(),
+                sky_lights: vec![], lights: vec![], smokes: vec![], wire_pts: vec![], falls: vec![], fog: None, fog_col: [0.0; 3], void_lin: [0.0; 3], realm: 0, bounds: None, facade: None, opening: None, portal: None, front: None, verge_beyond: None, gain: 1.0, wx: weather::Wx::default(), water: None, cover: Vec::new(),
             };
             let tris = build_geometry(&ctx, &opts.layers);
             let mut gbuf = vec![raster::GPixel::EMPTY; 90 * 160];
@@ -5484,7 +5797,7 @@ mod tests {
                 path_tile: 1.0, verge_tile: 1.0, wall_tile: 1.0, ceil_tile: 1.0,
                 bridge: Spans::new(&s.path.bridge, 24.0, &s.fixtures), fork: Forks::new(&s.path.fork, s.path.edge_noise, 24.0), deck_tex: r.textures.get(&s.path.bridge.deck), bottom_tex: r.textures.get(&s.verge.material),
                 deck_tile: 1.0, bottom_tile: 1.0, ambient: [0.0; 3],
-                sky_lights: vec![], lights: vec![], fog: None, fog_col: [0.0; 3], void_lin: [0.0; 3], realm: 0, bounds: None, facade: None, opening: None, portal: None, front: None, verge_beyond: None, gain: 1.0, wx: weather::Wx::default(), water: None, cover: Vec::new(),
+                sky_lights: vec![], lights: vec![], smokes: vec![], wire_pts: vec![], falls: vec![], fog: None, fog_col: [0.0; 3], void_lin: [0.0; 3], realm: 0, bounds: None, facade: None, opening: None, portal: None, front: None, verge_beyond: None, gain: 1.0, wx: weather::Wx::default(), water: None, cover: Vec::new(),
             };
             let tris = build_geometry(&ctx, &Layers::default());
             let mut gbuf = vec![raster::GPixel::EMPTY; 90 * 160];
@@ -5528,7 +5841,7 @@ mod tests {
                 path_tile: 1.0, verge_tile: 1.0, wall_tile: 1.0, ceil_tile: 1.0,
                 bridge: Spans::new(&s.path.bridge, 24.0, &s.fixtures), fork: Forks::new(&s.path.fork, s.path.edge_noise, 24.0), deck_tex: r.textures.get(&s.path.bridge.deck), bottom_tex: r.textures.get(&s.verge.material),
                 deck_tile: 1.0, bottom_tile: 1.0, ambient: [0.0; 3],
-                sky_lights: vec![], lights: vec![], fog: None, fog_col: [0.0; 3], void_lin: [0.0; 3], realm: 0, bounds: None, facade: None, opening: None, portal: None, front: None, verge_beyond: None, gain: 1.0, wx: weather::Wx::default(), water: None, cover: Vec::new(),
+                sky_lights: vec![], lights: vec![], smokes: vec![], wire_pts: vec![], falls: vec![], fog: None, fog_col: [0.0; 3], void_lin: [0.0; 3], realm: 0, bounds: None, facade: None, opening: None, portal: None, front: None, verge_beyond: None, gain: 1.0, wx: weather::Wx::default(), water: None, cover: Vec::new(),
             };
             let tris = build_geometry(&ctx, &Layers::default());
             let mut gbuf = vec![raster::GPixel::EMPTY; 90 * 160];
@@ -5561,7 +5874,7 @@ mod tests {
                 path_tile: 1.0, verge_tile: 1.0, wall_tile: 1.0, ceil_tile: 1.0,
                 bridge: None, fork: Forks::new(&s.path.fork, s.path.edge_noise, 24.0), deck_tex: r.textures.get(&s.path.bridge.deck), bottom_tex: r.textures.get(&s.verge.material),
                 deck_tile: 1.0, bottom_tile: 1.0, ambient: [0.0; 3],
-                sky_lights: vec![], lights: vec![], fog: None, fog_col: [0.0; 3], void_lin: [0.0; 3], realm: 0, bounds: None, facade: None, opening: None, portal: None, front: None, verge_beyond: None, gain: 1.0, wx: weather::Wx::default(), water: None, cover: Vec::new(),
+                sky_lights: vec![], lights: vec![], smokes: vec![], wire_pts: vec![], falls: vec![], fog: None, fog_col: [0.0; 3], void_lin: [0.0; 3], realm: 0, bounds: None, facade: None, opening: None, portal: None, front: None, verge_beyond: None, gain: 1.0, wx: weather::Wx::default(), water: None, cover: Vec::new(),
             };
             let tris = build_geometry(&ctx, &Layers::default());
             let mut gbuf = vec![raster::GPixel::EMPTY; 120 * 214];
@@ -5654,7 +5967,7 @@ mod tests {
             path_tile: 1.0, verge_tile: 1.0, wall_tile: 1.0, ceil_tile: 1.0,
             bridge: None, fork: None, deck_tex: r.textures.get(&s.path.bridge.deck), bottom_tex: r.textures.get(&s.verge.material),
             deck_tile: 1.0, bottom_tile: 1.0, ambient: [0.0; 3],
-            sky_lights: vec![], lights: vec![], fog: None, fog_col: [0.0; 3], void_lin: [0.0; 3], realm: 0, bounds: None, facade: None, opening: None, portal: None, front: None, verge_beyond: None, gain: 1.0, wx: weather::Wx::default(), water: None, cover: Vec::new(),
+            sky_lights: vec![], lights: vec![], smokes: vec![], wire_pts: vec![], falls: vec![], fog: None, fog_col: [0.0; 3], void_lin: [0.0; 3], realm: 0, bounds: None, facade: None, opening: None, portal: None, front: None, verge_beyond: None, gain: 1.0, wx: weather::Wx::default(), water: None, cover: Vec::new(),
         };
         let (zc, card_h) = (6.0f32, 1.2f32);
         let base_row = hz + f * eye / zc;
@@ -5753,7 +6066,7 @@ mod tests {
             path_tile: 1.0, verge_tile: 1.0, wall_tile: 1.0, ceil_tile: 1.0,
             bridge: None, fork: None, deck_tex: r.textures.get(&s.path.bridge.deck), bottom_tex: r.textures.get(&s.verge.material),
             deck_tile: 1.0, bottom_tile: 1.0, ambient: [0.0; 3],
-            sky_lights: vec![], lights: vec![], fog: None, fog_col: [0.0; 3], void_lin: [0.0; 3], realm: 0, bounds: None, facade: None, opening: None, portal: None, front: None, verge_beyond: None, gain: 1.0, wx: weather::Wx::default(), water: None, cover: Vec::new(),
+            sky_lights: vec![], lights: vec![], smokes: vec![], wire_pts: vec![], falls: vec![], fog: None, fog_col: [0.0; 3], void_lin: [0.0; 3], realm: 0, bounds: None, facade: None, opening: None, portal: None, front: None, verge_beyond: None, gain: 1.0, wx: weather::Wx::default(), water: None, cover: Vec::new(),
         };
         let zc = 3.0f32;
         let mut gbuf = vec![raster::GPixel::EMPTY; w * h];
@@ -5820,7 +6133,7 @@ mod tests {
                 path_tile: 1.0, verge_tile: 1.0, wall_tile: 1.0, ceil_tile: 1.0,
                 bridge: None, fork: None, deck_tex: r.textures.get(&s.path.bridge.deck), bottom_tex: r.textures.get(&s.verge.material),
                 deck_tile: 1.0, bottom_tile: 1.0, ambient: [0.0; 3],
-                sky_lights: vec![], lights: vec![], fog: None, fog_col: [0.0; 3], void_lin: [0.0; 3], realm: 0, bounds: None, facade: None, opening: None, portal: None, front: None, verge_beyond: None, gain: 1.0, wx: weather::Wx::default(), water: None, cover: Vec::new(),
+                sky_lights: vec![], lights: vec![], smokes: vec![], wire_pts: vec![], falls: vec![], fog: None, fog_col: [0.0; 3], void_lin: [0.0; 3], realm: 0, bounds: None, facade: None, opening: None, portal: None, front: None, verge_beyond: None, gain: 1.0, wx: weather::Wx::default(), water: None, cover: Vec::new(),
             };
             let (base_row, top_row) = (hz + f * eye / zc, hz + f * (eye - card_h) / zc);
             let mut gbuf = vec![raster::GPixel::EMPTY; bw * bh];
@@ -6095,5 +6408,76 @@ mod tests {
         let far = r.render(&m, 3.0, &o).rgba;
         let bottom = |v: &[u8]| v[v.len() * 3 / 4..].iter().map(|x| *x as f32).sum::<f32>();
         assert!((bottom(&near) - bottom(&far)).abs() > 1.0, "the mist clears from the near ground");
+    }
+
+    #[test]
+    fn waterfalls_and_cascades_pour_and_keep_the_loop() {
+        let o = |t: f32| RenderOptions { size: Some((120, 214)), time: Some(t), ..RenderOptions::default() };
+        let mut r = WorldRenderer::default();
+        for name in ["Waterfall Glen", "River Run"] {
+            let mut s = preset(name);
+            let (len, secs) = (s.motion.loop_length, s.motion.loop_seconds());
+            assert_eq!(r.render(&s, 0.0, &o(0.0)).rgba, r.render(&s, len, &o(secs)).rgba, "{name}: the loop must close");
+            let (a, b) = (r.render(&s, 3.0, &o(0.0)).rgba, r.render(&s, 3.0, &o(0.3)).rgba);
+            assert!(a != b, "{name}: the water moves while the camera stands still");
+            s.waterfalls.clear();
+            s.path.waterway.cascades = 0.0;
+            let mut differs = false;
+            for k in 0..6 {
+                let t = len * k as f32 / 6.0;
+                differs |= r.render(&preset(name), t, &o(0.3)).rgba != r.render(&s, t, &o(0.3)).rgba;
+            }
+            assert!(differs, "{name}: its falls show somewhere along the loop");
+        }
+    }
+
+    #[test]
+    fn a_village_smokes_and_its_string_lights_glow() {
+        let o = RenderOptions { size: Some((120, 214)), time: Some(0.4), ..RenderOptions::default() };
+        let mut r = WorldRenderer::default();
+        let s = preset("Village Evening");
+        let (len, secs) = (s.motion.loop_length, s.motion.loop_seconds());
+        let lo = |t: f32| RenderOptions { size: Some((90, 160)), time: Some(t), ..RenderOptions::default() };
+        assert_eq!(r.render(&s, 0.0, &lo(0.0)).rgba, r.render(&s, len, &lo(secs)).rgba, "the loop must close");
+        let sum = |v: &[u8]| v.iter().map(|x| *x as f64).sum::<f64>();
+        let lit = r.render(&s, 4.0, &o).rgba;
+        let mut dark = s.clone();
+        dark.fixtures[0].string_lights.enabled = false;
+        assert!(sum(&lit) > sum(&r.render(&dark, 4.0, &o).rgba), "the strings of bulbs add light");
+        let cottage = &s.props[0];
+        let (p, _) = crate::world::propdefs::PropDefs::default().resolve(&s, None, cottage, &mut crate::world::sprites::SpriteCache::default());
+        assert!(p.unwrap().smoke.is_some(), "cottage chimneys smoke");
+    }
+
+    #[test]
+    fn neon_signs_flicker_in_their_own_colour() {
+        let o = |t: f32| RenderOptions { size: Some((120, 214)), time: Some(t), ..RenderOptions::default() };
+        let mut r = WorldRenderer::default();
+        let mut s = preset("Dark Street");
+        s.fixtures = vec![Fixture { kind: FixtureKind::Neon, mount: Mount::Wall, spacing: 6.0, flicker: 1.0, ..Fixture::default() }];
+        let a = r.render(&s, 2.0, &o(0.2)).rgba;
+        s.fixtures[0].tint = [60, 220, 255];
+        assert!(r.render(&s, 2.0, &o(0.2)).rgba != a, "the tubes take the fixture's colour");
+        let mut off = s.clone();
+        off.fixtures.clear();
+        assert!(r.render(&s, 2.0, &o(0.2)).rgba != r.render(&off, 2.0, &o(0.2)).rgba, "the signs show");
+    }
+
+    #[test]
+    fn birds_bats_and_fish_move_and_keep_the_loop() {
+        let o = |t: f32| RenderOptions { size: Some((120, 214)), time: Some(t), ..RenderOptions::default() };
+        let mut r = WorldRenderer::default();
+        let mut s = preset("River Run");
+        s.wildlife.birds.enabled = true;
+        s.wildlife.fish = crate::scene::Fish { enabled: true, spacing: 3.0, ..crate::scene::Fish::default() };
+        let mut night = preset("Night Road");
+        night.wildlife.bats = crate::scene::Bats { enabled: true, dusk_only: false, count: 20, ..crate::scene::Bats::default() };
+        for s in [s, night] {
+            let (len, secs) = (s.motion.loop_length, s.motion.loop_seconds());
+            assert_eq!(r.render(&s, 0.0, &o(0.0)).rgba, r.render(&s, len, &o(secs)).rgba, "{}: the loop must close", s.name);
+            let mut none = s.clone();
+            none.wildlife = crate::scene::Wildlife::default();
+            assert!(r.render(&s, 2.0, &o(0.3)).rgba != r.render(&none, 2.0, &o(0.3)).rgba, "{}: they show", s.name);
+        }
     }
 }

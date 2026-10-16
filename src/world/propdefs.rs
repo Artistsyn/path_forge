@@ -20,6 +20,8 @@ pub struct ResolvedProp {
     pub hanging: bool,
     pub glow: f32,
     pub light: Option<PropLight>,
+    /// Smoke rising from it.
+    pub smoke: Option<crate::scene::PropSmoke>,
     pub pixelated: bool,
     /// Mirror every image; drawn and built-in props are mirrored at random instead.
     pub flip_x: bool,
@@ -34,7 +36,12 @@ pub struct PropDefs {
 }
 
 /// Kits compiled in, used as `def: "@<name>#<prop>"`: drawn from shapes, so they need no files.
-pub const BUILTIN_KITS: [(&str, &str); 1] = [("wayside", include_str!("../../kits/wayside/kit.json"))];
+pub const BUILTIN_KITS: [(&str, &str); 4] = [
+    ("wayside", include_str!("../../kits/wayside/kit.json")),
+    ("settlement", include_str!("../../kits/settlement/kit.json")),
+    ("waterside", include_str!("../../kits/waterside/kit.json")),
+    ("wildlife", include_str!("../../kits/wildlife/kit.json")),
+];
 
 fn mtime(p: &Path) -> Option<SystemTime> { std::fs::metadata(p).and_then(|m| m.modified()).ok() }
 
@@ -129,7 +136,7 @@ impl PropDefs {
     /// says why; a definition whose images cannot be read draws its `kind` instead.
     pub fn resolve(&mut self, scene: &Scene, base: Option<&Path>, layer: &PropLayer, sprites: &mut SpriteCache) -> (Option<ResolvedProp>, Option<String>) {
         let builtin = |kind: PropKind, tint: Rgb| ResolvedProp {
-            sprites: Vec::new(), kind, tint, height: kind.height_m(), hanging: kind.hangs(), glow: kind.glow(), light: None,
+            sprites: Vec::new(), kind, tint, height: kind.height_m(), hanging: kind.hangs(), glow: kind.glow(), light: None, smoke: None,
             pixelated: false, flip_x: false, from_files: false,
         };
         let here = base.map(Path::to_path_buf).unwrap_or_default();
@@ -152,6 +159,7 @@ impl PropDefs {
         r.hanging = d.anchor == Anchor::Ceiling;
         r.glow = d.glow.max(0.0);
         r.light = d.light.enabled.then(|| d.light.clone());
+        r.smoke = (d.smoke.enabled && d.smoke.amount > 0.0).then(|| d.smoke.clone());
         r.pixelated = d.sprite.pixelated;
         r.flip_x = d.sprite.flip_x;
         let mut warn = None;

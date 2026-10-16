@@ -26,6 +26,8 @@ See [MANUAL.md](MANUAL.md) for what each part does and how to use it.
 | `particles` | list of [Particles](#particles) | (see the type) |  |
 | `weather` | [Weather](#weather) | (see the type) | Lightning and fog banks. |
 | `season` | [Season](#season) | (see the type) | The time of year: foliage, grass and the ground through spring, summer, autumn and winter. |
+| `wildlife` | [Wildlife](#wildlife) | (see the type) | Things that move about: birds crossing the sky, bats at dusk, fish leaping from the water. |
+| `waterfalls` | list of [Waterfall](#waterfall) | `[]` | Waterfalls beside the path: water pouring down a rock face into foam and spray. |
 | `prop_defs` | map of name → [PropDef](#propdef) |  | Props described by data, by name: a prop layer uses one with `def: "<name>"`. Kits (folders with a kit.json) hold more, used as `def: "<folder>#<name>"`. |
 | `post` | [Post](#post) | (see the type) |  |
 | `style` | [Style](#style) | (see the type) |  |
@@ -111,6 +113,35 @@ Where a prop is fixed.
 | `arc` | number | `1.0` | How much the band bows up in the middle, as the far arc of the auroral oval does. |
 | `edge` | number | `1.0` | Brightness of the thin lower edge against the rest. |
 | `ground_glow` | number | `0.5` | How much the aurora lights the ground green (a faint, even glow). |
+| `seed` | integer | `0` |  |
+
+### Bats
+
+Bats flitting about over the path, darting and fluttering.
+
+| Field | Type | Default | Meaning |
+|---|---|---|---|
+| `enabled` | boolean | `false` |  |
+| `count` | integer | `8` |  |
+| `size` | number | `0.3` | Wingspan, metres. |
+| `color` | integer × 3 | `[24,20,22]` |  |
+| `dusk_only` | boolean | `true` | Only after dusk when the scene has a day and night. |
+| `seed` | integer | `0` |  |
+
+### Birds
+
+Flocks of birds crossing the sky in loose vees, wings beating.
+
+| Field | Type | Default | Meaning |
+|---|---|---|---|
+| `enabled` | boolean | `false` |  |
+| `flocks` | integer | `2` | Flocks crossing at once. |
+| `count` | integer | `7` | Birds in a flock. |
+| `size` | number | `0.025` | Wingspan as a share of the sky's height. |
+| `height` | number | `0.35` | How high they fly: 0 the top of the sky .. 1 the horizon. |
+| `flap` | number | `3.0` | Wingbeats a second. |
+| `crossing` | number | `12.0` | Seconds to cross the frame (rounded so a whole number of crossings fit the loop). |
+| `color` | integer × 3 | `[30,30,36]` |  |
 | `seed` | integer | `0` |  |
 
 ### BlackHole
@@ -357,6 +388,20 @@ them; far away they widen to a pixel and dim to match, so they do not flicker.
 | `dash` | number | `0.0` | Dashes: one dash and one gap every this many metres (snapped to divide the loop); 0 an unbroken line. |
 | `flow` | integer | `0` | How many dashes the lights run ahead in one loop, on top of the walk (negative: toward the camera). Whole numbers keep the loop seamless. |
 
+### Fish
+
+Fish leaping from the water beside or along the path in silver arcs, with splash rings.
+
+| Field | Type | Default | Meaning |
+|---|---|---|---|
+| `enabled` | boolean | `false` |  |
+| `spacing` | number | `6.0` | One every so many metres along the path. |
+| `lateral` | number × 2 | `[1.5,6.0]` | How far out from the path's middle they leap: from .. to, metres (either side). |
+| `leaps` | integer | `1` | Leaps each fish makes per loop. |
+| `size` | number | `0.35` | Its length, metres. |
+| `color` | integer × 3 | `[200,210,220]` |  |
+| `seed` | integer | `0` |  |
+
 ### Fixture
 
 A repeating light source along the path: torches, lanterns, fireflies, crystals.
@@ -391,12 +436,13 @@ A repeating light source along the path: torches, lanterns, fireflies, crystals.
 | `set_piece` | integer | `0` | For `place: SetPieces`: which of `set_pieces` the lights go with (0 = the first). |
 | `bridge_posts` | boolean | `false` | On bridges, stand on the railing's posts instead of at `spacing`: one on each end post of every bridge, each side (whatever `place` says). |
 | `posts_between` | integer | `0` | With `bridge_posts`: how many more posts (each with its light) stand evenly between the end posts: 1 halfway, 2 at the thirds, 3 at the quarters... The railing gains those posts. |
+| `string_lights` | [StringLights](#stringlights) | (see the type) | Strings of little bulbs hung between each light and the next along its side, sagging between them: festoon lights for a bridge, a terrace or a market street. |
 | `sprite` | [SpriteRef](#spriteref) | (see the type) |  |
 | `seed` | integer | `0` |  |
 
 ### FixtureKind
 
-One of `Torch` \| `Lantern` \| `Candle` \| `Brazier` \| `Crystal` \| `Firefly` \| `Magic` \| `GreenFire` \| `IceWisp` \| `StreetLamp` \| `PaperLantern` \| `Campfire` \| `Glowshroom` \| `Beacon` \| `Chandelier`.
+One of `Torch` \| `Lantern` \| `Candle` \| `Brazier` \| `Crystal` \| `Firefly` \| `Magic` \| `GreenFire` \| `IceWisp` \| `StreetLamp` \| `PaperLantern` \| `Campfire` \| `Glowshroom` \| `Beacon` \| `Chandelier` \| `Neon`.
 
 ### Flare
 
@@ -888,6 +934,7 @@ parts. Lives in `scene.prop_defs` or in a kit (a folder holding kit.json and its
 | `glow_from` | number | `0.0` | For images: only texels at least this light (0..1) glow, like the flame in a lantern; 0 = the whole prop glows by `glow`. |
 | `light` | [PropLight](#proplight) | (see the type) | Light it gives off, like a lamp. |
 | `trim` | boolean | `true` | Cut away transparent margins of images, so a sprite stands on its lowest visible pixel. |
+| `smoke` | [PropSmoke](#propsmoke) | (see the type) | Smoke rising from it: a chimney, a campfire, a smouldering ruin. |
 
 ### PropKind
 
@@ -938,6 +985,20 @@ Light a prop gives off.
 | `radius` | number | `4.0` | Reach, metres. |
 | `at` | number | `0.8` | Where the light sits, as a fraction of the prop's height from its base. |
 | `flicker` | number | `0.0` | 0 steady, 1 like a flame. |
+
+### PropSmoke
+
+Smoke rising from a prop (`PropDef::smoke`): puffs that climb, spread, drift with the wind and
+thin away, round and round with the loop.
+
+| Field | Type | Default | Meaning |
+|---|---|---|---|
+| `enabled` | boolean | `false` |  |
+| `at` | number × 2 | `[0.0,2.0]` | Where it leaves the prop, metres at scale 1: `x` sideways from its centre, `y` up. |
+| `color` | integer × 3 | `[150,150,155]` |  |
+| `amount` | number | `0.5` | How thick (0..1). |
+| `rise` | number | `3.0` | How high it climbs before it has thinned away, metres. |
+| `width` | number | `0.8` | How wide a puff grows, metres. |
 
 ### Railing
 
@@ -1228,6 +1289,21 @@ One of `Realistic` \| `Classic`.
 | `scene` | string | `""` | Scene file (relative to the journey) or `preset:<name>`. |
 | `next` | [Next](#next) | `"End"` |  |
 
+### StringLights
+
+Bulbs on a wire strung between neighbouring lights of a row (`Fixture::string_lights`).
+
+| Field | Type | Default | Meaning |
+|---|---|---|---|
+| `enabled` | boolean | `false` |  |
+| `bulbs` | integer | `9` | Bulbs between each pair of lights. |
+| `sag` | number | `0.45` | How far the wire sags at the middle, metres. |
+| `color` | integer × 3 | `[255,214,140]` |  |
+| `colors` | list of integer × 3 | `[]` | Colour the bulbs in turn through these instead (empty: all `color`). |
+| `brightness` | number | `1.0` |  |
+| `size` | number | `1.0` |  |
+| `twinkle` | number | `0.2` | How much they twinkle (0 steady). |
+
 ### Style
 
 | Field | Type | Default | Meaning |
@@ -1342,6 +1418,28 @@ Ground beside the path. Disabled = void beyond the path edge (walls usually cove
 | `base_shadow` | number | `0.55` | Darkening where the wall meets the ground (0..1). |
 | `material` | [Material](#material) | (see the type) |  |
 
+### Waterfall
+
+A waterfall beside the path (`scene.waterfalls`): a rock face with water pouring down it in
+streaks, foam and spray boiling up at its foot, and (with the sun out) a little rainbow in the
+spray. It repeats every `spacing` metres, like a set piece; its water falls a whole number of
+times a loop.
+
+| Field | Type | Default | Meaning |
+|---|---|---|---|
+| `enabled` | boolean | `true` |  |
+| `side` | [Side](#side) | `"Left"` |  |
+| `lateral` | number | `3.0` | Metres from the path's edge. |
+| `spacing` | number | `60.0` |  |
+| `offset` | number | `20.0` |  |
+| `height` | number | `7.0` | How far it falls, and how wide the water is, metres. |
+| `width` | number | `2.2` |  |
+| `water` | integer × 3 | `[210,228,240]` |  |
+| `rock` | integer × 3 | `[92,88,82]` |  |
+| `spray` | number | `0.7` | How much foam and spray at its foot (0..1). |
+| `rainbow` | number | `0.5` | The rainbow in its spray when the sun is out (0 none). |
+| `seed` | integer | `0` |  |
+
 ### Waterway
 
 The path as a waterway, for games where the player steers a boat or swims: a current, foam
@@ -1363,6 +1461,8 @@ water runs to the walls, as a canal's does.
 | `float_color` | integer × 3 | `[70,110,52]` |  |
 | `float_size` | number | `0.5` | How big each one is, metres across. |
 | `frozen` | number | `0.0` | How much of the water is frozen over (0..1): ice grows out from the banks, leaving a narrowing channel of open water down the middle, until at 1 it is ice from bank to bank. The ice is cracked, with snow lying on it in patches, and takes `foam_color`. |
+| `cascades` | number | `0.0` | Steps of white water across the channel where it tumbles over rock: 0 none .. 1 a tumbling drop. |
+| `cascade_spacing` | number | `24.0` | Metres between them. |
 | `seed` | integer | `0` |  |
 
 ### Weather
@@ -1383,6 +1483,17 @@ Every part works in any scene and repeats exactly with the loop.
 | `heat_shimmer` | [HeatShimmer](#heatshimmer) | `{"enabled":false,"strength":0.5,"speed":1.0}` | Heat haze: the air shimmers over the ground in the distance. |
 | `lens` | [Lens](#lens) | (see the type) | Raindrops or frost on the camera's lens. |
 | `snow_cover` | [SnowCover](#snowcover) | `{"enabled":false,"props":0.7,"ground":0.6}` | Snow lying on the scenery and the ground without any falling: a winter scene from any scene. |
+
+### Wildlife
+
+Animals on the move (`scene.wildlife`). Each goes round a whole number of times a loop, so the
+loop closes; with a day and night, birds fly by day and bats come out at dusk.
+
+| Field | Type | Default | Meaning |
+|---|---|---|---|
+| `birds` | [Birds](#birds) | (see the type) |  |
+| `bats` | [Bats](#bats) | (see the type) |  |
+| `fish` | [Fish](#fish) | (see the type) |  |
 
 ### Wind
 

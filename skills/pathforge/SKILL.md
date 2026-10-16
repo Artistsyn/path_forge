@@ -343,6 +343,14 @@ choose the details unless the plan's warnings say to.
   `falling` blossom and leaves, `snow` in winter) recolours foliage, grass and verges; winter bares
   broadleaf trees. `sky.halo` rings the sun/moon; `sky.rainbow.saturation` ~0.2 makes a moonbow;
   `weather.mist.from` keeps the near air clear (valley fog).
+- **Life and water:** `wildlife` (`birds` flocks crossing the sky, `bats` at dusk, `fish` leaping
+  beside the path), `waterfalls[]` (rock faces beside the path with water pouring down, `spray`,
+  `rainbow`; preset Waterfall Glen), `path.waterway.cascades` (white-water steps every
+  `cascade_spacing` m; River Run). Built-in kits `@settlement` (cottage with lit windows and
+  chimney smoke, well, market_stall, picket_fence, haybale, cart, woodpile; Village Evening),
+  `@waterside` (rowboat, lily_pads, mooring_post, buoy; Lily Harbour) and `@wildlife` (deer,
+  deer_grazing, stag, rabbit, heron). A prop def's `smoke` makes a plume. Lights:
+  `fixtures.*.string_lights` (festoon bulbs between posts) and `kind: Neon` (signs in `tint`).
 - **Day and night:** `sky.day_night` (`hour`, `days_per_loop` for a whole day each loop, `real_time`
   for the phone's clock, `sunrise`/`sunset`, `sun_height`, `sun_path`, `sunset_style`, `keep_look`,
   `night_light`, `sun`/`moon`/`stars`/`lamps`). Games: `Runtime::set_hour`, `set_day_length`,

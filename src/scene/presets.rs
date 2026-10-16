@@ -76,7 +76,7 @@ fn scene(name: &str) -> Scene {
     Scene {
         version: SCENE_VERSION, name: name.to_owned(), canvas: Canvas::default(), camera: Camera::default(),
         path: PathShape::default(), verge: Verge::default(), ground_cover: vec![], walls: Walls::default(), ceiling: Ceiling::default(),
-        sky: no_sky([0, 0, 0]), light: indoor_light(0.25, [0, 0, 0], 20.0), fixtures: vec![], props: vec![], set_pieces: vec![], companions: vec![], weather: Weather::default(), season: Season::default(), prop_defs: Default::default(),
+        sky: no_sky([0, 0, 0]), light: indoor_light(0.25, [0, 0, 0], 20.0), fixtures: vec![], props: vec![], set_pieces: vec![], companions: vec![], weather: Weather::default(), season: Season::default(), wildlife: Wildlife::default(), waterfalls: Vec::new(), prop_defs: Default::default(),
         particles: vec![], post: Post::default(), style: Style::default(), motion: Motion::default(),
     }
 }
@@ -365,7 +365,7 @@ pub fn river_run() -> Scene {
     s.path.edge_noise = 0.35;
     s.path.edge_dark = 0.15;
     s.path.material = water([46, 78, 82], [26, 48, 52], 0.3);
-    s.path.waterway = Waterway { floating: Floating::Leaves, float_density: 0.08, float_color: [112, 82, 40], float_size: 0.16, ..waterway(3, 0.55) };
+    s.path.waterway = Waterway { floating: Floating::Leaves, float_density: 0.08, float_color: [112, 82, 40], float_size: 0.16, cascades: 0.5, cascade_spacing: 30.0, ..waterway(3, 0.55) };
     s.verge = Verge { enabled: true, material: mat(Pattern::Grass, [50, 86, 34], [32, 58, 22], 2.0), tufts: true, ..Verge::default() };
     s.walls.enabled = false;
     s.sky = day_sky([80, 136, 200], [200, 218, 210], [0.72, 0.38]);
@@ -845,6 +845,70 @@ pub fn day_and_night() -> Scene {
     s
 }
 
+/// A village street at dusk: timber-framed cottages with lit windows and smoking chimneys, picket
+/// fences, a well and a market stall, festoon lights strung between the lamp posts, and a deer
+/// watching from the edge of the wood.
+pub fn village_evening() -> Scene {
+    let mut s = winding_trail();
+    s.name = "Village Evening".into();
+    s.path.winding.amplitude = 1.2;
+    s.sky.day_night = DayNight { enabled: true, hour: 19.0, ..DayNight::default() };
+    let kit = |name: &str, lateral: f32, spacing: f32, offset: f32, side: Side, seed: u32| PropLayer {
+        def: format!("@settlement#{name}"), side, offset, jitter: 0.0, jitter_along: 0.0, lean_var: 0.0, density: 1.0, tint_var: 0.05,
+        ..props(PropKind::Rock, lateral, spacing, 1.0, seed)
+    };
+    s.props = vec![
+        kit("cottage", 4.2, 16.0, 0.0, Side::Left, 301),
+        kit("cottage", 4.6, 16.0, 8.0, Side::Right, 302),
+        kit("picket_fence", 1.6, 1.9, 0.0, Side::Both, 303),
+        kit("well", 2.6, 48.0, 20.0, Side::Right, 304),
+        kit("market_stall", 2.4, 48.0, 36.0, Side::Left, 305),
+        kit("haybale", 2.8, 24.0, 12.0, Side::Right, 306),
+        PropLayer { def: "@wildlife#deer".into(), side: Side::Left, offset: 30.0, density: 1.0, ..props(PropKind::Rock, 9.0, 48.0, 1.0, 307) },
+        PropLayer { rows: 2, row_spacing: 5.0, jitter: 1.5, density: 0.8, ..props(PropKind::Tree, 11.0, 7.0, 1.1, 308) },
+    ];
+    s.fixtures = vec![Fixture {
+        kind: FixtureKind::Lantern, mount: Mount::Ground, post: LampPost::Pole, lateral: 0.6, height: 2.6, spacing: 8.0, radius: 7.0, intensity: 1.0, side: Side::Both,
+        string_lights: StringLights { enabled: true, colors: vec![[255, 214, 140], [255, 150, 90], [255, 236, 190]], ..StringLights::default() },
+        ..Fixture::default()
+    }];
+    s.wildlife.bats.enabled = true;
+    s.motion = Motion { loop_length: 48.0, speed: 2.5, fps: 24 };
+    s
+}
+
+/// A trail up a wooded glen where streams fall over the rocks either side, mist and a rainbow
+/// at their feet, and birds crossing overhead.
+pub fn waterfall_glen() -> Scene {
+    let mut s = winding_trail();
+    s.name = "Waterfall Glen".into();
+    s.waterfalls = vec![
+        Waterfall { enabled: true, side: Side::Left, lateral: 3.5, spacing: 48.0, offset: 14.0, height: 9.0, width: 2.4, seed: 1, ..Waterfall::default() },
+        Waterfall { enabled: true, side: Side::Right, lateral: 4.0, spacing: 48.0, offset: 38.0, height: 6.5, width: 1.6, seed: 2, ..Waterfall::default() },
+    ];
+    s.wildlife.birds.enabled = true;
+    s.motion.loop_length = 48.0;
+    s
+}
+
+/// A harbour of still water at sunset: rowing boats tied up beside the pier, lily pads, mooring
+/// posts and a buoy blinking out in the bay.
+pub fn lily_harbour() -> Scene {
+    let mut s = sunset_pier();
+    s.name = "Lily Harbour".into();
+    let kit = |name: &str, lateral: f32, spacing: f32, offset: f32, side: Side, seed: u32| PropLayer {
+        def: format!("@waterside#{name}"), side, offset, jitter: 0.4, density: 0.9, shadow: false, ..props(PropKind::Rock, lateral, spacing, 1.0, seed)
+    };
+    s.props.truncate(1);
+    s.props.extend([
+        kit("rowboat", 1.4, 14.0, 3.0, Side::Both, 401),
+        kit("lily_pads", 3.0, 3.5, 0.0, Side::Both, 402),
+        kit("mooring_post", 0.25, 8.0, 4.0, Side::Both, 403),
+        kit("buoy", 8.0, 24.0, 10.0, Side::Right, 404),
+    ]);
+    s
+}
+
 pub fn forest_path() -> Scene {
     let mut s = scene("Forest Path");
     s.camera.horizon = 0.3;
@@ -1104,6 +1168,9 @@ pub const ALL: &[(&str, fn() -> Scene)] = &[
 ("Desert Ruins", desert_ruins),
 ("Ice Cave", ice_cave),
 ("Day and Night", day_and_night),
+    ("Village Evening", village_evening),
+    ("Lily Harbour", lily_harbour),
+    ("Waterfall Glen", waterfall_glen),
     ("Star Bridge", star_bridge),
     ("Nebula Crossing", nebula_crossing),
     ("Asteroid Belt", asteroid_belt),

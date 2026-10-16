@@ -1490,6 +1490,7 @@ pub fn paint_fixture(kind: FixtureKind) -> Option<Sprite> {
             c.poly(&[[8.0, 48.0], [40.0, 48.0], [44.0, 72.0], [4.0, 72.0]], metal, 0.9);
             Some(c.finish())
         }
+        FixtureKind::Neon => Some(paint_neon()),
         FixtureKind::Chandelier => {
             // An iron ring on three chains from one above, candles standing round it.
             let (iron, wax) = ([0.07, 0.065, 0.06], [0.8, 0.74, 0.6]);
@@ -1507,6 +1508,95 @@ pub fn paint_fixture(kind: FixtureKind) -> Option<Sprite> {
             Some(c.finish())
         }
     }
+}
+
+/// A rock face 1 wide by 1.25 tall (the waterfall's height is its top): a jagged crest, ledges
+/// banded across it, moss on the ledges, and a dark wet channel down its middle.
+fn paint_cliff(tint: Rgb, variant: u32) -> Sprite {
+    let t = rgb_lin(tint);
+    let mut r = Rng(variant.wrapping_mul(2_654_435_761).wrapping_add(0xC1) | 1);
+    let (w, h) = (200.0, 250.0);
+    let mut c = Canvas::new(w as usize, h as usize);
+    // The outline: shoulders either side of the notch the water pours through, falling away
+    // raggedly to each side.
+    let mut top = Vec::new();
+    for i in 0..=20 {
+        let x = i as f32 * w / 20.0;
+        let off = (x - 100.0).abs();
+        let y = if off <= 30.0 { 18.0 + r.range(-1.5, 1.5) }
+            else if off <= 70.0 { 4.0 + r.range(0.0, 10.0) + 6.0 * ((off - 30.0) / 40.0 - 0.5).abs() }
+            else { 12.0 + (off - 70.0).powf(1.25) * r.range(1.6, 2.6) };
+        top.push([x, y.min(h - 30.0)]);
+    }
+    let top_at = |x: f32| -> f32 {
+        let i = ((x / w * 20.0).floor() as usize).min(19);
+        let f = x / w * 20.0 - i as f32;
+        top[i][1] + (top[i + 1][1] - top[i][1]) * f
+    };
+    let mut pts = vec![[0.0, h]];
+    pts.extend(top.iter().copied());
+    pts.push([w, h]);
+    c.poly(&pts, mul(t, 0.55), 0.2);
+    // Broken slabs and blocks, of no regular size, each lit on its top and left and shadowed
+    // under it, with darker cracks between.
+    for _ in 0..120 {
+        let (cx, cy) = (r.range(-10.0, w + 10.0), r.range(0.0, h));
+        let (bw, bh) = (r.range(14.0, 46.0), r.range(10.0, 30.0));
+        let (x0, x1, y0, y1) = (cx - 0.5 * bw, cx + 0.5 * bw, cy - 0.5 * bh, cy + 0.5 * bh);
+        let ty = top_at(cx.clamp(0.0, w));
+        if y1 < ty + 6.0 { continue; }
+        let y0 = y0.max(ty + 2.0);
+        let k = r.range(0.7, 1.2);
+        let face = [t[0] * k, t[1] * k * r.range(0.96, 1.03), t[2] * k * r.range(0.95, 1.04)];
+        let sk = r.range(-5.0, 5.0);
+        let q = [[x0 + sk + r.range(0.0, 6.0), y0], [x1 + sk - r.range(0.0, 6.0), y0 + r.range(-2.0, 3.0)], [x1 + r.range(-2.0, 2.0), 0.5 * (y0 + y1)], [x1 - r.range(0.0, 5.0), y1], [x0 + r.range(0.0, 5.0), y1 + r.range(-2.0, 1.0)], [x0 + r.range(-2.0, 2.0), 0.5 * (y0 + y1)]];
+        c.poly(&q, face, 0.5);
+        c.line(q[0], q[1], 1.8, mul(face, 1.4));
+        c.line(q[3], q[4], 2.0, mul(t, 0.3));
+        if r.f() < 0.5 { c.stain(cx + r.range(-4.0, 4.0), y0 + 1.5, bw * r.range(0.18, 0.4), 2.5, 0.0, [0.08 * t[0] + 0.04, 0.13 + 0.1 * t[1], 0.035], 0.7); }
+        if r.f() < 0.3 { let x = r.range(x0 + 3.0, x1 - 3.0); c.line([x, y0 + 2.0], [x + r.range(-5.0, 5.0), y1 - 2.0], 0.9, mul(t, 0.28)); }
+    }
+    // Grass and ferns hanging over the top, and a few down the face.
+    for _ in 0..70 {
+        let x = r.range(0.0, w);
+        if (72.0..128.0).contains(&x) { continue; }
+        let ty = top_at(x);
+        let g = [0.05 + r.range(0.0, 0.06), 0.14 + r.range(0.0, 0.12), 0.03];
+        let len = r.range(5.0, 16.0);
+        let lean = r.range(-0.8, 0.8);
+        c.line([x, ty + 2.0], [x + lean * len, ty - len * 0.7], 1.6, g);
+        if r.f() < 0.3 { c.line([x, ty + 1.0], [x + lean * 6.0, ty + len], 1.2, mul(g, 0.8)); }
+    }
+    for _ in 0..10 { let (x, yy) = (r.range(8.0, 192.0), r.range(40.0, 230.0)); if !(66.0..134.0).contains(&x) { c.stain(x, yy, r.range(5.0, 11.0), r.range(3.0, 6.0), 0.0, [0.06, 0.16, 0.04], 0.7); } }
+    // The channel the water has worn: darker, wet, and smooth.
+    c.stain(100.0, 140.0, 34.0, 130.0, 0.0, mul(t, 0.22), 0.9);
+    c.stain(100.0, 140.0, 26.0, 125.0, 0.0, [0.02, 0.025, 0.03], 0.6);
+    for i in 0..6 { c.stain(84.0 + i as f32 * 6.0, 120.0 + r.range(-20.0, 20.0), 2.0, 70.0, 0.0, mul(t, 0.9), 0.35); }
+    c.finish()
+}
+
+/// A neon sign: tubes bent into a border and a cocktail glass with an olive, on a dark board
+/// bolted out from the wall. The tubes are white (the fixture's colour tints them) and glow;
+/// the board and its brackets do not.
+fn paint_neon() -> Sprite {
+    let mut c = Canvas::new(160, 144);
+    let mut g = Canvas::new(160, 144);
+    let (board, iron, tube) = ([0.03, 0.03, 0.035], [0.08, 0.08, 0.085], [1.0, 1.0, 1.0]);
+    c.rect(6.0, 8.0, 154.0, 136.0, board, 0.3);
+    for (x, y) in [(14.0, 16.0), (146.0, 16.0), (14.0, 128.0), (146.0, 128.0)] { c.ellipse(x, y, 2.4, 2.4, iron, 0.8); }
+    // The tubes: a glass, its stem and foot, a stick with an olive, and a border round it all.
+    let tubes: Vec<([f32; 2], [f32; 2])> = vec![
+        ([18.0, 22.0], [142.0, 22.0]), ([142.0, 22.0], [142.0, 122.0]), ([142.0, 122.0], [18.0, 122.0]), ([18.0, 122.0], [18.0, 22.0]),
+        ([46.0, 36.0], [114.0, 36.0]), ([46.0, 36.0], [80.0, 74.0]), ([114.0, 36.0], [80.0, 74.0]),
+        ([80.0, 74.0], [80.0, 104.0]), ([62.0, 108.0], [98.0, 108.0]),
+        ([92.0, 30.0], [70.0, 58.0]),
+    ];
+    for (a, b) in &tubes { c.line(*a, *b, 3.4, tube); g.line(*a, *b, 3.4, [2.6; 3]); }
+    for (a, b) in &tubes { g.line(*a, *b, 9.0, [0.35; 3]); }
+    c.ellipse(76.0, 52.0, 5.0, 5.0, tube, 0.0);
+    g.ellipse(76.0, 52.0, 5.0, 5.0, [2.6; 3], 0.0);
+    c.rect(0.0, 66.0, 6.0, 78.0, iron, 0.6);
+    with_glow(c.finish(), g)
 }
 
 /// Where the chandelier's candle tops are in its 160 x 150 painting.
@@ -1576,6 +1666,7 @@ pub fn fixture_body(kind: FixtureKind) -> (f32, f32) {
         FixtureKind::Glowshroom => (0.4, 0.4),
         FixtureKind::Beacon => (0.32, 0.39),
         FixtureKind::Chandelier => (0.75, CHANDELIER_FLAME_Y / 150.0),
+        FixtureKind::Neon => (0.9, 0.5),
     }
 }
 
@@ -1808,6 +1899,13 @@ impl SpriteCache {
         let key = (kind as u8, tint, variant % VARIANTS);
         if self.procedural.len() > 256 { self.procedural.clear(); }
         self.procedural.entry(key).or_insert_with(|| Arc::new(paint_prop(kind, tint, variant % VARIANTS))).clone()
+    }
+
+    /// A rock face for a waterfall to pour down: craggy, banded, mossy, darker and wet down its middle.
+    pub fn cliff(&mut self, tint: Rgb, variant: u32) -> Arc<Sprite> {
+        let key = (0xC1, tint, variant % VARIANTS);
+        if self.procedural.len() > 256 { self.procedural.clear(); }
+        self.procedural.entry(key).or_insert_with(|| Arc::new(paint_cliff(tint, variant % VARIANTS))).clone()
     }
 
     /// A whole rock for one floating in space (`PropLayer.float`): the ground rocks are domes with
