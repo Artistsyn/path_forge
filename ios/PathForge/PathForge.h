@@ -33,4 +33,10 @@ bool pfm_on_gpu(PfmHandle *h);
 /** Draw into rgba (len bytes, at least w * h * 4): opaque RGBA rows. */
 bool pfm_render(PfmHandle *h, float distance, float time, uint32_t w, uint32_t hh, uint8_t *rgba, size_t len);
 
+/** The loop as an animated GIF or WebP ("gif" / "webp") in dir: its path, or NULL. */
+char *pfm_export(const char *json, const char *dir, const char *name, const char *format, uint32_t w, uint32_t h, uint32_t fps, float quality, bool gpu);
+/** Frames done, and of how many, of the export running now. */
+void pfm_export_progress(uint32_t *done, uint32_t *total);
+void pfm_export_cancel(void);
+
 #endif

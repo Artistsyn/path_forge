@@ -37,6 +37,7 @@ pub const META: &[Meta] = &[
     m("fixtures.*.flicker", 0.0, 3.0, "×"), m("fixtures.*.jitter", 0.0, 3.0, " m"),
     m("fixtures.*.jitter_along", 0.0, 1.0, ""), m("fixtures.*.height_var", 0.0, 3.0, " m"), m("fixtures.*.size_var", 0.0, 0.9, ""),
     m("fixtures.*.intensity_var", 0.0, 1.0, ""), m("fixtures.*.color_var", 0.0, 1.0, ""), m("fixtures.*.density", 0.0, 1.0, ""),
+    m("fixtures.*.posts_between", 0.0, 7.0, ""), m("weather.snow_cover.props", 0.0, 1.0, ""), m("weather.snow_cover.ground", 0.0, 1.0, ""),
     m("fixtures.*.cluster", 1.0, 8.0, ""), m("fixtures.*.stagger", 0.0, 1.0, ""), m("fixtures.*.set_piece", 0.0, 7.0, ""),
     m("props.*.jitter_along", 0.0, 1.0, ""), m("props.*.stagger", 0.0, 1.0, ""), m("props.*.lean_var", 0.0, 0.2, ""),
     m("props.*.orbit.radius", 0.5, 30.0, " m"), m("props.*.orbit.radius_var", 0.0, 10.0, " m"), m("props.*.orbit.height", 0.0, 20.0, " m"),

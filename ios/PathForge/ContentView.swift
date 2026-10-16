@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 import UniformTypeIdentifiers
 
 /// A rounded button: filled with the accent colour when `primary`, outlined otherwise.
@@ -72,6 +73,7 @@ struct ContentView: View {
                         VStack(spacing: 14) {
                             Text(busy).font(.headline)
                             if let p = model.progress { ProgressView(value: p).tint(accent).frame(width: 220) } else { ProgressView() }
+                            if model.cancellable { Button("Cancel") { pfm_export_cancel() }.buttonStyle(Pill()) }
                         }
                         .padding(24)
                         .background(RoundedRectangle(cornerRadius: 20).fill(Color(white: 0.12)))
@@ -79,6 +81,10 @@ struct ContentView: View {
                 }
             }
         }
+        .background(Color.clear.sheet(isPresented: $model.askingAnimation) { AnimationSheet(model: model) })
+        .background(Color.clear.sheet(item: Binding(get: { model.shareURL.map { SharedFile(url: $0) } }, set: { if $0 == nil { model.shareURL = nil } })) { f in
+            ShareSheet(items: [f.url])
+        })
         .preferredColorScheme(.dark)
         .statusBarHidden(!model.panelShown && !model.editing)
         .fileImporter(isPresented: $model.importing, allowedContentTypes: [.json, .plainText, .data], allowsMultipleSelection: false) { result in
@@ -170,6 +176,8 @@ struct Panel: View {
                            onEditingChanged: { if !$0 { model.changed() } }).tint(accent)
                     SectionLabel(text: "Draw on")
                     Chips(labels: ["GPU (fast)", "CPU"], selected: model.gpuOn ? 0 : 1) { model.setGpu($0 == 0) }
+                    SectionLabel(text: "Preview")
+                    Chips(labels: ["Auto (smooth)", "Sharp (full size)"], selected: model.sharp ? 1 : 0) { model.setSharp($0 == 1) }
                     SectionLabel(text: "Wallpaper")
                     Text("iPhone apps can't set the wallpaper themselves. Save it to Photos below, then in Photos tap Share → Use as Wallpaper. A Live Photo moves on the lock screen (iOS 17+).")
                         .font(.caption).foregroundColor(.secondary)
@@ -184,6 +192,7 @@ struct Panel: View {
                 Button("Still") { model.saveStill() }.buttonStyle(Pill(primary: true))
                 Button("Live Photo") { model.saveLivePhoto() }.buttonStyle(Pill(primary: true))
                 Button("Video") { model.saveVideo() }.buttonStyle(Pill())
+                Button("GIF/WebP") { model.askingAnimation = true }.buttonStyle(Pill())
             }
         }
         .padding(16)
@@ -213,5 +222,55 @@ struct Panel: View {
                 Button("Save a copy as one of yours") { if let s = Native.presetScene(name) { model.save(suggest: name + " (mine)", scene: s) } }
             }
         }
+    }
+}
+
+
+/// A file to share, as an item for `.sheet(item:)`.
+struct SharedFile: Identifiable {
+    let url: URL
+    var id: String { url.path }
+}
+
+/// The system share sheet (Save Image, Save to Files, Messages, AirDrop...).
+struct ShareSheet: UIViewControllerRepresentable {
+    let items: [Any]
+    func makeUIViewController(context: Context) -> UIActivityViewController { UIActivityViewController(activityItems: items, applicationActivities: nil) }
+    func updateUIViewController(_ vc: UIActivityViewController, context: Context) {}
+}
+
+/// Choosing how to save the loop as an animation.
+struct AnimationSheet: View {
+    @ObservedObject var model: AppModel
+    @Environment(\.dismiss) private var dismiss
+    @AppStorage("anim.format") private var format = 0
+    @AppStorage("anim.size") private var size = 1
+    @AppStorage("anim.fps") private var fps = 1
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Save the loop as an animation").font(.title3.bold())
+            SectionLabel(text: "Format")
+            Chips(labels: ["WebP (full colour, small)", "GIF (plays anywhere)"], selected: format) { format = $0 }
+            SectionLabel(text: "Size")
+            Chips(labels: ["Small", "Medium", "Large", "Full screen"], selected: size) { size = $0 }
+            SectionLabel(text: "Frames a second")
+            Chips(labels: ["12", "20", "30"], selected: fps) { fps = $0 }
+            Text("The whole loop, joining end to start, so it plays forever without a seam. Larger and smoother takes longer and makes a bigger file (GIF most of all). Photos plays GIFs; WebP is smaller and shows every colour.")
+                .font(.caption).foregroundColor(.secondary)
+            Spacer()
+            HStack {
+                Button("Cancel") { dismiss() }.buttonStyle(Pill())
+                Spacer()
+                Button("Make it") {
+                    dismiss()
+                    let width = [360, 540, 720, 100_000][size]
+                    model.saveAnimation(format: format == 0 ? "webp" : "gif", width: width, fps: [12, 20, 30][fps])
+                }.buttonStyle(Pill(primary: true))
+            }
+        }
+        .padding(20)
+        .presentationDetents([.medium])
+        .preferredColorScheme(.dark)
     }
 }

@@ -1432,6 +1432,26 @@ pub struct Weather {
     pub heat_shimmer: HeatShimmer,
     /// Raindrops or frost on the camera's lens.
     pub lens: Lens,
+    /// Snow lying on the scenery and the ground without any falling: a winter scene from any
+    /// scene.
+    pub snow_cover: SnowCover,
+}
+
+/// Snow that has already fallen: laid on trees, rocks and the rest of the scenery (`props`) and on
+/// the ground, walls and railings (`ground`), with no snow falling. Falling snow
+/// (`precipitation`) lays its own; whichever is deeper shows.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
+pub struct SnowCover {
+    pub enabled: bool,
+    /// How much snow lies on trees and the rest of the scenery (0..1): a cap along their tops at
+    /// 0.2, branches laden with it at 1.
+    pub props: f32,
+    /// How much lies on the ground, walls and railings (0..1): a dusting at 0.3, deep at 1.
+    pub ground: f32,
+}
+impl Default for SnowCover {
+    fn default() -> Self { SnowCover { enabled: false, props: 0.7, ground: 0.6 } }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Default)]
@@ -1716,6 +1736,12 @@ pub struct Fixture {
     pub place: LightPlace,
     /// For `place: SetPieces`: which of `set_pieces` the lights go with (0 = the first).
     pub set_piece: u32,
+    /// On bridges, stand on the railing's posts instead of at `spacing`: one on each end post of
+    /// every bridge, each side (whatever `place` says).
+    pub bridge_posts: bool,
+    /// With `bridge_posts`: how many more posts (each with its light) stand evenly between the end
+    /// posts: 1 halfway, 2 at the thirds, 3 at the quarters... The railing gains those posts.
+    pub posts_between: u32,
     pub sprite: SpriteRef,
     pub seed: u32,
 }
@@ -1725,7 +1751,7 @@ impl Default for Fixture {
             enabled: true, kind: FixtureKind::Torch, side: Side::Both, mount: Mount::Wall, height: 2.1, spacing: 6.0,
             offset: 0.0, lateral: 0.3, size: 1.0, light: true, intensity: 1.0, radius: 6.0, flicker: 1.0, jitter: 0.0,
             jitter_along: 0.0, height_var: 0.0, size_var: 0.0, intensity_var: 0.0, color_var: 0.0, density: 1.0, cluster: 1, stagger: 0.0,
-            tint: [255, 255, 255], post: LampPost::Auto, place: LightPlace::Anywhere, set_piece: 0,
+            tint: [255, 255, 255], post: LampPost::Auto, place: LightPlace::Anywhere, set_piece: 0, bridge_posts: false, posts_between: 0,
             sprite: SpriteRef::default(), seed: 0,
         }
     }

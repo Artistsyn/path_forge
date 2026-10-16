@@ -81,13 +81,20 @@ final class PreviewUIView: UIView {
         lock.lock(); running = false; lock.unlock()
     }
 
+    /// Always draw at the screen's full size, however long a frame takes.
+    func setSharp(_ on: Bool) { lock.lock(); sharp = on; lock.unlock() }
+    private var sharp = false
+    private var isSharp: Bool { lock.lock(); defer { lock.unlock() }; return sharp }
+
     private var isRunning: Bool { lock.lock(); defer { lock.unlock() }; return running }
 
     private func loop() {
         var scene: PathScene?
         var loopLen: Float = 24, loopSecs: Float = 10
-        // Render at 1/div of the screen's width, adapting to how fast this phone draws the scene.
-        var div = 3
+        // Render at a share of the screen's size: in Auto, as much as keeps up (full size on a fast
+        // phone); Sharp always draws at full size.
+        let scales: [Double] = [1, 0.85, 0.7, 0.55, 0.45, 0.35, 0.28, 0.22, 0.16, 0.1]
+        var level = 2
         var avg = 30.0
         var frames = 0
         var first = true
@@ -116,7 +123,8 @@ final class PreviewUIView: UIView {
             }
             let w = Int(size.width), h = Int(size.height)
             guard let s = scene, w > 0, h > 0 else { Thread.sleep(forTimeInterval: 0.05); continue }
-            let rw = max(64, w / div), rh = max(64, Int((Double(h) * Double(rw) / Double(w)).rounded()))
+            if isSharp { level = 0 }
+            let rw = max(64, Int((Double(w) * scales[level]).rounded())), rh = max(64, Int((Double(h) * Double(rw) / Double(w)).rounded()))
             let t = Float((CACurrentMediaTime() - t0).truncatingRemainder(dividingBy: Double(loopSecs)))
             let d = t / loopSecs * loopLen
             let a = CACurrentMediaTime()
@@ -136,8 +144,9 @@ final class PreviewUIView: UIView {
                 frames = 0
                 statsAt = now
             }
-            // As much of the screen's size as keeps up: half at best, a tenth at worst.
-            if avg > 45 && div < 10 { div += 1; avg = 30 } else if avg < 16 && div > 2 { div -= 1; avg = 30 }
+            if !isSharp {
+                if avg > 45 && level < scales.count - 1 { level += 1; avg = 30 } else if avg < 20 && level > 0 { level -= 1; avg = 30 }
+            }
             let spare = 1.0 / 30 - (CACurrentMediaTime() - frameStart)
             if spare > 0 { Thread.sleep(forTimeInterval: spare) }
         }
@@ -151,6 +160,7 @@ struct PreviewView: UIViewRepresentable {
         let v = PreviewUIView(frame: .zero)
         v.onStats = { gpu, w, h, fps in model.showStats(gpu: gpu, width: w, height: h, fps: fps) }
         model.preview = v
+        v.setSharp(model.sharp)
         v.setScene(model.scene)
         return v
     }

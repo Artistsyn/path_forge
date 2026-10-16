@@ -90,7 +90,10 @@ depth layers or a depth map).
   kinds, cover and size at random (change `seed` for another sky; `kinds` limits the choice).
   A sunset: `sky.sunset: {enabled: true, style: "Golden" | "Fiery" | "Pastel" | "Dusk"}` with the
   sun low (`sky.sun.pos` y 0.85-0.95); it colours the sky, a glow along the horizon round the
-  sun, the clouds (lit from below) and the light. A path that should wander:
+  sun, the clouds (lit from below) and the light. Winter without falling snow:
+  `weather.snow_cover: {enabled: true, props: 0.7, ground: 0.6}`. Lamps on a bridge's posts:
+  a fixture with `bridge_posts: true` (and `posts_between: 1` for one more post halfway).
+  A path that should wander:
   `path.winding`. A frozen river: `path.waterway.frozen`. Sun glare: `post.bloom` + `post.flare`.
   Under a dark sky `post.bloom` also makes the moon, aurora and brighter stars glow (0.3-0.6 soft). On a
   winding path the sky turns with the camera: sun, moon, stars and clouds slide across the frame and

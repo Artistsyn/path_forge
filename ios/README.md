@@ -49,6 +49,11 @@ saves to Photos, and you set it from there (**Photos → the picture → Share �
 - **Live Photo**: three seconds of the walk. On the lock screen it moves when the phone wakes
   (iOS 17 and later).
 - **Video**: the whole loop, joining end to start, at the screen's size.
+- **GIF/WebP**: the whole loop as a seamless animated GIF or WebP, small to full-screen size, at 12,
+  20 or 30 frames a second, handed to the share sheet (Save Image, Save to Files, Messages...).
+
+**Preview**: Auto draws as much of the screen's size as keeps the walk smooth; Sharp always draws
+at full size.
 
 ## Building it on a Mac
 

@@ -30,6 +30,12 @@ final class Native {
     static native void close(long handle);
     /** [loop length (m), loop seconds, fps, canvas width, canvas height]. */
     static native float[] info(long handle);
+    /** The loop as an animated GIF or WebP ("gif" / "webp") in `dir`, seamless: its path, or null
+     *  (see lastError). Blocks until done; exportProgress tells how far, exportCancel stops it. */
+    static native String exportAnimation(String json, String dir, String name, String format, int w, int h, int fps, float quality, boolean gpu);
+    /** [frames done, of how many] of the export running now. */
+    static native int[] exportProgress();
+    static native void exportCancel();
     /** Draw into a direct buffer of w * h * 4 bytes (RGBA, as an ARGB_8888 bitmap holds it). */
     static native boolean render(long handle, float distance, float time, int w, int h, ByteBuffer out);
 }

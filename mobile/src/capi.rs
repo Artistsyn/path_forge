@@ -107,6 +107,32 @@ pub extern "C" fn pfm_render(h: *mut Handle, distance: f32, time: f32, w: u32, h
     })
 }
 
+/// The loop as an animated GIF or WebP ("gif" / "webp") in `dir`: its path (free with pfm_free),
+/// or NULL (see pfm_last_error).
+#[no_mangle]
+#[allow(clippy::too_many_arguments)]
+pub extern "C" fn pfm_export(json: *const c_char, dir: *const c_char, name: *const c_char, format: *const c_char, w: u32, h: u32, fps: u32, quality: f32, gpu: bool) -> *mut c_char {
+    match guard(None, || {
+        let f = arg(format)?;
+        let a = crate::Animation { format: &f, width: w, height: h, fps, quality, gpu };
+        crate::export_animation(&arg(json)?, &arg(dir)?, &arg(name)?, &a).map(Some)
+    }) { Some(p) => out(p), None => std::ptr::null_mut() }
+}
+
+/// Frames done, and of how many, of the export running now.
+#[no_mangle]
+pub extern "C" fn pfm_export_progress(done: *mut u32, total: *mut u32) {
+    let (d, t) = crate::export_progress();
+    // SAFETY: the caller passes two writable u32s (or NULL).
+    unsafe {
+        if let Some(p) = done.as_mut() { *p = d; }
+        if let Some(p) = total.as_mut() { *p = t; }
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn pfm_export_cancel() { crate::export_cancel(); }
+
 #[cfg(test)]
 mod tests {
     use super::*;

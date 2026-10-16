@@ -52,6 +52,13 @@ final class AppModel: ObservableObject {
     @Published var thumbs: [String: UIImage] = [:]
     @Published var gpuOn: Bool
     @Published var mine: [String] = []
+    /// The preview always at full size (else as much as keeps up).
+    @Published var sharp = UserDefaults.standard.bool(forKey: "preview.sharp")
+    /// The animation export's settings window, and a file to share once made.
+    @Published var askingAnimation = false
+    @Published var shareURL: URL?
+    /// The busy job can be stopped (an animation export).
+    @Published var cancellable = false
     let presets: [String]
     let editor: EditorModel
     weak var preview: PreviewUIView?
@@ -126,6 +133,12 @@ final class AppModel: ObservableObject {
         gpuOn = on
         if on && gpuName.isEmpty { startGpu() }
         preview?.reopen(scene)
+    }
+
+    func setSharp(_ on: Bool) {
+        sharp = on
+        UserDefaults.standard.set(on, forKey: "preview.sharp")
+        preview?.setSharp(on)
     }
 
     func showStats(gpu: Bool, width: Int, height: Int, fps: Double) {

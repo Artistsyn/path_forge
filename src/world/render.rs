@@ -1632,7 +1632,7 @@ impl WorldRenderer {
             verge_tile: snap_to_loop(scene.verge.material.tile_size, loop_len),
             wall_tile: snap_to_loop(scene.walls.material.tile_size, loop_len),
             ceil_tile: snap_to_loop(scene.ceiling.material.tile_size, loop_len),
-            bridge: Spans::new(&scene.path.bridge, loop_len),
+            bridge: Spans::new(&scene.path.bridge, loop_len, &scene.fixtures),
             fork: Forks::new(&scene.path.fork, scene.path.edge_noise, loop_len),
             deck_tex: self.textures.get(&scene.path.bridge.deck),
             bottom_tex: match scene.path.bridge.bottom {
@@ -1801,16 +1801,33 @@ impl WorldRenderer {
             let flick_m1 = cycles(2.3, loop_seconds);
             let flick_m2 = cycles(5.1, loop_seconds);
             let seed = f.seed.wrapping_add(fi as u32 * 7919);
-            for k in k_lo..=k_hi {
-                let key = k.rem_euclid(n);
-                let d0 = k as f32 * sp + f.offset - ctx.scroll;
-                for (si, &sign) in f.side.signs().iter().enumerate() { for c in 0..cluster {
+            // Where they stand: every `spacing`, or on the railing posts of each bridge in view.
+            let on_posts = ctx.bridge.filter(|_| f.bridge_posts);
+            let scroll = ctx.scroll;
+            let (places, n): (Vec<(i64, f32)>, i64) = match on_posts {
+                Some(b) => {
+                    let per = ((ctx.loop_len / b.period).round() as i64).max(1);
+                    let v = b.within(scroll - reach - 1.0, scroll + ctx.far.min(80.0) + 1.0).into_iter().flat_map(|(s0, e)| {
+                        let kb = ((s0 - b.offset) / b.period).round() as i64;
+                        b.post_places(s0, e).into_iter().enumerate().map(move |(j, w)| (kb.rem_euclid(per) * 16 + j as i64, w - scroll))
+                    }).collect();
+                    (v, per * 16)
+                }
+                None => ((k_lo..=k_hi).map(|k| (k.rem_euclid(n), k as f32 * sp + f.offset - scroll)).collect(), n),
+            };
+            // A post on each side of the deck, whatever the side.
+            let signs: &[f32] = if on_posts.is_some() && f.side == Side::Center { &[-1.0, 1.0] } else { f.side.signs() };
+            for (key, d0) in places {
+                for (si, &sign) in signs.iter().enumerate() { for c in 0..cluster {
                     // (The first of a cluster keeps the key a lone light has, so old scenes stand as they did.)
                     let skey = key * 3 + si as i64 + c * 3 * n;
                     if f.density < 1.0 && hf(seed ^ 0xD3, skey) >= f.density { continue; }
-                    let d = d0 + if si == 1 { stagger * sp } else { 0.0 } + if along > 0.0 { (hf(seed ^ 0x9A, skey) - 0.5) * along * sp } else { 0.0 };
-                    if shifted && (d < -reach || d > ctx.far.min(80.0)) { continue; }
+                    let d = if on_posts.is_some() { d0 } else {
+                        d0 + if si == 1 { stagger * sp } else { 0.0 } + if along > 0.0 { (hf(seed ^ 0x9A, skey) - 0.5) * along * sp } else { 0.0 }
+                    };
+                    if (shifted || on_posts.is_some()) && (d < -reach || d > ctx.far.min(80.0)) { continue; }
                     match f.place {
+                        _ if on_posts.is_some() => {}
                         LightPlace::Bridges if !ctx.on_bridge(d) => continue,
                         LightPlace::OffBridges if ctx.on_bridge(d) => continue,
                         _ => {}
@@ -1848,6 +1865,14 @@ impl WorldRenderer {
                         && ctx.fork.is_some_and(|fk| fk.opens(ctx.scroll + d, sign)) { continue; }
                     let standing = matches!(f.mount, Mount::Ground) || (matches!(f.mount, Mount::Wall) && !scene.walls.enabled);
                     let x = if standing && x.abs() > hw && ctx.on_bridge(d) { x.signum() * (hw - 0.5 * ctx.bridge.map_or(0.0, |b| b.rail_inset())) } else { x };
+                    // On a post: in its middle, above its top.
+                    let (x, flame_y) = match on_posts {
+                        Some(b) => {
+                            let (out, top) = b.post_reach();
+                            (sign * (hw + out) + jx, flame_y.max(top + 0.25 * size))
+                        }
+                        None => (x, flame_y),
+                    };
                     if !ctx.owns(x, 0.0, d) { continue; }
                     // A flame gutters; glass and paper round one steady it; a beacon comes and goes.
                     let steady = match f.kind { FixtureKind::StreetLamp | FixtureKind::Glowshroom => 0.12, FixtureKind::PaperLantern => 0.4, _ => 1.0 };
@@ -2244,13 +2269,19 @@ fn post_billboard(ctx: &Ctx, sprite: &Arc<Sprite>, x: f32, top: f32, d: f32, siz
 
 /// Where the bridges are along the world.
 #[derive(Clone, Copy, Debug)]
-struct Spans { period: f32, len: f32, offset: f32, bottom: BridgeBottom, railing: Railing, rail_h: f32, pillars: bool, floor: f32 }
+struct Spans {
+    period: f32, len: f32, offset: f32, bottom: BridgeBottom, railing: Railing, rail_h: f32, pillars: bool, floor: f32,
+    /// Lights stand on the railing's posts (a fixture's `bridge_posts`): every bridge then has a
+    /// post at each end and `between` more evenly spaced between them, each side.
+    posts: bool,
+    between: u32,
+}
 
 impl Spans {
     /// How far in from the deck's edge the railing's parts are set, so that its widest part (an
     /// end pillar's cap, or the rail itself) ends flush with the edge instead of overhanging it.
     fn rail_inset(&self) -> f32 {
-        let ends = |w: f32, xi: f32| if self.pillars { xi + w + (w * 0.12).max(0.02) } else { 0.0 };
+        let ends = |w: f32, xi: f32| if self.pillars || self.posts { xi + w + (w * 0.12).max(0.02) } else { 0.0 };
         match self.railing {
             Railing::None => 0.0,
             Railing::Parapet => ends(0.46, -0.08).max(0.34),
@@ -2261,7 +2292,36 @@ impl Spans {
         }
     }
 
-    fn new(b: &Bridge, loop_len: f32) -> Option<Spans> {
+    /// The railing's end pillar (or post): its width, how far out from the railing's line it
+    /// stands, its height, and its material.
+    fn pillar(&self) -> (f32, f32, f32, u8) {
+        let rh = self.rail_h;
+        match self.railing {
+            Railing::Parapet => (0.46, -0.08, rh + 0.16, id::STONE),
+            Railing::Balustrade => (0.44, -0.07, rh + 0.12, id::STONE),
+            Railing::Posts => (0.18, -0.04, rh + 0.18, id::WOOD),
+            Railing::Iron => (0.42, -0.06, rh + 0.14, id::STONE),
+            Railing::Rope => (0.2, -0.02, rh + 0.25, id::WOOD),
+            Railing::None => (0.2, 0.0, rh + 0.2, id::WOOD),
+        }
+    }
+
+    /// Where the posts that carry lights stand along the bridge [s0, e] (their middles): one at
+    /// each end and `between` evenly between.
+    fn post_places(&self, s0: f32, e: f32) -> Vec<f32> {
+        let w = self.pillar().0;
+        let (a, z) = (s0 + 0.5 * w, e - 0.5 * w);
+        let n = self.between as usize + 1;
+        (0..=n).map(|k| a + (z - a) * k as f32 / n as f32).collect()
+    }
+
+    /// Sideways from the deck's edge to a post's middle (outward positive), and its top.
+    fn post_reach(&self) -> (f32, f32) {
+        let (w, xi, ht, _) = self.pillar();
+        (xi + 0.5 * w - self.rail_inset(), ht + (w * 0.12).max(0.02) * 1.6)
+    }
+
+    fn new(b: &Bridge, loop_len: f32, fixtures: &[Fixture]) -> Option<Spans> {
         if !b.enabled || b.length <= 0.0 { return None; }
         let period = snap_to_loop(b.spacing.max(2.0), loop_len);
         let depth = b.depth.clamp(0.5, 200.0);
@@ -2270,6 +2330,8 @@ impl Spans {
         Some(Spans {
             period, len: b.length.clamp(0.5, (period - 0.5).max(0.5)), offset: b.offset,
             bottom: b.bottom, railing: b.railing, rail_h: b.rail_height.clamp(0.2, 3.0), pillars: b.end_pillars, floor,
+            posts: fixtures.iter().any(|f| f.enabled && f.bridge_posts),
+            between: fixtures.iter().filter(|f| f.enabled && f.bridge_posts).map(|f| f.posts_between.min(15)).max().unwrap_or(0),
         })
     }
     fn contains(&self, w: f32) -> bool { (w - self.offset).rem_euclid(self.period) < self.len }
@@ -2625,13 +2687,24 @@ fn railing(v: &View, b: Spans, s0: f32, e: f32, ds: &[f32], far: f32, tris: &mut
     for sign in [-1.0f32, 1.0] {
         // The pillars at each end, and where the railing between them starts and ends.
         let ends = |tris: &mut Vec<Tri>, w: f32, xi: f32, ht: f32, m: u8| {
-            if !b.pillars { return (s0, e); }
+            if !b.pillars && !b.posts { return (s0, e); }
             pillar(tris, sign, s0, w, xi, ht, m);
             pillar(tris, sign, e - w, w, xi, ht, m);
             (s0 + w, e - w)
         };
+        // Posts that carry lights between the end ones.
+        if b.posts {
+            let (w, xi, ht, m) = b.pillar();
+            let places = b.post_places(s0, e);
+            for &c in &places[1..places.len() - 1] { pillar(tris, sign, c - 0.5 * w, w, xi, ht, m); }
+        }
         match b.railing {
-            Railing::None => {}
+            Railing::None => {
+                if b.posts {
+                    let (w, xi, ht, m) = b.pillar();
+                    ends(tris, w, xi, ht, m);
+                }
+            }
             Railing::Parapet => {
                 let (a, z) = ends(tris, 0.46, -0.08, rh + 0.16, stone);
                 run(tris, sign, a, z, 0.0, 0.3, 0.0, rh - 0.08, 0.0, stone);
@@ -4369,9 +4442,51 @@ struct Card<'a> {
     sx: f32, wp: f32, hp: f32, sy_top: f32, sway_px: f32,
     x0: i64, x1: i64, y0: i64, y1: i64,
     light: [f32; 3],
-    snow: Option<(f32, [f32; 3])>,
+    /// Snow on it: the cap's thickness (a share of its height), the snow's colour as lit, and how
+    /// much more lies caught on the upper sides of its clumps (0..1).
+    snow: Option<(f32, [f32; 3], f32)>,
     z: f32, nearest: bool,
     fog: (bool, f32, [f32; 3], f32, [f32; 3]),
+}
+
+/// Smooth value noise for snow on cards (0..1); `cards.wgsl` has the same.
+fn snow_noise(x: f32, y: f32) -> f32 {
+    let h = |i: i32, j: i32| {
+        let mut h = (i as u32).wrapping_mul(0x8da6_b343) ^ (j as u32).wrapping_mul(0xd816_3841) ^ 0x5157u32.wrapping_mul(0x9e37_79b9);
+        h ^= h >> 15;
+        h = h.wrapping_mul(0x2c1b_3c6d);
+        h ^= h >> 12;
+        (h & 0xffff) as f32 / 65535.0
+    };
+    let (xf, yf) = (x.floor(), y.floor());
+    let (fx, fy) = (x - xf, y - yf);
+    let (sx, sy) = (fx * fx * (3.0 - 2.0 * fx), fy * fy * (3.0 - 2.0 * fy));
+    let (i, j) = (xf as i32, yf as i32);
+    let a = h(i, j) + (h(i + 1, j) - h(i, j)) * sx;
+    let b = h(i, j + 1) + (h(i + 1, j + 1) - h(i, j + 1)) * sx;
+    a + (b - a) * sy
+}
+
+/// A card's colour at (u, v) under lying snow: a cap along every edge open above; and with
+/// `dust`, snow caught on the tops of its clumps all through it: where sky shows a little above,
+/// or where a darker gap or outline lies just above a lit clump, in patches, more higher up.
+/// `cards.wgsl` repeats it step for step.
+#[allow(clippy::too_many_arguments)]
+fn snow_on_card(sprite: &Sprite, u: f32, v: f32, hp: f32, cap: f32, dust: f32, lit: [f32; 3], snow: [f32; 3]) -> [f32; 3] {
+    let at = |dv: f32| if v - dv < 0.0 { [0.0; 4] } else { sprite.sample(u, v - dv, hp, true) };
+    if at(cap)[3] < 0.5 { return snow; }
+    if dust <= 0.0 { return lit; }
+    let luma = |c: [f32; 4]| 0.3 * c[0] + 0.59 * c[1] + 0.11 * c[2];
+    // A step in the card's height, at least a pixel and a half.
+    let step = (1.5 / hp.max(1.0)).max(0.012);
+    let (here, a1, a2) = (sprite.sample(u, v, hp, true), at(step), at(2.5 * step));
+    let open: f32 = if a1[3] < 0.5 { 1.0 } else if a2[3] < 0.5 { 0.7 } else { 0.0 };
+    let ledge = if a1[3] >= 0.5 { ((luma(here) - luma(a1)) * 5.0).clamp(0.0, 1.0) } else { 0.0 };
+    let patch = (0.5 + 0.5 * (37.0 * u + 23.0 * v + 3.1 * (13.0 * v).sin()).sin()).powf(0.7);
+    // Laden: blotches of it lying all over, the more the deeper.
+    let blob = smoothstep(0.5, 0.7, 0.65 * snow_noise(5.0 * u, 8.0 * v) + 0.35 * snow_noise(11.0 * u + 3.1, 17.0 * v + 1.7));
+    let k = (dust * open.max(ledge) * (0.55 + 0.45 * patch) + dust * dust * (0.75 * blob + 0.2 * patch) * (1.0 - 0.5 * v)).min(1.0);
+    mix3(lit, snow, k)
 }
 
 impl<'a> Card<'a> {
@@ -4395,9 +4510,10 @@ impl<'a> Card<'a> {
         if x0 > x1 || y0 > y1 { return None; }
         let light = ctx.light_except(x, y + b.height * 0.5, d, None, 0, weather::cloud_shade(ctx, x, d), b.own_light);
         // Lying snow settles on the tops of props: a few centimetres under every edge open above.
-        let snow = (ctx.wx.snow > 0.05 && b.id == id::PROP && b.emissive < 0.3).then(|| {
-            let cap = (v.px_per_m(base[2]) * 0.06 * ctx.wx.snow).max(1.0) / hp;
-            (cap, mul3([0.80, 0.83, 0.88], light))
+        let ps = ctx.wx.prop_snow;
+        let snow = (ps > 0.05 && b.id == id::PROP && b.emissive < 0.3).then(|| {
+            let cap = (v.px_per_m(base[2]) * 0.06 * ps).max(1.0) / hp;
+            (cap, mul3([0.80, 0.83, 0.88], light), ctx.wx.prop_dust)
         });
         let light = mul3(light, b.tint);
         let z = base[2];
@@ -4414,11 +4530,11 @@ impl<'a> Card<'a> {
     fn gpu(&self) -> super::gpu::CardIn {
         let b = self.b;
         let (plain, fog_t, fog, fog_mul, fog_add) = self.fog;
-        let (snow_on, snow_cap, snow) = self.snow.map_or((0, 0.0, [0.0; 3]), |(c, s)| (1, c, s));
+        let (snow_on, snow_cap, snow, snow_dust) = self.snow.map_or((0, 0.0, [0.0; 3], 0.0), |(c, s, d)| (1, c, s, d));
         let card = super::gpu::CardGpu {
             sx: self.sx, wp: self.wp, hp: self.hp, sy_top: self.sy_top, sway: self.sway_px, z: self.z,
             x0: self.x0 as i32, x1: self.x1 as i32, y0: self.y0 as i32, y1: self.y1 as i32,
-            light: self.light, snow_on, snow_cap, snow,
+            light: self.light, snow_on, snow_cap, snow, snow_dust,
             nearest: self.nearest as u32, flip: b.flip as u32, plain: plain as u32, fog_t, fog, fog_mul, fog_add,
             emissive: b.emissive, id: b.id as u32, realm: b.realm as u32, world: b.world, source: b.source as u32,
             w_amp: b.wind.amp, w_v: b.wind.v, w_lean: b.wind.lean, w_t1: b.wind.t1, w_t2: b.wind.t2,
@@ -4461,8 +4577,8 @@ impl<'a> Card<'a> {
                 if a < 0.02 { continue; }
                 let glow = b.emissive + b.sprite.glow.as_ref().map_or(0.0, |g| g.sample(u, vv, self.hp, self.nearest)[0]);
                 let mut lit = add3(mul3([s[0], s[1], s[2]], self.light), scale3([s[0], s[1], s[2]], glow));
-                if let Some((cap, snow_lit)) = self.snow {
-                    if a >= 0.5 && (vv - cap < 0.0 || b.sprite.sample(u, vv - cap, self.hp, true)[3] < 0.5) { lit = snow_lit; }
+                if let Some((cap, snow_lit, dust)) = self.snow {
+                    if a >= 0.5 { lit = snow_on_card(&b.sprite, u, vv, self.hp, cap, dust, lit, snow_lit); }
                 }
                 let c = if plain { mix3(fog_c, lit, fog_t) } else { add3(scale3(lit, fog_mul), fog_add) };
                 hdr[i] = mix3(hdr[i], c, a);
@@ -5042,7 +5158,7 @@ mod tests {
                 path_tex: r.textures.get(&s.path.material), verge_tex: r.textures.get(&s.verge.material),
                 wall_tex: r.textures.get(&s.walls.material), ceil_tex: r.textures.get(&s.ceiling.material),
                 path_tile: 1.0, verge_tile: 1.0, wall_tile: 1.0, ceil_tile: 1.0,
-                bridge: Spans::new(&s.path.bridge, 24.0), fork: Forks::new(&s.path.fork, s.path.edge_noise, 24.0), deck_tex: r.textures.get(&s.path.bridge.deck), bottom_tex: r.textures.get(&s.verge.material),
+                bridge: Spans::new(&s.path.bridge, 24.0, &s.fixtures), fork: Forks::new(&s.path.fork, s.path.edge_noise, 24.0), deck_tex: r.textures.get(&s.path.bridge.deck), bottom_tex: r.textures.get(&s.verge.material),
                 deck_tile: 1.0, bottom_tile: 1.0, ambient: [0.0; 3],
                 sky_lights: vec![], lights: vec![], fog: None, fog_col: [0.0; 3], void_lin: [0.0; 3], realm: 0, bounds: None, facade: None, opening: None, portal: None, front: None, verge_beyond: None, gain: 1.0, wx: weather::Wx::default(), water: None, cover: Vec::new(),
             };
@@ -5162,7 +5278,7 @@ mod tests {
                 path_tex: r.textures.get(&s.path.material), verge_tex: r.textures.get(&s.verge.material),
                 wall_tex: r.textures.get(&s.walls.material), ceil_tex: r.textures.get(&s.ceiling.material),
                 path_tile: 1.0, verge_tile: 1.0, wall_tile: 1.0, ceil_tile: 1.0,
-                bridge: Spans::new(&s.path.bridge, 24.0), fork: Forks::new(&s.path.fork, s.path.edge_noise, 24.0), deck_tex: r.textures.get(&s.path.bridge.deck), bottom_tex: r.textures.get(&s.verge.material),
+                bridge: Spans::new(&s.path.bridge, 24.0, &s.fixtures), fork: Forks::new(&s.path.fork, s.path.edge_noise, 24.0), deck_tex: r.textures.get(&s.path.bridge.deck), bottom_tex: r.textures.get(&s.verge.material),
                 deck_tile: 1.0, bottom_tile: 1.0, ambient: [0.0; 3],
                 sky_lights: vec![], lights: vec![], fog: None, fog_col: [0.0; 3], void_lin: [0.0; 3], realm: 0, bounds: None, facade: None, opening: None, portal: None, front: None, verge_beyond: None, gain: 1.0, wx: weather::Wx::default(), water: None, cover: Vec::new(),
             };
@@ -5206,7 +5322,7 @@ mod tests {
                 path_tex: r.textures.get(&s.path.material), verge_tex: r.textures.get(&s.verge.material),
                 wall_tex: r.textures.get(&s.walls.material), ceil_tex: r.textures.get(&s.ceiling.material),
                 path_tile: 1.0, verge_tile: 1.0, wall_tile: 1.0, ceil_tile: 1.0,
-                bridge: Spans::new(&s.path.bridge, 24.0), fork: Forks::new(&s.path.fork, s.path.edge_noise, 24.0), deck_tex: r.textures.get(&s.path.bridge.deck), bottom_tex: r.textures.get(&s.verge.material),
+                bridge: Spans::new(&s.path.bridge, 24.0, &s.fixtures), fork: Forks::new(&s.path.fork, s.path.edge_noise, 24.0), deck_tex: r.textures.get(&s.path.bridge.deck), bottom_tex: r.textures.get(&s.verge.material),
                 deck_tile: 1.0, bottom_tile: 1.0, ambient: [0.0; 3],
                 sky_lights: vec![], lights: vec![], fog: None, fog_col: [0.0; 3], void_lin: [0.0; 3], realm: 0, bounds: None, facade: None, opening: None, portal: None, front: None, verge_beyond: None, gain: 1.0, wx: weather::Wx::default(), water: None, cover: Vec::new(),
             };
@@ -5372,6 +5488,47 @@ mod tests {
         // Beside the card, only sky.
         let side = (base_row + 5.0) as usize;
         assert!(out[side * w + 5][1] > 0.95 && out[side * w + 5][0] < 0.05);
+    }
+
+    #[test]
+    fn lights_on_bridge_posts_stand_at_the_ends_and_between() {
+        let mut b = Bridge { enabled: true, spacing: 24.0, length: 10.0, offset: 2.0, railing: Railing::Balustrade, ..Bridge::default() };
+        let lamp = |between: u32| Fixture { kind: FixtureKind::Lantern, mount: Mount::Ground, bridge_posts: true, posts_between: between, ..Fixture::default() };
+        let sp = Spans::new(&b, 24.0, &[lamp(1)]).unwrap();
+        let p = sp.post_places(2.0, 12.0);
+        assert_eq!(p.len(), 3);
+        assert!((p[1] - 7.0).abs() < 1e-4, "the middle post is halfway: {p:?}");
+        assert!(p[0] > 2.0 && p[2] < 12.0, "the end posts are on the bridge: {p:?}");
+        assert_eq!(Spans::new(&b, 24.0, &[lamp(3)]).unwrap().post_places(2.0, 12.0).len(), 5);
+        // The railing gains a post for each light between the ends.
+        let v = View::new(&preset("Forest Path"), 90, 160);
+        let tris = |fx: &[Fixture]| { let mut t = Vec::new(); railing(&v, Spans::new(&b, 24.0, fx).unwrap(), 2.0, 12.0, &[], 300.0, &mut t); t.len() };
+        assert!(tris(&[lamp(2)]) > tris(&[]), "posts between the ends add to the railing");
+        // In a frame, a light on every post each side of the bridge in view.
+        b.end_pillars = false;
+        let mut s = preset("Forest Path");
+        s.path.bridge = b;
+        s.fixtures = vec![lamp(1)];
+        let mut r = WorldRenderer::default();
+        let view = View::new(&s, 90, 160);
+        let (mut ctx, ..) = r.world_ctx(&WorldIn { scene: &s, distance: 0.0, time: None, base_dir: None }, view, 0, None);
+        let (mut bills, mut flames) = (Vec::new(), Vec::new());
+        r.collect_fixtures(&mut ctx, s.motion.loop_seconds(), &RenderOptions::default(), &mut bills, &mut flames);
+        let on_first: Vec<f32> = ctx.lights.iter().map(|l| l.pos[2]).filter(|&d| d > 0.0 && d < 13.0).collect();
+        assert_eq!(on_first.len(), 6, "three posts a side on the first bridge: {on_first:?}");
+    }
+
+    #[test]
+    fn a_snow_cover_whitens_trees_without_any_snow_falling() {
+        let mean = |cover: bool| {
+            let mut s = preset("Forest Path");
+            s.weather.snow_cover = crate::scene::SnowCover { enabled: cover, props: 1.0, ground: 0.0 };
+            let img = WorldRenderer::default().render(&s, 3.0, &RenderOptions { size: Some((90, 160)), ..RenderOptions::default() });
+            // The crowns fill the top of the frame.
+            img.rgba[..90 * 40 * 4].chunks(4).map(|p| p[0] as f32 + p[1] as f32 + p[2] as f32).sum::<f32>() / (90.0 * 40.0 * 3.0)
+        };
+        let (bare, snowy) = (mean(false), mean(true));
+        assert!(snowy > bare + 8.0, "trees under snow {snowy} against bare {bare}");
     }
 
     #[test]

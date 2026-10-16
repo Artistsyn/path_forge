@@ -13,7 +13,7 @@ use path_forge::runtime::Runtime;
 use path_forge::scene::{presets, Scene};
 use path_forge::world::gpu::{Gpu, GpuContext};
 use std::panic::{catch_unwind, AssertUnwindSafe};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 pub mod capi;
@@ -78,6 +78,62 @@ pub fn normalize(json: &str) -> Result<String, String> {
     let s = Scene::from_json(json)?;
     serde_json::to_string(&s).map_err(|e| e.to_string())
 }
+
+/// How far the export running now has got (frames done, of how many), and a request to stop it.
+static EXPORT_DONE: AtomicU32 = AtomicU32::new(0);
+static EXPORT_TOTAL: AtomicU32 = AtomicU32::new(0);
+static EXPORT_CANCEL: AtomicBool = AtomicBool::new(false);
+
+/// What an export of the loop is to be.
+pub struct Animation<'a> {
+    /// "gif" or "webp".
+    pub format: &'a str,
+    pub width: u32,
+    pub height: u32,
+    /// Frames a second (the loop's length decides how many frames).
+    pub fps: u32,
+    /// WebP quality 0..100 (100 lossless); GIF: how much smaller to make it at some cost, 0..1.
+    pub quality: f32,
+    pub gpu: bool,
+}
+
+/// Write the scene's whole loop as an animated GIF or WebP that loops without a seam, into `dir`
+/// as `name`.gif / .webp; returns its path. `export_progress` tells how far it has got and
+/// `export_cancel` stops it.
+pub fn export_animation(json: &str, dir: &str, name: &str, a: &Animation) -> Result<String, String> {
+    use path_forge::export::{export_with, ExportJob, Format};
+    let scene = Scene::from_json(json)?;
+    let format = match a.format { "gif" => Format::Gif, "webp" => Format::Webp, f => return Err(format!("no such animation format: {f}")) };
+    let frames = ((scene.motion.loop_seconds() * a.fps.clamp(4, 60) as f32).round() as u32).clamp(8, 1200);
+    let job = ExportJob {
+        formats: vec![format], out_dir: dir.into(), name: name.to_string(), frames: Some(frames),
+        size: Some((a.width.clamp(16, 4096), a.height.clamp(16, 4096))),
+        gif_lossy: if format == Format::Gif { a.quality.clamp(0.0, 1.0) * 0.03 } else { 0.0 },
+        webp_quality: (format == Format::Webp).then_some(a.quality.clamp(0.0, 100.0)),
+        ..ExportJob::default()
+    };
+    let mut renderer = path_forge::world::WorldRenderer::default();
+    if a.gpu { if let Some((g, _)) = gpu() { renderer.set_gpu(Some(g)); } }
+    EXPORT_CANCEL.store(false, Ordering::Relaxed);
+    EXPORT_DONE.store(0, Ordering::Relaxed);
+    EXPORT_TOTAL.store(frames, Ordering::Relaxed);
+    let report = export_with(&scene, &job, &mut renderer, |p| {
+        EXPORT_DONE.store(p.done, Ordering::Relaxed);
+        EXPORT_TOTAL.store(p.total.max(1), Ordering::Relaxed);
+    }, &EXPORT_CANCEL)?;
+    let ext = if format == Format::Gif { "gif" } else { "webp" };
+    // Only the animation is wanted on a phone: not the game's metadata beside it.
+    for f in &report.files {
+        if f.extension().is_some_and(|e| e == "json") { let _ = std::fs::remove_file(f); }
+    }
+    report.files.iter().find(|f| f.extension().is_some_and(|e| e == ext)).map(|f| f.to_string_lossy().into_owned())
+        .ok_or_else(|| "the export wrote no animation".to_string())
+}
+
+/// (frames done, of how many) of the export running now.
+pub fn export_progress() -> (u32, u32) { (EXPORT_DONE.load(Ordering::Relaxed), EXPORT_TOTAL.load(Ordering::Relaxed)) }
+
+pub fn export_cancel() { EXPORT_CANCEL.store(true, Ordering::Relaxed); }
 
 /// Every scene setting as an editor builds itself from it (`path_forge::scene::form::form`).
 pub fn form() -> String { path_forge::scene::form::form().to_string() }
@@ -145,6 +201,17 @@ mod tests {
         assert!(buf.chunks(4).all(|p| p[3] == 255), "every pixel opaque");
         assert!(preset_scene("No Such Place").is_none());
         assert!(form().contains("\"parts\""));
+        // The loop as an animation, small and short.
+        let dir = std::env::temp_dir().join(format!("pfm-export-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        for format in ["gif", "webp"] {
+            let path = export_animation(&json, dir.to_str().unwrap(), "loop", &Animation { format, width: 36, height: 64, fps: 4, quality: 80.0, gpu: false }).unwrap();
+            let bytes = std::fs::read(&path).unwrap();
+            assert!(path.ends_with(format) && bytes.len() > 100, "{path}: {} bytes", bytes.len());
+            assert_eq!(export_progress().0, export_progress().1, "all frames done");
+        }
+        assert!(std::fs::read_dir(&dir).unwrap().all(|f| !f.unwrap().path().to_string_lossy().ends_with(".json")), "no metadata left beside it");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

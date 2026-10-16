@@ -33,6 +33,10 @@ pub(super) struct Wx {
     pub wet: f32,
     pub puddles: f32,
     pub snow: f32,
+    /// Snow lying on the props (0..1): falling snow's, or a snow cover's; and how much of a snow
+    /// cover is caught on the upper sides of their clumps, not only along their tops.
+    pub prop_snow: f32,
+    pub prop_dust: f32,
     pub track: f32,
     /// How hard rain is falling on the puddles (their rings).
     pub rings: f32,
@@ -165,6 +169,14 @@ pub(super) fn conditions(scene: &Scene, tphase: f32, loop_seconds: f32) -> Wx {
             wx.track = p.track.clamp(0.0, 1.0);
         }
     }
+    // Snow already lying, with none falling.
+    let sc = &w.snow_cover;
+    if sc.enabled {
+        wx.snow = wx.snow.max(sc.ground.clamp(0.0, 1.0));
+        wx.prop_snow = sc.props.clamp(0.0, 1.0);
+        wx.prop_dust = wx.prop_snow;
+    }
+    wx.prop_snow = wx.prop_snow.max(wx.snow);
     let c = &scene.sky.clouds;
     if c.shadows > 0.0 && scene.sky.enabled && scene.sky.sun.enabled && scene.sky.sun.emits_light {
         wx.clouds = c.shadows.clamp(0.0, 1.0);

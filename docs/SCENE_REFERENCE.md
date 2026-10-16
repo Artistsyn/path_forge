@@ -361,6 +361,8 @@ A repeating light source along the path: torches, lanterns, fireflies, crystals.
 | `post` | [LampPost](#lamppost) | `"Auto"` | What it stands on or hangs from where there is no wall (ground mounts, and wall mounts in a scene without walls). |
 | `place` | [LightPlace](#lightplace) | `"Anywhere"` | Where along the path the row is allowed to stand. |
 | `set_piece` | integer | `0` | For `place: SetPieces`: which of `set_pieces` the lights go with (0 = the first). |
+| `bridge_posts` | boolean | `false` | On bridges, stand on the railing's posts instead of at `spacing`: one on each end post of every bridge, each side (whatever `place` says). |
+| `posts_between` | integer | `0` | With `bridge_posts`: how many more posts (each with its light) stand evenly between the end posts: 1 halfway, 2 at the thirds, 3 at the quarters... The railing gains those posts. |
 | `sprite` | [SpriteRef](#spriteref) | (see the type) |  |
 | `seed` | integer | `0` |  |
 
@@ -993,6 +995,18 @@ One of `Both` \| `Left` \| `Right` \| `Center`.
 | `emits_light` | boolean | `true` | Lights the world and casts shadows. |
 | `intensity` | number | `1.0` |  |
 
+### SnowCover
+
+Snow that has already fallen: laid on trees, rocks and the rest of the scenery (`props`) and on
+the ground, walls and railings (`ground`), with no snow falling. Falling snow
+(`precipitation`) lays its own; whichever is deeper shows.
+
+| Field | Type | Default | Meaning |
+|---|---|---|---|
+| `enabled` | boolean | `false` |  |
+| `props` | number | `0.7` | How much snow lies on trees and the rest of the scenery (0..1): a cap along their tops at 0.2, branches laden with it at 1. |
+| `ground` | number | `0.6` | How much lies on the ground, walls and railings (0..1): a dusting at 0.3, deep at 1. |
+
 ### Space
 
 The sky seen from space. It sits at infinity, so it stays put while the camera walks.
@@ -1214,6 +1228,7 @@ Every part works in any scene and repeats exactly with the loop.
 | `light_shafts` | [LightShafts](#lightshafts) | `{"enabled":false,"sun":0.6,"lamps":0.4}` | Light made visible by the air: shafts from the sun past trees and walls, haloes round lamps. |
 | `heat_shimmer` | [HeatShimmer](#heatshimmer) | `{"enabled":false,"strength":0.5,"speed":1.0}` | Heat haze: the air shimmers over the ground in the distance. |
 | `lens` | [Lens](#lens) | (see the type) | Raindrops or frost on the camera's lens. |
+| `snow_cover` | [SnowCover](#snowcover) | `{"enabled":false,"props":0.7,"ground":0.6}` | Snow lying on the scenery and the ground without any falling: a winter scene from any scene. |
 
 ### Wind
 

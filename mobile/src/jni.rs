@@ -113,3 +113,29 @@ pub extern "system" fn Java_com_pathforge_mobile_Native_render(env: JNIEnv, _: J
         Ok(JNI_TRUE)
     })
 }
+
+/// The loop as an animated GIF or WebP in `dir`; its path, or null (see lastError).
+#[no_mangle]
+#[allow(clippy::too_many_arguments)]
+pub extern "system" fn Java_com_pathforge_mobile_Native_exportAnimation(mut env: JNIEnv, _: JClass, json: JString, dir: JString, name: JString, format: JString,
+    w: jint, h: jint, fps: jint, quality: jfloat, gpu: jboolean) -> jstring {
+    let r = guard(None, || {
+        let (j, d, n, f) = (string(&mut env, &json)?, string(&mut env, &dir)?, string(&mut env, &name)?, string(&mut env, &format)?);
+        let a = crate::Animation { format: &f, width: w.max(1) as u32, height: h.max(1) as u32, fps: fps.max(1) as u32, quality, gpu: gpu == JNI_TRUE };
+        crate::export_animation(&j, &d, &n, &a).map(Some)
+    });
+    match r { Some(p) => jstr(&mut env, &p), None => std::ptr::null_mut() }
+}
+
+/// [frames done, of how many] of the export running now.
+#[no_mangle]
+pub extern "system" fn Java_com_pathforge_mobile_Native_exportProgress(env: JNIEnv, _: JClass) -> jni::sys::jintArray {
+    let (d, t) = crate::export_progress();
+    match env.new_int_array(2) {
+        Ok(arr) => { let _ = env.set_int_array_region(&arr, 0, &[d as i32, t as i32]); arr.into_raw() }
+        Err(_) => std::ptr::null_mut(),
+    }
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_pathforge_mobile_Native_exportCancel(_: JNIEnv, _: JClass) { crate::export_cancel(); }

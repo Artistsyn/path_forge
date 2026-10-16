@@ -8,6 +8,7 @@ import android.content.ActivityNotFoundException;
 import android.content.ComponentName;
 import android.content.ContentResolver;
 import android.content.ContentValues;
+import android.content.SharedPreferences;
 import android.content.Intent;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
@@ -261,6 +262,14 @@ public final class MainActivity extends Activity implements Editor.Host {
             preview.reopen();
         }).view);
 
+        body.addView(Ui.label(this, "Preview"));
+        boolean sharp = getSharedPreferences("look", MODE_PRIVATE).getBoolean("sharp", false);
+        preview.setSharp(sharp);
+        body.addView(new Ui.Chips(this, new String[]{"Auto (smooth)", "Sharp (full size)"}, sharp ? 1 : 0, i -> {
+            getSharedPreferences("look", MODE_PRIVATE).edit().putBoolean("sharp", i == 1).apply();
+            preview.setSharp(i == 1);
+        }).view);
+
         // Every setting, and keeping it.
         LinearLayout edit = new LinearLayout(this);
         edit.setPadding(0, Ui.dp(this, 14), 0, 0);
@@ -272,11 +281,13 @@ public final class MainActivity extends Activity implements Editor.Host {
         // What to do with it.
         LinearLayout actions = new LinearLayout(this);
         actions.setPadding(0, Ui.dp(this, 8), 0, 0);
-        actions.addView(Ui.button(this, "Set as wallpaper", true, v -> setLive()), new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1.4f));
-        actions.addView(gap(8));
+        actions.addView(Ui.button(this, "Wallpaper", true, v -> setLive()), new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1.2f));
+        actions.addView(gap(6));
         actions.addView(Ui.button(this, "Still", false, v -> askStill()), new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 0.8f));
-        actions.addView(gap(8));
+        actions.addView(gap(6));
         actions.addView(Ui.button(this, "Image", false, v -> saveImage()), new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 0.8f));
+        actions.addView(gap(6));
+        actions.addView(Ui.button(this, "GIF/WebP", false, v -> askAnimation()), new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1.1f));
         p.addView(actions);
         return p;
     }
@@ -718,6 +729,109 @@ public final class MainActivity extends Activity implements Editor.Host {
                 ui.post(() -> toast("Could not save the picture: " + e.getMessage()));
             }
         }));
+    }
+
+    // ── The loop as an animation ─────────────────────────────────────────
+
+    /** Choose the format, size and frame rate, then write the whole loop as a seamless animation. */
+    private void askAnimation() {
+        SharedPreferences p = getSharedPreferences("look", MODE_PRIVATE);
+        final int[] pick = {p.getInt("anim_format", 0), p.getInt("anim_size", 1), p.getInt("anim_fps", 1)};
+        LinearLayout box = new LinearLayout(this);
+        box.setOrientation(LinearLayout.VERTICAL);
+        int pad = Ui.dp(this, 20);
+        box.setPadding(pad, pad / 2, pad, 0);
+        box.addView(Ui.label(this, "Format"));
+        box.addView(new Ui.Chips(this, new String[]{"WebP (full colour, small)", "GIF (plays anywhere)"}, pick[0], i -> pick[0] = i).view);
+        box.addView(Ui.label(this, "Size"));
+        box.addView(new Ui.Chips(this, new String[]{"Small", "Medium", "Large", "Full screen"}, pick[1], i -> pick[1] = i).view);
+        box.addView(Ui.label(this, "Frames a second"));
+        box.addView(new Ui.Chips(this, new String[]{"12", "20", "30"}, pick[2], i -> pick[2] = i).view);
+        TextView note = new TextView(this);
+        note.setText("The whole loop, joining end to start, so it plays forever without a seam. Larger and smoother takes longer and makes a bigger file (GIF most of all).");
+        note.setTextColor(Ui.DIM);
+        note.setPadding(0, pad / 2, 0, 0);
+        box.addView(note);
+        new AlertDialog.Builder(this).setTitle("Save the loop as an animation").setView(box)
+                .setPositiveButton("Make it", (d, w) -> {
+                    p.edit().putInt("anim_format", pick[0]).putInt("anim_size", pick[1]).putInt("anim_fps", pick[2]).apply();
+                    exportAnimation(pick[0] == 0 ? "webp" : "gif", pick[1], new int[]{12, 20, 30}[pick[2]]);
+                }).setNegativeButton("Cancel", null).show();
+    }
+
+    private void exportAnimation(String format, int size, int fps) {
+        Point screen = screen();
+        int w = size == 3 ? screen.x : new int[]{360, 540, 720}[size];
+        int h = Math.round(w * screen.y / (float) screen.x) & ~1;
+        w &= ~1;
+        final String scene = look.scene();
+        final String name = look.name.replaceAll("[\\/:*?\"<>|]", "_");
+        final File dir = new File(getCacheDir(), "export");
+        //noinspection ResultOfMethodCallIgnored
+        dir.mkdirs();
+        final Progress pr = new Progress("Drawing the loop (" + w + "×" + h + ", " + fps + " fps)…", true);
+        final boolean gpu = Gpu.wanted(this);
+        preview.pause();
+        // How far it has got, while it runs.
+        final Runnable[] poll = new Runnable[1];
+        poll[0] = () -> {
+            int[] at = Native.exportProgress();
+            if (at != null && at[1] > 0) pr.at(at[0], at[1]);
+            if (pr.cancel.get()) Native.exportCancel();
+            ui.postDelayed(poll[0], 250);
+        };
+        ui.postDelayed(poll[0], 250);
+        final int fw = w, fh = h;
+        work.execute(() -> {
+            String path = Native.exportAnimation(scene, dir.getPath(), name, format, fw, fh, fps, format.equals("gif") ? 0.3f : 88f, gpu);
+            ui.removeCallbacks(poll[0]);
+            pr.close();
+            if (path == null) {
+                String why = Native.lastError();
+                ui.post(() -> { preview.resume(); if (!pr.cancel.get()) toast("Could not make it: " + why); });
+                return;
+            }
+            Uri uri = savePicture(new File(path), format.equals("gif") ? "image/gif" : "image/webp");
+            //noinspection ResultOfMethodCallIgnored
+            new File(path).delete();
+            ui.post(() -> {
+                preview.resume();
+                if (uri == null) { toast("Could not save it to Pictures"); return; }
+                new AlertDialog.Builder(this).setTitle("Saved to Pictures/PathForge")
+                        .setMessage("It loops seamlessly. Share it now?")
+                        .setPositiveButton("Share", (d, wh) -> {
+                            Intent send = new Intent(Intent.ACTION_SEND);
+                            send.setType(format.equals("gif") ? "image/gif" : "image/webp");
+                            send.putExtra(Intent.EXTRA_STREAM, uri);
+                            send.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+                            startActivity(Intent.createChooser(send, "Share the loop"));
+                        }).setNegativeButton("Done", null).show();
+            });
+        });
+    }
+
+    /** Copy a file into Pictures/PathForge; its content URI, or null. */
+    private Uri savePicture(File f, String mime) {
+        ContentResolver r = getContentResolver();
+        ContentValues v = new ContentValues();
+        v.put(MediaStore.Images.Media.DISPLAY_NAME, f.getName().replaceAll("\\.[a-z]+$", "") + " " + System.currentTimeMillis() + (mime.endsWith("gif") ? ".gif" : ".webp"));
+        v.put(MediaStore.Images.Media.MIME_TYPE, mime);
+        v.put(MediaStore.Images.Media.RELATIVE_PATH, Environment.DIRECTORY_PICTURES + "/PathForge");
+        v.put(MediaStore.Images.Media.IS_PENDING, 1);
+        Uri uri = r.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, v);
+        if (uri == null) return null;
+        try (OutputStream out = r.openOutputStream(uri); java.io.FileInputStream in = new java.io.FileInputStream(f)) {
+            if (out == null) throw new IOException("no stream");
+            byte[] b = new byte[1 << 16];
+            for (int n; (n = in.read(b)) > 0; ) out.write(b, 0, n);
+        } catch (IOException e) {
+            r.delete(uri, null, null);
+            return null;
+        }
+        v.clear();
+        v.put(MediaStore.Images.Media.IS_PENDING, 0);
+        r.update(uri, v, null, null);
+        return uri;
     }
 
     // ── Scenes made on the desktop ───────────────────────────────────────

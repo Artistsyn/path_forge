@@ -260,6 +260,8 @@ pub(crate) struct CardGpu {
     /// `render::CardWind`.
     pub w_amp: f32, pub w_v: f32, pub w_lean: f32, pub w_t1: f32, pub w_t2: f32,
     pub w_c0: f32, pub w_c1: f32, pub w_trunk: f32, pub w_foot: f32, pub w_kv: f32,
+    /// `render::snow_on_card`'s dust.
+    pub snow_dust: f32,
 }
 
 /// A card and the sprite levels it samples (chosen on the CPU, as `Sprite::sample` would).
@@ -1559,7 +1561,7 @@ mod tests {
         // A uniform block's size is a multiple of 16; the WGSL struct has the same fields.
         assert_eq!(std::mem::size_of::<WorldParams>() % 16, 0);
         assert_eq!(std::mem::size_of::<WorldParams>(), 4 * 292);
-        assert_eq!(std::mem::size_of::<CardGpu>(), 4 * 52);
+        assert_eq!(std::mem::size_of::<CardGpu>(), 4 * 53);
         assert_eq!(std::mem::size_of::<SplatGpu>(), 4 * 24);
         assert_eq!(std::mem::size_of::<AirParams>(), 80);
         assert_eq!(std::mem::size_of::<ShaftParams>(), 64);

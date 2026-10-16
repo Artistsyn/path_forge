@@ -223,7 +223,12 @@ fn prepare(scene: &Scene, job: &ExportJob) -> Result<String, String> {
     Ok(sanitize(if job.name.trim().is_empty() { &scene.name } else { &job.name }))
 }
 
-pub fn export(scene: &Scene, job: &ExportJob, mut progress: impl FnMut(Progress), cancel: &AtomicBool) -> Result<ExportReport, String> {
+pub fn export(scene: &Scene, job: &ExportJob, progress: impl FnMut(Progress), cancel: &AtomicBool) -> Result<ExportReport, String> {
+    export_with(scene, job, &mut WorldRenderer::auto(), progress, cancel)
+}
+
+/// `export` drawing with `renderer` (a phone's shared GPU renderer, say) instead of one of its own.
+pub fn export_with(scene: &Scene, job: &ExportJob, renderer: &mut WorldRenderer, mut progress: impl FnMut(Progress), cancel: &AtomicBool) -> Result<ExportReport, String> {
     let t0 = Instant::now();
     let stem = prepare(scene, job)?;
     let loop_seconds = scene.motion.loop_seconds();
@@ -234,8 +239,7 @@ pub fn export(scene: &Scene, job: &ExportJob, mut progress: impl FnMut(Progress)
     if job.formats.contains(&Format::Gif) && fps > 50.0 { let step = (fps / 50.0).ceil() as u32; n = n.div_ceil(step) * step; }
     let lp = scene.motion.loop_length.max(1.0);
     let seq = Seq { frames: (0..n).map(|k| (lp * k as f32 / n as f32, None)).collect(), seconds: loop_seconds, looping: true };
-    let mut renderer = WorldRenderer::auto();
-    let out = export_seq(scene, job, &stem, &seq, &mut renderer, &mut progress, cancel, &mut notes)?;
+    let out = export_seq(scene, job, &stem, &seq, renderer, &mut progress, cancel, &mut notes)?;
     let (w, h, n) = (out.width, out.height, out.frames);
     let mut files = out.files;
     let (sheet_info, depth_info, bands) = (out.sheet, out.depth, out.layers);

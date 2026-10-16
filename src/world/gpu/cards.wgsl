@@ -12,6 +12,7 @@ struct Card {
     sw: u32, sh: u32, soff: u32, gw: u32, gh: u32, goff: u32,
     id: u32, realm: u32, wx: f32, wy: f32, wd: f32, source: u32,
     w_amp: f32, w_v: f32, w_lean: f32, w_t1: f32, w_t2: f32, w_c0: f32, w_c1: f32, w_trunk: f32, w_foot: f32, w_kv: f32,
+    snow_dust: f32,
 }
 
 struct Pass { tile_cols: u32, pick: u32, n_cards: u32, pad: u32 }
@@ -23,6 +24,49 @@ struct Pass { tile_cols: u32, pick: u32, n_cards: u32, pad: u32 }
 @group(0) @binding(5) var<storage, read> bins: array<u32>;
 @group(0) @binding(6) var<storage, read_write> pick: array<u32>;
 @group(0) @binding(7) var<uniform> P: Pass;
+
+// render::snow_noise.
+fn snow_h(i: i32, j: i32) -> f32 {
+    var h = (bitcast<u32>(i) * 0x8da6b343u) ^ (bitcast<u32>(j) * 0xd8163841u) ^ 0x525de6dfu;
+    h ^= h >> 15u;
+    h = h * 0x2c1b3c6du;
+    h ^= h >> 12u;
+    return f32(h & 0xffffu) / 65535.0;
+}
+fn snow_noise(x: f32, y: f32) -> f32 {
+    let xf = floor(x); let yf = floor(y);
+    let fx = x - xf; let fy = y - yf;
+    let sx = fx * fx * (3.0 - 2.0 * fx); let sy = fy * fy * (3.0 - 2.0 * fy);
+    let i = i32(xf); let j = i32(yf);
+    let a = snow_h(i, j) + (snow_h(i + 1, j) - snow_h(i, j)) * sx;
+    let b = snow_h(i, j + 1) + (snow_h(i + 1, j + 1) - snow_h(i, j + 1)) * sx;
+    return a + (b - a) * sy;
+}
+
+// render::snow_on_card.
+fn sample_above(cd: Card, u: f32, v: f32, dv: f32) -> vec4<f32> {
+    if v - dv < 0.0 { return vec4<f32>(0.0); }
+    return sprite_sample(cd.soff, cd.sw, cd.sh, u, v - dv, true);
+}
+fn luma4(c: vec4<f32>) -> f32 { return 0.3 * c.x + 0.59 * c.y + 0.11 * c.z; }
+fn snow_on_card(cd: Card, u: f32, v: f32, lit: vec3<f32>) -> vec3<f32> {
+    let snow = vec3<f32>(cd.snow_r, cd.snow_g, cd.snow_b);
+    if sample_above(cd, u, v, cd.snow_cap).w < 0.5 { return snow; }
+    if cd.snow_dust <= 0.0 { return lit; }
+    let step = max(1.5 / max(cd.hp, 1.0), 0.012);
+    let here = sprite_sample(cd.soff, cd.sw, cd.sh, u, v, true);
+    let a1 = sample_above(cd, u, v, step);
+    let a2 = sample_above(cd, u, v, 2.5 * step);
+    var open = 0.0;
+    if a1.w < 0.5 { open = 1.0; } else if a2.w < 0.5 { open = 0.7; }
+    var ledge = 0.0;
+    if a1.w >= 0.5 { ledge = clamp((luma4(here) - luma4(a1)) * 5.0, 0.0, 1.0); }
+    let patchy = pow(0.5 + 0.5 * sin(37.0 * u + 23.0 * v + 3.1 * sin(13.0 * v)), 0.7);
+    let d = cd.snow_dust;
+    let blob = smoothstep_r(0.5, 0.7, 0.65 * snow_noise(5.0 * u, 8.0 * v) + 0.35 * snow_noise(11.0 * u + 3.1, 17.0 * v + 1.7));
+    let k = min(d * max(open, ledge) * (0.55 + 0.45 * patchy) + d * d * (0.75 * blob + 0.2 * patchy) * (1.0 - 0.5 * v), 1.0);
+    return mix3(lit, snow, k);
+}
 
 // Sprite::sample at one (already chosen) level.
 fn sprite_sample(off: u32, w: u32, h: u32, u: f32, v: f32, nearest: bool) -> vec4<f32> {
@@ -95,10 +139,8 @@ fn cards_main(@builtin(global_invocation_id) gid: vec3<u32>) {
         if cd.goff != 0xFFFFFFFFu { glow += sprite_sample(cd.goff, cd.gw, cd.gh, u, vv, nearest).x; }
         let light = vec3<f32>(cd.light_r, cd.light_g, cd.light_b);
         var lit = s.xyz * light + s.xyz * glow;
-        if cd.snow_on != 0u {
-            if a >= 0.5 && (vv - cd.snow_cap < 0.0 || sprite_sample(cd.soff, cd.sw, cd.sh, u, vv - cd.snow_cap, true).w < 0.5) {
-                lit = vec3<f32>(cd.snow_r, cd.snow_g, cd.snow_b);
-            }
+        if cd.snow_on != 0u && a >= 0.5 {
+            lit = snow_on_card(cd, u, vv, lit);
         }
         var col: vec3<f32>;
         if cd.plain != 0u { col = mix3(vec3<f32>(cd.fog_r, cd.fog_g, cd.fog_b), lit, cd.fog_t); }

@@ -30,6 +30,11 @@ Android 10 or later on a 64-bit ARM phone (practically every phone since 2019).
   and **Walking speed**. They change the scene itself, as the editor does.
 - **Set as wallpaper** draws the loop once and makes it a live wallpaper. **Still** sets this moment
   as the home screen, lock screen or both. **Save** puts it in Pictures/PathForge.
+- **GIF/WebP** writes the whole loop as a seamless animated WebP (full colour, small) or GIF (plays
+  anywhere), small to full-screen size, at 12, 20 or 30 frames a second, into Pictures/PathForge,
+  and offers to share it.
+- **Preview**: Auto draws as much of the screen's size as keeps the walk smooth (full size on a
+  fast phone); Sharp always draws at full size.
 - Tap the scene to hide the controls; **Edit** brings them back.
 
 ## Made for phones

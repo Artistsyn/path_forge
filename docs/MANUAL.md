@@ -120,6 +120,12 @@ each with its own cover, size, raggedness and shade round `cover`, as different 
 `variety` says, in `patches`. The same `seed` always gives the same sky; the dice next to it in the
 studio picks another. They are drawn over `clouds` and `cloud_layers`, highest first.
 
+**Snow cover.** `weather.snow_cover` lays snow that has already fallen, with none falling: on
+trees, rocks and the rest of the scenery (`props`: a cap along their tops at 0.2, branches laden
+with it at 1, caught on the tops of their clumps in patches) and on the ground, walls and railings
+(`ground`). Any scene becomes a winter one; falling snow (`weather.precipitation`) lays its own, and
+whichever is deeper shows.
+
 **Sunsets.** `sky.sunset` turns the sky into a sunset (or sunrise) of one of four `style`s: `Golden`,
 `Fiery`, `Pastel`, or `Dusk` (just after the sun has gone: switch the sun off and keep its place).
 `amount` takes the sky's colours, the sun, the clouds' tint and the light towards the style's; a
@@ -195,6 +201,7 @@ studio, switching between Iron and Rope also switches `rail_color`, unless you h
 |---|---|
 | `post` | What holds it up where there is no wall: `Auto` (a street lamp on a pole, a paper lantern from a crook, a wall light with no wall on a pole, anything else raised on a pedestal), `Off`, `Pole`, `Crook` (a tall post with an arm the light hangs from) or `Pedestal`. |
 | `place` | `Anywhere`, `Bridges` (only on the path's bridges), `OffBridges`, or `SetPieces`: one at each repeat of `set_pieces[set_piece]`, at that set piece's spacing, with `offset` measured from it (torches on every arch). |
+| `bridge_posts`, `posts_between` | On the path's bridges, stand on the railing's posts instead of at `spacing`: one on each end post of every bridge, each side, and `posts_between` more evenly between them (1 halfway, 2 at the thirds, 3 at the quarters...); the railing gains those posts. The light stands above the post's top (higher if `height` says so). |
 | `tint` | A colour multiplied over the light and its flame. |
 | `jitter`, `jitter_along`, `height_var` | Random placement: sideways (metres), along the path (as a share of the spacing) and in height (metres). |
 | `size_var`, `intensity_var`, `color_var` | Each one a little larger or smaller, brighter or dimmer, warmer or cooler. |

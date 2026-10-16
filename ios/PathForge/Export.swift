@@ -124,6 +124,35 @@ extension AppModel {
         }
     }
 
+    /// The whole loop as a seamless animated GIF or WebP, `width` wide at the screen's shape,
+    /// offered to share (Save Image, Save to Files, Messages...) once made.
+    func saveAnimation(format: String, width: Int, fps: Int) {
+        let scene = self.scene
+        let (sw, sh) = screenPixels()
+        let w = min(width, sw) & ~1
+        let h = Int((Double(w) * Double(sh) / Double(sw)).rounded()) & ~1
+        let name = look.name.replacingOccurrences(of: "/", with: "_")
+        let gpu = gpuOn
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("export", isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        // How far it has got, while it runs.
+        let timer = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { [weak self] _ in
+            var done: UInt32 = 0, total: UInt32 = 0
+            pfm_export_progress(&done, &total)
+            if total > 0 { self?.progress = Double(done) / Double(total) }
+        }
+        cancellable = true
+        run("Drawing the loop (\(w)×\(h), \(fps) fps)…") { _ in
+            defer { DispatchQueue.main.async { timer.invalidate(); self.cancellable = false } }
+            guard let path = Native.take(pfm_export(scene, dir.path, name, format, UInt32(w), UInt32(h), UInt32(fps), format == "gif" ? 0.3 : 88, gpu)) else {
+                throw ExportError(Native.lastError)
+            }
+            let url = URL(fileURLWithPath: path)
+            DispatchQueue.main.async { self.shareURL = url }
+            return Note(title: "Made it", text: "It loops seamlessly. Save it to Photos or Files, or send it, from the share sheet.")
+        }
+    }
+
     // ── Writing files ────────────────────────────────────────────────────
 
     private static func save(_ changes: @escaping () -> Void) throws {

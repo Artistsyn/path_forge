@@ -47,6 +47,10 @@ final class PreviewView extends SurfaceView implements SurfaceHolder.Callback, R
 
     void setStats(Stats s) { stats = s; }
 
+    /** Always draw at the screen's full size, however long a frame takes. */
+    void setSharp(boolean on) { sharp = on; }
+    private volatile boolean sharp;
+
     /** While editing: the whole frame shown in the top `fraction` of the view, below `top` pixels
      *  (the status bar); 0 fills the view again. */
     void setFitTop(float fraction, int top) {
@@ -97,8 +101,10 @@ final class PreviewView extends SurfaceView implements SurfaceHolder.Callback, R
         float len = 24f, secs = 10f;
         Paint paint = Frame.paint(false);
         Matrix m = new Matrix();
-        // Render at a 1/div of the screen's width, adapting to how fast this phone draws the scene.
-        int div = 3;
+        // Render at a share of the screen's size: in Auto, as much as keeps up (full size on a fast
+        // phone); Sharp always draws at full size.
+        final float[] scales = {1f, 0.85f, 0.7f, 0.55f, 0.45f, 0.35f, 0.28f, 0.22f, 0.16f, 0.1f};
+        int level = 2;
         float avg = 30f;
         int frames = 0;
         boolean first = true;
@@ -123,7 +129,8 @@ final class PreviewView extends SurfaceView implements SurfaceHolder.Callback, R
                 }
                 int w = vw, hh = vh;
                 if (h == 0 || w <= 0 || hh <= 0) { sleep(50); continue; }
-                int rw = Math.max(64, w / div), rh = Math.max(64, Math.round(hh * (rw / (float) w)));
+                if (sharp) level = 0;
+                int rw = Math.max(64, Math.round(w * scales[level])), rh = Math.max(64, Math.round(hh * (rw / (float) w)));
                 if (bmp == null || bmp.getWidth() != rw || bmp.getHeight() != rh) {
                     buf = ByteBuffer.allocateDirect(rw * rh * 4);
                     bmp = Bitmap.createBitmap(rw, rh, Bitmap.Config.ARGB_8888);
@@ -150,9 +157,10 @@ final class PreviewView extends SurfaceView implements SurfaceHolder.Callback, R
                     frames = 0;
                     statsAt = now;
                 }
-                // As much of the screen's size as keeps up: halve at best, a tenth at worst.
-                if (avg > 45f && div < 10) { div++; avg = 30f; }
-                else if (avg < 16f && div > 2) { div--; avg = 30f; }
+                if (!sharp) {
+                    if (avg > 45f && level < scales.length - 1) { level++; avg = 30f; }
+                    else if (avg < 20f && level > 0) { level--; avg = 30f; }
+                }
                 // At most about 30 frames a second.
                 long spare = 33 - (SystemClock.uptimeMillis() - frameStart);
                 if (spare > 0) sleep(spare);
