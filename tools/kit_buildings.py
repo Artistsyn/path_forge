@@ -134,7 +134,7 @@ def wall(sp, x0, x1, top, openings, posts=None, clip=None, base=0.0, rnd=None):
                 s.append(rect(x0, plinth, x1, plinth + 0.3, mix(sp["fill"], [120, 116, 104], 0.18), 0.3))
                 if plinth: s.append(rect(x0, 0, x1, plinth, sp["tar"], 0.4))
         elif st == "log":
-            s += logs(sp, x0, x1, y0, top, clip, sp.get("ends", 0.0), discs=() if clip else (x0, x1), disc_offset=sp["log_h"] / 2)
+            s += logs(sp, x0, x1, y0, top, clip, sp.get("ends", 0.0))
     return s
 
 def frange(a, b, step):
@@ -144,9 +144,9 @@ def frange(a, b, step):
         x += step
     return out
 
-def logs(sp, x0, x1, y0, top, clip, ends, offset=0.0, discs=(), disc_offset=0.0):
-    """Round logs laid one on another, running `ends` past the corners. At a corner the other
-    wall's logs, a half log higher or lower, show their cut ends: discs centred at `discs`."""
+def logs(sp, x0, x1, y0, top, clip, ends, offset=0.0):
+    """Round logs laid one on another, their tails running `ends` past the corners (their cut
+    ends are faces of their own, `log_corners`)."""
     s, h = [], sp["log_h"]
     col, end, gap = sp["log"], sp["log_end"], dark(sp["log"], 0.55)
     y = y0 - offset
@@ -168,25 +168,65 @@ def logs(sp, x0, x1, y0, top, clip, ends, offset=0.0, discs=(), disc_offset=0.0)
                 wa, wb = abs(edge(ya)), abs(edge(yb))
                 if wb > 0.05: s.append(poly([(-wa, ya), (wa, ya), (wb, yb), (-wb, yb)], col, 0.75))
             else:
-                # Round: lit along its upper side, in shade below, a crack or two along it.
-                hh = b - a
-                s.append(rect(x0 - ends, a + 0.015, x1 + ends, b - 0.015, col, 0.75))
-                s.append(rect(x0 - ends, a + 0.015, x1 + ends, a + 0.3 * hh, dark(col, 0.28), 0.3))
-                s.append(rect(x0 - ends, b - 0.42 * hh, x1 + ends, b - 0.28 * hh, light(col, 0.16), 0.3))
-                s.append(line([x0 - ends, a + 0.45 * hh], [x1 + ends, a + 0.47 * hh], 0.012, dark(col, 0.25)))
+                s += log_band(x0 - ends, x1 + ends, a, b, col)
         y += h
-    # The other wall's log ends at the corners: end grain, rings and a check or two.
-    end = mix(end, col, 0.35)  # (weathered: greyer and darker than fresh-cut wood)
-    for cx in discs:
-        yc = y0 - disc_offset + h / 2
-        while yc < top - h * 0.3:
-            if yc > y0 + h * 0.3:
-                r = h * 0.47
-                s += [ell(cx, yc, r, r, dark(end, 0.25), 0.4), ell(cx, yc, r * 0.9, r * 0.9, end, 0.5),
-                      ell(cx, yc, r * 0.55, r * 0.55, light(end, 0.1), 0.3), ell(cx, yc, r * 0.14, r * 0.14, dark(end, 0.3), 0.2),
-                      line([cx, yc], [cx + r * 0.7, yc + r * 0.25], 0.012, dark(end, 0.45))]
-            yc += h
     return s
+
+def log_band(x0, x1, a, b, col):
+    """One round log seen from the side: a deep groove of shadow where it sits on the log below,
+    its belly in shade, lit across its upper curve, rolling away into shade again at its top."""
+    hh = b - a
+    return [rect(x0, a, x1, b, col, 0.6),
+            rect(x0, a, x1, a + 0.1 * hh, dark(col, 0.7), 0.2),
+            rect(x0, a + 0.1 * hh, x1, a + 0.24 * hh, dark(col, 0.45), 0.3),
+            rect(x0, a + 0.24 * hh, x1, a + 0.4 * hh, dark(col, 0.2), 0.3),
+            rect(x0, a + 0.6 * hh, x1, a + 0.8 * hh, light(col, 0.2), 0.3),
+            rect(x0, a + 0.9 * hh, x1, b, dark(col, 0.3), 0.3),
+            line([x0, a + 0.52 * hh], [x1, a + 0.5 * hh], 0.01, dark(col, 0.3))]
+
+def end_grain(sp, cx, cy, r, rnd):
+    """A log's sawn end, weathered: a rim of bark, growth rings round an off-centre pith, and the
+    checks that open as it dries, radiating out from the pith."""
+    end = mix(sp["log_end"], sp["log"], 0.3)
+    px, py = cx + rnd.uniform(-0.12, 0.12) * r, cy + rnd.uniform(-0.12, 0.12) * r
+    s = [ell(cx, cy, r, r, dark(sp["log"], 0.35), 0.5), ell(cx, cy, r * 0.88, r * 0.88, dark(end, 0.12), 0.45)]
+    for i, f in enumerate([0.76, 0.6, 0.45, 0.3, 0.16]):
+        s.append(ell(px + (cx - px) * f, py + (cy - py) * f, r * f, r * f, dark(end, 0.14) if i % 2 == 0 else light(end, 0.08), 0.35))
+    s.append(ell(px, py, r * 0.06, r * 0.06, dark(end, 0.4), 0.2))
+    # Checks open from the bark in toward the pith, partway.
+    for _ in range(rnd.choice([0, 1, 1, 2])):
+        a = rnd.uniform(0, 2 * math.pi)
+        f = rnd.uniform(0.3, 0.6)
+        s.append(line([cx + 0.88 * r * math.cos(a), cy + 0.88 * r * math.sin(a)], [cx + (0.88 - f) * r * math.cos(a), cy + (0.88 - f) * r * math.sin(a)], r * 0.05, dark(end, 0.55), 0.2))
+    return s
+
+def log_corners(sp, hw, D, wy, e, rnd):
+    """The corners of a round-log cabin, saddle-notched: each wall's logs run on past the corner
+    as tails, the two walls' logs a half log apart in height, so the tails stack out of the
+    corner both ways by turns. The walls' pictures carry the tails' bark; here are their sawn
+    ends, facing along the logs (the front wall's sideways, the side walls' toward the path), and
+    the back wall's tails where the side wall ends. The pictures are the walls' outer faces, so
+    a log's middle lies a radius inside them."""
+    h = sp["log_h"]
+    r = h / 2
+    front = [(k + 0.5) * h for k in range(50) if (k + 0.5) * h < wy - 0.04]
+    side = [k * h for k in range(1, 50) if k * h < wy - 0.04]
+    def caps(ys):
+        out = []
+        for y in ys: out += end_grain(sp, r, y, r * 0.98, rnd)
+        return out
+    col = sp["log"]
+    bark = []
+    for y in front: bark += log_band(0, e, y - r, y + r, col)
+    return [
+        # The front wall's tails end beyond the side wall; the side walls' come out toward the path.
+        face([hw + e, wy, 0], [hw + e, wy, 2 * r], [hw + e, 0, 0], caps(front), mirror=True),
+        face([hw - 2 * r, wy, -e], [hw, wy, -e], [hw - 2 * r, 0, -e], caps(side), mirror=True),
+        # At the back: the side walls' tails, and the back wall's coming out past the side wall.
+        face([hw, wy, D + e], [hw - 2 * r, wy, D + e], [hw, 0, D + e], caps(side), mirror=True),
+        face([hw + e, wy, D - 2 * r], [hw + e, wy, D], [hw + e, 0, D - 2 * r], caps(front), mirror=True),
+        face([hw, wy, D - 2 * r], [hw + e, wy, D - 2 * r], [hw, 0, D - 2 * r], bark, mirror=True),
+    ]
 
 # ── Openings ───────────────────────────────────────────────────────────────
 
@@ -346,7 +386,7 @@ def building(sp, seed):
     side_open = [(z - w / 2, y0, z + w / 2, y0 + h) for (z, y0, w, h, *_) in sp["side_windows"]]
     ssp = dict(sp)
     if sp["wall"] == "log":
-        side = logs(sp, -ends, D + ends, 0, wy, None, 0.0, offset=sp["log_h"] / 2, discs=(0.0, D))
+        side = logs(sp, -ends, D + ends, 0, wy, None, 0.0, offset=sp["log_h"] / 2)
         side = [shift(p, ends) for p in side]
         sw = D + 2 * ends
     else:
@@ -357,6 +397,8 @@ def building(sp, seed):
              face([0, R + tv, -oz], [0, R + tv, D + oz], [ex, ey + tv, -oz], roof_picture(sp, W, L, rnd), mirror=True),
              face([ex, ey + tv, -oz], [ex, ey + tv, D + oz], [ex, ey, -oz], edge_picture(sp, W, tv), mirror=True),
              face([hw, wy, -oz], [hw, wy, D + oz], [ex, ey, -oz], under_picture(sp, W, math.hypot(o, wy - ey)), mirror=True)]
+    if sp["wall"] == "log":
+        faces += log_corners(sp, hw, D, wy, ends, rnd)
     smoke = None
     for ch in sp.get("chimneys", []):
         x, z, w, dz, top = ch["x"], ch["z"], ch["w"], ch["dz"], ch["top"]
@@ -490,8 +532,8 @@ def cabins():
     out = {}
     base = {"wall": "log", "log_h": 0.3, "frame": [70, 50, 34], "door": [96, 70, 46], "panes": (2, 2), "chimney_kind": "stone", "chimney_col": [138, 132, 120]}
     out["log_cabin_small"] = building(dict(base, **{
-        "description": "A small log cabin: round logs crossed at the corners, one lit window and a plank door, a shingle roof and a stone chimney built up outside its side wall.",
-        "hw": 2.1, "E": 2.3, "R": 4.2, "D": 5.0, "o": 0.4, "t": 0.12, "ends": 0.22,
+        "description": "A small log cabin: round logs saddle-notched at the corners, their sawn tails stacking out both ways by turns; one lit window and a plank door, a shingle roof and a stone chimney built up outside its side wall.",
+        "hw": 2.1, "E": 2.3, "R": 4.2, "D": 5.0, "o": 0.4, "t": 0.12, "ends": 0.36,
         "log": [126, 90, 58], "log_end": [190, 152, 104],
         "front_windows": [(-1.1, 0.9, 0.75, 0.85)], "door_at": (0.75, 0.85, 1.8, 0.0),
         "side_windows": [(1.6, 0.9, 0.7, 0.8), (3.6, 0.9, 0.7, 0.8, False)],
@@ -502,7 +544,7 @@ def cabins():
     pz = 1.8
     sp = dict(base, **{
         "description": "A log cabin with a front porch: a plank deck under a lean-to roof on posts, a railing either side of the steps, two lit windows and a stone chimney on the ridge.",
-        "hw": 2.6, "E": 2.5, "R": 4.7, "D": 6.0, "o": 0.45, "t": 0.12, "ends": 0.22,
+        "hw": 2.6, "E": 2.5, "R": 4.7, "D": 6.0, "o": 0.45, "t": 0.12, "ends": 0.36,
         "log": [108, 76, 50], "log_end": [180, 142, 96],
         "front_windows": [(-1.55, 0.95, 0.8, 0.9), (1.55, 0.95, 0.8, 0.9)], "door_at": (0.0, 0.9, 1.9, 0.35),
         "side_windows": [(2.0, 0.95, 0.75, 0.85), (4.2, 0.95, 0.75, 0.85, False)],
@@ -514,7 +556,7 @@ def cabins():
     out["log_cabin_porch"] = building(sp, 22)
     out["log_cabin_sod"] = building(dict(base, **{
         "description": "A log cabin with a turf roof in the northern way: dark logs, white window frames, grass and wild flowers growing over a low roof edged with birch bark.",
-        "hw": 2.3, "E": 2.2, "R": 3.9, "D": 5.5, "o": 0.35, "t": 0.22, "ends": 0.2,
+        "hw": 2.3, "E": 2.2, "R": 3.9, "D": 5.5, "o": 0.35, "t": 0.22, "ends": 0.34,
         "log": [92, 64, 44], "log_end": [170, 132, 92], "frame": [236, 234, 228],
         "front_windows": [(-1.25, 0.9, 0.7, 0.8), (1.25, 0.9, 0.7, 0.8)], "door_at": (0.0, 0.8, 1.75, 0.15),
         "side_windows": [(1.8, 0.9, 0.7, 0.8, False), (3.8, 0.9, 0.7, 0.8)],
