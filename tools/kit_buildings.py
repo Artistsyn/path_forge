@@ -221,15 +221,18 @@ def log_corners(sp, hw, D, wy, e, k):
     # from the wall's top at `wy`): every tail is cut to one length, short enough for all of them
     # to tuck under it. A log with no room at all (its top above the wall's) ends flush.
     room = [(wy - 0.03 - (y + r)) / k if k > 0 else e for y in front]
-    front = [y for y, m in zip(front, room) if m >= 0.08]
     e = min([e] + [m for m in room if m >= 0.08])
+    # Each log from a little inside where its wall's picture stops (a log short of the corner),
+    # through the corner, and out as its tail; one with no room for a tail ends flush.
+    c = h + 0.05
     out = []
-    for y in front:
-        out.append(tube([hw - 2 * r, y, a], [hw + e, y, a]))              # the front wall's, out past the side
-        out.append(tube([hw - 2 * r, y, D - a], [hw + e, y, D - a]))      # the back wall's
+    for y, m in zip(front, room):
+        t = e if m >= 0.08 else 0.0
+        out.append(tube([hw - c, y, a], [hw + t, y, a]))                  # the front wall's, out past the side
+        out.append(tube([hw - c, y, D - a], [hw + t, y, D - a]))          # the back wall's
     for y in side:
-        out.append(tube([hw - a, y, 2 * r], [hw - a, y, -e]))             # the side wall's, out toward the path
-        out.append(tube([hw - a, y, D - 2 * r], [hw - a, y, D + e]))      # and out the back
+        out.append(tube([hw - a, y, c], [hw - a, y, -e]))                 # the side wall's, out toward the path
+        out.append(tube([hw - a, y, D - c], [hw - a, y, D + e]))          # and out the back
     return out
 
 # ── Openings ───────────────────────────────────────────────────────────────
@@ -364,7 +367,10 @@ def building(sp, seed):
     openings = [(cx - w / 2, y0, cx + w / 2, y0 + h) for (cx, y0, w, h, *_ ) in sp["front_windows"]]
     dcx, dw, dh, dy = sp["door_at"]
     openings.append((dcx - dw / 2, dy, dcx + dw / 2, dy + dh))
-    s = wall(sp, -hw, hw, E, openings, posts=sp.get("front_posts"), rnd=rnd)
+    # (A log wall's picture stops a log short of each corner: there the logs themselves, tubes,
+    # pass through one another.)
+    c = sp["log_h"] if sp["wall"] == "log" else 0.0
+    s = wall(sp, -hw + c, hw - c, E, openings, posts=sp.get("front_posts"), rnd=rnd)
     gable = tri_clip(0.0, hw, wy, R)
     gsp = dict(sp, wall=sp.get("gable", sp["wall"]))
     s += wall(gsp, -hw, hw, R, [], clip=gable, base=E - 0.01, rnd=rnd)
@@ -391,14 +397,11 @@ def building(sp, seed):
     side_open = [(z - w / 2, y0, z + w / 2, y0 + h) for (z, y0, w, h, *_) in sp["side_windows"]]
     ssp = dict(sp)
     if sp["wall"] == "log":
-        side = logs(sp, -ends, D + ends, 0, wy, None, 0.0, offset=sp["log_h"] / 2)
-        side = [shift(p, ends) for p in side]
-        sw = D + 2 * ends
+        side = [shift(p, -c) for p in logs(sp, c, D - c, 0, wy, None, 0.0, offset=sp["log_h"] / 2)]
     else:
         side = wall(ssp, 0, D, wy, side_open, posts=sp.get("side_posts"), rnd=rnd)
-        sw = D
-    for (z, y0, w, h, *rest) in sp["side_windows"]: side += [shift(p, ends) for p in window(sp, z, y0, w, h, lit=rest[0] if rest else True, panes=sp.get("panes", (2, 2)))]
-    faces = [face([hw, wy, -ends], [hw, wy, D + ends], [hw, 0, -ends], side, mirror=True),
+    for (z, y0, w, h, *rest) in sp["side_windows"]: side += [shift(p, -c) for p in window(sp, z, y0, w, h, lit=rest[0] if rest else True, panes=sp.get("panes", (2, 2)))]
+    faces = [face([hw, wy, c], [hw, wy, D - c], [hw, 0, c], side, mirror=True),
              face([0, R + tv, -oz], [0, R + tv, D + oz], [ex, ey + tv, -oz], roof_picture(sp, W, L, rnd), mirror=True),
              face([ex, ey + tv, -oz], [ex, ey + tv, D + oz], [ex, ey, -oz], edge_picture(sp, W, tv), mirror=True),
              face([hw, wy, -oz], [hw, wy, D + oz], [ex, ey, -oz], under_picture(sp, W, math.hypot(o, wy - ey)), mirror=True)]
