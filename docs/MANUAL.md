@@ -58,10 +58,10 @@ pf presets
 pf render --preset "Forest Path" -o forest.png
 ```
 
-There are 44 presets: Stone Dungeon, Stone Crypt, Mossy Sewer, Forest Path, Desert Canyon, Night
+There are 45 presets: Stone Dungeon, Stone Crypt, Mossy Sewer, Forest Path, Desert Canyon, Night
 Road, Magic Cavern, Ice Dungeon, Ruins Path, Dark Street, Mountain Pass, Volcanic Rift, Haunted
 Forest, Ruined Castle, Fiery Dungeon, Tower Stair, Bog Boardwalk, Desert Ruins, Ice Cave, Day and
-Night, Village Evening, Lily Harbour, Waterfall Glen, Miniature Village, Village Side Scroll, Village Corner, Star Bridge, Nebula Crossing, Asteroid Belt,
+Night, Village Evening, Lily Harbour, Waterfall Glen, Miniature Village, Village Side Scroll, Village Corner, Cabin Woods, Star Bridge, Nebula Crossing, Asteroid Belt,
 Hyperspace Run, Wormhole, Starship Flight, Event Horizon, Black Hole Arena, River Run, Canal
 Lanterns, Jungle River, Lagoon Swim, Sunset Pier, Frozen Channel, Misty River, Dawn Road, Winding
 Trail and Hyperspace Jump.
@@ -232,10 +232,20 @@ as seen from the side it faces, and painted from `shape` parts (metres from its 
 corner) or an `image`. `mirror: true` draws it again on the other side (`x` to `-x`). A cottage's
 faces are its long side walls with their windows, the two slopes of its roof running back from
 the gable and its chimney's sides; they replace the plain end walls. The settlement kit's
-cottage, market stall, cart and woodpile have them and face the path (`Path`), so even looking
+cottages, log cabins, market stall, cart and woodpile have them and face the path (`Path`), so even looking
 straight down a village street you see their side walls and roofs in perspective, as in a real
 street. A layer with `facing: PathWhenTurned` brings back the flat front that faces the camera
-until the camera turns. To look down
+until the camera turns.
+
+**Variety.** A definition with `pick` (a list of other definitions' names, in the same kit or the
+scene's `prop_defs`) is drawn as one of them per prop, the same one each time round the loop, so
+a street is not one house over and over. `@settlement#cottage` picks among five builds: timber
+framed (`cottage_timber`), stone (`cottage_stone`), whitewashed under thatch (`cottage_thatch`),
+two storeys of brick (`cottage_brick`) and weatherboarded (`cottage_board`); `@settlement#log_cabin`
+among a small cabin with a stone chimney up its side (`log_cabin_small`), one with a front porch
+(`log_cabin_porch`) and one with a turf roof (`log_cabin_sod`). Name one of them to use just that
+build. The preset Cabin Woods walks a woodland trail past log cabins at dusk. A smoke plume's
+`back` sets how far behind the front it rises (a chimney on the ridge). To look down
 on a scene, raise `eye_height` and move `horizon` up: verticals stay vertical.
 
 ### Camera moves

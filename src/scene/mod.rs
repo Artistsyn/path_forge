@@ -2868,6 +2868,10 @@ pub struct PropDef {
     /// walls and the slopes of its roof, a chimney's sides), drawn in place of plain end walls.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub faces: Vec<PropFace>,
+    /// Variety: each prop picks one of these definitions instead (names in the same kit, or in
+    /// the scene's `prop_defs`), so a row of cottages is not one cottage over and over.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub pick: Vec<String>,
 }
 
 /// A face of a prop besides its front (`PropDef::faces`): a flat picture standing in the prop's
@@ -2899,7 +2903,7 @@ impl Default for PropDef {
         Self {
             description: String::new(), sprite: SpriteRef::default(), shape: Vec::new(), kind: PropKind::Rock, tint: None,
             height: 0.0, anchor: Anchor::Ground, glow: 0.0, glow_from: 0.0, light: PropLight::default(), trim: true, smoke: PropSmoke::default(),
-            facing: Facing::Camera, depth: 0.0, faces: Vec::new(),
+            facing: Facing::Camera, depth: 0.0, faces: Vec::new(), pick: Vec::new(),
         }
     }
 }
@@ -2934,10 +2938,15 @@ pub struct PropSmoke {
     pub rise: f32,
     /// How wide a puff grows, metres.
     pub width: f32,
+    /// For a prop facing the path: how far back from its front it leaves, metres at scale 1 (a
+    /// chimney on the ridge).
+    #[serde(skip_serializing_if = "is_zero")]
+    pub back: f32,
 }
 impl Default for PropSmoke {
-    fn default() -> Self { PropSmoke { enabled: false, at: [0.0, 2.0], color: [150, 150, 155], amount: 0.5, rise: 3.0, width: 0.8 } }
+    fn default() -> Self { PropSmoke { enabled: false, at: [0.0, 2.0], color: [150, 150, 155], amount: 0.5, rise: 3.0, width: 0.8, back: 0.0 } }
 }
+fn is_zero(v: &f32) -> bool { *v == 0.0 }
 
 /// Where a prop is fixed.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

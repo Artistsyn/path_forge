@@ -4,6 +4,7 @@ Shapes are in metres: x sideways from the centre, y up from the ground. Run from
     python3 tools/make_kits.py
 """
 import json, math, os
+import kit_buildings
 
 def rect(x0, y0, x1, y1, col, shade=0.5, glow=0.0):
     return {"shape": {"Rect": {"min": [x0, y0], "max": [x1, y1]}}, "color": col, "shade": shade, **({"glow": glow} if glow else {})}
@@ -24,36 +25,6 @@ PLASTER, TIMBER = [214, 200, 172], [74, 52, 36]
 ROOF, ROOF_DARK = [122, 74, 52], [80, 46, 32]
 WOOD, WOOD_DARK = [118, 84, 54], [72, 50, 32]
 WARM = [255, 196, 112]
-
-def cottage():
-    s = [rect(-2.7, 0, 2.7, 0.45, STONE, 0.6)]
-    for x in [-2.2, -1.2, -0.2, 0.8, 1.8]: s.append(line([x, 0.05], [x + 0.25, 0.4], 0.05, MORTAR))
-    s.append(rect(-2.45, 0.45, 2.45, 2.85, PLASTER, 0.45))
-    # The timber frame.
-    for x in [-2.45, -0.9, 0.9, 2.45]: s.append(line([x, 0.45], [x, 2.85], 0.16, TIMBER))
-    for y in [0.45, 1.65, 2.85]: s.append(line([-2.45, y], [2.45, y], 0.16, TIMBER))
-    s += [line([-2.45, 0.5], [-0.9, 1.6], 0.12, TIMBER), line([2.45, 0.5], [0.9, 1.6], 0.12, TIMBER)]
-    # Lit windows with leaded crosses, and the door.
-    for cx in [-1.65, 1.65]:
-        s.append(rect(cx - 0.45, 1.05, cx + 0.45, 2.25, TIMBER, 0.3))
-        s.append(rect(cx - 0.36, 1.13, cx + 0.36, 2.17, WARM, 0.0, glow=2.4))
-        s += [line([cx, 1.13], [cx, 2.17], 0.05, TIMBER), line([cx - 0.36, 1.65], [cx + 0.36, 1.65], 0.05, TIMBER)]
-        s.append(rect(cx - 0.5, 0.98, cx + 0.5, 1.06, WOOD_DARK, 0.3))
-    s += [rect(-0.48, 0.45, 0.48, 2.25, TIMBER, 0.3), rect(-0.4, 0.45, 0.4, 2.15, WOOD, 0.5)]
-    s += [line([-0.4, 1.0], [0.4, 1.0], 0.05, WOOD_DARK), line([-0.4, 1.7], [0.4, 1.7], 0.05, WOOD_DARK), ell(0.25, 1.3, 0.04, 0.04, [40, 36, 30], 0.6)]
-    # The chimney behind the roof, then the roof with its ridge and eaves.
-    s += [rect(1.15, 3.2, 1.75, 5.55, [138, 82, 62], 0.55), rect(1.08, 5.45, 1.82, 5.65, [100, 62, 48], 0.5)]
-    s.append(poly([(-3.0, 2.75), (3.0, 2.75), (0.0, 5.05)], ROOF, 0.6))
-    for i in range(1, 6):
-        y = 2.75 + i * 0.38
-        hw = 3.0 * (1 - (y - 2.75) / 2.3)
-        s.append(line([-hw, y], [hw, y], 0.04, ROOF_DARK))
-    s += [line([-3.05, 2.72], [3.05, 2.72], 0.12, ROOF_DARK), line([-3.05, 2.72], [0, 5.08], 0.1, ROOF_DARK), line([3.05, 2.72], [0, 5.08], 0.1, ROOF_DARK)]
-    # A small round attic window, glowing too.
-    s += [ell(0, 3.75, 0.32, 0.32, TIMBER, 0.3), ell(0, 3.75, 0.25, 0.25, WARM, 0.0, glow=2.0), line([-0.25, 3.75], [0.25, 3.75], 0.04, TIMBER), line([0, 3.5], [0, 4.0], 0.04, TIMBER)]
-    return {"description": "A timber-framed cottage with lit windows and a smoking chimney; lights the ground before it warmly.",
-            "shape": s, "light": {"enabled": True, "color": [255, 186, 110], "intensity": 0.45, "radius": 6.0, "at": 0.3, "flicker": 0.15},
-            "smoke": {"enabled": True, "at": [1.45, 5.65], "color": [150, 148, 150], "amount": 0.55, "rise": 4.0, "width": 0.9}}
 
 def well():
     s = [rect(-0.85, 0, 0.85, 0.95, STONE, 0.6)]
@@ -121,8 +92,8 @@ def woodpile():
             s += [ell(x, y, 0.15, 0.12, end, 0.5), ell(x, y, 0.05, 0.04, mix(end, [0, 0, 0], 0.25), 0.2)]
     return {"description": "Split logs stacked for the winter, their cut ends showing.", "shape": s}
 
-settlement = {"name": "Settlement", "description": "A village by the road, drawn from shapes: cottages with lit windows and smoking chimneys, a well, a market stall, picket fences, hay bales, a cart and a woodpile. Use as \"@settlement#<name>\".",
-              "props": {"cottage": cottage(), "well": well(), "market_stall": market_stall(), "picket_fence": picket_fence(), "haybale": haybale(), "cart": cart(), "woodpile": woodpile()}}
+settlement = {"name": "Settlement", "description": "A village by the road, drawn from shapes: cottages of several builds and log cabins with lit windows and smoking chimneys, a well, a market stall, picket fences, hay bales, a cart and a woodpile. Use as \"@settlement#<name>\".",
+              "props": {"well": well(), "market_stall": market_stall(), "picket_fence": picket_fence(), "haybale": haybale(), "cart": cart(), "woodpile": woodpile()}}
 
 # ── Faces: what a prop looks like from the side and above, once it stands along the street ──
 # Corners are in the prop's space (x across its front, y up, z back from the path): the
@@ -133,58 +104,6 @@ def face(tl, tr, bl, shape, mirror=False):
     if mirror: f["mirror"] = True
     return f
 def size(tl, tr, bl): return math.dist(tl, tr), math.dist(tl, bl)
-
-COTTAGE_DEPTH = 6.5
-def cottage_faces():
-    D = COTTAGE_DEPTH
-    # The long side walls under the eaves: stone plinth, plastered timber frame, two lit windows.
-    wall = [rect(0, 0, D, 0.45, STONE, 0.6)]
-    for x in [0.5 + 1.1 * i for i in range(6)]: wall.append(line([x, 0.05], [x + 0.25, 0.4], 0.05, MORTAR))
-    wall.append(rect(0, 0.45, D, 2.85, PLASTER, 0.45))
-    posts = [0.08, D / 3, 2 * D / 3, D - 0.08]
-    for x in posts: wall.append(line([x, 0.45], [x, 2.85], 0.16, TIMBER))
-    for y in [0.45, 1.65, 2.85]: wall.append(line([0, y], [D, y], 0.16, TIMBER))
-    wall += [line([posts[1], 0.5], [posts[0] + 0.6, 1.6], 0.12, TIMBER), line([posts[2], 0.5], [posts[3] - 0.6, 1.6], 0.12, TIMBER)]
-    for cx in [D / 2 - 0.0]:
-        wall.append(rect(cx - 0.42, 1.05, cx + 0.42, 2.2, TIMBER, 0.3))
-        wall.append(rect(cx - 0.34, 1.13, cx + 0.34, 2.12, WARM, 0.0, glow=2.4))
-        wall += [line([cx, 1.13], [cx, 2.12], 0.05, TIMBER), line([cx - 0.34, 1.62], [cx + 0.34, 1.62], 0.05, TIMBER)]
-        wall.append(rect(cx - 0.48, 0.98, cx + 0.48, 1.06, WOOD_DARK, 0.3))
-    for cx in [D / 6, 5 * D / 6]:
-        wall.append(rect(cx - 0.36, 1.2, cx + 0.36, 2.15, TIMBER, 0.3))
-        wall.append(rect(cx - 0.28, 1.28, cx + 0.28, 2.07, WARM, 0.0, glow=2.2))
-        wall.append(line([cx - 0.28, 1.68], [cx + 0.28, 1.68], 0.05, TIMBER))
-    # In the shade of the eaves.
-    wall.append(rect(0, 2.85, D, 3.15, mix(ROOF_DARK, [0, 0, 0], 0.4), 0.2))
-    # The roof's slope, ridge to eave: courses of tiles, the ridge capped, a dark drip edge.
-    run, rise = 3.05, 5.08 - 2.72
-    L = math.hypot(run, rise)
-    roof = [rect(0, 0, D, L, ROOF, 0.4)]
-    y, k = 0.12, 0
-    while y < L - 0.2:
-        roof.append(rect(0, y, D, y + 0.06, ROOF_DARK, 0.2))
-        for i in range(int(D / 0.45) + 1):
-            x = i * 0.45 + (0.22 if k % 2 else 0.0)
-            if x < D: roof.append(line([x, y + 0.06], [x, y + 0.3], 0.03, mix(ROOF, ROOF_DARK, 0.6)))
-        y, k = y + 0.3, k + 1
-    for (mx, my, r) in [(0.9, 0.5, 0.35), (4.2, 0.9, 0.5), (5.6, 0.3, 0.3), (2.6, 1.6, 0.28)]:
-        roof.append(ell(mx, my, r, r * 0.45, [92, 104, 60], 0.3))
-    roof += [rect(0, L - 0.14, D, L, ROOF_DARK, 0.5), rect(0, 0, D, 0.08, mix(ROOF_DARK, [0, 0, 0], 0.3), 0.2)]
-    # The chimney's sides, back and flue (its front is in the front picture).
-    CH = [138, 82, 62]
-    def bricks(w, h):
-        b = [rect(0, 0, w, h, CH, 0.5)]
-        for j in range(int(h / 0.22)): b.append(line([0, 0.22 * (j + 1)], [w, 0.22 * (j + 1)], 0.025, [96, 60, 48]))
-        return b + [rect(0, h - 0.12, w, h, [100, 62, 48], 0.5)]
-    cz, top, low = 0.6, 5.55, 3.6
-    chimney = [
-        face([1.75, top, 0], [1.75, top, cz], [1.75, low, 0], bricks(cz, top - low)),
-        face([1.15, top, cz], [1.15, top, 0], [1.15, low, cz], bricks(cz, top - low)),
-        face([1.75, top, cz], [1.15, top, cz], [1.75, low, cz], bricks(0.6, top - low)),
-        face([1.15, top, cz], [1.75, top, cz], [1.15, top, 0], [rect(0, 0, 0.6, cz, [100, 62, 48], 0.5), rect(0.14, 0.14, 0.46, cz - 0.14, [26, 20, 18], 0.0)]),
-    ]
-    return [face([2.45, 3.15, 0], [2.45, 3.15, D], [2.45, 0, 0], wall, mirror=True),
-            face([0, 5.08, 0], [0, 5.08, D], [run, 2.72, 0], roof, mirror=True)] + chimney
 
 def stall_faces():
     D = 1.6
@@ -243,11 +162,20 @@ def woodpile_faces():
 # seen down the path, their side walls and roofs show; round things face the camera from any
 # side. Their faces are the rest of them, seen from the side and above. (The fence keeps facing
 # the camera until it turns: fences[] draws joined fences along the path.)
-for name, depth, faces in [("cottage", COTTAGE_DEPTH, cottage_faces()), ("market_stall", 1.6, stall_faces()), ("picket_fence", 0.0, []),
+for name, depth, faces in [("market_stall", 1.6, stall_faces()), ("picket_fence", 0.0, []),
                            ("cart", 1.2, cart_faces()), ("woodpile", 0.9, woodpile_faces())]:
     settlement["props"][name]["facing"] = "Path" if faces else "PathWhenTurned"
     if depth > 0: settlement["props"][name]["depth"] = depth
     if faces: settlement["props"][name]["faces"] = faces
+# Buildings (kit_buildings.py): cottages of five builds and three log cabins, each a group that
+# picks one per house so no two neighbours need match.
+houses, huts = kit_buildings.cottages(), kit_buildings.cabins()
+settlement["props"].update(houses)
+settlement["props"].update(huts)
+settlement["props"]["cottage"] = {"description": "A cottage of the village, each one built differently: timber-framed, stone, whitewashed under thatch, two storeys of brick or weatherboarded; lit windows and a smoking chimney, lighting the ground before it.",
+                                  "pick": sorted(houses), "facing": "Path", "depth": 6.5}
+settlement["props"]["log_cabin"] = {"description": "A log cabin, each one different: a small one with a stone chimney up its side, one with a front porch, one with a turf roof.",
+                                    "pick": sorted(huts), "facing": "Path", "depth": 5.5}
 
 # ── Waterside ─────────────────────────────────────────────────────────────
 def rowboat():
@@ -320,5 +248,6 @@ wildlife = {"name": "Wildlife", "description": "Animals by the way, drawn from s
 
 for name, kit in [("settlement", settlement), ("waterside", waterside), ("wildlife", wildlife)]:
     os.makedirs(f"kits/{name}", exist_ok=True)
-    with open(f"kits/{name}/kit.json", "w") as f: json.dump(kit, f, indent=1)
+    # (Written compactly: the kits are compiled into the program; edit this script, not them.)
+    with open(f"kits/{name}/kit.json", "w") as f: json.dump(kit, f, separators=(",", ":"))
     print(name, len(kit["props"]), "props")

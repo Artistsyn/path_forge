@@ -2262,7 +2262,7 @@ impl WorldRenderer {
         // is nothing to hang from, so they stand like the rest.
         let ceiling = if scene.ceiling.enabled { Some(scene.ceiling.height) } else if scene.walls.enabled && scene.walls.height > 0.0 { Some(scene.walls.height) } else { None };
         for (li, p) in scene.props.iter().enumerate().filter(|(_, p)| p.enabled) {
-            let Some(look) = self.defs.resolve(scene, opts.base_dir.as_deref(), p, &mut self.sprites).0 else { continue };
+            let Some(group) = self.defs.resolve(scene, opts.base_dir.as_deref(), p, &mut self.sprites).0 else { continue };
             let sp = snap_to_loop(p.spacing, ctx.loop_len);
             let n = (ctx.loop_len / sp).round() as i64;
             // (One place more at each end: a prop shifted along the path can stand in view when its place does not.)
@@ -2271,8 +2271,6 @@ impl WorldRenderer {
             let k_hi = ((ctx.scroll + hi - p.offset) / sp).floor() as i64 + 1;
             let (along, stagger) = (p.jitter_along.clamp(0.0, 1.0), p.stagger.clamp(0.0, 1.0));
             let seed = p.seed.wrapping_add(li as u32 * 104_729);
-            let hanging = look.hanging && ceiling.is_some();
-            let light = look.light.as_ref().filter(|l| l.intensity > 0.0 && l.radius > 0.0);
             for k in k_lo..=k_hi {
                 let key = k.rem_euclid(n);
                 let d0 = k as f32 * sp + p.offset - ctx.scroll;
@@ -2280,6 +2278,10 @@ impl WorldRenderer {
                     for row in 0..p.rows.max(1) {
                         let ikey = (key * 4 + si as i64) * 64 + row as i64;
                         if hf(seed ^ 0xD3, ikey) > p.density { continue; }
+                        // Which of a group's definitions this one is (the same each time round the loop).
+                        let look = group.pick(hash(seed ^ 0x6B, ikey));
+                        let hanging = look.hanging && ceiling.is_some();
+                        let light = look.light.as_ref().filter(|l| l.intensity > 0.0 && l.radius > 0.0);
                         // Rows further out are staggered along the path so they do not line up.
                         let shift = if row > 0 { along.max(0.8) } else { along };
                         let d = d0 + if si == 1 { stagger * sp } else { 0.0 } + if shift > 0.0 { (hf(seed ^ 0x9A, ikey) - 0.5) * sp * shift } else { 0.0 };
@@ -2365,7 +2367,7 @@ impl WorldRenderer {
                             let k = height / look.natural;
                             let sx = if flipped { -sm.at[0] } else { sm.at[0] } * k;
                             // (Standing along the path, its front runs along the path.)
-                            let at = if stands { [x, base + sm.at[1] * k, d - sign * sx] } else { [x + sx, base + sm.at[1] * k, d] };
+                            let at = if stands { [x + sign * sm.back.max(0.0) * k, base + sm.at[1] * k, d - sign * sx] } else { [x + sx, base + sm.at[1] * k, d] };
                             ctx.smokes.push((at, sm.clone(), hash(seed ^ 0x5E0, ikey) as u32));
                         }
                         let z = ctx.view.to_cam(x, base, d)[2];
@@ -5086,8 +5088,23 @@ impl<'a> Card<'a> {
         let [mx, my, md] = [t[0] + 0.5 * (a[0] + dn[0]), t[1] + 0.5 * (a[1] + dn[1]), t[2] + 0.5 * (a[2] + dn[2])];
         let mid = v.to_cam(mx, my, md);
         let z = mid[2].max(NEAR);
-        let hp = v.px_per_m(z) * b.height;
-        if hp < 0.5 { return None; }
+        let full = v.px_per_m(z) * b.height;
+        if full < 0.5 { return None; }
+        // Its picture's detail as squeezed on screen: a face seen at a glancing angle (a roof
+        // down the street) takes a coarser level, as its texels crowd into a few pixels.
+        let hp = match (v.project(corners[0]), v.project(corners[1]), v.project(corners[2])) {
+            (Some(p0), Some(p1), Some(p2)) if corners[..3].iter().all(|c| c[2] >= NEAR) => {
+                // The picture's height in pixels along its most squeezed direction: the smaller
+                // singular value of the map from the picture (in heights) to the screen.
+                let k = 1.0 / b.sprite.aspect.max(1e-3);
+                let (a, c) = ([(p1[0] - p0[0]) * k, (p1[1] - p0[1]) * k], [p2[0] - p0[0], p2[1] - p0[1]]);
+                let sum = a[0] * a[0] + a[1] * a[1] + c[0] * c[0] + c[1] * c[1];
+                let det = (a[0] * c[1] - a[1] * c[0]).abs();
+                let big = (0.5 * (sum + (sum * sum - 4.0 * det * det).max(0.0).sqrt())).sqrt();
+                (det / big.max(1e-6)).clamp(1.0, full.max(1.0))
+            }
+            _ => full,
+        };
         // Lit as a face turned the way it faces, toward the camera (the underside of an eave in
         // shade, seen from below).
         let n = [a[1] * dn[2] - a[2] * dn[1], a[2] * dn[0] - a[0] * dn[2], a[0] * dn[1] - a[1] * dn[0]];
@@ -5098,7 +5115,7 @@ impl<'a> Card<'a> {
         let light = ctx.light_except(mx, my, md, Some(normal), 0, weather::cloud_shade(ctx, mx, md), b.own_light);
         let ps = ctx.wx.prop_snow;
         let snow = (ps > 0.05 && b.id == id::PROP && b.emissive < 0.3).then(|| {
-            let cap = (v.px_per_m(z) * 0.06 * ps).max(1.0) / hp;
+            let cap = (v.px_per_m(z) * 0.06 * ps).max(1.0) / full;
             (cap, mul3([0.80, 0.83, 0.88], light), ctx.wx.prop_dust)
         });
         let light = mul3(light, b.tint);
@@ -6827,7 +6844,7 @@ mod tests {
         assert!(sum(&lit) > sum(&r.render(&dark, 4.0, &o).rgba), "the strings of bulbs add light");
         let cottage = &s.props[0];
         let (p, _) = crate::world::propdefs::PropDefs::default().resolve(&s, None, cottage, &mut crate::world::sprites::SpriteCache::default());
-        assert!(p.unwrap().smoke.is_some(), "cottage chimneys smoke");
+        assert!(p.unwrap().alts.iter().all(|a| a.smoke.is_some()), "every build of cottage has a chimney that smokes");
     }
 
     #[test]
@@ -6936,8 +6953,9 @@ mod tests {
     fn a_building_facing_the_path_shows_its_side_walls_and_roof_down_the_street() {
         let mut s = preset("Village Evening");
         s.props.retain(|p| p.def == "@settlement#cottage");
+        for p in &mut s.props { p.def = "@settlement#cottage_timber".into(); }
         let kit = crate::world::propdefs::PropDefs::default().kit(std::path::Path::new("@settlement")).unwrap();
-        let cottage = kit.props["cottage"].clone();
+        let cottage = kit.props["cottage_timber"].clone();
         assert_eq!(cottage.facing, Facing::Path);
         assert!(cottage.faces.len() >= 4);
         let mut flat = s.clone();

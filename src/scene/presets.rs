@@ -920,6 +920,34 @@ pub fn village_corner() -> Scene {
     s
 }
 
+/// A trail through the woods at dusk where log cabins stand among the trees, no two alike, smoke
+/// rising from their chimneys, woodpiles stacked by the path and lanterns lit along it.
+pub fn cabin_woods() -> Scene {
+    let mut s = winding_trail();
+    s.name = "Cabin Woods".into();
+    s.path.winding.amplitude = 1.4;
+    s.sky.day_night = DayNight { enabled: true, hour: 17.7, ..DayNight::default() };
+    let kit = |name: &str, lateral: f32, spacing: f32, offset: f32, side: Side, seed: u32| PropLayer {
+        def: format!("@settlement#{name}"), side, offset, jitter: 0.0, jitter_along: 0.0, lean_var: 0.0, density: 1.0, tint_var: 0.06,
+        ..props(PropKind::Rock, lateral, spacing, 1.0, seed)
+    };
+    s.props = vec![
+        kit("log_cabin", 4.4, 24.0, 2.0, Side::Left, 501),
+        kit("log_cabin", 4.8, 24.0, 14.0, Side::Right, 502),
+        kit("woodpile", 2.5, 24.0, 9.0, Side::Left, 503),
+        kit("cart", 2.6, 48.0, 22.0, Side::Right, 504),
+        // The woods: behind the cabins, and a few trees between them nearer the trail.
+        PropLayer { rows: 3, row_spacing: 4.0, jitter: 1.5, density: 0.85, ..props(PropKind::Tree, 12.5, 5.0, 1.15, 505) },
+        PropLayer { jitter: 0.8, density: 0.9, offset: 8.0, ..props(PropKind::Tree, 4.0, 24.0, 1.0, 506) },
+    ];
+    s.fixtures = vec![Fixture {
+        kind: FixtureKind::Lantern, mount: Mount::Ground, post: LampPost::Pole, lateral: 0.5, height: 2.2, spacing: 12.0, radius: 6.0, intensity: 0.9, side: Side::Left,
+        ..Fixture::default()
+    }];
+    s.motion = Motion { loop_length: 48.0, speed: 2.5, fps: 24 };
+    s
+}
+
 /// The village seen from above in the afternoon through a tilt-shift lens: a band across the
 /// middle sharp and the rest blurred, so the street looks like a model.
 pub fn miniature_village() -> Scene {
@@ -1219,6 +1247,7 @@ pub const ALL: &[(&str, fn() -> Scene)] = &[
     ("Miniature Village", miniature_village),
     ("Village Side Scroll", village_side_scroll),
     ("Village Corner", village_corner),
+    ("Cabin Woods", cabin_woods),
     ("Star Bridge", star_bridge),
     ("Nebula Crossing", nebula_crossing),
     ("Asteroid Belt", asteroid_belt),

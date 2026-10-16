@@ -359,8 +359,10 @@ choose the details unless the plan's warnings say to.
   Give buildings and other fronts `facing: Path` (or `PathWhenTurned`, flat to the camera until it
   turns) and a `depth`, or better `faces` (side walls, roof slopes: pictures placed by three
   `corners` in the prop's x/y/z metres, `mirror` for both sides), so they stand along the street as
-  solid buildings from any angle. Settlement kit cottages, stalls, carts and woodpiles already do;
-  trees and rocks keep `Camera`.
+  solid buildings from any angle. Settlement kit cottages, log cabins, stalls, carts and woodpiles
+  already do; trees and rocks keep `Camera`. `@settlement#cottage` / `#log_cabin` pick a different
+  build per house (a def's `pick` list); `cottage_timber|stone|thatch|brick|board` and
+  `log_cabin_small|porch|sod` name one build. Preset Cabin Woods.
 - **Camera and lens:** `camera.moves` (`bob`/`stride`/`sway` step with the walk, `pan`/`pans` and
   `tilt`/`tilts` slow looks, `dolly`/`dolly_focus`/`dollies` a dolly zoom: all whole cycles a
   loop; `fly_in` seconds of coming down from `fly_height` at the start, only in the runtime or

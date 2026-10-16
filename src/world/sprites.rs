@@ -2009,13 +2009,13 @@ pub fn set_piece(&mut self, kind: SetPieceKind, tint: Rgb, accent: Rgb, ow: f32,
     /// A prop face's picture (`paint_face`), kept by its parts and size.
     pub fn face(&mut self, parts: &[ShapePart], width: f32, height: f32) -> Option<Arc<Sprite>> {
         let key = format!("{width}x{height}:{}", serde_json::to_string(parts).unwrap_or_default());
-        if self.shapes.len() > 128 { self.shapes.clear(); }
+        if self.shapes.len() > 512 { self.shapes.clear(); }
         self.shapes.entry(key).or_insert_with(|| paint_face(parts, width, height).map(|s| (Arc::new(s), height))).clone().map(|(s, _)| s)
     }
 
     pub fn shape(&mut self, parts: &[ShapePart]) -> Option<(Arc<Sprite>, f32)> {
         let key = serde_json::to_string(parts).unwrap_or_default();
-        if self.shapes.len() > 128 { self.shapes.clear(); }
+        if self.shapes.len() > 512 { self.shapes.clear(); }
         self.shapes.entry(key).or_insert_with(|| paint_shape(parts).map(|(s, h)| (Arc::new(s), h))).clone()
     }
 }
