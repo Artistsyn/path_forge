@@ -104,12 +104,39 @@ pub struct Camera {
     /// In a side view, how far from the camera's side of the path things are left out, metres
     /// past the path's edge (props, lights, walls): the cut through the near side of the world.
     pub cutaway: f32,
+    /// Whether the sun and moon (and planets, a black hole, a rainbow) keep their place in the
+    /// world as the camera turns (`yaw`): `sky.sun.pos` is where they stand seen down the path,
+    /// and turned to the side the view swings away from them, so a sun ahead of the walk is off
+    /// to one side of a side-scroller, and its light and shadows still come from where it is.
+    /// Off: they keep their place in the picture whichever way the camera looks, and their light
+    /// turns with it.
+    pub world_sky: bool,
 }
 impl Default for Camera {
-    fn default() -> Self { Self { eye_height: 1.6, horizon: 0.22, zoom: 1.0, lens_curve: 0.0, moves: CameraMoves::default(), yaw: 0.0, side: 0.0, cutaway: 0.4 } }
+    fn default() -> Self { Self { eye_height: 1.6, horizon: 0.22, zoom: 1.0, lens_curve: 0.0, moves: CameraMoves::default(), yaw: 0.0, side: 0.0, cutaway: 0.4, world_sky: false } }
 }
 
 impl Camera {
+    /// For `world_sky`: a copy of the scene with its sun, moon and other things in the sky moved
+    /// across the picture to where the turned camera sees them (None when nothing moves). The
+    /// picture is 2.4 radians of sky across, as the sun's light reads it.
+    pub fn bake_world_sky(scene: &Scene) -> Option<Scene> {
+        let c = &scene.camera;
+        let yaw = c.yaw.clamp(-90.0, 90.0).to_radians();
+        if !c.world_sky || yaw == 0.0 { return None; }
+        let dx = -yaw / 2.4;
+        let mut s = scene.clone();
+        s.camera.world_sky = false;
+        let sky = &mut s.sky;
+        sky.sun.pos[0] += dx;
+        sky.moon.body.pos[0] += dx;
+        sky.rainbow.x += dx;
+        sky.space.black_hole.pos[0] += dx;
+        for p in sky.space.planets.iter_mut() { p.pos[0] += dx; }
+        for o in sky.space.objects.iter_mut() { o.pos[0] += dx; }
+        Some(s)
+    }
+
     /// Whether the camera looks far enough to the side that the near side of the world is cut
     /// away and the path straightened (a side view).
     pub fn side_view(&self) -> bool { self.yaw.abs() >= 60.0 }

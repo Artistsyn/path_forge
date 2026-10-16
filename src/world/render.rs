@@ -1071,6 +1071,12 @@ impl WorldRenderer {
             let ws: Vec<WorldIn> = worlds.iter().zip(&days).map(|(w, b)| WorldIn { scene: b.as_ref().unwrap_or(w.scene), ..w.clone() }).collect();
             return self.render_worlds(&ws, layout, opts);
         }
+        // A sky that stays in the world as the camera turns: draw a copy with it where the camera sees it.
+        let turned: Vec<Option<Scene>> = worlds.iter().map(|w| crate::scene::Camera::bake_world_sky(w.scene)).collect();
+        if turned.iter().any(Option::is_some) {
+            let ws: Vec<WorldIn> = worlds.iter().zip(&turned).map(|(w, b)| WorldIn { scene: b.as_ref().unwrap_or(w.scene), ..w.clone() }).collect();
+            return self.render_worlds(&ws, layout, opts);
+        }
         // A sunset takes a scene's colours towards its own: draw a copy that has them.
         let baked: Vec<Option<Scene>> = worlds.iter().map(|w| crate::scene::Sunset::bake(w.scene)).collect();
         if baked.iter().any(Option::is_some) {
@@ -1807,12 +1813,9 @@ impl WorldRenderer {
         for (body, gain) in [(&scene.sky.sun, 1.8 * sun_through), (&scene.sky.moon.body, 0.6 * sun_through.sqrt())] {
             if scene.sky.enabled && body.enabled && body.emits_light {
                 // As the camera turns with the path, the light comes from that much further round.
-                // (A turned camera sees the sky where it always does: the light turns with it.)
-                let yaw = if view.turned { view.yaw_s.atan2(view.yaw_c) } else { 0.0 };
-                let az = (body.pos[0] - 0.5) * 2.4 - view.turn_tan().atan() + yaw;
-                let el = (1.0 - body.pos[1].clamp(0.0, 1.0)) * 1.15 + 0.08;
-                let dir = [az.sin() * el.cos(), el.sin(), az.cos() * el.cos()];
-                sky_lights.push(DirLight { dir, color: scale3(rgb_lin(body.color), gain * body.intensity.max(0.0)) });
+                // (A turned camera sees the sky where it always does, the light turning with it,
+                // unless the sky stays in the world: then the sky was moved across the picture.)
+                sky_lights.push(DirLight { dir: sky_light_dir(&view, body.pos), color: scale3(rgb_lin(body.color), gain * body.intensity.max(0.0)) });
             }
         }
         // Lightning lights the world from above, out where the bolt is: tops and the ground catch it,
@@ -2984,6 +2987,15 @@ fn build_geometry(ctx: &Ctx, layers: &Layers) -> Vec<Tri> {
 }
 
 // ── Shading ────────────────────────────────────────────────────────────────
+
+/// Where the light of a sun or moon at `pos` in the picture comes from, in the world: the
+/// picture is 2.4 radians of sky across, and the sky turns with the camera.
+fn sky_light_dir(view: &View, pos: [f32; 2]) -> [f32; 3] {
+    let yaw = if view.turned { view.yaw_s.atan2(view.yaw_c) } else { 0.0 };
+    let az = (pos[0] - 0.5) * 2.4 - view.turn_tan().atan() + yaw;
+    let el = (1.0 - pos[1].clamp(0.0, 1.0)) * 1.15 + 0.08;
+    [az.sin() * el.cos(), el.sin(), az.cos() * el.cos()]
+}
 
 /// The paint of a scene's fences (the first painted one's colour), linear.
 pub(crate) fn fence_paint(s: &Scene) -> [f32; 3] {
@@ -7399,6 +7411,33 @@ mod tests {
             let v = View::new(&t, w, h);
             let foot = v.world_to_px(-(v.path_half_width(14.0 - at) + 2.0), 0.0, 14.0 - at).unwrap();
             assert!(sx / (n as f64) < foot[0] as f64, "yaw {yaw}: the shadow lies left of the tree at {foot:?}, away from the sun");
+        }
+    }
+
+    #[test]
+    fn a_world_sky_stays_put_as_the_camera_turns() {
+        // Seen down the path, then turned to look across it: with the sky in the world the sun
+        // shines from the same way and moves across the picture; with it on the camera it stays
+        // in the picture and its light turns with the camera.
+        // (A straight path: a winding one turns the camera down the path, not across it.)
+        let mut s = preset("Village Evening");
+        s.path.winding.enabled = false;
+        s.sky.day_night.enabled = false;
+        s.sky.sun.pos = [0.7, 0.4];
+        let ahead = sky_light_dir(&View::new(&s, 480, 270), s.sky.sun.pos);
+        for yaw in [-90.0f32, -40.0, 25.0, 90.0] {
+            let mut t = s.clone();
+            (t.camera.yaw, t.camera.side, t.camera.world_sky) = (yaw, 6.0 * yaw.signum(), true);
+            let baked = crate::scene::Camera::bake_world_sky(&t).expect("turned: the sky moves");
+            assert!(crate::scene::Camera::bake_world_sky(&baked).is_none(), "once");
+            let v = View::new(&baked, 480, 270);
+            let dir = sky_light_dir(&v, baked.sky.sun.pos);
+            assert!((0..3).all(|k| (dir[k] - ahead[k]).abs() < 1e-4), "yaw {yaw}: the sun shines from where it stands ({dir:?} vs {ahead:?})");
+            assert!((baked.sky.sun.pos[0] - s.sky.sun.pos[0] + yaw.to_radians() / 2.4).abs() < 1e-5, "yaw {yaw}: and moves across the picture");
+            t.camera.world_sky = false;
+            assert!(crate::scene::Camera::bake_world_sky(&t).is_none());
+            let turned = sky_light_dir(&View::new(&t, 480, 270), t.sky.sun.pos);
+            assert!((turned[0] - ahead[0]).abs() > 0.1 || (turned[2] - ahead[2]).abs() > 0.1, "yaw {yaw}: on the camera, the light turns with it");
         }
     }
 

@@ -223,6 +223,7 @@ the path crosses on a deck. Walls carry on down into the gap.
 | `yaw` | number | `0.0` | Which way the camera looks, degrees from straight down the path (-90 .. 90; positive turns right). The whole loop is seen from this angle: 30 looks diagonally across the path; 90 or -90 looks straight across it, a side-scroller's view, the walk carrying the world sideways past (to the left when the camera looks left, at -90). Turned far, the path's bends are straightened and what stands between the camera and the path (walls, the ceiling, props nearer than `cutaway`) is left out, so the path is seen. |
 | `side` | number | `0.0` | Where the camera stands, metres sideways from the middle of the path (positive right). A side view wants it well out to the side: 10 m from a path at yaw -90, -10 at 90. |
 | `cutaway` | number | `0.4` | In a side view, how far from the camera's side of the path things are left out, metres past the path's edge (props, lights, walls): the cut through the near side of the world. |
+| `world_sky` | boolean | `false` | Whether the sun and moon (and planets, a black hole, a rainbow) keep their place in the world as the camera turns (`yaw`): `sky.sun.pos` is where they stand seen down the path, and turned to the side the view swings away from them, so a sun ahead of the walk is off to one side of a side-scroller, and its light and shadows still come from where it is. Off: they keep their place in the picture whichever way the camera looks, and their light turns with it. |
 
 ### CameraMoves
 

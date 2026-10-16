@@ -214,6 +214,13 @@ props, lights, weather), the loop still closes, and the GPU draws the same frame
   ceiling, fences, lights and props on the camera's side are cut away beyond `camera.cutaway`
   metres past the path's edge, so the walking lane stays in view. Raise `eye_height` and lower
   `horizon` to see more of the lane.
+- **Where the sun stands**: by default the sky keeps its place in the picture whichever way the
+  camera looks (the sun where `sky.sun.pos` puts it), and its light and shadows turn with the
+  camera. Turn on `camera.world_sky` and the sun and moon (planets, a black hole, a rainbow) keep
+  their place in the world instead: `pos` is where they stand seen down the path, and turned to
+  the side the view swings away from them, so a sun ahead of the walk lies off to one side of a
+  side-scroller, its light and shadows coming from where it is. Two scenes of one place, one down
+  the path and one from the side, then share one sun.
 
 **Props from an angle.** A prop's `facing` says which way its picture faces. `Camera` (the
 default, and every built-in kind) keeps it turned to the camera: right for trees, rocks and lamps,
