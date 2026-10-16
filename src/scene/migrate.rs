@@ -177,7 +177,7 @@ pub fn from_v2(o: &PathForgeSettings, name: &str) -> Scene {
         sky,
         light,
         fixtures,
-        props, set_pieces: Vec::new(), companions: Vec::new(), weather: Weather::default(), season: Season::default(), wildlife: Wildlife::default(), waterfalls: Vec::new(), prop_defs: Default::default(),
+        props, set_pieces: Vec::new(), companions: Vec::new(), weather: Weather::default(), season: Season::default(), wildlife: Wildlife::default(), waterfalls: Vec::new(), fences: Vec::new(), prop_defs: Default::default(),
         particles,
         post: Post {
             exposure: 1.0, contrast: 1.0,

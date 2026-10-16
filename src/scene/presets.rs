@@ -76,7 +76,7 @@ fn scene(name: &str) -> Scene {
     Scene {
         version: SCENE_VERSION, name: name.to_owned(), canvas: Canvas::default(), camera: Camera::default(),
         path: PathShape::default(), verge: Verge::default(), ground_cover: vec![], walls: Walls::default(), ceiling: Ceiling::default(),
-        sky: no_sky([0, 0, 0]), light: indoor_light(0.25, [0, 0, 0], 20.0), fixtures: vec![], props: vec![], set_pieces: vec![], companions: vec![], weather: Weather::default(), season: Season::default(), wildlife: Wildlife::default(), waterfalls: Vec::new(), prop_defs: Default::default(),
+        sky: no_sky([0, 0, 0]), light: indoor_light(0.25, [0, 0, 0], 20.0), fixtures: vec![], props: vec![], set_pieces: vec![], companions: vec![], weather: Weather::default(), season: Season::default(), wildlife: Wildlife::default(), waterfalls: Vec::new(), fences: Vec::new(), prop_defs: Default::default(),
         particles: vec![], post: Post::default(), style: Style::default(), motion: Motion::default(),
     }
 }
@@ -860,7 +860,6 @@ pub fn village_evening() -> Scene {
     s.props = vec![
         kit("cottage", 4.2, 16.0, 0.0, Side::Left, 301),
         kit("cottage", 4.6, 16.0, 8.0, Side::Right, 302),
-        kit("picket_fence", 1.6, 1.9, 0.0, Side::Both, 303),
         kit("well", 2.6, 48.0, 20.0, Side::Right, 304),
         kit("market_stall", 2.4, 48.0, 36.0, Side::Left, 305),
         kit("haybale", 2.8, 24.0, 12.0, Side::Right, 306),
@@ -872,6 +871,11 @@ pub fn village_evening() -> Scene {
         string_lights: StringLights { enabled: true, colors: vec![[255, 214, 140], [255, 150, 90], [255, 236, 190]], ..StringLights::default() },
         ..Fixture::default()
     }];
+    // Picket fences along both sides, with a gate gap in front of each cottage.
+    s.fences = vec![
+        Fence { side: Side::Left, lateral: 1.3, spacing: 16.0, length: 13.0, offset: 1.5, ..Fence::default() },
+        Fence { side: Side::Right, lateral: 1.3, spacing: 16.0, length: 13.0, offset: 9.5, ..Fence::default() },
+    ];
     s.wildlife.bats.enabled = true;
     s.motion = Motion { loop_length: 48.0, speed: 2.5, fps: 24 };
     s

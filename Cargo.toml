@@ -46,4 +46,7 @@ rayon = "1"
 png = "0.18"
 schemars = "1"
 base64 = "0.22"
+# Share codes: scenes compressed into a line of text, and QR codes of them.
+miniz_oxide = "0.8"
+qrcode = { version = "0.14", default-features = false }
 webp-animation = "0.10"

@@ -25,11 +25,13 @@ pub mod id {
     /// Bridge railings: posts, rails, parapets, pillars. One id per material and face, so each
     /// face is lit with its own normal: `RAIL + 4 * material + face`.
     pub const RAIL: u8 = 20;
-    const RAIL_END: u8 = RAIL + 4 * 3;
+    const RAIL_END: u8 = RAIL + 4 * 4;
     /// Railing materials: stone (the walls, or the path), wood (the deck), and `rail_color`.
     pub const STONE: u8 = 0;
     pub const WOOD: u8 = 1;
     pub const PAINT: u8 = 2;
+    /// A fence's paint (`Fence::color`).
+    pub const FENCE: u8 = 3;
     /// Railing faces: toward the path, away from it, the top, and the end facing the camera.
     pub const INNER: u8 = 0;
     pub const OUTER: u8 = 1;

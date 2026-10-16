@@ -10,6 +10,7 @@ pub mod form;
 pub mod migrate;
 pub mod styles;
 pub mod remix;
+pub mod share;
 pub mod transition;
 
 use schemars::JsonSchema;
@@ -50,6 +51,8 @@ pub struct Scene {
     pub wildlife: Wildlife,
     /// Waterfalls beside the path: water pouring down a rock face into foam and spray.
     pub waterfalls: Vec<Waterfall>,
+    /// Fences along the path: pickets, rails or boards, joined post to post and following its bends.
+    pub fences: Vec<Fence>,
     /// Props described by data, by name: a prop layer uses one with `def: "<name>"`. Kits (folders
     /// with a kit.json) hold more, used as `def: "<folder>#<name>"`.
     #[serde(skip_serializing_if = "std::collections::BTreeMap::is_empty")]
@@ -1770,6 +1773,46 @@ fn smooth(e0: f32, e1: f32, x: f32) -> f32 { let t = ((x - e0) / (e1 - e0)).clam
 /// streaks, foam and spray boiling up at its foot, and (with the sun out) a little rainbow in the
 /// spray. It repeats every `spacing` metres, like a set piece; its water falls a whole number of
 /// times a loop.
+/// A fence beside the path, built post to post as solid pieces that run along its edge and bend
+/// with it, so it reads as one fence from any angle.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
+pub struct Fence {
+    pub enabled: bool,
+    pub style: FenceStyle,
+    pub side: Side,
+    /// Metres out from the path's edge.
+    pub lateral: f32,
+    /// Metres tall.
+    pub height: f32,
+    /// The paint of pickets and boards. (Every painted fence of a scene takes the first one's
+    /// colour; rails are bare wood, in the colour of a bridge's deck.)
+    pub color: Rgb,
+    /// Runs `length` metres long every `spacing` metres: as long as the spacing, one fence with no
+    /// break; shorter, with a gap (a gate, a lane) between runs. Both snap to divide the loop.
+    pub spacing: f32,
+    pub length: f32,
+    pub offset: f32,
+    /// Metres between posts.
+    pub post_spacing: f32,
+}
+impl Default for Fence {
+    fn default() -> Self {
+        Fence { enabled: true, style: FenceStyle::Picket, side: Side::Both, lateral: 1.2, height: 0.9, color: [236, 232, 220], spacing: 24.0, length: 20.0, offset: 0.0, post_spacing: 2.0 }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub enum FenceStyle {
+    /// White pickets on two rails between posts.
+    #[default]
+    Picket,
+    /// Posts and three bare wooden rails: a field fence.
+    Rails,
+    /// Close boards from the ground up, capped by a rail.
+    Boards,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(default)]
 pub struct Waterfall {

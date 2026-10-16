@@ -2704,6 +2704,7 @@ fn build_geometry(ctx: &Ctx, layers: &Layers) -> Vec<Tri> {
             railing(v, b, s0, e, &ds, ctx.far, &mut tris);
         }
     }
+    if layers.ground { fences(ctx, &ds, &mut tris); }
     // Side passages: an alley (open to the sky) without a ceiling, a doorway with one.
     let passage_h = ctx.fork.filter(|_| !openings.is_empty() && s.ceiling.enabled).map(|f| f.height.min(top));
     if let Some(f) = ctx.fork.filter(|_| !openings.is_empty()) {
@@ -2784,6 +2785,101 @@ fn build_geometry(ctx: &Ctx, layers: &Layers) -> Vec<Tri> {
 }
 
 // ── Shading ────────────────────────────────────────────────────────────────
+
+/// The paint of a scene's fences (the first painted one's colour), linear.
+pub(crate) fn fence_paint(s: &Scene) -> [f32; 3] {
+    rgb_lin(s.fences.iter().find(|f| f.enabled && f.style != FenceStyle::Rails).map_or([236, 232, 220], |f| f.color))
+}
+
+/// The fences beside the path: posts, rails and pickets (or boards) as boxes that follow the
+/// path's edge, built from the faces the camera can see, as a bridge's railing is.
+fn fences(ctx: &Ctx, ds: &[f32], tris: &mut Vec<Tri>) {
+    let v = &ctx.view;
+    let far = ctx.far.min(120.0);
+    let vert = |x: f32, y: f32, d: f32| Vert { cam: v.to_cam(x, y, d), world: [x, y, d] };
+    for f in ctx.scene.fences.iter().filter(|f| f.enabled && f.height > 0.0) {
+        let sp = snap_to_loop(f.spacing.max(1.0), ctx.loop_len);
+        let len = f.length.clamp(0.5, sp);
+        // A run as long as the spacing joins the next one: one fence with no break.
+        let joined = len >= sp - 1e-3;
+        let base = |d: f32| v.path_half_width(d) + f.lateral;
+        // A box over [d0, d1] standing `xi`..`xo` metres out from the fence's line.
+        let block = |tris: &mut Vec<Tri>, sign: f32, d0: f32, d1: f32, xi: f32, xo: f32, y0: f32, y1: f32, m: u8| {
+            if d0 < NEAR || d0 > far { return; }
+            let h = base(0.5 * (d0 + d1));
+            let (a, c) = (sign * (h + xi), sign * (h + xo));
+            raster::quad(tris, [vert(a, y0, d0), vert(c, y0, d0), vert(c, y1, d0), vert(a, y1, d0)], id::rail(m, id::FRONT));
+            raster::quad(tris, [vert(a, y0, d0), vert(a, y0, d1), vert(a, y1, d1), vert(a, y1, d0)], id::rail(m, id::INNER));
+            raster::quad(tris, [vert(c, y0, d0), vert(c, y0, d1), vert(c, y1, d1), vert(c, y1, d0)], id::rail(m, id::OUTER));
+            raster::quad(tris, [vert(a, y1, d0), vert(a, y1, d1), vert(c, y1, d1), vert(c, y1, d0)], id::rail(m, id::TOP));
+        };
+        // A long box from `a` to `b` along the line, cut where the ground is so it bends with it.
+        let run = |tris: &mut Vec<Tri>, sign: f32, a: f32, b: f32, xi: f32, xo: f32, y0: f32, y1: f32, m: u8| {
+            let (lo, hi) = (a.max(NEAR), b.min(far));
+            if hi <= lo { return; }
+            let mut cuts: Vec<f32> = ds.iter().copied().filter(|&d| d > lo && d < hi).collect();
+            cuts.push(lo);
+            cuts.push(hi);
+            cuts.sort_by(|p, q| p.partial_cmp(q).unwrap());
+            cuts.dedup_by(|p, q| (*p - *q).abs() < 1e-3);
+            let at = |d: f32| (sign * (base(d) + xi), sign * (base(d) + xo));
+            if a >= NEAR {
+                let (i, o) = at(a);
+                raster::quad(tris, [vert(i, y0, a), vert(o, y0, a), vert(o, y1, a), vert(i, y1, a)], id::rail(m, id::FRONT));
+            }
+            for w in cuts.windows(2) {
+                let ((i0, o0), (i1, o1), d0, d1) = (at(w[0]), at(w[1]), w[0], w[1]);
+                raster::quad(tris, [vert(i0, y0, d0), vert(i1, y0, d1), vert(i1, y1, d1), vert(i0, y1, d0)], id::rail(m, id::INNER));
+                raster::quad(tris, [vert(o0, y0, d0), vert(o1, y0, d1), vert(o1, y1, d1), vert(o0, y1, d0)], id::rail(m, id::OUTER));
+                raster::quad(tris, [vert(i0, y1, d0), vert(i1, y1, d1), vert(o1, y1, d1), vert(o0, y1, d0)], id::rail(m, id::TOP));
+            }
+        };
+        let ht = f.height;
+        let (paint, wood) = (id::FENCE, id::WOOD);
+        let k_lo = ((ctx.scroll - len - f.offset) / sp).floor() as i64;
+        let k_hi = ((ctx.scroll + far - f.offset) / sp).ceil() as i64;
+        for k in k_lo..=k_hi {
+            let a = k as f32 * sp + f.offset - ctx.scroll;
+            let b = a + len;
+            if b < NEAR || a > far { continue; }
+            // Not over a bridge's drop.
+            if ctx.on_bridge(0.5 * (a + b)) { continue; }
+            let posts = ((len / f.post_spacing.max(0.5)).round() as usize).max(1);
+            for sign in f.side.signs().iter().copied() {
+                let (pw, pm) = match f.style { FenceStyle::Rails => (0.12, wood), _ => (0.09, paint) };
+                // Posts (a joined fence's last post is the next run's first).
+                let last = if joined { posts - 1 } else { posts };
+                for j in 0..=last {
+                    let d = a + len * j as f32 / posts as f32;
+                    block(tris, sign, d - 0.5 * pw, d + 0.5 * pw, -0.5 * pw, 0.5 * pw, 0.0, ht + 0.06, pm);
+                }
+                match f.style {
+                    FenceStyle::Picket => {
+                        for y in [0.22 * ht, 0.72 * ht] { run(tris, sign, a, b, 0.03, 0.055, y, y + 0.07, paint); }
+                        // Pickets, each with a narrower point on top; far off they merge into a panel.
+                        let n = (len / 0.14).round().max(1.0) as usize;
+                        for j in 0..n {
+                            let c = a + len * (j as f32 + 0.5) / n as f32;
+                            if c > 35.0 {
+                                run(tris, sign, (c - 0.07).max(a), b, -0.02, 0.005, 0.04, ht * 0.97, paint);
+                                break;
+                            }
+                            block(tris, sign, c - 0.037, c + 0.037, -0.02, 0.005, 0.04, ht - 0.05, paint);
+                            block(tris, sign, c - 0.018, c + 0.018, -0.02, 0.005, ht - 0.05, ht, paint);
+                        }
+                    }
+                    FenceStyle::Rails => {
+                        for y in [0.28 * ht, 0.6 * ht, 0.9 * ht] { run(tris, sign, a, b, -0.07, -0.02, y - 0.09, y, wood); }
+                    }
+                    FenceStyle::Boards => {
+                        run(tris, sign, a, b, -0.02, 0.01, 0.02, ht - 0.04, paint);
+                        run(tris, sign, a, b, -0.04, 0.03, ht - 0.04, ht + 0.02, paint);
+                    }
+                }
+            }
+        }
+    }
+}
 
 /// One bridge's railings, both sides. Every part is a box built from the faces the camera can
 /// see (its far end always faces away), so it reads as solid from any bend of the path, and each
@@ -3109,7 +3205,8 @@ fn shade_px(ctx: &Ctx, g: &GPixel, gbuf: &[GPixel], i: usize, x: usize, y: usize
         let b = &scene.path.bridge;
         let luma = |c: [f32; 3]| 0.3 * c[0] + 0.59 * c[1] + 0.11 * c[2];
         let grain = (luma(albedo) / luma(rgb_lin(b.deck.base)).max(1e-3)).clamp(0.6, 1.3);
-        albedo = scale3(rgb_lin(b.rail_color), grain);
+        let paint = if id::is_rail(g.id) && id::rail_parts(g.id).0 == id::FENCE { fence_paint(scene) } else { rgb_lin(b.rail_color) };
+        albedo = scale3(paint, grain);
     }
     // A waterway: the foam and what floats on the water, and the bank or walls wet beside it.
     let (mut gloss_k, mut wet_g) = (1.0f32, 0.0f32);
@@ -3390,7 +3487,7 @@ fn gpu_params(ctx: &Ctx, layers: &Layers) -> super::gpu::WorldParams {
         ww_k1: ctx.water.map_or(0.0, |k| k.k1), ww_k2: ctx.water.map_or(0.0, |k| k.k2), ww_wet: ctx.water.map_or(0.0, |k| k.wet),
         ww_kind: ctx.water.map_or(0, |k| k.kind), ww_dens: ctx.water.map_or(0.0, |k| k.dens), ww_fcol: ctx.water.map_or([0.0; 3], |k| k.fcol),
         ww_fsize: ctx.water.map_or(1.0, |k| k.fsize), ww_period: ctx.water.map_or(1.0, |k| k.period), ww_cs: ctx.water.map_or(1.0, |k| k.cs), ww_seed: ctx.water.map_or(0, |k| k.seed),
-        br_inset: ctx.bridge.map_or(0.0, |b| b.rail_inset()), ww_frozen: ctx.water.map_or(0.0, |k| k.frozen), ww_hw: ctx.water.map_or(1.0, |k| k.hw), spare: [0.0; 5], wind: v.wind_now(), gc_n: ctx.cover.len() as u32, gc_sway: ctx.wx.sway_parts().0, gc_lean: ctx.wx.sway_parts().1, gc_phase: ctx.wx.sway_parts().2, gc: { let mut a = [[0.0f32; 4]; 12]; for (i, k) in ctx.cover.iter().enumerate() { a[i * 4..i * 4 + 4].copy_from_slice(&k.rec()); } a },
+        br_inset: ctx.bridge.map_or(0.0, |b| b.rail_inset()), ww_frozen: ctx.water.map_or(0.0, |k| k.frozen), ww_hw: ctx.water.map_or(1.0, |k| k.hw), fence: fence_paint(s), spare: [0.0; 2], wind: v.wind_now(), gc_n: ctx.cover.len() as u32, gc_sway: ctx.wx.sway_parts().0, gc_lean: ctx.wx.sway_parts().1, gc_phase: ctx.wx.sway_parts().2, gc: { let mut a = [[0.0f32; 4]; 12]; for (i, k) in ctx.cover.iter().enumerate() { a[i * 4..i * 4 + 4].copy_from_slice(&k.rec()); } a },
         ..bytemuck::Zeroable::zeroed()
     }
 }
@@ -4937,83 +5034,110 @@ fn draw_flame(ctx: &Ctx, f: &Flame, out: &mut Vec<Splat>) {
     }
 }
 
-/// Waterfalls' water: streaks pouring down the face, a pale sheet behind them, foam and spray
-/// boiling up at the foot, and a rainbow in the spray when the sun is out.
+/// Waterfalls' water. Over the lip it is a smooth, glassy band; falling, the curtain breaks
+/// into ribbons of white aerated water (thick in the middle, thin and see-through at the edges)
+/// down which clumps of water race, quickening as they fall; at the foot it churns white in a
+/// pool, and a plume of spray billows up and drifts, with a rainbow in it when the sun is out.
 fn draw_falls(ctx: &Ctx, out: &mut Vec<Splat>) {
     let v = &ctx.view;
+    let (sw, sh) = (v.width as i64, v.height as i64);
     let loop_seconds = ctx.scene.motion.loop_seconds();
     let sun = ctx.scene.sky.enabled && ctx.scene.sky.sun.enabled && ctx.scene.sky.sun.pos[1] < 1.0;
+    // A soft puff (`Wisp`) of `r` pixels, flattened by `squash`.
+    let puff = |out: &mut Vec<Splat>, c: [f32; 3], r: f32, squash: f32, lit: [f32; 3], alpha: f32| {
+        if c[2] < NEAR || alpha < 0.005 { return; }
+        let Some([sx, sy]) = v.project(c) else { return };
+        let (rx, ry) = (r.max(1.0), (r * squash).max(1.0));
+        let (x0, x1) = (((sx - rx).floor() as i64).max(0), ((sx + rx).ceil() as i64).min(sw - 1));
+        let (y0, y1) = (((sy - ry).floor() as i64).max(0), ((sy + ry).ceil() as i64).min(sh - 1));
+        if x0 > x1 || y0 > y1 { return; }
+        out.push(Splat { z: c[2], gate: None, shape: Shape::Wisp { sx, sy, rx, ry, x0, x1, y0, y1, lit, alpha } });
+    };
     for (at, width, wi) in &ctx.falls {
         let wf = &ctx.scene.waterfalls[*wi];
         let (x0, top, d) = (at[0], at[1], at[2] - 0.05);
-        let water = rgb_lin(wf.water);
+        let width = *width;
         let lit = add3(ctx.light_at(x0, 0.5 * top, d, None, 0, 1.0), [0.1; 3]);
-        let col = ctx.apply_fog(mul3(water, lit), d);
+        // Deep water is the water's colour; broken into foam it is nearly white.
+        let water = ctx.apply_fog(mul3(rgb_lin(wf.water), lit), d);
+        let white = ctx.apply_fog(mul3(mix3(rgb_lin(wf.water), [1.0; 3], 0.7), lit), d);
+        let glass = ctx.apply_fog(mul3(scale3(rgb_lin(wf.water), 0.55), lit), d);
+        let ppm = v.px_per_m(d.max(NEAR));
         let cyc = cycles(0.9, loop_seconds).max(1.0);
-        // The sheet: still, thin, see-through falls of water from lip to foot, darker at the
-        // edges where it is thinner.
-        let n_sheet = ((width * 16.0).round() as i64).clamp(8, 90);
-        for i in 0..n_sheet {
-            let u = (i as f32 + 0.5) / n_sheet as f32;
-            let x = x0 + (u - 0.5) * width + (hf(wf.seed ^ 0xE1, i) - 0.5) * 0.04;
-            let edge = 1.0 - (2.0 * u - 1.0).powi(4);
-            let (c0, c1) = (v.to_cam(x, top, d + 0.02), v.to_cam(x + (hf(wf.seed ^ 0xE2, i) - 0.5) * 0.1, 0.0, d + 0.02));
+        let h = |k: u32, i: i64| hf(wf.seed ^ k, i);
+        // The lip: smooth water bending over the edge, darker, with a bright line where it turns.
+        let lip = |x: f32, y: f32| v.project(v.to_cam(x, y, d + 0.03));
+        if let (Some(l), Some(r)) = (lip(x0 - 0.5 * width, top), lip(x0 + 0.5 * width, top)) {
+            let z = v.to_cam(x0, top, d + 0.03)[2];
+            if z >= NEAR {
+                splat::streak(out, z, (l[0], l[1] + 0.06 * ppm), (r[0], r[1] + 0.06 * ppm), glass, 0.85, (0.12 * ppm).max(1.0));
+                splat::streak(out, z, (l[0], l[1] - 0.01 * ppm), (r[0], r[1] - 0.01 * ppm), scale3(white, 1.2), 0.6, (0.025 * ppm).max(0.7));
+            }
+        }
+        // The curtain: ribbons of falling water side by side, each its own thickness.
+        let n_rib = ((width * 14.0).round() as i64).clamp(8, 80);
+        for i in 0..n_rib {
+            let u = (i as f32 + 0.1 + 0.8 * h(0xE1, i)) / n_rib as f32;
+            let x = x0 + (u - 0.5) * width;
+            let mid = 1.0 - (2.0 * u - 1.0).abs().powf(1.6);
+            let thick = (0.3 + 0.7 * h(0xE2, i)) * (0.25 + 0.75 * mid);
+            // It falls a little away from the face, and spreads as it falls.
+            // (Ragged at the edges: the outer threads wander and fall short.)
+            let edge = (2.0 * u - 1.0).abs();
+            let foot_x = x0 + (u - 0.5) * width * 1.3 + (h(0xE4, i) - 0.5) * 0.12 * width * edge;
+            let (c0, c1) = (v.to_cam(x, top - 0.25 * edge.powi(3) * h(0xE5, i) * top, d + 0.02), v.to_cam(foot_x, 0.0, d - 0.12));
             if c0[2] < NEAR { continue; }
-            let (Some([sx0, sy0]), Some([sx1, sy1])) = (v.project(c0), v.project(c1)) else { continue };
-            let wpx = (v.px_per_m(c0[2]) * width / n_sheet as f32 * 1.3).max(0.8);
-            splat::streak(out, c0[2], (sx0, sy0), (sx1, sy1), scale3(col, 0.8 + 0.25 * hf(wf.seed ^ 0xE3, i)), 0.32 * edge, wpx);
-        }
-        // A pool at the foot.
-        {
-            let c = v.to_cam(x0, 0.02, d - 0.3);
-            if c[2] >= NEAR {
-                if let Some([sx, sy]) = v.project(c) {
-                    let rx = v.px_per_m(c[2]) * width * 0.95;
-                    let ry = rx * 0.22;
-                    let (w, hgt) = (v.width as i64, v.height as i64);
-                    let (x0p, x1p) = (((sx - rx).floor() as i64).max(0), ((sx + rx).ceil() as i64).min(w - 1));
-                    let (y0p, y1p) = (((sy - ry).floor() as i64).max(0), ((sy + ry).ceil() as i64).min(hgt - 1));
-                    if x0p <= x1p && y0p <= y1p {
-                        out.push(Splat { z: c[2], gate: None, shape: Shape::Wisp { sx, sy, rx, ry, x0: x0p, x1: x1p, y0: y0p, y1: y1p, lit: scale3(col, 0.85), alpha: 0.7 } });
-                    }
-                }
+            let (Some(p0), Some(p1)) = (v.project(c0), v.project(c1)) else { continue };
+            let wpx = (ppm * width / n_rib as f32 * (1.0 + 0.9 * h(0xE3, i))).max(0.8);
+            let q = |t: f32| (p0[0] + (p1[0] - p0[0]) * t, p0[1] + (p1[1] - p0[1]) * t);
+            // A thin veil the whole way down, glassy where it leaves the lip and fading into it.
+            splat::streak(out, c0[2], q(0.0), q(1.0), mix3(water, white, 0.55), 0.1 + 0.25 * thick, wpx);
+            for (t0, t1, al) in [(0.0, 0.06, 0.45), (0.05, 0.12, 0.28), (0.11, 0.2, 0.12)] {
+                splat::streak(out, c0[2] - 0.005, q(t0), q(t1), glass, al * (0.5 + 0.5 * thick), wpx);
+            }
+            // Water racing down it in clumps and threads, quickening as it falls and breaking
+            // whiter: this is what makes it flow.
+            let n_clump = 5 + (thick * 7.0) as i64;
+            for j in 0..n_clump {
+                let k = i * 16 + j;
+                let p = (cyc * ctx.tphase + h(0xF1, k) + j as f32 / n_clump as f32).rem_euclid(1.0);
+                let t0 = 0.08 + 0.92 * p * p;
+                let t1 = (t0 + 0.05 + 0.22 * p * (0.5 + h(0xF3, k))).min(1.0);
+                let bright = 1.0 + 0.45 * h(0xF2, k);
+                let fade = (p / 0.12).min(1.0);
+                splat::streak(out, c0[2] - 0.01, q(t0), q(t1), scale3(mix3(water, white, 0.5 + 0.5 * p), bright), (0.2 + 0.35 * thick) * fade, (wpx * (0.45 + 0.5 * h(0xF4, k))).max(0.6));
             }
         }
-        let n_str = ((width * 18.0).round() as i64).clamp(8, 100);
-        for i in 0..n_str {
-            let h = |k: u32| hf(wf.seed ^ k, i);
-            let x = x0 + (h(0xF0) - 0.5) * width;
-            for j in 0..3 {
-                let p = (cyc * ctx.tphase + h(0xF1) + j as f32 / 3.0).rem_euclid(1.0);
-                // Falling faster as it goes.
-                let y1 = top * (1.0 - p * p);
-                let len = (0.4 + 0.9 * h(0xF2)) * (0.5 + p);
-                let y0 = (y1 + len).min(top);
-                let (c0, c1) = (v.to_cam(x, y0, d), v.to_cam(x, y1.max(0.0), d));
-                if c0[2] < NEAR { continue; }
-                let (Some([sx0, sy0]), Some([sx1, sy1])) = (v.project(c0), v.project(c1)) else { continue };
-                let wpx = (v.px_per_m(c0[2]) * 0.07).max(0.8);
-                splat::streak(out, c0[2], (sx0, sy0), (sx1, sy1), scale3(col, 1.25), 0.5 * (0.6 + 0.4 * p), wpx);
-            }
+        // The foot: the pool, white water churning where the fall strikes it, and the plume of
+        // spray billowing up and drifting off.
+        let spray = wf.spray.clamp(0.0, 1.0);
+        puff(out, v.to_cam(x0, 0.02, d - 0.7), ppm * width * 1.25, 0.24, mix3(water, white, 0.3), 0.8);
+        let n_churn = ((width * 10.0).round() as i64).clamp(8, 60);
+        let pc = cycles(0.8, loop_seconds).max(1.0);
+        for i in 0..n_churn {
+            let p = (pc * ctx.tphase + h(0xC1, i)).rem_euclid(1.0);
+            let x = x0 + (h(0xC2, i) - 0.5) * width * 1.25;
+            let y = 0.04 + 0.5 * (p * (1.0 - p)) * 4.0 * h(0xC3, i);
+            puff(out, v.to_cam(x, y, d - 0.2 - 0.3 * h(0xC5, i)), ppm * width * (0.14 + 0.2 * h(0xC4, i)), 0.75, scale3(white, 1.2), 0.85 * (1.0 - p) * (p / 0.12).min(1.0));
         }
-        // Foam and spray at the foot.
-        let n_puff = (12.0 * wf.spray.clamp(0.0, 1.0)).round() as i64;
-        let pc = cycles(0.5, loop_seconds).max(1.0);
+        // Where the curtain strikes the pool, a band of white water.
+        if let (Some(l), Some(r)) = (v.project(v.to_cam(x0 - 0.62 * width, 0.12, d - 0.2)), v.project(v.to_cam(x0 + 0.62 * width, 0.12, d - 0.2))) {
+            let z = v.to_cam(x0, 0.12, d - 0.2)[2];
+            if z >= NEAR { splat::streak(out, z, (l[0], l[1]), (r[0], r[1]), scale3(white, 1.15), 0.7, (0.28 * ppm).max(1.0)); }
+        }
+        let n_puff = (30.0 * spray).round() as i64;
+        let sc = cycles(0.35, loop_seconds).max(1.0);
         for i in 0..n_puff {
-            let h = |k: u32| hf(wf.seed ^ k, i);
-            let p = (pc * ctx.tphase + h(0xF5)).rem_euclid(1.0);
-            let (x, y) = (x0 + (h(0xF6) - 0.5) * width * (1.0 + p), 0.1 + 1.6 * p * h(0xF7));
-            let c = v.to_cam(x, y, d - 0.2);
-            if c[2] < NEAR { continue; }
-            let Some([sx, sy]) = v.project(c) else { continue };
-            let r = (v.px_per_m(c[2]) * width * (0.25 + 0.5 * p)).max(1.0);
-            let (w, hgt) = (v.width as i64, v.height as i64);
-            let (x0p, x1p) = (((sx - r).floor() as i64).max(0), ((sx + r).ceil() as i64).min(w - 1));
-            let (y0p, y1p) = (((sy - r).floor() as i64).max(0), ((sy + r).ceil() as i64).min(hgt - 1));
-            if x0p > x1p || y0p > y1p { continue; }
-            let alpha = 0.45 * wf.spray * (1.0 - p);
-            out.push(Splat { z: c[2], gate: None, shape: Shape::Wisp { sx, sy, rx: r, ry: 0.7 * r, x0: x0p, x1: x1p, y0: y0p, y1: y1p, lit: ctx.apply_fog(mul3([0.92, 0.95, 1.0], lit), c[2]), alpha } });
+            let p = (sc * ctx.tphase + h(0xF5, i)).rem_euclid(1.0);
+            let drift = ctx.wx.wind * 0.05 * p * top;
+            let x = x0 + (h(0xF6, i) - 0.5) * width * (1.0 + 1.8 * p) + drift;
+            let y = 0.2 + top * 0.6 * p * (0.4 + 0.6 * h(0xF7, i));
+            let c = v.to_cam(x, y, d - 0.4 - 0.9 * p);
+            let r = v.px_per_m(c[2].max(NEAR)) * width * (0.3 + 0.6 * p);
+            puff(out, c, r, 0.8, ctx.apply_fog(mul3([0.93, 0.96, 1.0], lit), c[2]), 0.3 * spray * (1.0 - p) * (p / 0.1).min(1.0));
         }
+        // A haze of fine mist over the lower part of the fall.
+        puff(out, v.to_cam(x0, 0.3 * top, d - 0.5), ppm * width * 1.6, 0.9, ctx.apply_fog(mul3([0.9, 0.93, 0.97], lit), d), 0.12 * spray);
         // A rainbow in the spray, low over the foot.
         if sun && wf.rainbow > 0.0 {
             let rad = width * 0.9;

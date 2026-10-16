@@ -153,7 +153,7 @@ fn parse_args() -> Result<Args, String> {
 }
 
 fn usage() -> String {
-    "usage: pf <presets|dump|render|sheet|gallery|styles|kit|schema|seam|bench|animcheck|animsheet|gifdiff|export|transition|journey|project|assets|pack|skill|parity> [--preset NAME | --scene FILE] [options]  (see src/bin/pf.rs)".into()
+    "usage: pf <presets|dump|render|sheet|gallery|styles|kit|schema|seam|bench|animcheck|animsheet|gifdiff|export|transition|journey|project|assets|pack|skill|parity|share|unshare> [--preset NAME | --scene FILE] [options]  (see src/bin/pf.rs)".into()
 }
 
 fn norm(s: &str) -> String { s.to_lowercase().replace([' ', '_', '-'], "") }
@@ -936,6 +936,29 @@ fn main() -> ExitCode {
         "sheet" => cmd_sheet(&args),
         "seam" => cmd_seam(&args),
         "parity" => cmd_parity(&args),
+        // A scene as a share code (`--qr out.png` writes its QR code too); `unshare --code`
+        // turns one back into a scene.
+        "share" => {
+            let (_, item) = one_item(&args)?;
+            let Item::V3(scene, _) = item else { return Err("share needs a v3 scene".into()) };
+            let code = scene::share::encode(&scene)?;
+            if let Some(f) = args.opts.get("qr") {
+                std::fs::write(f, scene::share::qr_png(&code, opt(&args, "scale", 6u32)?)?).map_err(|e| format!("{f}: {e}"))?;
+                eprintln!("wrote {f}");
+            }
+            println!("{code}");
+            Ok(())
+        }
+        "unshare" => {
+            let code = args.opts.get("code").ok_or("unshare needs --code PF1....")?;
+            let s = scene::share::decode(code)?;
+            let json = serde_json::to_string_pretty(&s).map_err(|e| e.to_string())?;
+            match args.opts.get("o").or(args.opts.get("out")) {
+                Some(f) => { std::fs::write(f, json).map_err(|e| format!("{f}: {e}"))?; println!("{}: wrote {f}", s.name); }
+                None => println!("{json}"),
+            }
+            Ok(())
+        }
         "bench" => cmd_bench(&args),
         "gallery" => cmd_gallery(&args),
         "export" => cmd_export(&args),

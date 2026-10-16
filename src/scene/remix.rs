@@ -12,8 +12,8 @@ pub const GROUPS: [(&str, &[&str]); 8] = [
     ("setting", &["verge", "walls", "ceiling"]),
     ("sky", &["sky"]),
     ("lighting", &["light", "fixtures"]),
-    ("props", &["props", "set_pieces", "prop_defs"]),
-    ("atmosphere", &["particles", "weather"]),
+    ("props", &["props", "set_pieces", "prop_defs", "wildlife", "waterfalls"]),
+    ("atmosphere", &["particles", "weather", "season"]),
     ("look", &["style", "post"]),
 ];
 

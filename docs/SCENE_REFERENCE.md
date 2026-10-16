@@ -28,6 +28,7 @@ See [MANUAL.md](MANUAL.md) for what each part does and how to use it.
 | `season` | [Season](#season) | (see the type) | The time of year: foliage, grass and the ground through spring, summer, autumn and winter. |
 | `wildlife` | [Wildlife](#wildlife) | (see the type) | Things that move about: birds crossing the sky, bats at dusk, fish leaping from the water. |
 | `waterfalls` | list of [Waterfall](#waterfall) | `[]` | Waterfalls beside the path: water pouring down a rock face into foam and spray. |
+| `fences` | list of [Fence](#fence) | `[]` | Fences along the path: pickets, rails or boards, joined post to post and following its bends. |
 | `prop_defs` | map of name → [PropDef](#propdef) |  | Props described by data, by name: a prop layer uses one with `def: "<name>"`. Kits (folders with a kit.json) hold more, used as `def: "<folder>#<name>"`. |
 | `post` | [Post](#post) | (see the type) |  |
 | `style` | [Style](#style) | (see the type) |  |
@@ -409,6 +410,36 @@ them; far away they widen to a pixel and dim to match, so they do not flicker.
 | `inset` | number | `0.08` | How far in from the path's edge, metres. |
 | `dash` | number | `0.0` | Dashes: one dash and one gap every this many metres (snapped to divide the loop); 0 an unbroken line. |
 | `flow` | integer | `0` | How many dashes the lights run ahead in one loop, on top of the walk (negative: toward the camera). Whole numbers keep the loop seamless. |
+
+### Fence
+
+A waterfall beside the path (`scene.waterfalls`): a rock face with water pouring down it in
+streaks, foam and spray boiling up at its foot, and (with the sun out) a little rainbow in the
+spray. It repeats every `spacing` metres, like a set piece; its water falls a whole number of
+times a loop.
+A fence beside the path, built post to post as solid pieces that run along its edge and bend
+with it, so it reads as one fence from any angle.
+
+| Field | Type | Default | Meaning |
+|---|---|---|---|
+| `enabled` | boolean | `true` |  |
+| `style` | [FenceStyle](#fencestyle) | `"Picket"` |  |
+| `side` | [Side](#side) | `"Both"` |  |
+| `lateral` | number | `1.2` | Metres out from the path's edge. |
+| `height` | number | `0.9` | Metres tall. |
+| `color` | integer × 3 | `[236,232,220]` | The paint of pickets and boards. (Every painted fence of a scene takes the first one's colour; rails are bare wood, in the colour of a bridge's deck.) |
+| `spacing` | number | `24.0` | Runs `length` metres long every `spacing` metres: as long as the spacing, one fence with no break; shorter, with a gap (a gate, a lane) between runs. Both snap to divide the loop. |
+| `length` | number | `20.0` |  |
+| `offset` | number | `0.0` |  |
+| `post_spacing` | number | `2.0` | Metres between posts. |
+
+### FenceStyle
+
+| Value | Meaning |
+|---|---|
+| `Picket` | White pickets on two rails between posts. |
+| `Rails` | Posts and three bare wooden rails: a field fence. |
+| `Boards` | Close boards from the ground up, capped by a rail. |
 
 ### Fish
 
@@ -1460,11 +1491,6 @@ Ground beside the path. Disabled = void beyond the path edge (walls usually cove
 | `material` | [Material](#material) | (see the type) |  |
 
 ### Waterfall
-
-A waterfall beside the path (`scene.waterfalls`): a rock face with water pouring down it in
-streaks, foam and spray boiling up at its foot, and (with the sun out) a little rainbow in the
-spray. It repeats every `spacing` metres, like a set piece; its water falls a whole number of
-times a loop.
 
 | Field | Type | Default | Meaning |
 |---|---|---|---|

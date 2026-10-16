@@ -16,6 +16,7 @@ const fn a(pat: &'static str, min: f64, max: f64, unit: &'static str) -> Meta { 
 pub const META: &[Meta] = &[
     m("canvas.width", 64.0, 2048.0, " px"), m("canvas.height", 64.0, 4096.0, " px"),
     m("camera.eye_height", 0.2, 10.0, " m"), m("camera.horizon", 0.02, 0.98, ""), m("camera.zoom", 0.3, 4.0, "×"), m("camera.lens_curve", -1.0, 1.0, ""),
+    m("fences.*.lateral", -1.0, 12.0, " m"), m("fences.*.height", 0.3, 2.5, " m"), m("fences.*.spacing", 2.0, 120.0, " m"), m("fences.*.length", 1.0, 120.0, " m"), m("fences.*.offset", 0.0, 120.0, " m"), m("fences.*.post_spacing", 0.8, 5.0, " m"),
     m("camera.moves.bob", 0.0, 0.2, " m"), m("camera.moves.stride", 0.3, 2.0, " m"), m("camera.moves.sway", 0.0, 5.0, "°"), m("camera.moves.pan", -30.0, 30.0, "°"), m("camera.moves.pans", 1.0, 8.0, ""),
     m("camera.moves.tilt", -15.0, 15.0, "°"), m("camera.moves.tilts", 1.0, 8.0, ""), m("camera.moves.dolly", -10.0, 20.0, " m"), m("camera.moves.dolly_focus", 2.0, 40.0, " m"), m("camera.moves.dollies", 1.0, 8.0, ""),
     m("camera.moves.fly_in", 0.0, 12.0, " s"), m("camera.moves.fly_height", 3.0, 50.0, " m"),

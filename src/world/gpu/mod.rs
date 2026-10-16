@@ -148,9 +148,10 @@ pub(crate) struct WorldParams {
     pub ww_on: u32, pub ww_shift: f32, pub ww_foam: f32, pub ww_foam_col: [f32; 3], pub ww_foam_w: f32,
     pub ww_lap_ph: f32, pub ww_lap_k: f32, pub ww_k1: f32, pub ww_k2: f32, pub ww_wet: f32,
     pub ww_kind: u32, pub ww_dens: f32, pub ww_fcol: [f32; 3], pub ww_fsize: f32, pub ww_period: f32, pub ww_cs: f32, pub ww_seed: u32,
-    /// How far in from the deck's edge a bridge's railing stands (Spans::rail_inset), then words
+    /// How far in from the deck's edge a bridge's railing stands (Spans::rail_inset), the waterway's
+    /// ice and width, the fences' paint (render::fence_paint), then words
     /// kept free for what comes next.
-    pub br_inset: f32, pub ww_frozen: f32, pub ww_hw: f32, pub spare: [f32; 5],
+    pub br_inset: f32, pub ww_frozen: f32, pub ww_hw: f32, pub fence: [f32; 3], pub spare: [f32; 2],
     /// View::wind_now: the path's winding.
     pub wind: [[f32; 4]; 4],
     /// Ground cover (render::cover): how many layers, the wind in them, and each layer's record.

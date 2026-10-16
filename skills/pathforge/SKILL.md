@@ -349,7 +349,9 @@ choose the details unless the plan's warnings say to.
   `cascade_spacing` m; River Run). Built-in kits `@settlement` (cottage with lit windows and
   chimney smoke, well, market_stall, picket_fence, haybale, cart, woodpile; Village Evening),
   `@waterside` (rowboat, lily_pads, mooring_post, buoy; Lily Harbour) and `@wildlife` (deer,
-  deer_grazing, stag, rabbit, heron). A prop def's `smoke` makes a plume. Lights:
+  deer_grazing, stag, rabbit, heron). A prop def's `smoke` makes a plume. `fences[]` (Picket,
+  Rails, Boards; runs `length` every `spacing` with gate gaps) are joined geometry along the path,
+  better than repeating fence props. `pf share --scene F` gives a short share code (`pf unshare`). Lights:
   `fixtures.*.string_lights` (festoon bulbs between posts) and `kind: Neon` (signs in `tint`).
 - **Camera and lens:** `camera.moves` (`bob`/`stride`/`sway` step with the walk, `pan`/`pans` and
   `tilt`/`tilts` slow looks, `dolly`/`dolly_focus`/`dollies` a dolly zoom: all whole cycles a

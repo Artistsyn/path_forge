@@ -297,6 +297,7 @@ falling. Each is off until `enabled`. Field by field, see
 | Fog banks | `weather.fog_banks` | Thick stretches of fog the camera walks into and out of. |
 | Wildlife | `wildlife` | `birds`: flocks in V formation crossing the sky, wings flapping (`flocks`, `count`, `size`, `height`, `flap`, `crossing` seconds; not at night). `bats`: flitting low over the path at dusk (`dusk_only`) or all night. `fish`: leaping from the water beside the path and splashing back with a ring (`spacing`, `lateral` range, `leaps` a loop). Deer, stags, rabbits and herons stand in the kit `@wildlife`. |
 | Waterfalls | `waterfalls[]` | Streams pouring over a rock face beside the path: `side`, `lateral`, `spacing`, `offset`, `height` and `width` in metres, `water` and `rock` colours, foam and `spray` at the foot and a `rainbow` in it when the sun is out (Waterfall Glen). |
+| Fences | `fences[]` | Fences along the path, built post to post as solid pieces that follow its edge and bends (not cards), so they join up from any angle: `style` Picket (pickets on two rails, painted `color`), Rails (posts and three bare wooden rails, in the bridge deck's wood) or Boards (close boards under a capping rail); `side`, `lateral` metres out from the path's edge, `height`, `post_spacing`. Runs are `length` metres long every `spacing` metres: as long as the spacing it is one fence without a break, shorter leaves gaps for gates (Village Evening puts one in front of each cottage). Painted fences of a scene share the first one's colour. |
 
 **Cost.** Falling rain and snow, splashes, mist and most effects cost little. Wet ground and puddles
 cost what any glossy floor costs: the reflections roughly double a frame's render time (Dark
@@ -737,6 +738,13 @@ Scenes are given as `--preset NAME` or `--scene FILE`.
 | Exporting | `export` (loops, encounters, transitions, forks) |
 | Transitions, forks, journeys | `transition`, `journey` |
 | Projects and the skill | `project`, `assets`, `pack`, `preset-save`, `mask`, `skill` |
+| Sharing | `share` (a scene as a share code; `--qr out.png` writes its QR code), `unshare --code PF1... [-o scene.json]` |
+
+**Share codes.** `pf share` turns a scene into one line of text starting `PF1.`, short enough
+for a message or a QR code: each part of the scene is written as what it changes from the
+nearest preset's, compressed (a preset with a few edits is a few dozen characters; a remix, a few
+hundred). `pf unshare` (or the phone apps' Open a code) gives the scene back exactly. Codes name
+the presets they build on, so they open in later versions of PathForge too.
 
 `pf` with no arguments lists the commands; the top of `src/bin/pf.rs` gives every command with all
 its options.

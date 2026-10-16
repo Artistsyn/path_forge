@@ -715,7 +715,9 @@ fn shade_px(g: GPix, i: u32, x: u32, y: u32, own: bool) -> Shaded {
     if tex == 7u {
         let lw = vec3<f32>(0.3, 0.59, 0.11);
         let grain = clamp(dot(albedo, lw) / max(dot(vec3<f32>(W.deck_base_r, W.deck_base_g, W.deck_base_b), lw), 1e-3), 0.6, 1.3);
-        albedo = vec3<f32>(W.rail_r, W.rail_g, W.rail_b) * grain;
+        var paint = vec3<f32>(W.rail_r, W.rail_g, W.rail_b);
+        if (id - ID_RAIL) / 4u == RAIL_FENCE { paint = vec3<f32>(W.fence_r, W.fence_g, W.fence_b); }
+        albedo = paint * grain;
     }
     // A waterway: the foam and what floats on the water, and the bank or walls wet beside it.
     var gloss_k = 1.0; var wet_g = 0.0;
