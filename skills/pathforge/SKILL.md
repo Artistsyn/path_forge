@@ -351,6 +351,11 @@ choose the details unless the plan's warnings say to.
   `@waterside` (rowboat, lily_pads, mooring_post, buoy; Lily Harbour) and `@wildlife` (deer,
   deer_grazing, stag, rabbit, heron). A prop def's `smoke` makes a plume. Lights:
   `fixtures.*.string_lights` (festoon bulbs between posts) and `kind: Neon` (signs in `tint`).
+- **Camera and lens:** `camera.moves` (`bob`/`stride`/`sway` step with the walk, `pan`/`pans` and
+  `tilt`/`tilts` slow looks, `dolly`/`dolly_focus`/`dollies` a dolly zoom: all whole cycles a
+  loop; `fly_in` seconds of coming down from `fly_height` at the start, only in the runtime or
+  `pf render --intro`). `post.focus` (`mode` Depth with `distance`, or TiltShift with `band` and
+  `band_width`; `blur` ~0.01) for depth of field or a miniature look (preset Miniature Village).
 - **Day and night:** `sky.day_night` (`hour`, `days_per_loop` for a whole day each loop, `real_time`
   for the phone's clock, `sunrise`/`sunset`, `sun_height`, `sun_path`, `sunset_style`, `keep_look`,
   `night_light`, `sun`/`moon`/`stars`/`lamps`). Games: `Runtime::set_hour`, `set_day_length`,

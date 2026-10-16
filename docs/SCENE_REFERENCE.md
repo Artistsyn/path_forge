@@ -218,6 +218,28 @@ the path crosses on a deck. Walls carry on down into the gap.
 | `horizon` | number | `0.22` | Horizon position as a fraction of the canvas height from the top (0.1..0.9). |
 | `zoom` | number | `1.0` | Zoom: 1.0 puts the ground at `eye_height` metres ahead on the bottom row. Higher = narrower view. |
 | `lens_curve` | number | `0.0` | Screen-space lens bend of the horizon (-1..1); 0 is a flat horizon. |
+| `moves` | [CameraMoves](#cameramoves) | (see the type) | How the camera moves besides walking: a bob in its step, slow looks to the side, a dolly zoom, and a flight down from above at the start. |
+
+### CameraMoves
+
+Camera moves on top of the walk. Each repeats a whole number of times a loop, so the loop
+still closes; the flight in is the exception, played once at the very start (the live
+runtime, `pf render --intro`, an export with an intro).
+
+| Field | Type | Default | Meaning |
+|---|---|---|---|
+| `bob` | number | `0.0` | The head's bob as the walker steps: metres up and down at each footfall (0 none, about 0.04 a walk, 0.1 a run). It follows the distance walked, so it stops when the walk does. |
+| `stride` | number | `0.75` | Metres walked in one step. |
+| `sway` | number | `0.0` | The head's sway from side to side with the steps, degrees. |
+| `pan` | number | `0.0` | A slow look to one side and back: how far, degrees (0 none; negative looks left first). |
+| `pans` | integer | `1` | Looks to the side and back per loop (whole). |
+| `tilt` | number | `0.0` | A slow look up and down: degrees (positive looks up first). |
+| `tilts` | integer | `1` |  |
+| `dolly` | number | `0.0` | A dolly zoom: the camera draws back while it zooms in (or the reverse when negative), so what stands `dolly_focus` metres ahead keeps its size while the background swells and shrinks behind it. How far it draws back, metres. |
+| `dolly_focus` | number | `8.0` |  |
+| `dollies` | integer | `1` | Dolly zooms per loop (whole). |
+| `fly_in` | number | `0.0` | The flight in: seconds of coming down from above and over to the walker's eyes (0 none). |
+| `fly_height` | number | `18.0` | How high it starts, metres. |
 
 ### Canvas
 
@@ -477,6 +499,24 @@ Things floating on a waterway.
 | `Leaves` | Fallen leaves. |
 | `LilyPads` | Lily pads, a few in flower. |
 | `Ice` | Ice floes: flat straight-sided plates, snow on top and bare blue ice round the rim. |
+
+### Focus
+
+| Field | Type | Default | Meaning |
+|---|---|---|---|
+| `enabled` | boolean | `false` |  |
+| `mode` | [FocusMode](#focusmode) | `"Depth"` |  |
+| `distance` | number | `8.0` | Depth: metres ahead that are sharp. |
+| `blur` | number | `0.008` | How strongly the rest blurs: the widest blur, as a share of the frame height (0..0.03). |
+| `band` | number | `0.62` | Tilt-shift: the sharp band's middle (share of the frame height from the top) and width. |
+| `band_width` | number | `0.16` |  |
+
+### FocusMode
+
+| Value | Meaning |
+|---|---|
+| `Depth` | A real lens: sharp at `distance`, blurring nearer and further. |
+| `TiltShift` | A band across the frame sharp and above and below it blurred: a miniature. |
 
 ### Fog
 
@@ -889,6 +929,7 @@ A planet's orbit round another (`Planet::orbit`).
 | `grain` | number | `0.0` |  |
 | `tint` | integer × 3 | `[255,255,255]` | Colour multiplied over the final image. |
 | `flare` | [Flare](#flare) | `{"style":"None","amount":0.5}` | What bright light does in the lens besides bloom. |
+| `focus` | [Focus](#focus) | (see the type) | Depth of field: what is nearer or further than the focus blurs, or (tilt-shift) all but a band across the frame does, for the look of a miniature. |
 
 ### Precipitation
 

@@ -85,9 +85,112 @@ pub struct Camera {
     pub zoom: f32,
     /// Screen-space lens bend of the horizon (-1..1); 0 is a flat horizon.
     pub lens_curve: f32,
+    /// How the camera moves besides walking: a bob in its step, slow looks to the side, a
+    /// dolly zoom, and a flight down from above at the start.
+    pub moves: CameraMoves,
 }
 impl Default for Camera {
-    fn default() -> Self { Self { eye_height: 1.6, horizon: 0.22, zoom: 1.0, lens_curve: 0.0 } }
+    fn default() -> Self { Self { eye_height: 1.6, horizon: 0.22, zoom: 1.0, lens_curve: 0.0, moves: CameraMoves::default() } }
+}
+
+/// Camera moves on top of the walk. Each repeats a whole number of times a loop, so the loop
+/// still closes; the flight in is the exception, played once at the very start (the live
+/// runtime, `pf render --intro`, an export with an intro).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
+pub struct CameraMoves {
+    /// The head's bob as the walker steps: metres up and down at each footfall (0 none, about
+    /// 0.04 a walk, 0.1 a run). It follows the distance walked, so it stops when the walk does.
+    pub bob: f32,
+    /// Metres walked in one step.
+    pub stride: f32,
+    /// The head's sway from side to side with the steps, degrees.
+    pub sway: f32,
+    /// A slow look to one side and back: how far, degrees (0 none; negative looks left first).
+    pub pan: f32,
+    /// Looks to the side and back per loop (whole).
+    pub pans: u32,
+    /// A slow look up and down: degrees (positive looks up first).
+    pub tilt: f32,
+    pub tilts: u32,
+    /// A dolly zoom: the camera draws back while it zooms in (or the reverse when negative), so
+    /// what stands `dolly_focus` metres ahead keeps its size while the background swells and
+    /// shrinks behind it. How far it draws back, metres.
+    pub dolly: f32,
+    pub dolly_focus: f32,
+    /// Dolly zooms per loop (whole).
+    pub dollies: u32,
+    /// The flight in: seconds of coming down from above and over to the walker's eyes (0 none).
+    pub fly_in: f32,
+    /// How high it starts, metres.
+    pub fly_height: f32,
+}
+impl Default for CameraMoves {
+    fn default() -> Self {
+        CameraMoves { bob: 0.0, stride: 0.75, sway: 0.0, pan: 0.0, pans: 1, tilt: 0.0, tilts: 1, dolly: 0.0, dolly_focus: 8.0, dollies: 1, fly_in: 0.0, fly_height: 18.0 }
+    }
+}
+
+/// The camera at one moment of its moves: what to add to the scene's camera.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct CameraPose {
+    /// Metres added to the eye height; looking up (the tangent of the angle: the horizon moves
+    /// down that many focal lengths); and the share of the frame height the horizon moves down
+    /// besides.
+    pub lift: f32,
+    pub tilt: f32,
+    pub horizon: f32,
+    /// The zoom multiplied, and metres the camera stands back along the path.
+    pub zoom: f32,
+    pub back: f32,
+    /// Looking to the side, as the tangent of the angle (positive right).
+    pub pan: f32,
+}
+impl CameraMoves {
+    pub fn any(&self) -> bool { self.bob != 0.0 || self.sway != 0.0 || self.pan != 0.0 || self.tilt != 0.0 || self.dolly != 0.0 || self.fly_in > 0.0 }
+    pub fn loops(&self) -> bool { self.bob != 0.0 || self.sway != 0.0 || self.pan != 0.0 || self.tilt != 0.0 || self.dolly != 0.0 }
+    /// The furthest the camera looks to the side, as a tangent.
+    pub fn pan_max(&self) -> f32 {
+        let deg = |d: f32| (d.abs().min(60.0) * std::f32::consts::PI / 180.0).tan();
+        deg(self.sway) + deg(self.pan)
+    }
+
+    /// Where the moves put the camera: `walked` metres along a loop of `loop_len`, at `phase`
+    /// (0..1) of the loop's time, and `intro` seconds since the start when the flight in
+    /// plays (None when it does not).
+    pub fn pose(&self, walked: f32, loop_len: f32, phase: f32, intro: Option<f32>, eye: f32, horizon: f32) -> CameraPose {
+        use std::f32::consts::{PI, TAU};
+        let mut p = CameraPose { zoom: 1.0, ..CameraPose::default() };
+        let deg = |d: f32| (d.clamp(-60.0, 60.0) * PI / 180.0).tan();
+        if self.bob != 0.0 || self.sway != 0.0 {
+            // Whole pairs of steps a loop, so the left and right feet both come round again.
+            let pairs = (loop_len / (2.0 * self.stride.max(0.2))).round().max(1.0);
+            let u = walked.rem_euclid(loop_len) / loop_len * pairs;
+            // Up over each step and down at each footfall (twice a pair), swaying once a pair.
+            p.lift += self.bob * ((TAU * u).sin().abs() - 2.0 / PI);
+            p.pan += deg(self.sway) * (TAU * u).sin();
+        }
+        if self.pan != 0.0 { p.pan += deg(self.pan) * (TAU * self.pans.max(1) as f32 * phase).sin(); }
+        if self.tilt != 0.0 { p.tilt += deg(self.tilt) * (TAU * self.tilts.max(1) as f32 * phase).sin(); }
+        if self.dolly != 0.0 {
+            let k = 0.5 - 0.5 * (TAU * self.dollies.max(1) as f32 * phase).cos();
+            let back = self.dolly.abs() * k;
+            let f = self.dolly_focus.max(1.0);
+            // Back and zooming in, or forward (never past half the way to the focus) and out.
+            p.back = if self.dolly > 0.0 { back } else { -back.min(0.5 * f) };
+            p.zoom = (f + p.back) / f;
+        }
+        if let Some(t) = intro.filter(|_| self.fly_in > 0.0) {
+            let u = (t / self.fly_in).clamp(0.0, 1.0);
+            // Eased: fast at first, settling gently at the walker's eyes.
+            let e = 1.0 - (1.0 - u).powi(3);
+            let up = (1.0 - e) * (self.fly_height - eye).max(0.0);
+            p.lift += up;
+            // Looking down at the start: the horizon high in the frame, coming down to its own place.
+            p.horizon -= (1.0 - e) * (horizon - 0.04).max(0.0);
+        }
+        p
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -2844,6 +2947,35 @@ pub struct Post {
     pub tint: Rgb,
     /// What bright light does in the lens besides bloom.
     pub flare: Flare,
+    /// Depth of field: what is nearer or further than the focus blurs, or (tilt-shift) all but
+    /// a band across the frame does, for the look of a miniature.
+    pub focus: Focus,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
+pub struct Focus {
+    pub enabled: bool,
+    pub mode: FocusMode,
+    /// Depth: metres ahead that are sharp.
+    pub distance: f32,
+    /// How strongly the rest blurs: the widest blur, as a share of the frame height (0..0.03).
+    pub blur: f32,
+    /// Tilt-shift: the sharp band's middle (share of the frame height from the top) and width.
+    pub band: f32,
+    pub band_width: f32,
+}
+impl Default for Focus {
+    fn default() -> Self { Focus { enabled: false, mode: FocusMode::Depth, distance: 8.0, blur: 0.008, band: 0.62, band_width: 0.16 } }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub enum FocusMode {
+    /// A real lens: sharp at `distance`, blurring nearer and further.
+    #[default]
+    Depth,
+    /// A band across the frame sharp and above and below it blurred: a miniature.
+    TiltShift,
 }
 
 /// Lens flare from the sun and bright lights.
@@ -2885,7 +3017,7 @@ impl FlareStyle {
 }
 impl Default for Post {
     fn default() -> Self {
-        Self { exposure: 1.0, contrast: 1.0, saturation: 1.0, bloom: 0.35, vignette: 0.35, grain: 0.0, tint: [255, 255, 255], flare: Flare::default() }
+        Self { exposure: 1.0, contrast: 1.0, saturation: 1.0, bloom: 0.35, vignette: 0.35, grain: 0.0, tint: [255, 255, 255], flare: Flare::default(), focus: Focus::default() }
     }
 }
 

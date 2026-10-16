@@ -449,7 +449,11 @@ pub(crate) struct PostParams {
     pub ln_cell0: f32, pub ln_cell1: f32, pub ln_tt: f32, pub ln_cyc: u32,
     pub ln_fill: f32, pub ln_haze: f32, pub ln_blur: i32, pub ln_reach: f32,
     /// The bloom threshold of the sky (post::sky_threshold).
-    pub bl_sky: f32, pub bl_pad: [f32; 3],
+    pub bl_sky: f32,
+    /// Depth of field (weather::FocusK); it reads h_fsrc and writes h_fdst.
+    pub fo_on: u32, pub fo_tilt: u32, pub fo_dist: f32,
+    pub fo_max: f32, pub fo_band: f32, pub fo_half: f32, pub h_fsrc: u32,
+    pub h_fdst: u32, pub fo_pad: [u32; 3],
 }
 
 /// What post needs besides its settings: the lens drops, the palette and grade tables (cached by
@@ -460,7 +464,7 @@ pub(crate) struct PostIn<'a> {
     pub key: usize,
     pub lut: Option<(u32, &'a [u8], Vec<u32>)>,
     pub cube: Option<&'a [[f32; 3]]>,
-    pub kuwahara: bool, pub shimmer: bool, pub warp: bool, pub bloom: bool,
+    pub kuwahara: bool, pub shimmer: bool, pub focus: bool, pub warp: bool, pub bloom: bool,
     pub want_depth: bool,
 }
 
@@ -698,7 +702,7 @@ impl Gpu {
             let pl = d.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: Some("post"), bind_group_layouts: &[&layout], push_constant_ranges: &[] });
             let m = ctx.module("post.wgsl", include_str!("post.wgsl"))?;
             let mut pipes = std::collections::HashMap::new();
-            for e in ["post_crop", "post_shimmer", "post_frost_rows", "post_frost_mean", "post_lens", "post_bloom_down", "post_bh0", "post_bv0", "post_bh1", "post_bv1", "post_bh2", "post_bv2", "post_bh3", "post_bv3", "post_bh4", "post_bv4", "post_rays", "post_ghosts",
+            for e in ["post_crop", "post_shimmer", "post_focus", "post_frost_rows", "post_frost_mean", "post_lens", "post_bloom_down", "post_bh0", "post_bv0", "post_bh1", "post_bv1", "post_bh2", "post_bv2", "post_bh3", "post_bv3", "post_bh4", "post_bv4", "post_rays", "post_ghosts",
                       "post_finish", "post_kuw_h", "post_kuw_v", "post_grade_outline", "post_warp", "post_quant", "post_stats", "post_out"] {
                 pipes.insert(e, ctx.compute(&m, &pl, e)?);
             }
@@ -1297,6 +1301,7 @@ impl<'g> Frame<'g> {
         let mut cur = ha;
         p.h_crop = ha as u32;
         if pin.shimmer { p.h_shim = hb as u32; cur = hb; }
+        if pin.focus { p.h_fsrc = cur as u32; cur = other(cur); p.h_fdst = cur as u32; }
         let lens = p.lens_kind != 0;
         if lens { p.h_lsrc = cur as u32; cur = other(cur); p.h_ldst = cur as u32; }
         p.h_fin = cur as u32;
@@ -1363,6 +1368,7 @@ impl<'g> Frame<'g> {
         let rows = (h as u32).div_ceil(64);
         let mut steps: Vec<(&'static str, (u32, u32))> = vec![("post_crop", full)];
         if pin.shimmer { steps.push(("post_shimmer", full)); }
+        if pin.focus { steps.push(("post_focus", full)); }
         if lens {
             if params.lens_kind == 2 { steps.push(("post_frost_rows", (rows, 1))); steps.push(("post_frost_mean", (1, 1))); }
             steps.push(("post_lens", full));
@@ -1567,7 +1573,7 @@ mod tests {
         assert_eq!(std::mem::size_of::<SplatGpu>(), 4 * 24);
         assert_eq!(std::mem::size_of::<AirParams>(), 80);
         assert_eq!(std::mem::size_of::<ShaftParams>(), 64);
-        assert_eq!(std::mem::size_of::<PostParams>(), 432);
+        assert_eq!(std::mem::size_of::<PostParams>(), 464);
         assert_eq!(std::mem::size_of::<SkyParams>() % 16, 0, "SkyParams is {} bytes", std::mem::size_of::<SkyParams>());
     }
 

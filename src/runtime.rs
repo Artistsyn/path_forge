@@ -43,6 +43,8 @@ pub struct Runtime {
     journey: Option<(Journey, Option<PathBuf>, String)>,
     /// Real seconds one day lasts when the game lets the days pass (`set_day_length`); 0 holds the hour.
     day_seconds: f32,
+    /// Seconds since play began (not wrapped by the loop), for the camera's flight in.
+    played: f32,
 }
 
 /// A scene the walk is heading into.
@@ -83,7 +85,7 @@ pub struct WalkState {
 impl Runtime {
     /// A scene whose files (sprites, kits, grades) are named relative to `base_dir`.
     pub fn new(scene: Scene, base_dir: Option<PathBuf>) -> Runtime {
-        Runtime { scene, base_dir, renderer: WorldRenderer::default(), rgba: Vec::new(), distance: 0.0, time: 0.0, active: None, journey: None, day_seconds: 0.0 }
+        Runtime { scene, base_dir, renderer: WorldRenderer::default(), rgba: Vec::new(), distance: 0.0, time: 0.0, active: None, journey: None, day_seconds: 0.0, played: 0.0 }
     }
 
     /// Draw frames on the GPU, on a device the game hands over (with wgpu 25, the same one it
@@ -199,6 +201,7 @@ impl Runtime {
             self.renderer.set_hour(Some(h));
         }
         let ds = (speed * dt).max(0.0);
+        self.played += dt.max(0.0);
         self.time = (self.time + dt).rem_euclid(self.loop_seconds().max(1e-3));
         self.distance += ds;
         let done = match &mut self.active {
@@ -231,13 +234,22 @@ impl Runtime {
         if let (Some((_, _, at)), Some(stop)) = (self.journey.as_mut(), next.stop) { *at = stop; }
     }
 
+    /// Play the camera's flight in (`camera.moves.fly_in`) again from the top, as at the start.
+    pub fn restart_intro(&mut self) { self.played = 0.0; }
+
+    /// Seconds into the flight in, while it is playing.
+    fn intro(&self) -> Option<f32> {
+        let f = self.scene.camera.moves.fly_in;
+        (f > 0.0 && self.played < f).then_some(self.played)
+    }
+
     /// The current frame of the runtime's own walk, `width` x `height` RGBA8.
     pub fn frame(&mut self, width: u32, height: u32) -> &[u8] {
         let opts = RenderOptions { size: Some((width.max(1), height.max(1))), ..RenderOptions::default() };
         let a = Place { scene: &self.scene, dir: self.base_dir.as_deref() };
         let img = match &self.active {
             None => {
-                let o = RenderOptions { base_dir: self.base_dir.clone(), time: Some(self.time), ..opts };
+                let o = RenderOptions { base_dir: self.base_dir.clone(), time: Some(self.time), intro: self.intro(), ..opts };
                 self.renderer.render(&self.scene, self.distance, &o)
             }
             Some(Active::Cross { next, walk, travel, clock }) => {
@@ -420,6 +432,21 @@ mod tests {
         r.render_into(len * 0.25, secs * 0.25, 120, 214, &mut buf).unwrap();
         assert!(buf == a);
         assert!(r.render_into(0.0, 0.0, 120, 214, &mut buf[..10]).is_err());
+    }
+
+    #[test]
+    fn the_flight_in_plays_once_from_the_start() {
+        let mut r = rt("Waterfall Glen");
+        let start = r.frame(60, 107).to_vec();
+        r.step(0.5, 0.0);
+        let early = r.frame(60, 107).to_vec();
+        assert!(start != early, "the camera is coming down");
+        for _ in 0..12 { r.step(0.5, 0.0); }
+        let landed = r.frame(60, 107).to_vec();
+        let opts = RenderOptions { size: Some((60, 107)), time: Some(r.state().time), ..RenderOptions::default() };
+        assert!(landed == WorldRenderer::default().render(r.scene(), r.state().distance, &opts).rgba, "landed, it is the walk's own camera");
+        r.restart_intro();
+        assert!(r.frame(60, 107).to_vec() != landed, "and it can fly in again");
     }
 
     #[test]

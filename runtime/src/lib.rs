@@ -210,6 +210,15 @@ pub unsafe extern "C" fn pf_runtime_set_hour(rt: *mut Runtime, hour: f32) -> i32
     0
 }
 
+/// Play the camera's flight in (`camera.moves.fly_in`) again from the top, over the next
+/// pf_runtime_step seconds. 0, or -1 for a null handle.
+#[no_mangle]
+pub unsafe extern "C" fn pf_runtime_restart_intro(rt: *mut Runtime) -> i32 {
+    let Some(r) = rt.as_mut() else { return -1 };
+    r.restart_intro();
+    0
+}
+
 /// Let the days pass: one day every `seconds` of pf_runtime_step time (0 holds the hour).
 #[no_mangle]
 pub unsafe extern "C" fn pf_runtime_set_day_length(rt: *mut Runtime, seconds: f32) -> i32 {

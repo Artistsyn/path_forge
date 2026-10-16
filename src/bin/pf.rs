@@ -67,10 +67,12 @@ struct Renderers {
     gpu_backend: bool,
     /// Render as the studio's preview does: with frame stats and pick ids.
     studio: bool,
+    /// Play the camera's flight in (`camera.moves.fly_in`) from the loop's start.
+    intro: bool,
 }
 
 impl Renderers {
-    fn new(gpu_backend: bool) -> Self { Self { world: WorldRenderer::default(), cpu: PathRenderer::default(), gpu: None, gpu_backend, studio: false } }
+    fn new(gpu_backend: bool) -> Self { Self { world: WorldRenderer::default(), cpu: PathRenderer::default(), gpu: None, gpu_backend, studio: false, intro: false } }
 
     /// The renderers a command asked for: `--backend` for the 2.0 engine; the v3 renderer on the
     /// GPU where there is one, `--engine cpu` for the CPU reference, `--engine gpu` to insist.
@@ -79,6 +81,8 @@ impl Renderers {
         r.world = world_for(args)?;
         // --hour H: the hour of the day on every scene with a sky (sky.day_night).
         if let Some(h) = args.opts.get("hour") { r.world.set_hour(Some(h.parse().map_err(|_| format!("--hour: cannot read `{h}`"))?)); }
+        // --intro: the camera's flight in plays from the start of the loop.
+        r.intro = args.opts.contains_key("intro");
         Ok(r)
     }
 
@@ -94,7 +98,8 @@ impl Renderers {
     fn frame(&mut self, item: &Item, pos: f32) -> Result<Vec<u8>, String> {
         match item {
             Item::V3(s, dir) => {
-                let opts = RenderOptions { base_dir: dir.clone(), stats: self.studio, pick: self.studio, ..RenderOptions::default() };
+                let intro = self.intro.then(|| pos / s.motion.speed.max(0.01));
+                let opts = RenderOptions { base_dir: dir.clone(), stats: self.studio, pick: self.studio, intro, ..RenderOptions::default() };
                 Ok(self.world.render(s, pos, &opts).rgba)
             }
             Item::V2(s) => {

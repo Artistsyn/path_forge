@@ -53,6 +53,12 @@ pub struct View {
     /// per metre ahead (the camera turning onto it brings the slope to 0).
     #[serde(skip)]
     pub shear: Option<(f32, f32)>,
+    /// The camera looking to the side (`camera.moves`): how far everything slides across the
+    /// frame, pixels (the sky with the rest), and the furthest it does over the loop.
+    #[serde(skip)]
+    pub pan_px: f32,
+    #[serde(skip)]
+    pub pan_max: f32,
 }
 
 /// Where one world gives way to the next, as the camera sees it this frame. Path width and ground
@@ -178,7 +184,7 @@ impl View {
             bend: scene.path.bend.clamp(-2.0, 2.0), wind: winding(scene), hill: scene.path.hill.clamp(-2.0, 2.0),
             half_width: scene.path.half_width.clamp(0.05, 50.0), flare: scene.path.flare.clamp(0.0, 0.95),
             near_ground: eye_height * zoom, lens_curve: scene.camera.lens_curve.clamp(-1.0, 1.0),
-            stairs: StairProfile::new(&scene.path.stairs, scene.motion.loop_length), scroll: 0.0, top: 0, left: 0, split: None, shear: None,
+            stairs: StairProfile::new(&scene.path.stairs, scene.motion.loop_length), scroll: 0.0, top: 0, left: 0, split: None, shear: None, pan_px: 0.0, pan_max: 0.0,
         }
     }
 
@@ -241,11 +247,11 @@ impl View {
     /// How far sideways the sky stands from where the scene puts it, pixels. The sky is
     /// infinitely far, so as the camera turns with the path all of it slides across the frame
     /// together, the way the far end of the path does.
-    pub fn sky_dx(&self) -> f32 { -self.focal_px * self.turn_tan() }
+    pub fn sky_dx(&self) -> f32 { -self.focal_px * self.turn_tan() + self.pan_px }
 
     /// The furthest the sky slides either way over the loop, pixels (0 when the camera never turns).
     pub fn sky_swing(&self) -> f32 {
-        self.focal_px * self.wind.iter().map(|&[a, k, _, turn]| (a * turn * k).abs()).sum::<f32>()
+        self.focal_px * self.wind.iter().map(|&[a, k, _, turn]| (a * turn * k).abs()).sum::<f32>() + self.pan_max
     }
 
     /// The winding's waves as they stand now (the phase at the camera in place of the loop's

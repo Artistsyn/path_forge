@@ -63,6 +63,9 @@ pub struct RenderOptions {
     pub time: Option<f32>,
     /// Also return which part of the scene each pixel shows (see `Pick`), for clicking to select.
     pub pick: bool,
+    /// Seconds since play began, for the camera's flight in (`camera.moves.fly_in`); None plays
+    /// no flight (a loop, which must close).
+    pub intro: Option<f32>,
 }
 
 /// Which part of the scene each pixel of a frame shows, at the frame's render resolution (the
@@ -957,6 +960,24 @@ impl WorldRenderer {
             let ws: Vec<WorldIn> = worlds.iter().zip(&baked).map(|(w, b)| WorldIn { scene: b.as_ref().unwrap_or(w.scene), ..w.clone() }).collect();
             return self.render_worlds(&ws, layout, opts);
         }
+        // The camera's moves: where they put it this frame. Standing back (a dolly) moves the
+        // walk itself back, when there is one world to walk.
+        let moves = &worlds[0].scene.camera.moves;
+        let pose = (moves.any()).then(|| {
+            let w0 = &worlds[0];
+            let len = w0.scene.motion.loop_length.max(1.0);
+            moves.pose(w0.distance, len, loop_phase(w0), opts.intro, w0.scene.camera.eye_height, w0.scene.camera.horizon)
+        });
+        let pan_max = moves.pan_max();
+        let backed: Vec<WorldIn>;
+        let worlds = match pose {
+            Some(p) if p.back != 0.0 && worlds.len() == 1 => {
+                let time = Some(worlds[0].time.unwrap_or_else(|| worlds[0].distance / worlds[0].scene.motion.speed.max(0.01)));
+                backed = vec![WorldIn { distance: worlds[0].distance - p.back, time, ..worlds[0].clone() }];
+                &backed[..]
+            }
+            _ => worlds,
+        };
         let mut prof = Prof::new(self.profile);
         let mut plan = Self::plan(worlds, layout);
         let n = plan.shear.len();
@@ -985,6 +1006,14 @@ impl WorldRenderer {
             cam.hill = mix(cam.hill, vn.hill);
             cam.near_ground = mix(cam.near_ground, vn.near_ground);
             cam.lens_curve = mix(cam.lens_curve, vn.lens_curve);
+        }
+        if let Some(p) = pose {
+            cam.eye_height = (cam.eye_height + p.lift).clamp(0.05, 60.0);
+            cam.focal_px *= p.zoom.clamp(0.1, 10.0);
+            cam.horizon_px += p.tilt * cam.focal_px + p.horizon * h as f32;
+            cam.pan_px = -p.pan * cam.focal_px;
+            cam.pan_max = pan_max * cam.focal_px;
+            cam.center_px += cam.pan_px;
         }
         // Each world's view: the shared camera with its own path, stairs and place along the loop.
         let mut views: Vec<View> = (0..n).map(|r| {
@@ -1232,6 +1261,7 @@ impl WorldRenderer {
                 flare: if a.flare.style == b.flare.style { Flare { style: a.flare.style, amount: mix(a.flare.amount, b.flare.amount) } }
                     else if t < 0.5 { Flare { style: a.flare.style, amount: a.flare.amount * (1.0 - 2.0 * t) } }
                     else { Flare { style: b.flare.style, amount: b.flare.amount * (2.0 * t - 1.0) } },
+                focus: if t < 0.5 { a.focus.clone() } else { b.focus.clone() },
             };
             blended = s;
             &blended
@@ -1575,6 +1605,7 @@ impl WorldRenderer {
         // Heat haze and the lens, on the finished frame.
         if layers.post {
             weather::heat_shimmer(&ctxs, &gbuf, &mut hdr);
+            if let Some(k) = weather::FocusK::of(post_scene, h, true) { weather::focus(&k, &gbuf, &mut hdr, w, h); }
             if n > 1 {
                 weather::lens(&ctxs[0], 1.0 - plan.cam_t, &mut hdr);
                 weather::lens(&ctxs[plan.next], plan.cam_t, &mut hdr);
@@ -3515,7 +3546,10 @@ fn gpu_post_params<'a>(ctx: &Ctx, ctxs: &[Ctx], fv: &View, scene: &Scene, lens: 
     p.stats_on = opts.stats as u32;
     (p.sky_enabled, p.verge_enabled) = (scene.sky.enabled as u32, scene.verge.enabled as u32);
     let key = 1 + lut.map_or(0, |l| l as *const PaletteLut as usize) ^ grade.map_or(0, |g| (g as *const super::looks::Grade as usize) << 1);
-    super::gpu::PostIn { params: p, drops, key, lut: lut_in, cube, kuwahara, shimmer, warp, bloom, want_depth: opts.depth }
+    // Depth of field, over the frame after the haze.
+    let focus = super::render::weather::FocusK::of(scene, h, post_on);
+    if let Some(k) = focus { (p.fo_on, p.fo_tilt, p.fo_dist, p.fo_max, p.fo_band, p.fo_half) = (1, k.tilt as u32, k.dist, k.max_r, k.band, k.half); }
+    super::gpu::PostIn { params: p, drops, key, lut: lut_in, cube, kuwahara, shimmer, focus: focus.is_some(), warp, bloom, want_depth: opts.depth }
 }
 
 /// `frame_stats` from the GPU's per-row sums (11 counts, 11 luma sums, the total, a row each).
@@ -6479,5 +6513,51 @@ mod tests {
             none.wildlife = crate::scene::Wildlife::default();
             assert!(r.render(&s, 2.0, &o(0.3)).rgba != r.render(&none, 2.0, &o(0.3)).rgba, "{}: they show", s.name);
         }
+    }
+
+    #[test]
+    fn camera_moves_keep_the_loop_and_the_flight_comes_down_once() {
+        let mut r = WorldRenderer::default();
+        let mut s = preset("Waterfall Glen");
+        s.camera.moves = crate::scene::CameraMoves { bob: 0.05, sway: 0.5, pan: 8.0, tilt: 3.0, tilts: 2, dolly: 4.0, fly_in: 3.0, ..s.camera.moves.clone() };
+        let (len, secs) = (s.motion.loop_length, s.motion.loop_seconds());
+        let o = |t: f32, intro: Option<f32>| RenderOptions { size: Some((90, 160)), time: Some(t), intro, ..RenderOptions::default() };
+        assert_eq!(r.render(&s, 0.0, &o(0.0, None)).rgba, r.render(&s, len, &o(secs, None)).rgba, "the loop must close");
+        let still = { let mut t = s.clone(); t.camera.moves = Default::default(); t };
+        assert!(r.render(&s, 7.0, &o(2.0, None)).rgba != r.render(&still, 7.0, &o(2.0, None)).rgba, "the camera moves");
+        // The flight starts high and ends where the walk's own camera is.
+        assert!(r.render(&s, 0.0, &o(0.0, Some(0.0))).rgba != r.render(&s, 0.0, &o(0.0, None)).rgba);
+        assert_eq!(r.render(&s, 9.0, &o(3.6, Some(3.5))).rgba, r.render(&s, 9.0, &o(3.6, None)).rgba, "over once it has landed");
+        let m = &s.camera.moves;
+        let top = m.pose(0.0, len, 0.0, Some(0.0), s.camera.eye_height, s.camera.horizon);
+        assert!((top.lift - (m.fly_height - s.camera.eye_height)).abs() < 0.2, "it starts at fly_height: {}", top.lift);
+        // A dolly zoom keeps what stands at its focus the same size.
+        let d = crate::scene::CameraMoves { dolly: 6.0, dolly_focus: 10.0, ..Default::default() };
+        let p = d.pose(0.0, len, 0.5, None, 1.6, 0.3);
+        assert!(p.back > 5.9 && (p.zoom / (10.0 + p.back) - 1.0 / 10.0).abs() < 1e-6, "{p:?}");
+    }
+
+    #[test]
+    fn focus_blurs_away_from_the_sharp_depth_or_band() {
+        let mut r = WorldRenderer::default();
+        let s = preset("Winding Trail");
+        let (w, h) = (120usize, 214usize);
+        let o = RenderOptions { size: Some((w as u32, h as u32)), time: Some(1.0), ..RenderOptions::default() };
+        let plain = r.render(&s, 3.0, &o).rgba;
+        let mut t = s.clone();
+        t.post.focus = crate::scene::Focus { enabled: true, mode: crate::scene::FocusMode::TiltShift, blur: 0.02, band: 0.6, band_width: 0.2, ..Default::default() };
+        let tilt = r.render(&t, 3.0, &o).rgba;
+        let row = |img: &[u8], y: usize| img[y * w * 4..(y + 1) * w * 4].to_vec();
+        let mid = (0.6 * h as f32) as usize;
+        // (Bloom spreads a little of the blur round it, so the band is within a level or two.)
+        let off = |y: usize| row(&tilt, y).iter().zip(row(&plain, y)).map(|(a, b)| a.abs_diff(b) as u32).max().unwrap_or(0);
+        assert!(off(mid) <= 2, "the band stays sharp: {}", off(mid));
+        assert!(off(8) > 4 && off(h - 4) > 4, "above and below it blur: {} {}", off(8), off(h - 4));
+        // A real lens: the sky (far) blurs, and blurring evens out the sky's detail.
+        t.post.focus = crate::scene::Focus { enabled: true, mode: crate::scene::FocusMode::Depth, distance: 3.0, blur: 0.02, ..Default::default() };
+        let depth = r.render(&t, 3.0, &o).rgba;
+        let var = |img: &[u8]| { let v: Vec<f32> = (0..w).map(|x| img[(4 * w + x) * 4] as f32).collect(); let m = v.iter().sum::<f32>() / w as f32; v.iter().map(|a| (a - m).powi(2)).sum::<f32>() };
+        assert!(var(&depth) <= var(&plain), "the far distance is softer");
+        assert!(depth != plain);
     }
 }

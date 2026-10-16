@@ -166,7 +166,7 @@ pub fn from_v2(o: &PathForgeSettings, name: &str) -> Scene {
         name: name.to_owned(),
         ground_cover: Vec::new(),
         canvas: Canvas { width: o.canvas.w() as u32, height: o.canvas.h() as u32 },
-        camera: Camera { eye_height: eye, horizon: (hy / h).clamp(0.05, 0.95), zoom, lens_curve: o.scene.horizon_curve },
+        camera: Camera { eye_height: eye, horizon: (hy / h).clamp(0.05, 0.95), zoom, lens_curve: o.scene.horizon_curve, ..Camera::default() },
         path,
         verge: Verge {
             enabled: false, tufts: o.scene.grass_enabled, tuft_color: o.scene.grass_color,
@@ -187,6 +187,7 @@ pub fn from_v2(o: &PathForgeSettings, name: &str) -> Scene {
             grain: if o.post.grain_enabled { o.post.grain } else { 0.0 },
             tint: [255, 255, 255],
             flare: Flare::default(),
+            focus: Focus::default(),
         },
         style: Style::default(),
         motion: Motion { loop_length, speed: o.anim.play_speed.max(0.01) * loop_length, fps: 24 },

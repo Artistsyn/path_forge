@@ -58,10 +58,10 @@ pf presets
 pf render --preset "Forest Path" -o forest.png
 ```
 
-There are 41 presets: Stone Dungeon, Stone Crypt, Mossy Sewer, Forest Path, Desert Canyon, Night
+There are 42 presets: Stone Dungeon, Stone Crypt, Mossy Sewer, Forest Path, Desert Canyon, Night
 Road, Magic Cavern, Ice Dungeon, Ruins Path, Dark Street, Mountain Pass, Volcanic Rift, Haunted
 Forest, Ruined Castle, Fiery Dungeon, Tower Stair, Bog Boardwalk, Desert Ruins, Ice Cave, Day and
-Night, Village Evening, Lily Harbour, Waterfall Glen, Star Bridge, Nebula Crossing, Asteroid Belt,
+Night, Village Evening, Lily Harbour, Waterfall Glen, Miniature Village, Star Bridge, Nebula Crossing, Asteroid Belt,
 Hyperspace Run, Wormhole, Starship Flight, Event Horizon, Black Hole Arena, River Run, Canal
 Lanterns, Jungle River, Lagoon Swim, Sunset Pier, Frozen Channel, Misty River, Dawn Road, Winding
 Trail and Hyperspace Jump.
@@ -76,7 +76,7 @@ times in seconds.
 | Part | What it controls |
 |---|---|
 | `canvas` | Output size in pixels (default 480 × 854, portrait). |
-| `camera` | Eye height, horizon position, zoom, lens curve. |
+| `camera` | Eye height, horizon position, zoom, lens curve, and `moves`: see [Camera moves](#camera-moves). |
 | `path` | The road: width, flare, bend (curving left or right), hill (rising or dipping), ragged edges, material and pattern (cobblestone, brick, stone block, sand, dirt, grass, planks, water, ice, and the futuristic panels, grid, hex and circuit, whose lit parts glow with `material.glow`), stairs, bridges, side paths, roads that divide in two or three, side passages that branch off as scenery, and `edge_lights` (glowing lines along both edges, solid or dashed, the dashes running ahead with `flow`). `surface: false` draws no ground at all: the camera flies the route through open space (Starship Flight, Hyperspace Jump), with floating props, companions and the sky all round. |
 | `verge` | The ground beside an open path: its material and grass tufts. Off, the path edge drops into void (walls usually cover it). |
 | `walls` | Walls either side (a corridor, a canyon, a street) and their material. |
@@ -91,7 +91,7 @@ times in seconds.
 | `particles` | Dust, embers, fireflies, rain, snow, leaves, ash, spores, sand, petals. They drift with the wind. |
 | `weather` | Rain, snow, sleet and hail with what they do to the ground, drips, wind, sandstorms, mist, light shafts, heat shimmer, drops or frost on the lens, lightning and fog banks. See [Weather and the air](#weather-and-the-air). |
 | `prop_defs` | Props described by data, named for the scene's prop layers to use. |
-| `post` | Exposure, contrast, saturation, bloom (a tight glow round every flame and the sun, falling off into a wide veil), `flare` (what bright light does in the lens: a `style` of streaks, ghosts or haloes, with `strength`), vignette, grain, tint. |
+| `post` | Exposure, contrast, saturation, bloom (a tight glow round every flame and the sun, falling off into a wide veil), `flare` (what bright light does in the lens: a `style` of streaks, ghosts or haloes, with `strength`), vignette, grain, tint, and `focus`: depth of field or tilt-shift (see [Camera moves](#camera-moves)). |
 | `style` | How the picture is drawn: pixel size, palette, dither, outline, paint, grade (§4). |
 | `motion` | Loop length (metres), walking speed (m/s) and fps for exports. |
 
@@ -196,6 +196,27 @@ water, or a bottomless void. With water, `water_level` sets how far below the de
 at each end of every railing: stone for parapets, balustrades and iron, wood for posts and rope.
 Every railing is built as solid pieces, with faces on all the sides the camera can see. In the
 studio, switching between Iron and Rope also switches `rail_color`, unless you have chosen a colour yourself.
+
+### Camera moves
+
+`camera.moves` moves the camera on top of the walk. Everything here repeats a whole number of
+times a loop, so loops still close, except the flight in, which plays once.
+
+| Field | What it does |
+|---|---|
+| `bob`, `stride`, `sway` | The head bobbing at each step (metres; 0.03-0.05 a walk, 0.1 a run), the length of a step, and a sway from side to side with the steps (degrees). It follows the distance walked, so it stops when the walk does. |
+| `pan`, `pans` | Looking slowly to the side and back: degrees (negative looks left first), and how many times a loop. The sky turns with the rest. |
+| `tilt`, `tilts` | Looking slowly up and down. |
+| `dolly`, `dolly_focus`, `dollies` | A dolly zoom: the camera draws back `dolly` metres while zooming in, so what stands `dolly_focus` metres ahead keeps its size while the background swells and shrinks round it (negative pushes in and zooms out). |
+| `fly_in`, `fly_height` | The flight in: over `fly_in` seconds the camera comes down from `fly_height` metres, looking down, to the walker's eyes. It plays at the start of the live runtime (`restart_intro` plays it again) and with `pf render --intro` / `pf sheet --intro`; loops and exports leave it out. Best under an open sky. |
+
+`post.focus` is depth of field: with `mode: Depth` what stands `distance` metres ahead is sharp
+and nearer and further things blur (the far distance and sky the most), up to `blur` (the widest
+blur, as a share of the frame height, 0.005-0.015). Lights and stars become soft discs. With
+`mode: TiltShift` a band across the frame (`band` its middle, from the top, `band_width` its
+width) stays sharp and the rest blurs, which with a raised camera and some extra saturation
+makes the scene look like a model (preset Miniature Village). The vignette and grain are in
+`post` too. Waterfall Glen bobs gently, looks round once a loop and flies in at the start.
 
 ### Lights
 
@@ -636,13 +657,14 @@ let s = rt.state();                 // scene, stop, progress, choose_within, spe
 rt.set_hour(Some(19.5));            // dusk on every scene with an open sky
 rt.set_day_length(600.0);           // or let a day pass every 10 minutes of step time
 if rt.day().is_some_and(|d| d.daylight < 0.2) { /* night: spawn the bats */ }
+rt.restart_intro();                 // fly in again (camera.moves.fly_in), as at the start
 ```
 
 | Method | Purpose |
 |---|---|
 | `new`, `from_file`, `from_json`, `from_journey` | Open a scene or a journey. |
 | `render(distance, time, w, h)`, `render_into` | Draw one frame (RGBA8, rows top to bottom). |
-| `step(dt, speed)`, `frame(w, h)` | Let the runtime walk; draw where it stands. |
+| `step(dt, speed)`, `frame(w, h)` | Let the runtime walk; draw where it stands (with the camera's flight in at the start, `restart_intro` to play it again; C `pf_runtime_restart_intro`). |
 | `go()` | Walk on to the journey's next stop: a transition, or the approach to a fork. |
 | `transition_to(scene, dir, transition)`, `fork(left, right, fork)` | Start a transition or fork to any scene at run time. |
 | `choose(branch)` | Take a branch of the fork ahead. Returns false when there is none or it is too late. |

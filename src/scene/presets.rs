@@ -887,7 +887,24 @@ pub fn waterfall_glen() -> Scene {
         Waterfall { enabled: true, side: Side::Right, lateral: 4.0, spacing: 48.0, offset: 38.0, height: 6.5, width: 1.6, seed: 2, ..Waterfall::default() },
     ];
     s.wildlife.birds.enabled = true;
+    s.camera.moves = CameraMoves { bob: 0.035, sway: 0.4, pan: 6.0, pans: 1, fly_in: 5.0, fly_height: 22.0, ..CameraMoves::default() };
     s.motion.loop_length = 48.0;
+    s
+}
+
+/// The village seen from above in the afternoon through a tilt-shift lens: a band across the
+/// middle sharp and the rest blurred, so the street looks like a model.
+pub fn miniature_village() -> Scene {
+    let mut s = village_evening();
+    s.name = "Miniature Village".into();
+    s.sky.day_night.hour = 15.0;
+    s.camera.eye_height = 4.0;
+    s.camera.horizon = 0.16;
+    s.camera.zoom = 1.3;
+    s.light.fog.distance = 160.0;
+    s.post.focus = Focus { enabled: true, mode: FocusMode::TiltShift, blur: 0.012, band: 0.58, band_width: 0.16, ..Focus::default() };
+    s.post.saturation = 1.3;
+    s.post.contrast = 1.1;
     s
 }
 
@@ -1171,6 +1188,7 @@ pub const ALL: &[(&str, fn() -> Scene)] = &[
     ("Village Evening", village_evening),
     ("Lily Harbour", lily_harbour),
     ("Waterfall Glen", waterfall_glen),
+    ("Miniature Village", miniature_village),
     ("Star Bridge", star_bridge),
     ("Nebula Crossing", nebula_crossing),
     ("Asteroid Belt", asteroid_belt),

@@ -71,6 +71,9 @@ int pf_runtime_project_now(const PfRuntime *rt, float x, float y, float d, uint3
 /* Set the hour (0..24: 6 sunrise, 12 noon, 18 sunset, 0 midnight) on every scene drawn, turning
  * its day and night on; a negative hour gives each scene back its own. */
 int pf_runtime_set_hour(PfRuntime *rt, float hour);
+/* Play the camera's flight in (camera.moves.fly_in) again from the top: the camera comes down
+ * from above over the next fly_in seconds of pf_runtime_step (it plays once at the start). */
+int pf_runtime_restart_intro(PfRuntime *rt);
 /* Let the days pass: one day every `seconds` of pf_runtime_step time (0 holds the hour). */
 int pf_runtime_set_day_length(PfRuntime *rt, float seconds);
 /* The day now: writes the hour and the daylight (0 night .. 1 day; either may be NULL) and
