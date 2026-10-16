@@ -426,10 +426,6 @@ Which way a prop's picture faces.
 
 ### Fence
 
-A waterfall beside the path (`scene.waterfalls`): a rock face with water pouring down it in
-streaks, foam and spray boiling up at its foot, and (with the sun out) a little rainbow in the
-spray. It repeats every `spacing` metres, like a set piece; its water falls a whole number of
-times a loop.
 A fence beside the path, built post to post as solid pieces that run along its edge and bend
 with it, so it reads as one fence from any angle.
 
@@ -445,6 +441,8 @@ with it, so it reads as one fence from any angle.
 | `length` | number | `20.0` |  |
 | `offset` | number | `0.0` |  |
 | `post_spacing` | number | `2.0` | Metres between posts. |
+| `shadow` | boolean | `true` | Whether it casts the sun's shadow on the ground, post by post and picket by picket, with a soft darkening along its foot. |
+| `shadow_opacity` | number | `0.6` | How dark that shadow is (0..1), as a prop's. |
 
 ### FenceStyle
 
@@ -1540,6 +1538,11 @@ Ground beside the path. Disabled = void beyond the path edge (walls usually cove
 | `material` | [Material](#material) | (see the type) |  |
 
 ### Waterfall
+
+A waterfall beside the path (`scene.waterfalls`): a rock face with water pouring down it in
+streaks, foam and spray boiling up at its foot, and (with the sun out) a little rainbow in the
+spray. It repeats every `spacing` metres, like a set piece; its water falls a whole number of
+times a loop.
 
 | Field | Type | Default | Meaning |
 |---|---|---|---|

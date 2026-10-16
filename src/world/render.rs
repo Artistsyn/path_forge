@@ -3584,16 +3584,25 @@ fn gpu_geom_input(ctx: &Ctx, prepared: &[raster::Prepared], bills: &[Billboard],
     let bits = |v: usize| f32::from_bits(v as u32);
     let mut cboxes = Vec::with_capacity(list.len());
     let casters: Vec<CasterIn> = list.iter().map(|c| {
-        let b = c.b;
         let mut f = [0.0f32; 40];
-        (f[0], f[1], f[2], f[3], f[4], f[5], f[6]) = (c.foot[0], c.foot[1], c.axis[0], c.axis[1], c.ra, b.shadow, c.rb);
-        f[7] = f32::from_bits(b.flip as u32);
+        (f[0], f[1], f[2], f[3], f[4], f[5], f[6]) = (c.foot[0], c.foot[1], c.axis[0], c.axis[1], c.ra, c.shadow, c.rb);
         let (mut x0, mut y0, mut x1, mut y1) = (i64::MAX, i64::MAX, i64::MIN, i64::MIN);
         let mut grow = |r: (usize, usize, usize, usize)| { x0 = x0.min(r.0 as i64); y0 = y0.min(r.1 as i64); x1 = x1.max(r.2 as i64); y1 = y1.max(r.3 as i64); };
         if let Some(r) = c.contact { f[8] = bits(1); (f[9], f[10], f[11], f[12]) = (bits(r.0), bits(r.1), bits(r.2), bits(r.3)); grow(r); }
         if let (Some(_), Some(r)) = (sun, c.sun) { f[13] = bits(1); (f[14], f[15], f[16], f[17]) = (bits(r.0), bits(r.1), bits(r.2), bits(r.3)); grow(r); }
-        f[18] = b.panel.and_then(|p| p.strip).unwrap_or(-1.0);
-        // (19..21: the sprite level, filled in by Frame::geometry.)
+        // (19..21: the sprite level, filled in by Frame::geometry; a fence's shape instead.)
+        let sprite = match &c.pic {
+            Pic::Sprite(b) => {
+                f[7] = f32::from_bits(b.flip as u32);
+                f[18] = b.panel.and_then(|p| p.strip).unwrap_or(-1.0);
+                Some((b.sprite.clone(), b.sprite.lod(192.0)))
+            }
+            Pic::Fence(fc) => {
+                f[18] = -1.0;
+                (f[19], f[20], f[21], f[37], f[38]) = (f32::from_bits(fc.bits()), fc.len, fc.ht, f32::from_bits(1), fc.pw);
+                None
+            }
+        };
         f[22..25].copy_from_slice(&c.c0);
         f[25..28].copy_from_slice(&c.across);
         f[28..31].copy_from_slice(&c.down);
@@ -3601,7 +3610,7 @@ fn gpu_geom_input(ctx: &Ctx, prepared: &[raster::Prepared], bills: &[Billboard],
         f[33..36].copy_from_slice(&c.n);
         f[36] = c.nl;
         cboxes.push(if x0 <= x1 { (x0, y0, x1, y1) } else { (1, 1, 0, 0) });
-        CasterIn { c: CasterGpu { f }, lod: b.sprite.lod(192.0), sprite: b.sprite.clone() }
+        CasterIn { c: CasterGpu { f }, sprite }
     }).collect();
     let cast_bins = bin_tiles(w, h, &cboxes);
     let clouds = weather::cloud_params(ctx);
@@ -4307,12 +4316,79 @@ fn reflect_pass(ctx: &Ctx, gbuf: &[GPixel], refl: &[Refl], under: Option<&[[f32;
 /// A billboard's two shadows, worked out once: the contact shadow (a soft ellipse on the ground
 /// at its foot, `axis` along its width) and the sun's (the flat picture it is drawn as, at the
 /// angle it stands: `c0` its top left corner, `across` and `down` its edges, `n` its normal),
-/// each with the pixels it can fall on.
+/// each with the pixels it can fall on. A run of fence is one too: a flat picture along its line,
+/// its posts, rails and pickets worked out where the sun's ray meets it.
 struct Caster<'b> {
-    b: &'b Billboard,
+    pic: Pic<'b>, shadow: f32,
     foot: [f32; 2], axis: [f32; 2], ra: f32, rb: f32, contact: Option<(usize, usize, usize, usize)>,
     c0: [f32; 3], across: [f32; 3], down: [f32; 3], ia: f32, idn: f32, n: [f32; 3], nl: f32,
     sun: Option<(usize, usize, usize, usize)>,
+}
+
+/// What a caster's shadow is the shape of.
+enum Pic<'b> { Sprite(&'b Billboard), Fence(FenceCut) }
+
+/// One run of fence as its shadow sees it: from `-pw/2` to `len + pw/2` along its line (u 0..1)
+/// and from `ht + 0.06` down to the ground (v 0..1), the parts `fences` builds it from.
+#[derive(Clone, Copy)]
+struct FenceCut { style: u32, len: f32, ht: f32, posts: u32, n: u32, pw: f32 }
+
+impl FenceCut {
+    fn top(&self) -> f32 { self.ht + 0.06 }
+
+    /// Its packed shape for the GPU (f[19..22] and f[37..39] of a caster).
+    fn bits(&self) -> u32 { self.style | (self.posts.min(1023) << 2) | (self.n.min(65535) << 12) }
+
+    /// How much of it stands at (u, v), averaged over a box `fu` x `fv` wide.
+    fn alpha(&self, u: f32, v: f32, fu: f32, fv: f32) -> f32 {
+        let span = self.len + self.pw;
+        let (s, y) = (u * span - 0.5 * self.pw, (1.0 - v) * self.top());
+        let (hs, hy) = (0.5 * fu * span, 0.5 * fv * self.top());
+        let ht = self.ht;
+        // Posts at each end and between, as tall as the fence and a little more.
+        let post = fence_comb(s, hs, self.len / self.posts.max(1) as f32, self.pw, 0.0, -0.5 * self.pw, self.len + 0.5 * self.pw) * fence_box(0.0, ht + 0.06, y, hy);
+        let along = fence_box(0.0, self.len, s, hs);
+        let (upright, across) = match self.style {
+            // Pickets with a narrower point on top, on two rails.
+            0 => {
+                let p = self.len / self.n.max(1) as f32;
+                let body = fence_comb(s, hs, p, 0.074, 0.5 * p, 0.0, self.len) * fence_box(0.04, ht - 0.05, y, hy);
+                let tip = fence_comb(s, hs, p, 0.036, 0.5 * p, 0.0, self.len) * fence_box(ht - 0.05, ht, y, hy);
+                (body + tip, along * (fence_box(0.22 * ht, 0.22 * ht + 0.07, y, hy) + fence_box(0.72 * ht, 0.72 * ht + 0.07, y, hy)))
+            }
+            // Three rails.
+            1 => (0.0, along * (fence_box(0.28 * ht - 0.09, 0.28 * ht, y, hy) + fence_box(0.6 * ht - 0.09, 0.6 * ht, y, hy) + fence_box(0.9 * ht - 0.09, 0.9 * ht, y, hy))),
+            // Boards, capped.
+            _ => (0.0, along * fence_box(0.02, ht + 0.02, y, hy)),
+        };
+        let up = 1.0 - (1.0 - post.min(1.0)) * (1.0 - upright.min(1.0));
+        1.0 - (1.0 - up) * (1.0 - across.min(1.0))
+    }
+}
+
+/// How much of [x - h, x + h] lies in [lo, hi] (whether x does, for h near 0).
+fn fence_box(lo: f32, hi: f32, x: f32, h: f32) -> f32 {
+    if h < 1e-5 { return (x >= lo && x < hi) as u32 as f32; }
+    ((x + h).min(hi) - (x - h).max(lo)).max(0.0) / (2.0 * h)
+}
+
+/// How much of [x - h, x + h] (within [lo, hi]) is covered by bars `w` wide every `p`, one
+/// centred on `c`.
+fn fence_comb(x: f32, h: f32, p: f32, w: f32, c: f32, lo: f32, hi: f32) -> f32 {
+    // Covered length from `c - p/2` to x.
+    let cum = |x: f32| {
+        let r = x - c + 0.5 * p;
+        let k = (r / p).floor();
+        k * w + (r - k * p - 0.5 * (p - w)).clamp(0.0, w)
+    };
+    if h < 1e-5 {
+        if x < lo || x >= hi { return 0.0; }
+        let r = (x - c + 0.5 * p).rem_euclid(p);
+        return (r >= 0.5 * (p - w) && r < 0.5 * (p + w)) as u32 as f32;
+    }
+    let (a, b) = ((x - h).max(lo), (x + h).min(hi));
+    if b <= a { return 0.0; }
+    (cum(b) - cum(a)) / (2.0 * h)
 }
 
 /// The sun's direction when it casts shadows here (a low sun's shadows held to six heights
@@ -4326,7 +4402,36 @@ fn shadow_casters<'b>(ctx: &Ctx, bills: &'b [Billboard]) -> (Option<[f32; 3]>, V
         [l[0] * k, l[1], l[2] * k]
     });
     let cross = |a: [f32; 3], b: [f32; 3]| [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
-    let casters: Vec<Caster> = bills.iter().filter(|b| b.shadow > 0.0 && b.realm == ctx.realm && b.tube.is_none()).filter_map(|b| {
+    // The pixels a caster's shadows can fall on: around its foot, and its picture projected along
+    // the sun onto the ground.
+    let reach = |c0: [f32; 3], across: [f32; 3], down: [f32; 3], n: [f32; 3], (foot, axis, ra, rb): ([f32; 2], [f32; 2], f32, f32), grounded: bool| {
+        let (aa, dd) = (dot3(across, across), dot3(down, down));
+        let bottom = [c0[0] + down[0], c0[1] + down[1], c0[2] + down[2]];
+        let mut bbox = BBox::new();
+        let mut whole = false;
+        if grounded {
+            for (sa, sb) in [(-1.0f32, -1.0f32), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)] {
+                let (x, d) = (foot[0] + axis[0] * ra * sa - axis[1] * rb * sb, foot[1] + axis[1] * ra * sa + axis[0] * rb * sb);
+                match v.world_to_px(x, 0.0, d) { Some(p) => bbox.add(Some(p)), None => whole = true }
+            }
+        }
+        let contact = if !grounded { None } else if whole { Some((0, 0, w - 1, h - 1)) } else { bbox.clip(w, h) };
+        let sun_box = sun.and_then(|l| {
+            let nl = dot3(n, l);
+            if nl.abs() < 1e-6 * (aa * dd).sqrt() { return None; }
+            let mut bbox = BBox::new();
+            let mut whole = false;
+            for c in [c0, [c0[0] + across[0], c0[1] + across[1], c0[2] + across[2]], bottom, [bottom[0] + across[0], bottom[1] + across[1], bottom[2] + across[2]]] {
+                let t = c[1].max(0.0) / l[1];
+                for (x, d) in [(c[0], c[2]), (c[0] - l[0] * t, c[2] - l[2] * t)] {
+                    match v.world_to_px(x, 0.0, d) { Some(p) => bbox.add(Some(p)), None => whole = true }
+                }
+            }
+            if whole { Some((0, (v.horizon_px.max(0.0) as usize).min(h - 1), w - 1, h - 1)) } else { bbox.clip(w, h) }
+        });
+        (contact, sun_box)
+    };
+    let mut casters: Vec<Caster> = bills.iter().filter(|b| b.shadow > 0.0 && b.realm == ctx.realm && b.tube.is_none()).filter_map(|b| {
         let [bx, _by, bd] = b.world;
         // The picture as it stands: a panel where it is; a card turned to the camera is a thing
         // alike from every side (a tree, a rock), so its shadow is cast as if turned to the sun,
@@ -4361,31 +4466,45 @@ fn shadow_casters<'b>(ctx: &Ctx, bills: &'b [Billboard]) -> (Option<[f32; 3]>, V
                 ([bottom[0] + 0.5 * across[0], bottom[2] + 0.5 * across[2]], [across[0] / hk, across[2] / hk], 0.5 * hk + 0.2, (0.275 * hk).min(0.6))
             }
         };
-        let mut bbox = BBox::new();
-        let mut whole = false;
-        if grounded {
-            for (sa, sb) in [(-1.0f32, -1.0f32), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)] {
-                let (x, d) = (foot[0] + axis[0] * ra * sa - axis[1] * rb * sb, foot[1] + axis[1] * ra * sa + axis[0] * rb * sb);
-                match v.world_to_px(x, 0.0, d) { Some(p) => bbox.add(Some(p)), None => whole = true }
-            }
-        }
-        let contact = if !grounded { None } else if whole { Some((0, 0, w - 1, h - 1)) } else { bbox.clip(w, h) };
-        // Sun shadow: the picture projected along the sun onto the ground.
-        let sun_box = sun.and_then(|l| {
-            let nl = dot3(n, l);
-            if nl.abs() < 1e-6 * (aa * dd).sqrt() { return None; }
-            let mut bbox = BBox::new();
-            let mut whole = false;
-            for c in [c0, [c0[0] + across[0], c0[1] + across[1], c0[2] + across[2]], bottom, [bottom[0] + across[0], bottom[1] + across[1], bottom[2] + across[2]]] {
-                let t = c[1].max(0.0) / l[1];
-                for (x, d) in [(c[0], c[2]), (c[0] - l[0] * t, c[2] - l[2] * t)] {
-                    match v.world_to_px(x, 0.0, d) { Some(p) => bbox.add(Some(p)), None => whole = true }
+        let (contact, sun_box) = reach(c0, across, down, n, (foot, axis, ra, rb), grounded);
+        Some(Caster { pic: Pic::Sprite(b), shadow: b.shadow, foot, axis, ra, rb, contact, c0, across, down, ia: 1.0 / aa, idn: 1.0 / dd, n, nl: sun.map_or(0.0, |l| dot3(n, l)), sun: sun_box })
+    }).collect();
+    // Fences: each run on each side, as `fences` builds them. Runs just out of sight still cast
+    // onto the ground in sight.
+    {
+        let margin = 8.0;
+        let far = (if v.turned { ctx.d_hi } else { ctx.far.min(120.0) }) + margin;
+        let near = (if v.turned { ctx.d_lo } else { NEAR }) - margin;
+        for f in ctx.scene.fences.iter().filter(|f| f.enabled && f.height > 0.0 && f.shadow && f.shadow_opacity > 0.0) {
+            let sp = snap_to_loop(f.spacing.max(1.0), ctx.loop_len);
+            let len = f.length.clamp(0.5, sp);
+            let posts = ((len / f.post_spacing.max(0.5)).round() as u32).max(1);
+            let style = match f.style { FenceStyle::Picket => 0, FenceStyle::Rails => 1, FenceStyle::Boards => 2 };
+            let pw = if style == 1 { 0.12 } else { 0.09 };
+            let cut = FenceCut { style, len, ht: f.height, posts, n: (len / 0.14).round().max(1.0) as u32, pw };
+            let top = cut.top();
+            let k_lo = ((ctx.scroll + near - len - f.offset) / sp).floor() as i64;
+            let k_hi = ((ctx.scroll + far - f.offset) / sp).ceil() as i64;
+            for k in k_lo..=k_hi {
+                let a = k as f32 * sp + f.offset - ctx.scroll;
+                let b = a + len;
+                if b < near || a > far || ctx.on_bridge(0.5 * (a + b)) { continue; }
+                for sign in f.side.signs().iter().copied() {
+                    if ctx.cut_away(sign * (v.half_width + f.lateral)) { continue; }
+                    let (a0, b0) = (a - 0.5 * pw, b + 0.5 * pw);
+                    let (xa, xb) = (sign * (v.path_half_width(a0) + f.lateral), sign * (v.path_half_width(b0) + f.lateral));
+                    let (c0, across, down) = ([xa, top, a0], [xb - xa, 0.0, b0 - a0], [0.0, -top, 0.0]);
+                    let (aa, dd) = (dot3(across, across), dot3(down, down));
+                    let n = cross(across, down);
+                    let hk = aa.sqrt();
+                    let fa = ([0.5 * (xa + xb), 0.5 * (a0 + b0)], [across[0] / hk, across[2] / hk], 0.5 * hk, 0.3);
+                    let (contact, sun_box) = reach(c0, across, down, n, fa, true);
+                    let (foot, axis, ra, rb) = fa;
+                    casters.push(Caster { pic: Pic::Fence(cut), shadow: f.shadow_opacity.min(1.0), foot, axis, ra, rb, contact, c0, across, down, ia: 1.0 / aa, idn: 1.0 / dd, n, nl: sun.map_or(0.0, |l| dot3(n, l)), sun: sun_box });
                 }
             }
-            if whole { Some((0, (v.horizon_px.max(0.0) as usize).min(h - 1), w - 1, h - 1)) } else { bbox.clip(w, h) }
-        });
-        Some(Caster { b, foot, axis, ra, rb, contact, c0, across, down, ia: 1.0 / aa, idn: 1.0 / dd, n, nl: sun.map_or(0.0, |l| dot3(n, l)), sun: sun_box })
-    }).collect();
+        }
+    }
     (sun, casters)
 }
 
@@ -4398,7 +4517,6 @@ fn prop_shadows(ctx: &Ctx, bills: &[Billboard], gbuf: &[GPixel], sun_mask: &mut 
     sun_mask.par_chunks_mut(w * BAND).zip(ao_mask.par_chunks_mut(w * BAND)).enumerate().for_each(|(k, (sm, am))| {
         let (r0, r1) = (k * BAND, k * BAND + sm.len() / w - 1);
         for c in &casters {
-            let b = c.b;
             if let Some((x0, y0, x1, y1)) = c.contact.filter(|r| r.3 >= r0 && r.1 <= r1) {
                 for y in y0.max(r0)..=y1.min(r1) {
                     for x in x0..=x1 {
@@ -4407,36 +4525,68 @@ fn prop_shadows(ctx: &Ctx, bills: &[Billboard], gbuf: &[GPixel], sun_mask: &mut 
                         if g.id != id::GROUND { continue; }
                         let (dx, dd) = (g.x - c.foot[0], g.d - c.foot[1]);
                         let (na, nb) = ((dx * c.axis[0] + dd * c.axis[1]) / c.ra, (dd * c.axis[0] - dx * c.axis[1]) / c.rb);
-                        let r2 = na * na + nb * nb;
-                        if r2 < 1.0 { am[i - r0 * w] *= 1.0 - 0.5 * b.shadow * (1.0 - r2); }
+                        // Under a prop a soft oval; along a fence's foot a soft strip.
+                        let r2 = match c.pic { Pic::Fence(_) if na.abs() <= 1.0 => nb * nb, Pic::Fence(_) => 1.0, _ => na * na + nb * nb };
+                        if r2 < 1.0 { am[i - r0 * w] *= 1.0 - 0.5 * c.shadow * (1.0 - r2); }
                     }
                 }
             }
             let (Some(l), Some((x0, y0, x1, y1))) = (sun, c.sun) else { continue };
             if y1 < r0 || y0 > r1 { continue; }
-            let strip = b.panel.and_then(|p| p.strip);
+            // Toward the sun from a bit of ground: where the ray meets the picture's plane, as (u, v)
+            // on it. (The ground is at height 0 in path space: hills are the camera's.)
+            let on_pic = |gx: f32, gd: f32| {
+                let rel = [c.c0[0] - gx, c.c0[1], c.c0[2] - gd];
+                let t = dot3(c.n, rel) / c.nl;
+                let q = [gx + l[0] * t - c.c0[0], l[1] * t - c.c0[1], gd + l[2] * t - c.c0[2]];
+                (t, dot3(q, c.across) * c.ia, dot3(q, c.down) * c.idn)
+            };
             for y in y0.max(r0)..=y1.min(r1) {
                 for x in x0..=x1 {
                     let i = y * w + x;
                     let g = &gbuf[i];
                     if g.id != id::GROUND { continue; }
-                    // Toward the sun from this bit of ground: where the ray meets the picture's plane.
-                    // (The ground is at height 0 in path space: hills are the camera's.)
-                    let rel = [c.c0[0] - g.x, c.c0[1], c.c0[2] - g.d];
-                    let t = dot3(c.n, rel) / c.nl;
+                    let (t, mut u, vv) = on_pic(g.x, g.d);
                     if t <= 0.0 { continue; }
-                    let q = [g.x + l[0] * t - c.c0[0], l[1] * t - c.c0[1], g.d + l[2] * t - c.c0[2]];
-                    let (mut u, vv) = (dot3(q, c.across) * c.ia, dot3(q, c.down) * c.idn);
                     if !(0.0..1.0).contains(&u) || !(0.0..1.0).contains(&vv) { continue; }
-                    if let Some(s) = strip { u = s; } else if b.flip { u = 1.0 - u; }
-                    let mut a = b.sprite.sample(u, vv, 192.0, false)[3];
-                    // A painted mask says which parts are solid: a flame or a pane of glass casts nothing.
-                    if b.sprite.casts { if let Some(gl) = &b.sprite.glow { a *= gl.sample(u, vv, 192.0, false)[1]; } }
-                    if a > 0.01 { let m = &mut sm[i - r0 * w]; *m = m.min(1.0 - b.shadow * a.min(1.0)); }
+                    let a = match &c.pic {
+                        Pic::Sprite(b) => {
+                            if let Some(s) = b.panel.and_then(|p| p.strip) { u = s; } else if b.flip { u = 1.0 - u; }
+                            let mut a = b.sprite.sample(u, vv, 192.0, false)[3];
+                            // A painted mask says which parts are solid: a flame or a pane of glass casts nothing.
+                            if b.sprite.casts { if let Some(gl) = &b.sprite.glow { a *= gl.sample(u, vv, 192.0, false)[1]; } }
+                            a
+                        }
+                        Pic::Fence(fc) => {
+                            // Averaged over the ground this pixel covers, so pickets far off do not shimmer.
+                            let (fu, fv) = ground_step(gbuf, w, x, y).map_or((0.0, 0.0), |((ax, ad), (bx, bd))| {
+                                let (_, ua, va) = on_pic(g.x + ax, g.d + ad);
+                                let (_, ub, vb) = on_pic(g.x + bx, g.d + bd);
+                                ((ua - u).abs() + (ub - u).abs(), (va - vv).abs() + (vb - vv).abs())
+                            });
+                            fc.alpha(u, vv, fu.min(1.0), fv.min(1.0))
+                        }
+                    };
+                    if a > 0.01 { let m = &mut sm[i - r0 * w]; *m = m.min(1.0 - c.shadow * a.min(1.0)); }
                 }
             }
         }
     });
+}
+
+/// How far the ground moves (x, d) from pixel (x, y) to the next pixel across and the next down,
+/// from neighbours that are ground too (the one before where the one after is not).
+fn ground_step(gbuf: &[GPixel], w: usize, x: usize, y: usize) -> Option<((f32, f32), (f32, f32))> {
+    let h = gbuf.len() / w;
+    let i = y * w + x;
+    let g = &gbuf[i];
+    let step = |j: Option<usize>, k: Option<usize>| {
+        let pick = |j: usize, s: f32| { let o = &gbuf[j]; (o.id == id::GROUND).then(|| (s * (o.x - g.x), s * (o.d - g.d))) };
+        j.and_then(|j| pick(j, 1.0)).or_else(|| k.and_then(|k| pick(k, -1.0)))
+    };
+    let across = step((x + 1 < w).then(|| i + 1), (x > 0).then(|| i - 1))?;
+    let down = step((y + 1 < h).then(|| i + w), (y > 0).then(|| i - w))?;
+    Some((across, down))
 }
 
 struct BBox { x0: f32, y0: f32, x1: f32, y1: f32, any: bool }
@@ -7249,6 +7399,51 @@ mod tests {
             let v = View::new(&t, w, h);
             let foot = v.world_to_px(-(v.path_half_width(14.0 - at) + 2.0), 0.0, 14.0 - at).unwrap();
             assert!(sx / (n as f64) < foot[0] as f64, "yaw {yaw}: the shadow lies left of the tree at {foot:?}, away from the sun");
+        }
+    }
+
+    #[test]
+    fn fences_cast_shadows_away_from_the_sun() {
+        // Picket fences along both sides of a straight path, a low sun to the right and ahead, and
+        // no ambient light, so only the sun's shadows show (not the soft darkening at their feet).
+        let mut s = preset("Forest Path");
+        s.path.bend = 0.0;
+        s.light.fog.distance = 500.0;
+        s.light.ambient = 0.0;
+        s.weather = Default::default();
+        s.props.clear();
+        s.fences = vec![Fence { side: Side::Both, lateral: 1.3, spacing: 16.0, length: 16.0, ..Fence::default() }];
+        s.sky.day_night.enabled = false;
+        s.sky.sun.pos = [0.85, 0.8];
+        s.motion.loop_length = 48.0;
+        let mut r = WorldRenderer::default();
+        // (From the side the camera's own side of the path is cut away: only the far fence stands.)
+        for (yaw, side, (w, h), signs) in [(0.0, 0.0, (240usize, 427usize), &[-1.0f32, 1.0][..]), (-90.0, 6.0, (427, 240), &[-1.0][..])] {
+            let mut t = s.clone();
+            (t.camera.yaw, t.camera.side) = (yaw, side);
+            let v = View::new(&t, w, h);
+            let o = RenderOptions { size: Some((w as u32, h as u32)), time: Some(0.0), ..RenderOptions::default() };
+            let with = r.render(&t, 0.0, &o).rgba;
+            let mut off = t.clone();
+            off.fences[0].shadow = false;
+            let without = r.render(&off, 0.0, &o).rgba;
+            // Where each fence's foot runs on screen.
+            let lines: Vec<Vec<[f32; 2]>> = signs.iter().map(|&k| (1..400).filter_map(|j| { let d = j as f32 * 0.25; v.world_to_px(k * (v.path_half_width(d) + 1.3), 0.0, d) }).collect()).collect();
+            // Darker with its shadow than without, and which side of the nearest foot it lies:
+            // looking down the path, left of it (away from the sun) or right; from the side, below
+            // it (toward the camera, away from the sun beyond) or above.
+            let (mut away, mut toward) = (0usize, 0usize);
+            for y in 0..h { for x in 0..w {
+                let i = (y * w + x) * 4;
+                let (a, b) = (with[i] as i32 + with[i + 1] as i32 + with[i + 2] as i32, without[i] as i32 + without[i + 1] as i32 + without[i + 2] as i32);
+                if b - a <= 12 { continue; }
+                let (px, py) = (x as f32, y as f32);
+                let at = |l: &Vec<[f32; 2]>| l.iter().copied().min_by(|p, q| if yaw == 0.0 { (p[1] - py).abs().total_cmp(&(q[1] - py).abs()) } else { (p[0] - px).abs().total_cmp(&(q[0] - px).abs()) });
+                let Some(f) = lines.iter().filter_map(at).min_by(|p, q| (p[0] - px).abs().total_cmp(&(q[0] - px).abs())) else { continue };
+                if if yaw == 0.0 { px < f[0] } else { py > f[1] } { away += 1 } else { toward += 1 }
+            }}
+            assert!(away > 40, "yaw {yaw}: the fences cast shadows ({away} pixels away from the sun)");
+            assert!(away > 4 * toward, "yaw {yaw}: their shadows fall away from the sun ({away} away, {toward} toward)");
         }
     }
 }

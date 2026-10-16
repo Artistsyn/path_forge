@@ -1788,10 +1788,6 @@ impl DayNight {
 
 fn smooth(e0: f32, e1: f32, x: f32) -> f32 { let t = ((x - e0) / (e1 - e0)).clamp(0.0, 1.0); t * t * (3.0 - 2.0 * t) }
 
-/// A waterfall beside the path (`scene.waterfalls`): a rock face with water pouring down it in
-/// streaks, foam and spray boiling up at its foot, and (with the sun out) a little rainbow in the
-/// spray. It repeats every `spacing` metres, like a set piece; its water falls a whole number of
-/// times a loop.
 /// A fence beside the path, built post to post as solid pieces that run along its edge and bend
 /// with it, so it reads as one fence from any angle.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -1814,10 +1810,15 @@ pub struct Fence {
     pub offset: f32,
     /// Metres between posts.
     pub post_spacing: f32,
+    /// Whether it casts the sun's shadow on the ground, post by post and picket by picket, with a
+    /// soft darkening along its foot.
+    pub shadow: bool,
+    /// How dark that shadow is (0..1), as a prop's.
+    pub shadow_opacity: f32,
 }
 impl Default for Fence {
     fn default() -> Self {
-        Fence { enabled: true, style: FenceStyle::Picket, side: Side::Both, lateral: 1.2, height: 0.9, color: [236, 232, 220], spacing: 24.0, length: 20.0, offset: 0.0, post_spacing: 2.0 }
+        Fence { enabled: true, style: FenceStyle::Picket, side: Side::Both, lateral: 1.2, height: 0.9, color: [236, 232, 220], spacing: 24.0, length: 20.0, offset: 0.0, post_spacing: 2.0, shadow: true, shadow_opacity: 0.6 }
     }
 }
 
@@ -1832,6 +1833,10 @@ pub enum FenceStyle {
     Boards,
 }
 
+/// A waterfall beside the path (`scene.waterfalls`): a rock face with water pouring down it in
+/// streaks, foam and spray boiling up at its foot, and (with the sun out) a little rainbow in the
+/// spray. It repeats every `spacing` metres, like a set piece; its water falls a whole number of
+/// times a loop.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(default)]
 pub struct Waterfall {

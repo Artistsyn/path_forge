@@ -14,7 +14,8 @@ struct Tri { f: array<f32, 36> }
 // A shadow caster (render::prop_shadows' Caster): foot x, d, width axis x, d, ra, shadow, rb,
 // flip; contact box on (bits), x0, y0, x1, y1; sun box on, x0, y0, x1, y1; strip (or below 0);
 // sprite level off, w, h; then the picture's plane: c0 (3), across (3), down (3), 1/|across|^2,
-// 1/|down|^2, normal (3), normal . sun.
+// 1/|down|^2, normal (3), normal . sun. A fence's run (37: 1) has its shape where the sprite
+// level would be: style | posts << 2 | pickets << 12, length, height; and 38: its posts' width.
 struct Caster { f: array<f32, 40> }
 
 struct Geom {
@@ -195,6 +196,82 @@ fn cf(c: u32, k: u32) -> f32 { return casters[c].f[k]; }
 fn dot3g(a: vec3<f32>, b: vec3<f32>) -> f32 { return rnd(rnd(rnd(a.x * b.x) + rnd(a.y * b.y)) + rnd(a.z * b.z)); }
 fn cu(c: u32, k: u32) -> u32 { return bitcast<u32>(casters[c].f[k]); }
 
+// render::fence_box: how much of [x - h, x + h] lies in [lo, hi].
+fn fence_box(lo: f32, hi: f32, x: f32, h: f32) -> f32 {
+    if h < 1e-5 { return select(0.0, 1.0, x >= lo && x < hi); }
+    return div(max(min(x + h, hi) - max(x - h, lo), 0.0), rnd(2.0 * h));
+}
+
+// render::fence_comb: how much of [x - h, x + h] (within [lo, hi]) bars `w` wide every `p`,
+// one centred on `c`, cover.
+fn fence_cum(x: f32, p: f32, w: f32, c: f32) -> f32 {
+    let r = (x - c) + rnd(0.5 * p);
+    let k = floor(div(r, p));
+    return rnd(k * w) + clamp((r - rnd(k * p)) - rnd(0.5 * (p - w)), 0.0, w);
+}
+fn fence_comb(x: f32, h: f32, p: f32, w: f32, c: f32, lo: f32, hi: f32) -> f32 {
+    if h < 1e-5 {
+        if x < lo || x >= hi { return 0.0; }
+        let r0 = (x - c) + rnd(0.5 * p);
+        let r = r0 - rnd(p * floor(div(r0, p)));
+        return select(0.0, 1.0, r >= rnd(0.5 * (p - w)) && r < rnd(0.5 * (p + w)));
+    }
+    let a = max(x - h, lo); let b = min(x + h, hi);
+    if b <= a { return 0.0; }
+    return div(fence_cum(b, p, w, c) - fence_cum(a, p, w, c), rnd(2.0 * h));
+}
+
+// render::FenceCut::alpha: how much of caster c's run of fence stands at (u, v), averaged over a
+// box fu x fv wide.
+fn fence_alpha(c: u32, u: f32, v: f32, fu: f32, fv: f32) -> f32 {
+    let shape = cu(c, 19u);
+    let style = shape & 3u;
+    let posts = max((shape >> 2u) & 1023u, 1u);
+    let n = max(shape >> 12u, 1u);
+    let len = cf(c, 20u); let ht = cf(c, 21u); let pw = cf(c, 38u);
+    let top = ht + 0.06;
+    let span = len + pw;
+    let s = rnd(u * span) - rnd(0.5 * pw);
+    let y = rnd((1.0 - v) * top);
+    let hs = rnd(rnd(0.5 * fu) * span);
+    let hy = rnd(rnd(0.5 * fv) * top);
+    let post = rnd(fence_comb(s, hs, div(len, f32(posts)), pw, 0.0, -rnd(0.5 * pw), len + rnd(0.5 * pw)) * fence_box(0.0, ht + 0.06, y, hy));
+    let along = fence_box(0.0, len, s, hs);
+    var upright = 0.0; var across = 0.0;
+    if style == 0u {
+        let p = div(len, f32(n));
+        let body = rnd(fence_comb(s, hs, p, 0.074, rnd(0.5 * p), 0.0, len) * fence_box(0.04, ht - 0.05, y, hy));
+        let tip = rnd(fence_comb(s, hs, p, 0.036, rnd(0.5 * p), 0.0, len) * fence_box(ht - 0.05, ht, y, hy));
+        upright = body + tip;
+        across = rnd(along * (fence_box(rnd(0.22 * ht), rnd(0.22 * ht) + 0.07, y, hy) + fence_box(rnd(0.72 * ht), rnd(0.72 * ht) + 0.07, y, hy)));
+    } else if style == 1u {
+        across = rnd(along * ((fence_box(rnd(0.28 * ht) - 0.09, rnd(0.28 * ht), y, hy) + fence_box(rnd(0.6 * ht) - 0.09, rnd(0.6 * ht), y, hy)) + fence_box(rnd(0.9 * ht) - 0.09, rnd(0.9 * ht), y, hy)));
+    } else {
+        across = rnd(along * fence_box(0.02, ht + 0.02, y, hy));
+    }
+    let up = 1.0 - rnd((1.0 - min(post, 1.0)) * (1.0 - min(upright, 1.0)));
+    return 1.0 - rnd((1.0 - up) * (1.0 - min(across, 1.0)));
+}
+
+// render::ground_step's neighbour: how far the ground moves to pixel j (s = 1) or from it (s = -1);
+// x > 1e29 when j is not ground.
+fn ground_to(g: GPix, j: u32, s: f32) -> vec2<f32> {
+    let o = gbuf[j];
+    if (o.idr & 0xFFu) != ID_GROUND { return vec2<f32>(1e30, 0.0); }
+    return vec2<f32>(rnd(s * (o.x - g.x)), rnd(s * (o.d - g.d)));
+}
+
+// The (t, u, v) where the sun's ray from ground (gx, gd) meets caster c's picture.
+fn on_pic(c: u32, gx: f32, gd: f32) -> vec3<f32> {
+    let c0 = vec3<f32>(cf(c, 22u), cf(c, 23u), cf(c, 24u));
+    let nrm = vec3<f32>(cf(c, 33u), cf(c, 34u), cf(c, 35u));
+    let t = div(dot3g(nrm, vec3<f32>(c0.x - gx, c0.y, c0.z - gd)), cf(c, 36u));
+    let q = vec3<f32>(rnd(gx + rnd(G.sun_x * t)) - c0.x, rnd(G.sun_y * t) - c0.y, rnd(gd + rnd(G.sun_z * t)) - c0.z);
+    let u = rnd(dot3g(q, vec3<f32>(cf(c, 25u), cf(c, 26u), cf(c, 27u))) * cf(c, 31u));
+    let vv = rnd(dot3g(q, vec3<f32>(cf(c, 28u), cf(c, 29u), cf(c, 30u))) * cf(c, 32u));
+    return vec3<f32>(t, u, vv);
+}
+
 @compute @workgroup_size(8, 8)
 fn shadow_main(@builtin(global_invocation_id) gid: vec3<u32>) {
     if gid.x >= W.width || gid.y >= W.height { return; }
@@ -216,22 +293,38 @@ fn shadow_main(@builtin(global_invocation_id) gid: vec3<u32>) {
                 let ax = cf(c, 2u); let ad = cf(c, 3u);
                 let na = div(rnd(dx * ax) + rnd(dd * ad), cf(c, 4u));
                 let nb = div(rnd(dd * ax) - rnd(dx * ad), cf(c, 6u));
-                let r2 = rnd(na * na) + rnd(nb * nb);
+                // Under a prop a soft oval; along a fence's foot a soft strip.
+                var r2 = rnd(na * na) + rnd(nb * nb);
+                if cu(c, 37u) == 1u { r2 = select(1.0, rnd(nb * nb), abs(na) <= 1.0); }
                 if r2 < 1.0 { ao = rnd(ao * rnd(1.0 - rnd(rnd(0.5 * shadow) * (1.0 - r2)))); }
             }
             if G.sun_on != 0u && cu(c, 13u) != 0u && x >= cu(c, 14u) && x <= cu(c, 16u) && y >= cu(c, 15u) && y <= cu(c, 17u) {
                 // Toward the sun from this bit of ground: where the ray meets the picture's plane.
-                let c0 = vec3<f32>(cf(c, 22u), cf(c, 23u), cf(c, 24u));
-                let nrm = vec3<f32>(cf(c, 33u), cf(c, 34u), cf(c, 35u));
-                let t = div(dot3g(nrm, vec3<f32>(c0.x - g.x, c0.y, c0.z - g.d)), cf(c, 36u));
-                if t <= 0.0 { continue; }
-                let q = vec3<f32>(rnd(g.x + rnd(G.sun_x * t)) - c0.x, rnd(G.sun_y * t) - c0.y, rnd(g.d + rnd(G.sun_z * t)) - c0.z);
-                var u = rnd(dot3g(q, vec3<f32>(cf(c, 25u), cf(c, 26u), cf(c, 27u))) * cf(c, 31u));
-                let vv = rnd(dot3g(q, vec3<f32>(cf(c, 28u), cf(c, 29u), cf(c, 30u))) * cf(c, 32u));
+                let tuv = on_pic(c, g.x, g.d);
+                if tuv.x <= 0.0 { continue; }
+                var u = tuv.y; let vv = tuv.z;
                 if !(u >= 0.0 && u < 1.0) || !(vv >= 0.0 && vv < 1.0) { continue; }
-                let strip = cf(c, 18u);
-                if strip >= 0.0 { u = strip; } else if cu(c, 7u) != 0u { u = 1.0 - u; }
-                let a = sprite_alpha(cu(c, 19u), cu(c, 20u), cu(c, 21u), u, vv);
+                var a = 0.0;
+                if cu(c, 37u) == 1u {
+                    // Averaged over the ground this pixel covers, so pickets far off do not shimmer.
+                    var fu = 0.0; var fv = 0.0;
+                    var ax = vec2<f32>(1e30, 0.0); var dn = vec2<f32>(1e30, 0.0);
+                    if x + 1u < W.width { ax = ground_to(g, i + 1u, 1.0); }
+                    if ax.x > 1e29 && x > 0u { ax = ground_to(g, i - 1u, -1.0); }
+                    if y + 1u < W.height { dn = ground_to(g, i + W.width, 1.0); }
+                    if dn.x > 1e29 && y > 0u { dn = ground_to(g, i - W.width, -1.0); }
+                    if ax.x < 1e29 && dn.x < 1e29 {
+                        let pa = on_pic(c, g.x + ax.x, g.d + ax.y);
+                        let pb = on_pic(c, g.x + dn.x, g.d + dn.y);
+                        fu = abs(pa.y - u) + abs(pb.y - u);
+                        fv = abs(pa.z - vv) + abs(pb.z - vv);
+                    }
+                    a = fence_alpha(c, u, vv, min(fu, 1.0), min(fv, 1.0));
+                } else {
+                    let strip = cf(c, 18u);
+                    if strip >= 0.0 { u = strip; } else if cu(c, 7u) != 0u { u = 1.0 - u; }
+                    a = sprite_alpha(cu(c, 19u), cu(c, 20u), cu(c, 21u), u, vv);
+                }
                 if a > 0.01 { sun = min(sun, 1.0 - rnd(shadow * min(a, 1.0))); }
             }
         }

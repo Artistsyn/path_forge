@@ -346,7 +346,8 @@ impl TriGpu {
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 pub(crate) struct CasterGpu { pub f: [f32; 40] }
 impl Default for CasterGpu { fn default() -> Self { CasterGpu { f: [0.0; 40] } } }
-pub(crate) struct CasterIn { pub c: CasterGpu, pub sprite: Arc<super::sprites::Sprite>, pub lod: usize }
+/// A caster and its picture's sprite and level (None: a fence, its shape in the caster).
+pub(crate) struct CasterIn { pub c: CasterGpu, pub sprite: Option<(Arc<super::sprites::Sprite>, usize)> }
 
 /// geom.wgsl's `Geom`.
 #[repr(C)]
@@ -1001,8 +1002,10 @@ impl<'g> Frame<'g> {
             let mut st = g.cards.store.lock().unwrap();
             for c in &gi.casters {
                 let mut cd = c.c;
-                let (w, h, off) = st.level(&c.sprite, c.lod);
-                (cd.f[19], cd.f[20], cd.f[21]) = (f32::from_bits(off), f32::from_bits(w), f32::from_bits(h));
+                if let Some((sp, lod)) = &c.sprite {
+                    let (w, h, off) = st.level(sp, *lod);
+                    (cd.f[19], cd.f[20], cd.f[21]) = (f32::from_bits(off), f32::from_bits(w), f32::from_bits(h));
+                }
                 cs.push(cd);
             }
             self.sprite_texels(&mut st)
