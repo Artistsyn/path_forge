@@ -25,6 +25,82 @@ pub(super) enum Shape {
     Dot { sx: f32, sy: f32, r: f32, col: [f32; 3], alpha: f32 },
     /// Far curtains of rain over the whole frame, added.
     Curtain { amt: f32, slant: f32, cyc: f32, seed: u32, col: [f32; 3], tphase: f32 },
+    /// A waterfall's falling water (`fall_at`), over the box its curtain spans: its middle's
+    /// column `cx`, the rows of its lip and foot, its half width there (pixels).
+    Fall { cx: f32, top: f32, foot: f32, hw_top: f32, hw_foot: f32, k: FallK },
+}
+
+/// A waterfall's curtain: the water's look and its motion this frame.
+#[derive(Clone, Copy)]
+pub(super) struct FallK {
+    pub seed: u32,
+    /// Noise cells down the whole fall (in falling time), for the coarse and the fine layer, and
+    /// how many cells each is carried down in one loop (whole, so the loop closes; also the
+    /// period of the noise down the fall).
+    pub ky: [f32; 2],
+    pub n: [u32; 2],
+    /// Where in the loop's time the frame is (0..1).
+    pub t: f32,
+    /// Deep (clear) water and aerated white water, lit.
+    pub deep: [f32; 3],
+    pub foam: [f32; 3],
+    pub strength: f32,
+    /// 2 g H / u0²: how much faster the water falls at the foot than over the lip.
+    pub kk: f32,
+}
+
+/// Smooth value noise at (x, y), periodic in y with `period` cells, 0..1.
+pub(super) fn vnoise(x: f32, y: f32, period: i64, seed: u32) -> f32 {
+    let (ix, iy) = (x.floor(), y.floor());
+    let (fx, fy) = (x - ix, y - iy);
+    let (sx, sy) = (fx * fx * (3.0 - 2.0 * fx), fy * fy * (3.0 - 2.0 * fy));
+    let (ix, iy) = (ix as i64, iy as i64);
+    let (r0, r1) = (iy.rem_euclid(period), (iy + 1).rem_euclid(period));
+    let h = |a: i64, b: i64| hf(seed ^ (b as u32).wrapping_mul(0x9E37_79B1), a);
+    let top = h(ix, r0) + (h(ix + 1, r0) - h(ix, r0)) * sx;
+    let bot = h(ix, r1) + (h(ix + 1, r1) - h(ix, r1)) * sx;
+    top + (bot - top) * sy
+}
+
+/// A waterfall's curtain at (u, v): u across it (-1..1 edge to edge), v down it (0 at the lip,
+/// 1 at the foot). Water speeds up as it falls, so its patterns are carried down in falling time
+/// (`tn`) and stretch lower down; it leaves the lip as a dark glassy tongue, breaks into white
+/// aerated columns past its break-up, and frays at the edges and into spray toward the foot.
+/// The colour there and how opaque it is, or None where there is no water.
+pub(super) fn fall_at(u: f32, v: f32, k: &FallK) -> Option<([f32; 3], f32)> {
+    if !(0.0..=1.0).contains(&v) || u.abs() > 1.1 { return None; }
+    let tn = ((1.0 + k.kk * v).sqrt() - 1.0) / ((1.0 + k.kk).sqrt() - 1.0);
+    let wob = std::f32::consts::TAU * (2.0 * k.t + 3.0 * v);
+    let uu = u + 0.03 * v * wob.sin();
+    let (p1, p2) = (k.n[0].max(1) as i64, k.n[1].max(1) as i64);
+    let y1 = tn * k.ky[0] - k.n[0] as f32 * k.t;
+    let y2 = tn * k.ky[1] - k.n[1] as f32 * k.t;
+    // Columns where the lip lets more water over, and streaks racing down them.
+    let col = smoothstep(0.3, 0.7, vnoise(uu * 4.0 + 5.0, 0.5, 1, k.seed ^ 0xC0));
+    let s1 = 0.6 * vnoise(uu * 9.0, y1, p1, k.seed ^ 0xC1) + 0.4 * vnoise(uu * 20.0 + 3.0, 2.0 * y1, 2 * p1, k.seed ^ 0xC2);
+    let s2 = vnoise(uu * 28.0 + 7.0, y2, p2, k.seed ^ 0xC3);
+    let dens = col * (0.55 + 0.45 * s1) + 0.3 * s2 + 0.15;
+    let aer = smoothstep(0.06, 0.4, v);
+    let ne = vnoise(uu.signum() * 3.0 + 11.0, y1, p1, k.seed ^ 0xC4);
+    let edge = 1.0 - smoothstep(0.72, 1.0, uu.abs() + 0.25 * v * (ne - 0.5));
+    let thr = 0.12 + 0.4 * v * v;
+    let mut a = smoothstep(thr - 0.1, thr + 0.1, dens * edge) * (1.0 - (-3.5 * dens).exp());
+    let mut rgb = scale3(mix3(k.deep, k.foam, aer * (0.55 + 0.45 * s1)), 0.62 + 0.6 * s2);
+    // The lip: a dark glassy tongue with the sky caught along its bend.
+    let lip = 1.0 - smoothstep(0.0, 0.07, v);
+    let band = (-((v - 0.025) / 0.012).powi(2)).exp();
+    rgb = add3(mix3(rgb, scale3(k.deep, 0.75), lip), scale3(k.foam, 0.5 * band));
+    a += (0.92 * edge - a) * lip;
+    // Glints on the clear water near the top.
+    let gy = (y1 * 3.0).floor() as i64;
+    if hf(k.seed ^ 0xC5 ^ (gy.rem_euclid(3 * p1) as u32).wrapping_mul(0x85EB_CA6B), (uu * 30.0).floor() as i64) > 0.97 {
+        rgb = add3(rgb, scale3(k.foam, 0.6 * (1.0 - 0.5 * aer)));
+    }
+    // Into the spray at the foot.
+    let foot = smoothstep(0.85, 1.0, v);
+    rgb = mix3(rgb, k.foam, foot);
+    a *= 1.0 - 0.4 * foot;
+    Some((rgb, a * k.strength))
 }
 
 #[derive(Clone, Copy)]
@@ -190,6 +266,21 @@ impl Splat {
                     }
                 }
             }
+            Shape::Fall { cx, top, foot, hw_top, hw_foot, k } => {
+                let hw = hw_top.max(hw_foot) * 1.1;
+                let (xa, xb) = (((cx - hw).floor() as i64).max(0), ((cx + hw).ceil() as i64).min(w as i64 - 1));
+                let (ya, yb) = ((top.floor() as i64).max(0), (foot.ceil() as i64).min(h as i64 - 1));
+                for py in ya..=yb {
+                    let v = (py as f32 + 0.5 - top) / (foot - top).max(1.0);
+                    let half = hw_top + (hw_foot - hw_top) * v.clamp(0.0, 1.0);
+                    for px in xa..=xb {
+                        let i = py as usize * w + px as usize;
+                        if z >= gbuf[i].depth { continue; }
+                        let u = (px as f32 + 0.5 - cx) / half.max(0.5);
+                        if let Some((c, a)) = fall_at(u, v, &k) { hdr[i] = mix3(hdr[i], c, a.clamp(0.0, 1.0)); }
+                    }
+                }
+            }
             Shape::Curtain { amt, slant, cyc, seed, col, tphase } => {
                 let gbuf = &*gbuf;
                 hdr.par_chunks_mut(w).enumerate().for_each(|(y, row)| {
@@ -278,6 +369,15 @@ impl Splat {
                 set3(&mut f, 3, col);
                 let (cx, cy) = (sx.floor() as i64, sy.floor() as i64);
                 (7, (cx - ri, cy - ri, cx + ri, cy + ri))
+            }
+            Shape::Fall { cx, top, foot, hw_top, hw_foot, k } => {
+                (f[0], f[1], f[2], f[3], f[4], f[5]) = (cx, top, foot, hw_top, hw_foot, f32::from_bits(k.seed));
+                (f[6], f[7], f[8], f[9]) = (k.ky[0], k.ky[1], k.t, f32::from_bits(k.n[0] | k.n[1] << 16));
+                set3(&mut f, 10, k.deep);
+                set3(&mut f, 13, k.foam);
+                (f[16], f[17]) = (k.strength, k.kk);
+                let hw = hw_top.max(hw_foot) * 1.1;
+                (9, ((cx - hw).floor() as i64, top.floor() as i64, (cx + hw).ceil() as i64, foot.ceil() as i64))
             }
             Shape::Curtain { amt, slant, cyc, seed, col, tphase } => {
                 (f[0], f[1], f[2], f[3], f[7]) = (amt, slant, cyc, f32::from_bits(seed), tphase);

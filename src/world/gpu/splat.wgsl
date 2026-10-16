@@ -25,6 +25,59 @@ const K_MOTE: u32 = 5u;
 const K_STREAK: u32 = 6u;
 const K_DOT: u32 = 7u;
 const K_CURTAIN: u32 = 8u;
+const K_FALL: u32 = 9u;
+
+// render::splat::vnoise
+fn vnoise(x: f32, y: f32, period: i32, seed: u32) -> f32 {
+    let ixf = floor(x); let iyf = floor(y);
+    let fx = x - ixf; let fy = y - iyf;
+    let sx = rnd(fx * fx) * (3.0 - 2.0 * fx); let sy = rnd(fy * fy) * (3.0 - 2.0 * fy);
+    let ix = i32(ixf); let iy = i32(iyf);
+    let r0 = rem_ei(iy, period); let r1 = rem_ei(iy + 1, period);
+    let s0 = seed ^ (bitcast<u32>(r0) * 0x9E3779B1u); let s1 = seed ^ (bitcast<u32>(r1) * 0x9E3779B1u);
+    let a = hf(s0, ix); let b = hf(s0, ix + 1); let c = hf(s1, ix); let d = hf(s1, ix + 1);
+    let top = a + rnd((b - a) * sx);
+    let bot = c + rnd((d - c) * sx);
+    return top + rnd((bot - top) * sy);
+}
+
+// render::splat::fall_at: (rgb, alpha); alpha < 0 where there is no water.
+fn fall_at(u: f32, v: f32, s: Splat) -> vec4<f32> {
+    if v < 0.0 || v > 1.0 || abs(u) > 1.1 { return vec4<f32>(0.0, 0.0, 0.0, -1.0); }
+    let seed = fu(s, 5u);
+    let ky0 = s.f[6]; let ky1 = s.f[7]; let t = s.f[8];
+    let nn = fu(s, 9u); let n0 = nn & 0xFFFFu; let n1 = nn >> 16u;
+    let deep = f3(s, 10u); let foam = f3(s, 13u); let kk = s.f[17];
+    let tn = div(sqrt(1.0 + rnd(kk * v)) - 1.0, sqrt(1.0 + kk) - 1.0);
+    let wob = 6.2831855 * (rnd(2.0 * t) + rnd(3.0 * v));
+    let uu = u + rnd(rnd(0.03 * v) * sin(wob));
+    let p1 = max(i32(n0), 1); let p2 = max(i32(n1), 1);
+    let y1 = rnd(tn * ky0) - rnd(f32(n0) * t);
+    let y2 = rnd(tn * ky1) - rnd(f32(n1) * t);
+    let col = smoothstep_r(0.3, 0.7, vnoise(rnd(uu * 4.0) + 5.0, 0.5, 1, seed ^ 0xC0u));
+    let s1 = rnd(0.6 * vnoise(rnd(uu * 9.0), y1, p1, seed ^ 0xC1u)) + rnd(0.4 * vnoise(rnd(uu * 20.0) + 3.0, 2.0 * y1, 2 * p1, seed ^ 0xC2u));
+    let s2 = vnoise(rnd(uu * 28.0) + 7.0, y2, p2, seed ^ 0xC3u);
+    let dens = rnd(col * (0.55 + rnd(0.45 * s1))) + rnd(0.3 * s2) + 0.15;
+    let aer = smoothstep_r(0.06, 0.4, v);
+    var sg = 0.0; if uu > 0.0 { sg = 1.0; } else if uu < 0.0 { sg = -1.0; }
+    let ne = vnoise(rnd(sg * 3.0) + 11.0, y1, p1, seed ^ 0xC4u);
+    let edge = 1.0 - smoothstep_r(0.72, 1.0, abs(uu) + rnd(rnd(0.25 * v) * (ne - 0.5)));
+    let thr = 0.12 + rnd(rnd(0.4 * v) * v);
+    var a = smoothstep_r(thr - 0.1, thr + 0.1, rnd(dens * edge)) * (1.0 - exp(-3.5 * dens));
+    var rgb = mix3(deep, foam, rnd(aer * (0.55 + rnd(0.45 * s1)))) * (0.62 + rnd(0.6 * s2));
+    let lip = 1.0 - smoothstep_r(0.0, 0.07, v);
+    let bq = div(v - 0.025, 0.012);
+    let band = exp(-(bq * bq));
+    rgb = mix3(rgb, deep * 0.75, lip) + foam * rnd(0.5 * band);
+    a += (rnd(0.92 * edge) - a) * lip;
+    let gy = i32(floor(rnd(y1 * 3.0)));
+    let gs = seed ^ 0xC5u ^ (bitcast<u32>(rem_ei(gy, 3 * p1)) * 0x85EBCA6Bu);
+    if hf(gs, i32(floor(rnd(uu * 30.0)))) > 0.97 { rgb += foam * rnd(0.6 * (1.0 - rnd(0.5 * aer))); }
+    let foot = smoothstep_r(0.85, 1.0, v);
+    rgb = mix3(rgb, foam, foot);
+    a *= 1.0 - rnd(0.4 * foot);
+    return vec4<f32>(rgb, a * s.f[16]);
+}
 
 fn fi(s: Splat, k: u32) -> i32 { return bitcast<i32>(s.f[k]); }
 fn fu(s: Splat, k: u32) -> u32 { return bitcast<u32>(s.f[k]); }
@@ -169,6 +222,16 @@ fn splat_main(@builtin(global_invocation_id) gid: vec3<u32>) {
                 let ss = rem_e(rnd(div(fy, f32(W.height)) * 2.5) + hf(seed ^ 0x71u, col_id) - rnd(rnd(speed * s.f[2]) * s.f[7]), 1.0);
                 let st = smoothstep_r(0.75, 1.0, ss) * (0.4 + 0.6 * hf(seed ^ 0x73u, col_id));
                 c += f3(s, 4u) * (s.f[0] * st * far);
+            }
+            case 9u: { // a waterfall's curtain
+                if z >= g.depth { continue; }
+                let cx = s.f[0]; let top = s.f[1]; let foot = s.f[2];
+                let v = div(fy + 0.5 - top, max(foot - top, 1.0));
+                let half = s.f[3] + rnd((s.f[4] - s.f[3]) * clamp(v, 0.0, 1.0));
+                let u = div(fx + 0.5 - cx, max(half, 0.5));
+                let r = fall_at(u, v, s);
+                if r.w < 0.0 { continue; }
+                c = mix3(c, r.xyz, clamp(r.w, 0.0, 1.0));
             }
             default: {}
         }

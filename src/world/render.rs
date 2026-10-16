@@ -5063,50 +5063,48 @@ fn draw_falls(ctx: &Ctx, out: &mut Vec<Splat>) {
         let white = ctx.apply_fog(mul3(mix3(rgb_lin(wf.water), [1.0; 3], 0.7), lit), d);
         let glass = ctx.apply_fog(mul3(scale3(rgb_lin(wf.water), 0.55), lit), d);
         let ppm = v.px_per_m(d.max(NEAR));
-        let cyc = cycles(0.9, loop_seconds).max(1.0);
         let h = |k: u32, i: i64| hf(wf.seed ^ k, i);
-        // The lip: smooth water bending over the edge, darker, with a bright line where it turns.
-        let lip = |x: f32, y: f32| v.project(v.to_cam(x, y, d + 0.03));
-        if let (Some(l), Some(r)) = (lip(x0 - 0.5 * width, top), lip(x0 + 0.5 * width, top)) {
-            let z = v.to_cam(x0, top, d + 0.03)[2];
-            if z >= NEAR {
-                splat::streak(out, z, (l[0], l[1] + 0.06 * ppm), (r[0], r[1] + 0.06 * ppm), glass, 0.85, (0.12 * ppm).max(1.0));
-                splat::streak(out, z, (l[0], l[1] - 0.01 * ppm), (r[0], r[1] - 0.01 * ppm), scale3(white, 1.2), 0.6, (0.025 * ppm).max(0.7));
+        // The curtain, water drawn pixel by pixel (splat::fall_at): it speeds up as it falls
+        // (from 1 m/s over the lip), so its noise is carried down in falling time, a whole
+        // number of cells a loop so the loop closes.
+        let g = 9.81f32;
+        let tau = ((1.0 + 2.0 * g * top).sqrt() - 1.0) / g;
+        let n_of = |cells: f32| ((cells * loop_seconds / tau.max(0.05)).round().clamp(1.0, 65535.0)) as u32;
+        let (n1, n2) = (n_of(7.0), n_of(15.0));
+        let ky = [n1 as f32 * tau / loop_seconds, n2 as f32 * tau / loop_seconds];
+        let (ct, cf) = (v.to_cam(x0, top, d + 0.02), v.to_cam(x0, 0.0, d + 0.02));
+        if ct[2] >= NEAR {
+            if let (Some(pt), Some(pf)) = (v.project(ct), v.project(cf)) {
+                let k = splat::FallK {
+                    seed: wf.seed.wrapping_mul(0x2545_F491) ^ 0xFA11, ky, n: [n1, n2], t: ctx.tphase.rem_euclid(1.0),
+                    deep: scale3(glass, 1.1), foam: scale3(white, 1.12), strength: 1.0, kk: 2.0 * g * top,
+                };
+                let hw = 0.5 * width * ppm;
+                out.push(Splat { z: ct[2], gate: None, shape: Shape::Fall { cx: pt[0], top: pt[1], foot: pf[1], hw_top: hw, hw_foot: hw * 1.18, k } });
             }
         }
-        // The curtain: ribbons of falling water side by side, each its own thickness.
-        let n_rib = ((width * 14.0).round() as i64).clamp(8, 80);
-        for i in 0..n_rib {
-            let u = (i as f32 + 0.1 + 0.8 * h(0xE1, i)) / n_rib as f32;
-            let x = x0 + (u - 0.5) * width;
-            let mid = 1.0 - (2.0 * u - 1.0).abs().powf(1.6);
-            let thick = (0.3 + 0.7 * h(0xE2, i)) * (0.25 + 0.75 * mid);
-            // It falls a little away from the face, and spreads as it falls.
-            // (Ragged at the edges: the outer threads wander and fall short.)
-            let edge = (2.0 * u - 1.0).abs();
-            let foot_x = x0 + (u - 0.5) * width * 1.3 + (h(0xE4, i) - 0.5) * 0.12 * width * edge;
-            let (c0, c1) = (v.to_cam(x, top - 0.25 * edge.powi(3) * h(0xE5, i) * top, d + 0.02), v.to_cam(foot_x, 0.0, d - 0.12));
+        // Drops flung from its frayed edges low down, longer the faster they fall.
+        let cyc = cycles(1.3, loop_seconds).max(1.0);
+        for i in 0..((width * 4.0).round() as i64).clamp(4, 20) {
+            let p = (cyc * ctx.tphase + h(0xD1, i)).rem_euclid(1.0);
+            let side = if h(0xD2, i) < 0.5 { -1.0 } else { 1.0 };
+            let y = top * (0.55 - 0.55 * p);
+            let x = x0 + side * width * (0.5 + 0.1 * h(0xD3, i) + 0.12 * p);
+            let len = 0.08 + 0.35 * p;
+            let (c0, c1) = (v.to_cam(x, y + len, d - 0.05), v.to_cam(x, y, d - 0.05));
             if c0[2] < NEAR { continue; }
-            let (Some(p0), Some(p1)) = (v.project(c0), v.project(c1)) else { continue };
-            let wpx = (ppm * width / n_rib as f32 * (1.0 + 0.9 * h(0xE3, i))).max(0.8);
-            let q = |t: f32| (p0[0] + (p1[0] - p0[0]) * t, p0[1] + (p1[1] - p0[1]) * t);
-            // A thin veil the whole way down, glassy where it leaves the lip and fading into it.
-            splat::streak(out, c0[2], q(0.0), q(1.0), mix3(water, white, 0.55), 0.1 + 0.25 * thick, wpx);
-            for (t0, t1, al) in [(0.0, 0.06, 0.45), (0.05, 0.12, 0.28), (0.11, 0.2, 0.12)] {
-                splat::streak(out, c0[2] - 0.005, q(t0), q(t1), glass, al * (0.5 + 0.5 * thick), wpx);
-            }
-            // Water racing down it in clumps and threads, quickening as it falls and breaking
-            // whiter: this is what makes it flow.
-            let n_clump = 5 + (thick * 7.0) as i64;
-            for j in 0..n_clump {
-                let k = i * 16 + j;
-                let p = (cyc * ctx.tphase + h(0xF1, k) + j as f32 / n_clump as f32).rem_euclid(1.0);
-                let t0 = 0.08 + 0.92 * p * p;
-                let t1 = (t0 + 0.05 + 0.22 * p * (0.5 + h(0xF3, k))).min(1.0);
-                let bright = 1.0 + 0.45 * h(0xF2, k);
-                let fade = (p / 0.12).min(1.0);
-                splat::streak(out, c0[2] - 0.01, q(t0), q(t1), scale3(mix3(water, white, 0.5 + 0.5 * p), bright), (0.2 + 0.35 * thick) * fade, (wpx * (0.45 + 0.5 * h(0xF4, k))).max(0.6));
-            }
+            let (Some(a0), Some(a1)) = (v.project(c0), v.project(c1)) else { continue };
+            splat::streak(out, c0[2], (a0[0], a0[1]), (a1[0], a1[1]), white, 0.25 * (p / 0.1).min(1.0), (0.015 * ppm).max(0.5));
+        }
+        // A splash crown where it strikes: drops thrown up and out, falling back.
+        let crown = cycles(1.1, loop_seconds).max(1.0);
+        for i in 0..((width * 14.0).round() as i64).clamp(10, 70) {
+            let p = (crown * ctx.tphase + h(0xB1, i)).rem_euclid(1.0);
+            let (vx, vy) = ((h(0xB2, i) - 0.5) * 2.2, 1.0 + 1.6 * h(0xB3, i));
+            let x = x0 + (h(0xB4, i) - 0.5) * width + vx * p;
+            let y = 0.1 + vy * p - 2.4 * p * p;
+            if y < 0.0 { continue; }
+            puff(out, v.to_cam(x, y, d - 0.3 - 0.4 * h(0xB5, i)), ppm * (0.05 + 0.06 * h(0xB6, i)) * (1.0 - 0.5 * p), 1.0, scale3(white, 1.2), 0.75 * (std::f32::consts::PI * p).sin());
         }
         // The foot: the pool, white water churning where the fall strikes it, and the plume of
         // spray billowing up and drifting off.
