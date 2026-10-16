@@ -21,6 +21,11 @@ enum Native {
     static var lastError: String { take(pfm_last_error()) ?? "" }
     /// Start the GPU renderer: its name, or "" where there is none.
     static func gpuInit() -> String { take(pfm_gpu_init()) ?? "" }
+    /// "Surprise me": the parts in `keep` stay, the rest come from presets picked by `seed`.
+    static func remix(_ json: String, keep: String, seed: UInt32) -> String? { take(pfm_remix(json, keep, seed)) }
+    /// A scene as a share code, and back.
+    static func shareCode(_ json: String) -> String? { take(pfm_share_code(json)) }
+    static func unshare(_ code: String) -> String? { take(pfm_unshare(code)) }
 }
 
 /// One scene being drawn, used from one thread at a time.

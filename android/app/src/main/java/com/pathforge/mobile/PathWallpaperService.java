@@ -143,6 +143,9 @@ public final class PathWallpaperService extends WallpaperService {
 
         /** When the wallpaper last checked whether the clock has moved on from its frames. */
         private long checked;
+        /** The battery saver (Saver.stride), and when it was last asked. */
+        private int stride = 1;
+        private long strideAt = -1;
 
         private void tick() {
             handler.removeCallbacks(tick);
@@ -157,10 +160,14 @@ public final class PathWallpaperService extends WallpaperService {
                     if (Bake.hoursStale(PathWallpaperService.this, look.scene()) > 0.33f) bakeHere();
                 } catch (RuntimeException ignored) { }
             }
+            if (strideAt < 0 || now - strideAt > 30_000) {
+                strideAt = now;
+                try { stride = Saver.stride(PathWallpaperService.this); } catch (RuntimeException e) { stride = 1; }
+            }
             draw();
             if (player == null) return;
-            // On to the next frame when its turn comes.
-            long frameMs = Math.max(8, player.frameNanos() / 1_000_000);
+            // On to the next frame when its turn comes (every `stride`th one to save battery).
+            long frameMs = Math.max(8, stride * player.frameNanos() / 1_000_000);
             long elapsed = SystemClock.uptimeMillis() - start;
             handler.postDelayed(tick, frameMs - elapsed % frameMs);
         }

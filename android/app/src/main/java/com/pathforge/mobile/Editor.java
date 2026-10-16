@@ -41,6 +41,9 @@ final class Editor {
         /** The scene, changed. */
         void changed(String scene);
         void done();
+        /** Show `scene` in the preview for a moment without changing anything (null: the scene
+         *  being edited again). */
+        void peek(String scene);
     }
 
     private final Activity a;
@@ -48,13 +51,16 @@ final class Editor {
     private final List<JSONObject> parts = new ArrayList<>();
     private JSONObject scene = new JSONObject();
     private final ArrayDeque<String> undo = new ArrayDeque<>();
+    private final ArrayDeque<String> redo = new ArrayDeque<>();
     private static final int UNDO_MAX = 100;
+    /** The scene as it was when editing began, for Before. */
+    private String original = "{}";
     /** The editor: a header, the parts as tabs, and the current part's settings. */
     final LinearLayout view;
     private final LinearLayout tabs;
     private final ScrollView scroll;
     private final LinearLayout body;
-    private TextView undoButton;
+    private TextView undoButton, redoButton;
     private int part;
     private boolean advanced;
     /** Groups and list items that are open, by path. */
@@ -80,7 +86,7 @@ final class Editor {
         LinearLayout head = new LinearLayout(a);
         head.setGravity(Gravity.CENTER_VERTICAL);
         TextView title = new TextView(a);
-        title.setText("Edit scene");
+        title.setText("Edit");
         title.setTextColor(Ui.TEXT);
         title.setTextSize(TypedValue.COMPLEX_UNIT_SP, 20);
         title.setTypeface(Typeface.DEFAULT_BOLD);
@@ -88,11 +94,26 @@ final class Editor {
         undoButton = Ui.button(a, "Undo", false, v -> undo());
         head.addView(undoButton);
         head.addView(gap());
+        redoButton = Ui.button(a, "Redo", false, v -> redo());
+        head.addView(redoButton);
+        head.addView(gap());
+        // Hold to see the scene as it was before these edits; let go to see it as it is.
+        TextView before = Ui.button(a, "Before", false, v -> { });
+        before.setOnTouchListener((v, e) -> {
+            switch (e.getActionMasked()) {
+                case android.view.MotionEvent.ACTION_DOWN: v.setPressed(true); host.peek(original); return true;
+                case android.view.MotionEvent.ACTION_UP:
+                case android.view.MotionEvent.ACTION_CANCEL: v.setPressed(false); host.peek(null); v.performClick(); return true;
+                default: return true;
+            }
+        });
+        head.addView(before);
+        head.addView(gap());
         head.addView(Ui.button(a, "Done", true, v -> host.done()));
         view.addView(head);
 
         TextView hint = new TextView(a);
-        hint.setText("Long-press any setting for what it does.");
+        hint.setText("Long-press any setting for what it does. Hold Before to compare.");
         hint.setTextColor(Ui.DIM);
         hint.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
         hint.setPadding(0, dp(4), 0, dp(6));
@@ -115,7 +136,9 @@ final class Editor {
     /** Start editing `json`. */
     void load(String json) {
         try { scene = new JSONObject(json); } catch (JSONException e) { scene = new JSONObject(); }
+        original = scene.toString();
         undo.clear();
+        redo.clear();
         rebuild();
     }
 
@@ -164,12 +187,20 @@ final class Editor {
     private void remember() {
         undo.push(scene.toString());
         while (undo.size() > UNDO_MAX) undo.removeLast();
+        redo.clear();
         undoButton.setAlpha(1f);
+        redoButton.setAlpha(0.4f);
     }
 
-    private void undo() {
-        String s = undo.poll();
+    private void undo() { step(undo, redo); }
+    private void redo() { step(redo, undo); }
+
+    /** Go back (or forward again): the scene from `from`, keeping this one in `to`. */
+    private void step(ArrayDeque<String> from, ArrayDeque<String> to) {
+        String s = from.poll();
         if (s == null) return;
+        to.push(scene.toString());
+        while (to.size() > UNDO_MAX) to.removeLast();
         try { scene = new JSONObject(s); } catch (JSONException ignored) { }
         host.changed(scene.toString());
         rebuild();
@@ -191,6 +222,7 @@ final class Editor {
 
     private void rebuild() {
         undoButton.setAlpha(undo.isEmpty() ? 0.4f : 1f);
+        redoButton.setAlpha(redo.isEmpty() ? 0.4f : 1f);
         tabs.removeAllViews();
         List<String> labels = new ArrayList<>();
         List<Integer> index = new ArrayList<>();

@@ -267,6 +267,11 @@ public final class MainActivity extends Activity implements Editor.Host {
 
         body.addView(Ui.label(this, "Live wallpaper"));
         body.addView(new Ui.Chips(this, Look.QUALITIES, look.quality, i -> { look.quality = i; look.save(this); }).view);
+        body.addView(Ui.label(this, "Wallpaper battery saver"));
+        body.addView(new Ui.Chips(this, Saver.MODES, Saver.mode(this), i -> {
+            Saver.setMode(this, i);
+            if (i == 0) toast("Fewer frames a second while the battery is low or the phone saves power");
+        }).view);
 
         body.addView(Ui.label(this, "Draw on"));
         body.addView(new Ui.Chips(this, new String[]{"GPU (fast)", "CPU"}, Gpu.wanted(this) ? 0 : 1, i -> {
@@ -290,6 +295,26 @@ public final class MainActivity extends Activity implements Editor.Host {
         edit.addView(gap(8));
         edit.addView(Ui.button(this, "Save scene", false, v -> askSave(look.name, null)), new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
         p.addView(edit);
+
+        // A new scene at random (keeping the parts you lock), and scenes as share codes.
+        LinearLayout fun = new LinearLayout(this);
+        fun.setPadding(0, Ui.dp(this, 8), 0, 0);
+        TextView surprise = Ui.button(this, "Surprise me", false, v -> surprise());
+        surprise.setOnLongClickListener(v -> { askLocks(); return true; });
+        fun.addView(surprise, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1.3f));
+        fun.addView(gap(6));
+        fun.addView(Ui.button(this, "Locks", false, v -> askLocks()), new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 0.8f));
+        fun.addView(gap(6));
+        backButton = Ui.button(this, "Back", false, v -> back());
+        backButton.setAlpha(0.4f);
+        fun.addView(backButton, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 0.8f));
+        p.addView(fun);
+        LinearLayout codes = new LinearLayout(this);
+        codes.setPadding(0, Ui.dp(this, 8), 0, 0);
+        codes.addView(Ui.button(this, "Share code / QR", false, v -> shareCode()), new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1.2f));
+        codes.addView(gap(6));
+        codes.addView(Ui.button(this, "Open a code", false, v -> openCode(null)), new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        p.addView(codes);
 
         // What to do with it.
         LinearLayout actions = new LinearLayout(this);
@@ -455,6 +480,156 @@ public final class MainActivity extends Activity implements Editor.Host {
         try { startActivityForResult(i, EXPORT_SCENE); } catch (ActivityNotFoundException e) { toast("No file picker on this phone"); }
     }
 
+    // ── Surprise me, and share codes ─────────────────────────────────────
+
+    private static final String[] PARTS = {"camera", "path", "setting", "sky", "lighting", "props", "atmosphere", "look"};
+    private static final String[] PART_LABELS = {"Camera", "Path", "Walls and verge", "Sky", "Lights", "Props and wildlife", "Weather and season", "Look and lens"};
+    /** Scenes to go back to after a surprise or an opened code. */
+    private final java.util.ArrayDeque<String[]> history = new java.util.ArrayDeque<>();
+    private TextView backButton;
+
+    private String locks() { return getSharedPreferences("look", MODE_PRIVATE).getString("locks", "camera"); }
+
+    /** Which parts "Surprise me" keeps as they are. */
+    private void askLocks() {
+        List<String> on = java.util.Arrays.asList(locks().split(","));
+        boolean[] checked = new boolean[PARTS.length];
+        for (int i = 0; i < PARTS.length; i++) checked[i] = on.contains(PARTS[i]);
+        new AlertDialog.Builder(this).setTitle("Keep these as they are")
+                .setMultiChoiceItems(PART_LABELS, checked, (d, i, v) -> checked[i] = v)
+                .setPositiveButton("Surprise me", (d, w) -> { saveLocks(checked); surprise(); })
+                .setNegativeButton("Done", (d, w) -> saveLocks(checked))
+                .show();
+    }
+
+    private void saveLocks(boolean[] checked) {
+        StringBuilder b = new StringBuilder();
+        for (int i = 0; i < PARTS.length; i++) if (checked[i]) b.append(b.length() > 0 ? "," : "").append(PARTS[i]);
+        getSharedPreferences("look", MODE_PRIVATE).edit().putString("locks", b.toString()).apply();
+    }
+
+    /** A new scene: the locked parts of this one, the rest from presets picked at random. */
+    private void surprise() {
+        String from = look.scene(), keep = locks();
+        int seed = (int) (Math.random() * 1_000_000);
+        work.execute(() -> {
+            String s = Native.remix(from, keep, seed);
+            ui.post(() -> {
+                if (s == null) { toast("Could not make one: " + Native.lastError()); return; }
+                show(s, null);
+            });
+        });
+    }
+
+    /** Make `scene` the current one (remembering this one for Back). */
+    private void show(String scene, String name) {
+        history.push(new String[]{look.scene(), look.name, String.valueOf(look.mine)});
+        while (history.size() > 30) history.removeLast();
+        backButton.setAlpha(1f);
+        look.scene = scene;
+        try { look.name = name != null ? name : new JSONObject(scene).optString("name", "Surprise"); } catch (JSONException e) { look.name = "Surprise"; }
+        look.mine = false;
+        sceneChanged(true);
+        refreshStrip();
+    }
+
+    private void back() {
+        String[] h = history.poll();
+        if (h == null) return;
+        look.scene = h[0];
+        look.name = h[1];
+        look.mine = Boolean.parseBoolean(h[2]);
+        backButton.setAlpha(history.isEmpty() ? 0.4f : 1f);
+        sceneChanged(true);
+        refreshStrip();
+    }
+
+    /** The scene as a share code: a line of text and its QR code, to copy or send. */
+    private void shareCode() {
+        String scene = look.scene();
+        work.execute(() -> {
+            String code = Native.shareCode(scene);
+            byte[] qr = code == null ? null : Native.qr(code);
+            ui.post(() -> {
+                if (code == null) { toast("Could not make a code: " + Native.lastError()); return; }
+                LinearLayout box = new LinearLayout(this);
+                box.setOrientation(LinearLayout.VERTICAL);
+                int pad = Ui.dp(this, 20);
+                box.setPadding(pad, pad / 2, pad, 0);
+                Bitmap q = qrBitmap(qr);
+                if (q != null) {
+                    ImageView iv = new ImageView(this);
+                    iv.setImageBitmap(q);
+                    iv.setAdjustViewBounds(true);
+                    box.addView(iv, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+                }
+                TextView t = new TextView(this);
+                t.setText(code);
+                t.setTextIsSelectable(true);
+                t.setTypeface(Typeface.MONOSPACE);
+                t.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11);
+                t.setMaxLines(6);
+                t.setPadding(0, pad / 2, 0, 0);
+                box.addView(t);
+                new AlertDialog.Builder(this).setTitle(look.name).setView(box)
+                        .setPositiveButton("Send…", (d, w) -> {
+                            Intent i = new Intent(Intent.ACTION_SEND).setType("text/plain").putExtra(Intent.EXTRA_TEXT, code);
+                            try { startActivity(Intent.createChooser(i, "Share the scene")); } catch (ActivityNotFoundException e) { toast("Nothing here can send text"); }
+                        })
+                        .setNeutralButton("Copy", (d, w) -> {
+                            android.content.ClipboardManager cm = (android.content.ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
+                            if (cm != null) { cm.setPrimaryClip(android.content.ClipData.newPlainText("PathForge scene", code)); toast("Copied"); }
+                        })
+                        .setNegativeButton("Close", null).show();
+            });
+        });
+    }
+
+    /** A QR code from Native.qr (its width, then a byte a module) as a bitmap with a white margin. */
+    private static Bitmap qrBitmap(byte[] q) {
+        if (q == null || q.length < 2) return null;
+        int n = q[0] & 0xFF, scale = 8, side = (n + 8) * scale;
+        if (q.length < 1 + n * n) return null;
+        int[] px = new int[side * side];
+        java.util.Arrays.fill(px, Color.WHITE);
+        for (int my = 0; my < n; my++) for (int mx = 0; mx < n; mx++) {
+            if (q[1 + my * n + mx] == 0) continue;
+            for (int y = (my + 4) * scale; y < (my + 5) * scale; y++) java.util.Arrays.fill(px, y * side + (mx + 4) * scale, y * side + (mx + 5) * scale, Color.BLACK);
+        }
+        return Bitmap.createBitmap(px, side, side, Bitmap.Config.ARGB_8888);
+    }
+
+    /** Open a share code: pasted, or `given` (one sent to the app). */
+    private void openCode(String given) {
+        EditText e = new EditText(this);
+        e.setHint("PF1.…");
+        e.setTypeface(Typeface.MONOSPACE);
+        String start = given;
+        if (start == null) {
+            android.content.ClipboardManager cm = (android.content.ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
+            CharSequence c = cm != null && cm.hasPrimaryClip() && cm.getPrimaryClip().getItemCount() > 0 ? cm.getPrimaryClip().getItemAt(0).coerceToText(this) : null;
+            if (c != null && c.toString().trim().startsWith("PF1.")) start = c.toString().trim();
+        }
+        if (start != null) e.setText(start);
+        int pad = Ui.dp(this, 20);
+        FrameLayout f = new FrameLayout(this);
+        f.setPadding(pad, pad / 2, pad, 0);
+        f.addView(e);
+        new AlertDialog.Builder(this).setTitle("Open a share code").setView(f)
+                .setPositiveButton("Open", (d, w) -> {
+                    String code = e.getText().toString();
+                    work.execute(() -> {
+                        String s = Native.unshare(code);
+                        ui.post(() -> {
+                            if (s == null) { toast(Native.lastError()); return; }
+                            show(s, null);
+                            toast("Opened " + look.name + ". Save scene keeps it.");
+                        });
+                    });
+                })
+                .setNegativeButton("Cancel", null).show();
+    }
+
     // ── The editor ───────────────────────────────────────────────────────
 
     private void openEditor() {
@@ -470,6 +645,12 @@ public final class MainActivity extends Activity implements Editor.Host {
         look.scene = scene;
         ui.removeCallbacks(applyEdit);
         ui.postDelayed(applyEdit, 120);
+    }
+
+    @Override
+    public void peek(String scene) {
+        ui.removeCallbacks(applyEdit);
+        preview.setScene(scene != null ? scene : look.scene());
     }
 
     @Override

@@ -52,6 +52,25 @@ pub extern "C" fn pfm_normalize(json: *const c_char) -> *mut c_char {
 #[no_mangle]
 pub extern "C" fn pfm_last_error() -> *mut c_char { out(crate::last_error()) }
 
+/// "Surprise me": the parts in `keep` (comma separated) stay, the rest come from presets picked
+/// by `seed`. NULL on failure (see pfm_last_error).
+#[no_mangle]
+pub extern "C" fn pfm_remix(json: *const c_char, keep: *const c_char, seed: u32) -> *mut c_char {
+    match guard(None, || crate::remix(&arg(json)?, &arg(keep)?, seed).map(Some)) { Some(s) => out(s), None => std::ptr::null_mut() }
+}
+
+/// A scene as a share code, or NULL.
+#[no_mangle]
+pub extern "C" fn pfm_share_code(json: *const c_char) -> *mut c_char {
+    match guard(None, || crate::share_code(&arg(json)?).map(Some)) { Some(s) => out(s), None => std::ptr::null_mut() }
+}
+
+/// The scene a share code holds, or NULL (see pfm_last_error).
+#[no_mangle]
+pub extern "C" fn pfm_unshare(code: *const c_char) -> *mut c_char {
+    match guard(None, || crate::unshare(&arg(code)?).map(Some)) { Some(s) => out(s), None => std::ptr::null_mut() }
+}
+
 /// Start the GPU renderer: the adapter's name, or "" where there is none (see pfm_last_error).
 #[no_mangle]
 pub extern "C" fn pfm_gpu_init() -> *mut c_char { out(guard(None, || Ok(crate::gpu().map(|g| g.1))).unwrap_or_default()) }

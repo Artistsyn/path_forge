@@ -16,10 +16,16 @@ final class EditorModel: ObservableObject {
     @Published var open: Set<String> = []
     @Published var help: Note?
     @Published private(set) var canUndo = false
+    @Published private(set) var canRedo = false
     private(set) var root = NSMutableDictionary()
     private var undo: [Data] = []
+    private var redo: [Data] = []
+    /// The scene as it was when editing began, for Before.
+    private(set) var original = "{}"
     /// Told the scene, as JSON, after each change.
     var onChange: ((String) -> Void)?
+    /// Told to show a scene for a moment without changing anything (nil: the edited one again).
+    var onPeek: ((String?) -> Void)?
 
     init(form: String) {
         let o = form.data(using: .utf8).flatMap { try? JSONSerialization.jsonObject(with: $0) } as? [String: Any]
@@ -29,7 +35,10 @@ final class EditorModel: ObservableObject {
     func load(_ json: String) {
         root = (json.data(using: .utf8).flatMap { try? JSONSerialization.jsonObject(with: $0, options: [.mutableContainers]) } as? NSMutableDictionary) ?? NSMutableDictionary()
         undo = []
+        redo = []
         canUndo = false
+        canRedo = false
+        original = json
         objectWillChange.send()
     }
 
@@ -85,13 +94,22 @@ final class EditorModel: ObservableObject {
     func remember() {
         if let d = try? JSONSerialization.data(withJSONObject: root) { undo.append(d) }
         if undo.count > 100 { undo.removeFirst() }
+        redo = []
         canUndo = true
+        canRedo = false
     }
 
-    func stepBack() {
-        guard let d = undo.popLast() else { return }
+    func stepBack() { step(&undo, &redo) }
+    func stepForward() { step(&redo, &undo) }
+
+    /// Go back (or forward again): the scene from `from`, keeping this one in `to`.
+    private func step(_ from: inout [Data], _ to: inout [Data]) {
+        guard let d = from.popLast() else { return }
+        if let now = try? JSONSerialization.data(withJSONObject: root) { to.append(now) }
+        if to.count > 100 { to.removeFirst() }
         root = ((try? JSONSerialization.jsonObject(with: d, options: [.mutableContainers])) as? NSMutableDictionary) ?? root
         canUndo = !undo.isEmpty
+        canRedo = !redo.isEmpty
         objectWillChange.send()
         onChange?(json)
     }
@@ -146,16 +164,24 @@ let accent = Color(red: 1, green: 0.61, blue: 0.33)
 struct EditorView: View {
     @ObservedObject var ed: EditorModel
     let done: () -> Void
+    @State private var peeking = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack {
-                Text("Edit scene").font(.title3.bold())
+                Text("Edit").font(.title3.bold())
                 Spacer()
                 Button("Undo") { ed.stepBack() }.buttonStyle(Pill()).disabled(!ed.canUndo).opacity(ed.canUndo ? 1 : 0.4)
+                Button("Redo") { ed.stepForward() }.buttonStyle(Pill()).disabled(!ed.canRedo).opacity(ed.canRedo ? 1 : 0.4)
+                // Hold to see the scene as it was before these edits.
+                Text("Before").font(.subheadline.weight(.semibold)).padding(.horizontal, 14).padding(.vertical, 8)
+                    .background(Capsule().fill(Color.white.opacity(peeking ? 0.3 : 0.12)))
+                    .gesture(DragGesture(minimumDistance: 0)
+                        .onChanged { _ in if !peeking { peeking = true; ed.onPeek?(ed.original) } }
+                        .onEnded { _ in peeking = false; ed.onPeek?(nil) })
                 Button("Done", action: done).buttonStyle(Pill(primary: true))
             }
-            Text("Long-press a setting's name for what it does.").font(.caption).foregroundColor(.secondary)
+            Text("Long-press a setting's name for what it does. Hold Before to compare.").font(.caption).foregroundColor(.secondary)
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 8) {
                     ForEach(Array(visibleParts.enumerated()), id: \.offset) { _, item in

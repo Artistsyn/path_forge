@@ -72,6 +72,30 @@ pub fn preset_scene(name: &str) -> Option<String> {
     presets::ALL.iter().find(|(n, _)| *n == name).and_then(|(_, f)| serde_json::to_string(&f()).ok())
 }
 
+/// "Surprise me": a variation of the scene where the parts named in `keep` (comma separated)
+/// stay and the rest come from presets picked by `seed`.
+pub fn remix(json: &str, keep: &str, seed: u32) -> Result<String, String> {
+    let base = Scene::from_json(json)?;
+    let keep: Vec<&str> = keep.split(',').map(str::trim).filter(|k| !k.is_empty()).collect();
+    let s = path_forge::scene::remix::remix(&base, &keep, seed, 0.0)?;
+    serde_json::to_string(&s).map_err(|e| e.to_string())
+}
+
+/// A scene as a share code, and back (path_forge::scene::share).
+pub fn share_code(json: &str) -> Result<String, String> { path_forge::scene::share::encode(&Scene::from_json(json)?) }
+pub fn unshare(code: &str) -> Result<String, String> {
+    serde_json::to_string(&path_forge::scene::share::decode(code)?).map_err(|e| e.to_string())
+}
+
+/// A QR code of `text`: its width in modules, then a byte a module (1 dark), row by row.
+pub fn qr(text: &str) -> Result<Vec<u8>, String> {
+    let (w, dark) = path_forge::scene::share::qr(text)?;
+    let mut out = Vec::with_capacity(1 + dark.len());
+    out.push(w as u8);
+    out.extend(dark.iter().map(|&d| d as u8));
+    Ok(out)
+}
+
 /// A scene file's JSON read the way the desktop reads it (older formats are converted), written
 /// back in the current format.
 pub fn normalize(json: &str) -> Result<String, String> {

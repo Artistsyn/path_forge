@@ -143,3 +143,27 @@ pub extern "system" fn Java_com_pathforge_mobile_Native_exportProgress(env: JNIE
 
 #[no_mangle]
 pub extern "system" fn Java_com_pathforge_mobile_Native_exportCancel(_: JNIEnv, _: JClass) { crate::export_cancel(); }
+
+#[no_mangle]
+pub extern "system" fn Java_com_pathforge_mobile_Native_remix(mut env: JNIEnv, _: JClass, json: JString, keep: JString, seed: jint) -> jstring {
+    let r = guard(None, || { let (j, k) = (string(&mut env, &json)?, string(&mut env, &keep)?); crate::remix(&j, &k, seed as u32).map(Some) });
+    match r { Some(s) => jstr(&mut env, &s), None => std::ptr::null_mut() }
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_pathforge_mobile_Native_shareCode(mut env: JNIEnv, _: JClass, json: JString) -> jstring {
+    let r = guard(None, || { let j = string(&mut env, &json)?; crate::share_code(&j).map(Some) });
+    match r { Some(s) => jstr(&mut env, &s), None => std::ptr::null_mut() }
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_pathforge_mobile_Native_unshare(mut env: JNIEnv, _: JClass, code: JString) -> jstring {
+    let r = guard(None, || { let c = string(&mut env, &code)?; crate::unshare(&c).map(Some) });
+    match r { Some(s) => jstr(&mut env, &s), None => std::ptr::null_mut() }
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_pathforge_mobile_Native_qr(mut env: JNIEnv, _: JClass, text: JString) -> jni::sys::jbyteArray {
+    let r = guard(None, || { let t = string(&mut env, &text)?; crate::qr(&t).map(Some) });
+    match r { Some(b) => env.byte_array_from_slice(&b).map(|a| a.into_raw()).unwrap_or(std::ptr::null_mut()), None => std::ptr::null_mut() }
+}

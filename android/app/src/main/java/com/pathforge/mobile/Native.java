@@ -38,6 +38,18 @@ final class Native {
     static native void exportCancel();
     /** Draw into a direct buffer of w * h * 4 bytes (RGBA, as an ARGB_8888 bitmap holds it). */
     static native boolean render(long handle, float distance, float time, int w, int h, ByteBuffer out);
+    /** A new variation of a scene ("Surprise me"): the parts named in `keep` (comma separated:
+     *  camera, path, setting, sky, lighting, props, atmosphere, look) stay, the rest come from
+     *  presets picked by `seed`. Null on failure (see lastError). */
+    static native String remix(String json, String keep, int seed);
+    /** A scene as a share code (one short line of text starting PF1.), or null. */
+    static native String shareCode(String json);
+    /** The scene a share code holds, or null (see lastError). */
+    static native String unshare(String code);
+    /** A QR code of `text`: its width in modules, then one byte a module (1 dark), row by row;
+     *  null when it is too long. */
+    static native byte[] qr(String text);
+
     /** The phone's local time of day, hours (0..24), for scenes whose day and night follow the clock. */
     static native void setClock(float hour);
 

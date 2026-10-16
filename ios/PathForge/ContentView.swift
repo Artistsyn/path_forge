@@ -1,4 +1,5 @@
 import SwiftUI
+import CoreImage
 import UIKit
 import UniformTypeIdentifiers
 
@@ -82,6 +83,13 @@ struct ContentView: View {
             }
         }
         .background(Color.clear.sheet(isPresented: $model.askingAnimation) { AnimationSheet(model: model) })
+        .background(Color.clear.sheet(isPresented: $model.askingLocks) { LocksSheet(model: model) })
+        .background(Color.clear.sheet(item: $model.sharing) { c in CodeSheet(code: c) })
+        .background(Color.clear.alert("Open a share code", isPresented: $model.openingCode) {
+            TextField("PF1.…", text: $model.codeText)
+            Button("Open") { model.open(code: model.codeText) }
+            Button("Cancel", role: .cancel) { }
+        })
         .background(Color.clear.sheet(item: Binding(get: { model.shareURL.map { SharedFile(url: $0) } }, set: { if $0 == nil { model.shareURL = nil } })) { f in
             ShareSheet(items: [f.url])
         })
@@ -193,6 +201,16 @@ struct Panel: View {
                 Button("Save scene") { model.save(suggest: model.look.name) }.buttonStyle(Pill())
             }
             HStack {
+                Button("Surprise me") { model.surprise() }.buttonStyle(Pill())
+                    .simultaneousGesture(LongPressGesture().onEnded { _ in model.askingLocks = true })
+                Button("Locks") { model.askingLocks = true }.buttonStyle(Pill())
+                Button("Back") { model.back() }.buttonStyle(Pill()).disabled(!model.canGoBack).opacity(model.canGoBack ? 1 : 0.4)
+            }
+            HStack {
+                Button("Share code / QR") { model.shareCode() }.buttonStyle(Pill())
+                Button("Open a code") { model.openCode() }.buttonStyle(Pill())
+            }
+            HStack {
                 Button("Still") { model.saveStill() }.buttonStyle(Pill(primary: true))
                 Button("Live Photo") { model.saveLivePhoto() }.buttonStyle(Pill(primary: true))
                 Button("Video") { model.saveVideo() }.buttonStyle(Pill())
@@ -276,5 +294,75 @@ struct AnimationSheet: View {
         .padding(20)
         .presentationDetents([.medium])
         .preferredColorScheme(.dark)
+    }
+}
+
+/// A share code, as an item for `.sheet(item:)`.
+struct SharedCode: Identifiable {
+    let name: String
+    let code: String
+    var id: String { code }
+}
+
+/// The parts "Surprise me" keeps.
+struct LocksSheet: View {
+    @ObservedObject var model: AppModel
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationView {
+            List {
+                Section(footer: Text("Surprise me keeps these and takes the rest from presets at random. Back undoes a surprise.")) {
+                    ForEach(Array(AppModel.parts.enumerated()), id: \.offset) { i, part in
+                        Toggle(AppModel.partLabels[i], isOn: Binding(get: { model.locks.contains(part) }, set: { on in if on { model.locks.insert(part) } else { model.locks.remove(part) } }))
+                    }
+                }
+            }
+            .navigationTitle("Keep as they are")
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) { Button("Done") { dismiss() } }
+                ToolbarItem(placement: .confirmationAction) { Button("Surprise me") { dismiss(); model.surprise() } }
+            }
+        }
+    }
+}
+
+/// A scene's share code: its QR code to scan, and the text to copy or send.
+struct CodeSheet: View {
+    let code: SharedCode
+    @Environment(\.dismiss) private var dismiss
+    @State private var copied = false
+
+    var body: some View {
+        NavigationView {
+            ScrollView {
+                VStack(spacing: 16) {
+                    if let img = CodeSheet.qr(code.code) {
+                        Image(uiImage: img).interpolation(.none).resizable().scaledToFit()
+                            .frame(maxWidth: 320).padding(12).background(Color.white).cornerRadius(12)
+                    } else {
+                        Text("Too long for a QR code; share the text instead.").font(.caption).foregroundColor(.secondary)
+                    }
+                    Text(code.code).font(.system(.caption, design: .monospaced)).textSelection(.enabled).lineLimit(8)
+                    HStack {
+                        Button(copied ? "Copied" : "Copy") { UIPasteboard.general.string = code.code; copied = true }.buttonStyle(Pill())
+                        ShareLink(item: code.code) { Text("Send…") }.buttonStyle(Pill(primary: true))
+                    }
+                }
+                .padding()
+            }
+            .navigationTitle(code.name)
+            .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } } }
+        }
+    }
+
+    /// The QR code of `text`, drawn by Core Image.
+    static func qr(_ text: String) -> UIImage? {
+        guard let f = CIFilter(name: "CIQRCodeGenerator") else { return nil }
+        f.setValue(Data(text.utf8), forKey: "inputMessage")
+        f.setValue("L", forKey: "inputCorrectionLevel")
+        guard let out = f.outputImage?.transformed(by: CGAffineTransform(scaleX: 8, y: 8)),
+              let cg = CIContext().createCGImage(out, from: out.extent) else { return nil }
+        return UIImage(cgImage: cg)
     }
 }

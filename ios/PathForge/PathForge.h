@@ -27,6 +27,13 @@ PfmHandle *pfm_open(const char *json, const char *base_dir, bool gpu);
 bool pfm_set_scene(PfmHandle *h, const char *json);
 /* The phone's local time of day, hours (0..24), for scenes whose day and night follow the clock. */
 void pfm_set_clock(float hour);
+/** A variation of a scene: the parts in `keep` (comma separated: camera, path, setting, sky,
+ *  lighting, props, atmosphere, look) stay, the rest come from presets picked by `seed`. NULL on failure. */
+char *pfm_remix(const char *json, const char *keep, uint32_t seed);
+/** A scene as a share code (one line of text starting PF1.), or NULL. */
+char *pfm_share_code(const char *json);
+/** The scene a share code holds, or NULL (see pfm_last_error). */
+char *pfm_unshare(const char *code);
 void pfm_close(PfmHandle *h);
 /** [loop length (m), loop seconds, fps, canvas width, canvas height] into info[5]. */
 bool pfm_info(PfmHandle *h, float *info);

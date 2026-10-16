@@ -79,6 +79,11 @@ final class AppModel: ObservableObject {
         }
         if gpuOn { startGpu() }
         editor.onChange = { [weak self] json in self?.edited(json) }
+        editor.onPeek = { [weak self] json in
+            guard let self = self else { return }
+            self.pending?.cancel()
+            self.preview?.setScene(json ?? self.scene)
+        }
         refreshLibrary()
         loadThumbs(presets.map { ("preset", $0) })
     }
@@ -152,6 +157,83 @@ final class AppModel: ObservableObject {
     func showStats(gpu: Bool, width: Int, height: Int, fps: Double) {
         let engine = gpu ? (gpuName.isEmpty ? "GPU" : "GPU \(gpuName)") : "CPU"
         status = String(format: "%@  ·  %d×%d  ·  %.0f fps", engine, width, height, fps)
+    }
+
+    // ── Surprise me, and share codes ─────────────────────────────────────
+
+    static let parts = ["camera", "path", "setting", "sky", "lighting", "props", "atmosphere", "look"]
+    static let partLabels = ["Camera", "Path", "Walls and verge", "Sky", "Lights", "Props and wildlife", "Weather and season", "Look and lens"]
+    /// The parts "Surprise me" keeps as they are.
+    @Published var locks: Set<String> = Set((UserDefaults.standard.string(forKey: "locks") ?? "camera").split(separator: ",").map(String.init)) {
+        didSet { UserDefaults.standard.set(AppModel.parts.filter { locks.contains($0) }.joined(separator: ","), forKey: "locks") }
+    }
+    @Published var askingLocks = false
+    @Published var sharing: SharedCode?
+    @Published var openingCode = false
+    @Published var codeText = ""
+    @Published private(set) var canGoBack = false
+    private var history: [(String, String, Bool)] = []
+
+    /// A new scene: the locked parts of this one, the rest from presets picked at random.
+    func surprise() {
+        let from = scene, keep = AppModel.parts.filter { locks.contains($0) }.joined(separator: ","), seed = UInt32.random(in: 0..<1_000_000)
+        work.async { [weak self] in
+            let s = Native.remix(from, keep: keep, seed: seed)
+            DispatchQueue.main.async {
+                guard let self = self else { return }
+                guard let s = s else { self.note = Note(title: "Could not make one", text: Native.lastError); return }
+                self.show(s)
+            }
+        }
+    }
+
+    /// Make `json` the current scene, remembering this one for Back.
+    private func show(_ json: String) {
+        history.append((look.scene, look.name, look.mine))
+        if history.count > 30 { history.removeFirst() }
+        canGoBack = true
+        look.scene = json
+        let o = json.data(using: .utf8).flatMap { try? JSONSerialization.jsonObject(with: $0) } as? [String: Any]
+        look.name = (o?["name"] as? String) ?? "Surprise"
+        look.mine = false
+        changed()
+    }
+
+    func back() {
+        guard let h = history.popLast() else { return }
+        look.scene = h.0
+        look.name = h.1
+        look.mine = h.2
+        canGoBack = !history.isEmpty
+        changed()
+    }
+
+    func shareCode() {
+        let json = scene, name = look.name
+        work.async { [weak self] in
+            let code = Native.shareCode(json)
+            DispatchQueue.main.async {
+                guard let self = self else { return }
+                guard let code = code else { self.note = Note(title: "Could not make a code", text: Native.lastError); return }
+                self.sharing = SharedCode(name: name, code: code)
+            }
+        }
+    }
+
+    func openCode() {
+        if let c = UIPasteboard.general.string?.trimmingCharacters(in: .whitespacesAndNewlines), c.hasPrefix("PF1.") { codeText = c } else { codeText = "" }
+        openingCode = true
+    }
+
+    func open(code: String) {
+        work.async { [weak self] in
+            let s = Native.unshare(code)
+            DispatchQueue.main.async {
+                guard let self = self else { return }
+                guard let s = s else { self.note = Note(title: "Could not open the code", text: Native.lastError); return }
+                self.show(s)
+            }
+        }
     }
 
     // ── The editor ───────────────────────────────────────────────────────
