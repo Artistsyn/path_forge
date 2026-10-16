@@ -991,7 +991,9 @@
     "amount": 0.55,
     "rise": 4.0,
     "width": 0.9
-   }
+   },
+   "facing": "PathWhenTurned",
+   "depth": 4.5
   },
   "well": {
    "description": "A stone well with a little roof, a windlass and a bucket.",
@@ -2240,7 +2242,9 @@
      ],
      "shade": 0.5
     }
-   ]
+   ],
+   "facing": "PathWhenTurned",
+   "depth": 1.6
   },
   "picket_fence": {
    "description": "A white picket fence, two metres to a section: space its layer every 1.9 m for an unbroken fence.",
@@ -2625,7 +2629,8 @@
      ],
      "shade": 0.5
     }
-   ]
+   ],
+   "facing": "PathWhenTurned"
   },
   "haybale": {
    "description": "A bale of hay, tied with twine.",
@@ -3215,7 +3220,9 @@
      ],
      "shade": 0.6
     }
-   ]
+   ],
+   "facing": "PathWhenTurned",
+   "depth": 1.2
   },
   "woodpile": {
    "description": "Split logs stacked for the winter, their cut ends showing.",
@@ -4120,7 +4127,9 @@
      ],
      "shade": 0.2
     }
-   ]
+   ],
+   "facing": "PathWhenTurned",
+   "depth": 0.9
   }
  }
 }

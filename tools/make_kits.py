@@ -123,6 +123,11 @@ def woodpile():
 
 settlement = {"name": "Settlement", "description": "A village by the road, drawn from shapes: cottages with lit windows and smoking chimneys, a well, a market stall, picket fences, hay bales, a cart and a woodpile. Use as \"@settlement#<name>\".",
               "props": {"cottage": cottage(), "well": well(), "market_stall": market_stall(), "picket_fence": picket_fence(), "haybale": haybale(), "cart": cart(), "woodpile": woodpile()}}
+# Buildings and long things stand along the street, their fronts to it, once the camera turns;
+# round things face the camera from any side. Depth makes the ends of a block walls.
+for name, depth in [("cottage", 4.5), ("market_stall", 1.6), ("picket_fence", 0.0), ("cart", 1.2), ("woodpile", 0.9)]:
+    settlement["props"][name]["facing"] = "PathWhenTurned"
+    if depth > 0: settlement["props"][name]["depth"] = depth
 
 # ── Waterside ─────────────────────────────────────────────────────────────
 def rowboat():

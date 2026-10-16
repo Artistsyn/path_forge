@@ -2788,6 +2788,13 @@ pub struct PropLayer {
     /// spacing, scale...) still comes from this layer.
     #[serde(skip_serializing_if = "String::is_empty")]
     pub def: String,
+    /// Which way the props face, in place of their definition's (`PropDef::facing`; built-in
+    /// kinds face the camera).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub facing: Option<Facing>,
+    /// How deep they are behind their fronts, in place of their definition's (`PropDef::depth`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub depth: Option<f32>,
 }
 impl Default for PropLayer {
     fn default() -> Self {
@@ -2795,6 +2802,7 @@ impl Default for PropLayer {
             enabled: true, kind: PropKind::Tree, side: Side::Both, lateral: 1.5, spacing: 6.0, offset: 0.0, rows: 1,
             row_spacing: 3.0, jitter: 0.5, jitter_along: 0.0, stagger: 0.0, density: 1.0, scale: 1.0, scale_var: 0.2, lean_var: 0.0, tint_var: 0.12, tint: PropKind::Tree.default_tint(),
             sink: 0.02, float: 0.0, float_var: 0.0, orbit: Orbit::default(), shadow: true, shadow_opacity: 0.6, sprite: SpriteRef::default(), seed: 1, def: String::new(),
+            facing: None, depth: None,
         }
     }
 }
@@ -2848,14 +2856,38 @@ pub struct PropDef {
     pub trim: bool,
     /// Smoke rising from it: a chimney, a campfire, a smouldering ruin.
     pub smoke: PropSmoke,
+    /// Which way its picture faces (see `Facing`): the camera (a tree, a rock: the same from every
+    /// side), or the path (a building's front, a fence, a stall), seen at an angle when the camera
+    /// is turned.
+    pub facing: Facing,
+    /// Facing the path: how deep it is behind its front, metres. Its ends are drawn as walls that
+    /// deep (from the edges of its picture), so seen at an angle it reads as a solid block; 0 is a
+    /// flat front.
+    pub depth: f32,
 }
 impl Default for PropDef {
     fn default() -> Self {
         Self {
             description: String::new(), sprite: SpriteRef::default(), shape: Vec::new(), kind: PropKind::Rock, tint: None,
             height: 0.0, anchor: Anchor::Ground, glow: 0.0, glow_from: 0.0, light: PropLight::default(), trim: true, smoke: PropSmoke::default(),
+            facing: Facing::Camera, depth: 0.0,
         }
     }
+}
+
+/// Which way a prop's picture faces.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub enum Facing {
+    /// Always toward the camera (a tree, a rock, a lamp: alike from every side).
+    #[default]
+    Camera,
+    /// Always toward the path, standing along it as a building's front does: seen at an angle
+    /// from down the path, and squarely from the side.
+    Path,
+    /// Toward the camera while it looks down the path, toward the path when it is turned
+    /// (`camera.yaw`): a building that looks as it always has from the path, and stands in the
+    /// street when seen from an angle or the side.
+    PathWhenTurned,
 }
 
 /// Smoke rising from a prop (`PropDef::smoke`): puffs that climb, spread, drift with the wind and

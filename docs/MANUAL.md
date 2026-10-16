@@ -215,8 +215,16 @@ props, lights, weather), the loop still closes, and the GPU draws the same frame
   metres past the path's edge, so the walking lane stays in view. Raise `eye_height` and lower
   `horizon` to see more of the lane.
 
-Props stay flat images that face the camera, so a cottage shows its front from any angle. To look
-down on a scene, raise `eye_height` and move `horizon` up: verticals stay vertical.
+**Props from an angle.** A prop's `facing` says which way its picture faces. `Camera` (the
+default, and every built-in kind) keeps it turned to the camera: right for trees, rocks and lamps,
+which look alike from every side. `Path` stands it along the path like a building's front, so from
+an angle it is seen obliquely and from the side squarely; `PathWhenTurned` faces the camera while it
+looks down the path and the path once `yaw` turns it, so a scene looks as it always has head-on and
+its buildings line the street from any angle. With `depth` (metres behind the front) the picture's
+ends are drawn as side walls that deep, so a cottage seen from an angle reads as a solid block, not
+a card. Set both on a prop definition, or per layer (`props.*.facing`, `props.*.depth`) over it.
+The settlement kit's buildings, stalls, carts, woodpiles and fences do this already. To look down
+on a scene, raise `eye_height` and move `horizon` up: verticals stay vertical.
 
 ### Camera moves
 

@@ -13,6 +13,7 @@ struct Card {
     id: u32, realm: u32, wx: f32, wy: f32, wd: f32, source: u32,
     w_amp: f32, w_v: f32, w_lean: f32, w_t1: f32, w_t2: f32, w_c0: f32, w_c1: f32, w_trunk: f32, w_foot: f32, w_kv: f32,
     snow_dust: f32,
+    pan: u32, ph: array<f32, 9>, pq0: f32, pq1: f32, pq2: f32, strip: f32,
 }
 
 struct Pass { tile_cols: u32, pick: u32, n_cards: u32, pad: u32 }
@@ -110,6 +111,39 @@ fn cards_main(@builtin(global_invocation_id) gid: vec3<u32>) {
     for (var k = a0; k < a1; k++) {
         let cd = cards[bins[ntiles + 1u + k]];
         if px < cd.x0 || px > cd.x1 || py < cd.y0 || py > cd.y1 { continue; }
+        if cd.pan != 0u {
+            // A card standing in the world (render::Card::draw_rows, its panel).
+            let fx = f32(px) + 0.5; let fy = f32(py) + 0.5;
+            let iz = rnd(cd.pq0 * fx) + rnd(cd.pq1 * fy) + cd.pq2;
+            if iz <= 0.0 { continue; }
+            let pz = 1.0 / iz;
+            if pz < 0.05 || pz >= g.depth { continue; }
+            let wd = rnd(cd.ph[6] * fx) + rnd(cd.ph[7] * fy) + cd.ph[8];
+            if abs(wd) < 1e-12 { continue; }
+            var pu = (rnd(cd.ph[0] * fx) + rnd(cd.ph[1] * fy) + cd.ph[2]) / wd;
+            let pv = (rnd(cd.ph[3] * fx) + rnd(cd.ph[4] * fy) + cd.ph[5]) / wd;
+            if !(pu >= 0.0 && pu < 1.0) || !(pv >= 0.0 && pv < 1.0) { continue; }
+            if cd.strip >= 0.0 { pu = cd.strip; } else if cd.flip != 0u { pu = 1.0 - pu; }
+            let pn = cd.nearest != 0u;
+            let ps = sprite_sample(cd.soff, cd.sw, cd.sh, pu, pv, pn);
+            var pa = ps.w;
+            if pn { pa = select(0.0, 1.0, ps.w >= 0.5); }
+            if pa < 0.02 { continue; }
+            var pglow = cd.emissive;
+            if cd.goff != 0xFFFFFFFFu { pglow += sprite_sample(cd.goff, cd.gw, cd.gh, pu, pv, pn).x; }
+            var plit = ps.xyz * vec3<f32>(cd.light_r, cd.light_g, cd.light_b) + ps.xyz * pglow;
+            if cd.snow_on != 0u && pa >= 0.5 { plit = snow_on_card(cd, pu, pv, plit); }
+            var pcol: vec3<f32>;
+            if cd.plain != 0u { pcol = mix3(vec3<f32>(cd.fog_r, cd.fog_g, cd.fog_b), plit, cd.fog_t); }
+            else { pcol = plit * cd.fog_mul + vec3<f32>(cd.add_r, cd.add_g, cd.add_b); }
+            c = mix3(c, pcol, pa);
+            touched = true;
+            if pa >= 0.5 {
+                g = GPix(pz, cd.wx, cd.wy, cd.wd, cd.id | (cd.realm << 8u));
+                pk = cd.source; wrote_pick = true;
+            }
+            continue;
+        }
         let row = div(f32(py) + 0.5 - cd.sy_top, cd.hp);
         if !(row >= 0.0 && row < 1.0) { continue; }
         var vv = row;

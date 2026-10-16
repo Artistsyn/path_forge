@@ -1,6 +1,6 @@
 ---
 name: pathforge
-description: Design, critique and export endless looping first-person path backgrounds for 2D games with PathForge (Path of Kings style portrait runners). Use when the user wants a walking-path / corridor / road background, wants to restyle, judge or export a PathForge scene, or needs depth layers, sprite sheets, encounter or biome-transition clips, or camera data for placing enemies on the path. Not for editing PathForge's own Rust code, side-scrolling parallax or top-down maps.
+description: Design, critique and export endless looping first-person path backgrounds for 2D games with PathForge (Path of Kings style portrait runners). Use when the user wants a walking-path / corridor / road background, wants to restyle, judge or export a PathForge scene, or needs depth layers, sprite sheets, encounter or biome-transition clips, or camera data for placing enemies on the path. Also endless side-scrollers seen from a turned camera. Not for editing PathForge's own Rust code or top-down maps.
 metadata:
   version: "1.0"
   tools: "pf_mcp MCP server (pf_* tools) or the pf CLI"
@@ -356,6 +356,9 @@ choose the details unless the plan's warnings say to.
 - **Angle / side-scroller:** `camera.yaw` (-90..90 deg) and `camera.side` (m sideways): yaw ~28 with
   side -1 looks along the path diagonally; yaw -90 with side 5 on an 854x480 canvas is an endless
   side-scroller (near side cut away past `camera.cutaway`; presets Village Side Scroll, Village Corner).
+  Give buildings and other fronts `facing: PathWhenTurned` (or `Path`) and a `depth` in metres, on the
+  prop def or the layer, so they stand along the street with side walls when turned (settlement kit
+  props already do); trees and rocks keep `Camera`.
 - **Camera and lens:** `camera.moves` (`bob`/`stride`/`sway` step with the walk, `pan`/`pans` and
   `tilt`/`tilts` slow looks, `dolly`/`dolly_focus`/`dollies` a dolly zoom: all whole cycles a
   loop; `fly_in` seconds of coming down from `fly_height` at the start, only in the runtime or

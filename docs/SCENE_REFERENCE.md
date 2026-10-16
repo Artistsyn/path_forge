@@ -414,6 +414,16 @@ them; far away they widen to a pixel and dim to match, so they do not flicker.
 | `dash` | number | `0.0` | Dashes: one dash and one gap every this many metres (snapped to divide the loop); 0 an unbroken line. |
 | `flow` | integer | `0` | How many dashes the lights run ahead in one loop, on top of the walk (negative: toward the camera). Whole numbers keep the loop seamless. |
 
+### Facing
+
+Which way a prop's picture faces.
+
+| Value | Meaning |
+|---|---|
+| `Camera` | Always toward the camera (a tree, a rock, a lamp: alike from every side). |
+| `Path` | Always toward the path, standing along it as a building's front does: seen at an angle from down the path, and squarely from the side. |
+| `PathWhenTurned` | Toward the camera while it looks down the path, toward the path when it is turned (`camera.yaw`): a building that looks as it always has from the path, and stands in the street when seen from an angle or the side. |
+
 ### Fence
 
 A waterfall beside the path (`scene.waterfalls`): a rock face with water pouring down it in
@@ -1010,6 +1020,8 @@ parts. Lives in `scene.prop_defs` or in a kit (a folder holding kit.json and its
 | `light` | [PropLight](#proplight) | (see the type) | Light it gives off, like a lamp. |
 | `trim` | boolean | `true` | Cut away transparent margins of images, so a sprite stands on its lowest visible pixel. |
 | `smoke` | [PropSmoke](#propsmoke) | (see the type) | Smoke rising from it: a chimney, a campfire, a smouldering ruin. |
+| `facing` | [Facing](#facing) | `"Camera"` | Which way its picture faces (see `Facing`): the camera (a tree, a rock: the same from every side), or the path (a building's front, a fence, a stall), seen at an angle when the camera is turned. |
+| `depth` | number | `0.0` | Facing the path: how deep it is behind its front, metres. Its ends are drawn as walls that deep (from the edges of its picture), so seen at an angle it reads as a solid block; 0 is a flat front. |
 
 ### PropKind
 
@@ -1047,6 +1059,8 @@ A repeating row (or several rows) of props beside the path.
 | `sprite` | [SpriteRef](#spriteref) | (see the type) |  |
 | `seed` | integer | `1` |  |
 | `def` | string |  | A prop described by data instead of `kind`: the name of one in `prop_defs`, or `"<kit folder>#<name>"` for one in a kit (relative to the scene file). Placement (side, spacing, scale...) still comes from this layer. |
+| `facing` | [Facing](#facing) or null |  | Which way the props face, in place of their definition's (`PropDef::facing`; built-in kinds face the camera). |
+| `depth` | number or null |  | How deep they are behind their fronts, in place of their definition's (`PropDef::depth`). |
 
 ### PropLight
 

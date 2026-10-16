@@ -241,7 +241,16 @@ struct Billboard {
     tint: [f32; 3],
     /// How its picture stirs in the wind now.
     wind: CardWind,
+    /// Standing in the world facing one way (a building's front along the path, `Facing::Path`)
+    /// rather than turned toward the camera: drawn in perspective.
+    panel: Option<Panel>,
 }
+
+/// A card standing in the world: its picture spans `width` metres along `u_dir` (a level unit
+/// direction, x and d) from its middle at `world`, and faces `normal`. `strip` draws only one
+/// column of the picture (u) stretched across it: the end walls of a prop with depth.
+#[derive(Clone, Copy, Debug)]
+struct Panel { u_dir: [f32; 3], normal: [f32; 3], width: f32, strip: Option<f32> }
 
 /// The wind in a card's picture: the base and trunk stay where they are while the rest shifts by
 /// a field of waves running downwind. Lengths are shares of the card's width (`v`, of its
@@ -1218,7 +1227,7 @@ impl WorldRenderer {
                 let z = ctxs[0].view.to_cam(0.0, 0.0, zb)[2];
                 bills.push(Billboard {
                     z: z - 0.05, world: [0.0, 0.0, zb - 0.05], height, sprite, flip: false, nearest: false, id: id::PROP,
-                    emissive: if kind == SetPieceKind::Portal { 0.9 } else { 0.0 }, shadow: 0.6, own_light: None, source: 0, realm: 0, sway: 0.0, tint: [1.0; 3], wind: CardWind::default(),
+                    emissive: if kind == SetPieceKind::Portal { 0.9 } else { 0.0 }, shadow: 0.6, own_light: None, source: 0, realm: 0, panel: None, sway: 0.0, tint: [1.0; 3], wind: CardWind::default(),
                 });
             }
         }
@@ -2056,7 +2065,7 @@ impl WorldRenderer {
                             bills.push(Billboard {
                                 z, world: [x, base, d], height: body_h, sprite: sprite.clone(),
                                 flip: sign > 0.0 && (matches!(f.mount, Mount::Wall) || on_pole), nearest: f.sprite.pixelated,
-                                id: id::FIXTURE, emissive, shadow: 0.0, own_light: None, source: PICK_FIXTURES | fi as u16, realm: ctx.realm, sway: 0.0,
+                                id: id::FIXTURE, emissive, shadow: 0.0, own_light: None, source: PICK_FIXTURES | fi as u16, realm: ctx.realm, panel: None, sway: 0.0,
                                 // A neon sign's tubes take its colour, and stutter with it.
                                 tint: if f.kind == FixtureKind::Neon && !f.sprite.is_set() { let g = glow; let m = g[0].max(g[1]).max(g[2]).max(1e-3); scale3(g, flicker.min(1.2) / m) } else { [1.0; 3] },
                                 wind: CardWind::default() });
@@ -2137,7 +2146,7 @@ impl WorldRenderer {
                     let z = ctx.view.to_cam(x, base, d + 0.3)[2];
                     bills.push(Billboard {
                         z, world: [x, base, d + 0.3], height: h * 1.25, sprite, sway: 0.0, tint: [1.0; 3], wind: CardWind::default(),
-                        flip: sign > 0.0, nearest: false, id: id::PROP, emissive: 0.0, shadow: 0.0, own_light: None, source: 0, realm: ctx.realm,
+                        flip: sign > 0.0, nearest: false, id: id::PROP, emissive: 0.0, shadow: 0.0, own_light: None, source: 0, realm: ctx.realm, panel: None,
                     });
                     ctx.falls.push(([x, h * 1.05, d], wf.width, wi));
                 }
@@ -2196,7 +2205,7 @@ impl WorldRenderer {
                 bills.push(Billboard {
                     z, world: [0.0, 0.0, d], height, sprite, flip: false, nearest: p.sprite.pixelated, id: id::PROP,
                     emissive: if p.kind == SetPieceKind::Portal { 0.9 } else { 0.0 },
-                    shadow: p.shadow.clamp(0.0, 1.0), own_light: None, source: PICK_SET_PIECES | li as u16, realm: ctx.realm, sway, tint: [1.0; 3], wind: CardWind::default() });
+                    shadow: p.shadow.clamp(0.0, 1.0), own_light: None, source: PICK_SET_PIECES | li as u16, realm: ctx.realm, panel: None, sway, tint: [1.0; 3], wind: CardWind::default() });
             }
         }
     }
@@ -2238,7 +2247,7 @@ impl WorldRenderer {
             let z = ctx.view.to_cam(x, base, d)[2];
             bills.push(Billboard {
                 z, world: [x, base, d], height, sprite, flip: c.sprite.flip_x, nearest: c.sprite.pixelated, id: id::PROP,
-                emissive: 0.0, shadow: 0.0, own_light, source: PICK_COMPANIONS | ci as u16, realm: ctx.realm, sway: 0.0, tint: [1.0; 3], wind: CardWind::default(),
+                emissive: 0.0, shadow: 0.0, own_light, source: PICK_COMPANIONS | ci as u16, realm: ctx.realm, panel: None, sway: 0.0, tint: [1.0; 3], wind: CardWind::default(),
             });
         }
     }
@@ -2367,11 +2376,33 @@ impl WorldRenderer {
                             for i in 0..3 { tint[i] *= 1.0 + wall[i] / here[i].max(1e-3); }
                         }
                         let wind = if hanging || look.from_files { CardWind::default() } else { ctx.wx.card_wind(look.kind, hf(seed ^ 0x3D, ikey) * TAU, sprite.aspect) };
+                        let flip = if look.from_files { look.flip_x } else { variant & 0x100 != 0 };
+                        // Standing along the path, its front to it (a building), not turned to the camera.
+                        let facing = p.facing.unwrap_or(look.facing);
+                        let stands = sign != 0.0 && ring.is_none() && !floating && !hanging
+                            && (facing == Facing::Path || (facing == Facing::PathWhenTurned && ctx.view.turned));
+                        let panel = stands.then(|| Panel { u_dir: [0.0, 0.0, -sign], normal: [-sign, 0.0, 0.0], width: height * sprite.aspect, strip: None });
+                        let shadow = if p.shadow && !hanging && !floating { p.shadow_opacity.clamp(0.0, 1.0) } else { 0.0 };
+                        let source = PICK_PROPS | li as u16;
+                        // With depth, its ends are walls that deep, drawn from the edges of its picture.
+                        let depth = p.depth.unwrap_or(look.depth).max(0.0);
+                        if let Some(pn) = panel.filter(|_| depth > 0.01) {
+                            for (end, strip) in [(-1.0f32, 0.012f32), (1.0, 0.988)] {
+                                let ed = d + end * pn.u_dir[2] * 0.5 * pn.width;
+                                let (ex, ez) = (x + sign * 0.5 * depth, ctx.view.to_cam(x + sign * 0.5 * depth, base, ed)[2]);
+                                let strip = if flip { 1.0 - strip } else { strip };
+                                bills.push(Billboard {
+                                    z: ez, world: [ex, base, ed], height, sprite: sprite.clone(), sway: 0.0, tint, wind: CardWind::default(), flip: false,
+                                    nearest: look.pixelated, id: id::PROP, emissive: look.glow, shadow: 0.0, own_light, source, realm: ctx.realm,
+                                    panel: Some(Panel { u_dir: [sign, 0.0, 0.0], normal: [0.0, 0.0, end * pn.u_dir[2]], width: depth, strip: Some(strip) }),
+                                });
+                            }
+                        }
+                        let (sway, wind) = if panel.is_some() { (0.0, CardWind::default()) } else { (sway, wind) };
                         bills.push(Billboard {
-                            z, world: [x, base, d], height, sprite, sway, tint, wind,
-                            flip: if look.from_files { look.flip_x } else { variant & 0x100 != 0 },
+                            z, world: [x, base, d], height, sprite, sway, tint, wind, flip,
                             nearest: look.pixelated, id: id::PROP, emissive: look.glow,
-                            shadow: if p.shadow && !hanging && !floating { p.shadow_opacity.clamp(0.0, 1.0) } else { 0.0 }, own_light, source: PICK_PROPS | li as u16, realm: ctx.realm });
+                            shadow, own_light, source, realm: ctx.realm, panel });
                     }
                 }
             }
@@ -2454,7 +2485,7 @@ fn post_billboard(ctx: &Ctx, sprite: &Arc<Sprite>, x: f32, top: f32, d: f32, siz
     let z = ctx.view.to_cam(x, 0.0, d)[2];
     Billboard {
         z: z + 0.001, world: [x, 0.0, d], height: top, sprite: sprite.clone(), flip: false, nearest: false,
-        id: id::FIXTURE, emissive: 0.0, shadow: 0.35 * size.min(1.0), own_light: None, source: 0, realm: ctx.realm, sway: 0.0, tint: [1.0; 3], wind: CardWind::default(),
+        id: id::FIXTURE, emissive: 0.0, shadow: 0.35 * size.min(1.0), own_light: None, source: 0, realm: ctx.realm, panel: None, sway: 0.0, tint: [1.0; 3], wind: CardWind::default(),
     }
 }
 
@@ -4897,6 +4928,39 @@ struct Card<'a> {
     snow: Option<(f32, [f32; 3], f32)>,
     z: f32, nearest: bool,
     fog: (bool, f32, [f32; 3], f32, [f32; 3]),
+    /// A card standing in the world (`Billboard::panel`): pixel (X, Y) to its picture is
+    /// u = (h0 X + h1 Y + h2) / w, v = (h3 X + h4 Y + h5) / w with w = h6 X + h7 Y + h8, and its
+    /// depth there is 1 / (q0 X + q1 Y + q2); `strip` (or below 0) is the column an end wall shows.
+    pan: Option<([f32; 9], [f32; 3], f32)>,
+}
+
+/// The mapping from pixels to a world-standing card's picture and depth (see `Card::pan`), for a
+/// card whose picture's top left corner is `c0` (camera space) and whose width and height run
+/// along `cu` and `cv`. Worked in f64: the per-pixel arithmetic is then the same few f32 steps on
+/// the CPU and the GPU.
+fn panel_map(v: &View, c0: [f32; 3], cu: [f32; 3], cv: [f32; 3]) -> Option<([f32; 9], [f32; 3])> {
+    let d = |a: [f32; 3]| [a[0] as f64, a[1] as f64, a[2] as f64];
+    let (c0, cu, cv) = (d(c0), d(cu), d(cv));
+    let cross = |a: [f64; 3], b: [f64; 3]| [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
+    let dot = |a: [f64; 3], b: [f64; 3]| a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+    let sc = |a: [f64; 3], k: f64| [a[0] * k, a[1] * k, a[2] * k];
+    let sub = |a: [f64; 3], b: [f64; 3]| [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
+    let n = cross(cu, cv);
+    let (a, b) = (cross(cv, n), cross(n, cu));
+    let (nc, ua, vb) = (dot(n, c0), dot(cu, a), dot(cv, b));
+    if nc.abs() < 1e-9 || ua.abs() < 1e-12 || vb.abs() < 1e-12 { return None; }
+    // Over the ray r = ((X - cx) / f, (cy - Y) / f, 1): u = hu.r / n.r, v = hv.r / n.r, 1/z = n.r / n.c0.
+    let hu = sc(sub(sc(a, nc), sc(n, dot(c0, a))), 1.0 / ua);
+    let hv = sc(sub(sc(b, nc), sc(n, dot(c0, b))), 1.0 / vb);
+    let hz = sc(n, 1.0 / nc);
+    // Scaled so the denominator is about 1 near the card (only ratios matter).
+    let k = 1.0 / dot(n, n).sqrt().max(1e-12);
+    let (f, cx, cy) = (v.focal_px as f64, v.center_px as f64, v.horizon_px as f64);
+    let px = |h: [f64; 3]| [h[0] / f, -h[1] / f, -h[0] * cx / f + h[1] * cy / f + h[2]];
+    let (u3, v3, w3, z3) = (px(sc(hu, k)), px(sc(hv, k)), px(sc(n, k)), px(hz));
+    let f32s = |a: [f64; 3]| [a[0] as f32, a[1] as f32, a[2] as f32];
+    let (u3, v3, w3) = (f32s(u3), f32s(v3), f32s(w3));
+    Some(([u3[0], u3[1], u3[2], v3[0], v3[1], v3[2], w3[0], w3[1], w3[2]], f32s(z3)))
 }
 
 /// Smooth value noise for snow on cards (0..1); `cards.wgsl` has the same.
@@ -4944,6 +5008,7 @@ impl<'a> Card<'a> {
         let v = &ctx.view;
         let (w, h) = (v.width, v.height);
         let [x, y, d] = b.world;
+        if let Some(pn) = b.panel { return Card::panel(ctx, b, pn, crisp); }
         let base = v.to_cam(x, y, d);
         if base[2] < NEAR { return None; }
         let [sx, sy_base] = v.project(base)?;
@@ -4971,7 +5036,49 @@ impl<'a> Card<'a> {
         let (fog_mul, fog_add) = ctx.fog_affine(z);
         Some(Card {
             b, w, sx, wp, hp, sy_top, sway_px, x0, x1, y0, y1, light, snow, z, nearest: b.nearest || crisp,
-            fog: (plain, ctx.fog_t(z), ctx.fog_col, fog_mul, fog_add),
+            fog: (plain, ctx.fog_t(z), ctx.fog_col, fog_mul, fog_add), pan: None,
+        })
+    }
+
+    /// A card standing in the world (`Billboard::panel`), seen in perspective.
+    fn panel(ctx: &Ctx, b: &'a Billboard, pn: Panel, crisp: bool) -> Option<Card<'a>> {
+        let v = &ctx.view;
+        let (w, h) = (v.width, v.height);
+        let [x, y, d] = b.world;
+        let half = 0.5 * pn.width;
+        let (ux, ud) = (pn.u_dir[0] * half, pn.u_dir[2] * half);
+        let top = y + b.height;
+        let corners = [v.to_cam(x - ux, top, d - ud), v.to_cam(x + ux, top, d + ud), v.to_cam(x - ux, y, d - ud), v.to_cam(x + ux, y, d + ud)];
+        if corners.iter().all(|c| c[2] < NEAR) { return None; }
+        let c0 = corners[0];
+        let cu = [corners[1][0] - c0[0], corners[1][1] - c0[1], corners[1][2] - c0[2]];
+        let cv = [corners[2][0] - c0[0], corners[2][1] - c0[1], corners[2][2] - c0[2]];
+        let (hm, q) = panel_map(v, c0, cu, cv)?;
+        // Its pixel box: round its corners, or the whole frame when it passes behind the camera.
+        let (x0, x1, y0, y1) = if corners.iter().all(|c| c[2] >= NEAR) {
+            let ps: Vec<[f32; 2]> = corners.iter().filter_map(|c| v.project(*c)).collect();
+            let (mut a, mut bb, mut c, mut e) = (f32::MAX, f32::MIN, f32::MAX, f32::MIN);
+            for p in &ps { a = a.min(p[0]); bb = bb.max(p[0]); c = c.min(p[1]); e = e.max(p[1]); }
+            ((a.floor() as i64).max(0), (bb.ceil() as i64).min(w as i64 - 1), (c.floor() as i64).max(0), (e.ceil() as i64).min(h as i64 - 1))
+        } else { (0, w as i64 - 1, 0, h as i64 - 1) };
+        if x0 > x1 || y0 > y1 { return None; }
+        let mid = v.to_cam(x, y + 0.5 * b.height, d);
+        let z = mid[2].max(NEAR);
+        let hp = v.px_per_m(z) * b.height;
+        if hp < 0.5 { return None; }
+        // Lit as a face turned the way it faces.
+        let light = ctx.light_except(x, y + b.height * 0.5, d, Some(pn.normal), 0, weather::cloud_shade(ctx, x, d), b.own_light);
+        let ps = ctx.wx.prop_snow;
+        let snow = (ps > 0.05 && b.id == id::PROP && b.emissive < 0.3).then(|| {
+            let cap = (v.px_per_m(z) * 0.06 * ps).max(1.0) / hp;
+            (cap, mul3([0.80, 0.83, 0.88], light), ctx.wx.prop_dust)
+        });
+        let light = mul3(light, b.tint);
+        let plain = ctx.front.is_none() && ctx.gain == 1.0;
+        let (fog_mul, fog_add) = ctx.fog_affine(z);
+        Some(Card {
+            b, w, sx: 0.0, wp: 1.0, hp, sy_top: 0.0, sway_px: 0.0, x0, x1, y0, y1, light, snow, z, nearest: b.nearest || crisp,
+            fog: (plain, ctx.fog_t(z), ctx.fog_col, fog_mul, fog_add), pan: Some((hm, q, pn.strip.unwrap_or(-1.0))),
         })
     }
 
@@ -4989,6 +5096,7 @@ impl<'a> Card<'a> {
             emissive: b.emissive, id: b.id as u32, realm: b.realm as u32, world: b.world, source: b.source as u32,
             w_amp: b.wind.amp, w_v: b.wind.v, w_lean: b.wind.lean, w_t1: b.wind.t1, w_t2: b.wind.t2,
             w_c0: b.wind.c0, w_c1: b.wind.c1, w_trunk: b.wind.trunk, w_foot: b.wind.foot, w_kv: b.wind.kv,
+            pan: self.pan.is_some() as u32, ph: self.pan.map_or([0.0; 9], |p| p.0), pq: self.pan.map_or([0.0; 3], |p| p.1), strip: self.pan.map_or(-1.0, |p| p.2),
             ..Default::default()
         };
         super::gpu::CardIn {
@@ -5004,6 +5112,40 @@ impl<'a> Card<'a> {
         let (ya, yb) = (self.y0.max(row0 as i64), self.y1.min(row0 as i64 + rows - 1));
         let [x, y, d] = b.world;
         let (plain, fog_t, fog_c, fog_mul, fog_add) = self.fog;
+        if let Some((hm, q, strip)) = self.pan {
+            for py in ya..=yb {
+                let fy = py as f32 + 0.5;
+                for px in self.x0..=self.x1 {
+                    let i = (py - row0 as i64) as usize * w + px as usize;
+                    let fx = px as f32 + 0.5;
+                    let iz = q[0] * fx + q[1] * fy + q[2];
+                    if iz <= 0.0 { continue; }
+                    let z = 1.0 / iz;
+                    if z < NEAR || z >= gbuf[i].depth { continue; }
+                    let wd = hm[6] * fx + hm[7] * fy + hm[8];
+                    if wd.abs() < 1e-12 { continue; }
+                    let mut u = (hm[0] * fx + hm[1] * fy + hm[2]) / wd;
+                    let vv = (hm[3] * fx + hm[4] * fy + hm[5]) / wd;
+                    if !(0.0..1.0).contains(&u) || !(0.0..1.0).contains(&vv) { continue; }
+                    if strip >= 0.0 { u = strip; } else if b.flip { u = 1.0 - u; }
+                    let s = b.sprite.sample(u, vv, self.hp, self.nearest);
+                    let a = if self.nearest { if s[3] >= 0.5 { 1.0 } else { 0.0 } } else { s[3] };
+                    if a < 0.02 { continue; }
+                    let glow = b.emissive + b.sprite.glow.as_ref().map_or(0.0, |g| g.sample(u, vv, self.hp, self.nearest)[0]);
+                    let mut lit = add3(mul3([s[0], s[1], s[2]], self.light), scale3([s[0], s[1], s[2]], glow));
+                    if let Some((cap, snow_lit, dust)) = self.snow {
+                        if a >= 0.5 { lit = snow_on_card(&b.sprite, u, vv, self.hp, cap, dust, lit, snow_lit); }
+                    }
+                    let c = if plain { mix3(fog_c, lit, fog_t) } else { add3(scale3(lit, fog_mul), fog_add) };
+                    hdr[i] = mix3(hdr[i], c, a);
+                    if a >= 0.5 {
+                        gbuf[i] = GPixel { depth: z, id: b.id, x, y, d, realm: b.realm, pad: 0 };
+                        if let Some(p) = pick.as_deref_mut() { p[i] = b.source; }
+                    }
+                }
+            }
+            return;
+        }
         let bend = |vv: f32| self.sway_px * (1.0 - vv) * (1.0 - vv);
         for py in ya..=yb {
             let vv = (py as f32 + 0.5 - self.sy_top) / self.hp;

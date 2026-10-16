@@ -27,6 +27,9 @@ pub struct ResolvedProp {
     pub flip_x: bool,
     /// Images come from files (fixed orientation unless `flip_x`).
     pub from_files: bool,
+    /// Which way it faces, and how deep it is behind its front (PropDef::facing, depth).
+    pub facing: crate::scene::Facing,
+    pub depth: f32,
 }
 
 #[derive(Default)]
@@ -152,7 +155,7 @@ impl PropDefs {
     /// says why; a definition whose images cannot be read draws its `kind` instead.
     pub fn resolve(&mut self, scene: &Scene, base: Option<&Path>, layer: &PropLayer, sprites: &mut SpriteCache) -> (Option<ResolvedProp>, Option<String>) {
         let builtin = |kind: PropKind, tint: Rgb| ResolvedProp {
-            sprites: Vec::new(), kind, tint, height: kind.height_m(), hanging: kind.hangs(), glow: kind.glow(), light: None, smoke: None,
+            sprites: Vec::new(), kind, tint, height: kind.height_m(), hanging: kind.hangs(), glow: kind.glow(), light: None, smoke: None, facing: crate::scene::Facing::Camera, depth: 0.0,
             pixelated: false, flip_x: false, from_files: false,
         };
         let here = base.map(Path::to_path_buf).unwrap_or_default();
@@ -176,6 +179,7 @@ impl PropDefs {
         r.glow = d.glow.max(0.0);
         r.light = d.light.enabled.then(|| d.light.clone());
         r.smoke = (d.smoke.enabled && d.smoke.amount > 0.0).then(|| d.smoke.clone());
+        (r.facing, r.depth) = (d.facing, d.depth.max(0.0));
         r.pixelated = d.sprite.pixelated;
         r.flip_x = d.sprite.flip_x;
         let mut warn = None;

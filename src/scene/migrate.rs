@@ -156,7 +156,7 @@ pub fn from_v2(o: &PathForgeSettings, name: &str) -> Scene {
             scale: p.scale, scale_var: p.scale_var.min(0.9), tint_var: 0.0, tint: p.tint, sink: (p.y_sink * 0.04).min(0.3), float: 0.0, float_var: 0.0, orbit: Orbit::default(),
             shadow: p.casts_shadow, shadow_opacity: (p.shadow_opacity * 0.7).clamp(0.0, 1.0),
             sprite: sprite(&p.sprite_path, &p.sprite_pool_paths, p.sprite_pool_enabled, p.sprite_flip_x),
-            seed: p.seed, def: String::new(),
+            seed: p.seed, def: String::new(), facing: None, depth: None,
         }
     }).collect();
 
