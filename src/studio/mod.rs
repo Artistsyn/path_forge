@@ -25,11 +25,13 @@ use std::time::{Duration, Instant, SystemTime};
 
 const SECTIONS: &[(&str, &str)] = &[
     ("camera", "Camera"), ("path", "Path"), ("verge", "Verge"), ("walls", "Walls"), ("ceiling", "Ceiling"),
-    ("sky", "Sky"), ("light", "Lighting"), ("weather", "Weather"), ("post", "Post"), ("style", "Style"), ("motion", "Motion"), ("canvas", "Canvas"),
+    ("sky", "Sky"), ("light", "Lighting"), ("weather", "Weather"), ("season", "Season"), ("wildlife", "Wildlife"),
+    ("post", "Post"), ("style", "Style"), ("motion", "Motion"), ("canvas", "Canvas"),
 ];
 const LISTS: &[(&str, &str, &str)] = &[
     ("fixtures", "Lights", "Fixture"), ("props", "Props", "PropLayer"), ("set_pieces", "Set pieces", "SetPiece"),
     ("particles", "Particles", "Particles"), ("ground_cover", "Ground cover", "GroundCover"),
+    ("waterfalls", "Waterfalls", "Waterfall"), ("fences", "Fences", "Fence"), ("companions", "Companions", "Companion"),
 ];
 /// What one item of a list is called: "light", "prop", "set piece".
 fn one_of(label: &str) -> String {
@@ -1338,5 +1340,19 @@ fn style(ctx: &egui::Context) {
     ctx.set_visuals_of(egui::Theme::Light, l);
     for t in [egui::Theme::Dark, egui::Theme::Light] {
         ctx.style_mut_of(t, |s| { s.spacing.item_spacing = egui::vec2(8.0, 5.0); s.spacing.button_padding = egui::vec2(6.0, 3.0); });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_outliner_reaches_every_part_of_a_scene() {
+        let schema = serde_json::to_value(schemars::schema_for!(crate::scene::Scene)).unwrap();
+        for key in schema["properties"].as_object().unwrap().keys() {
+            if ["name", "version", "prop_defs"].contains(&key.as_str()) { continue; }
+            assert!(SECTIONS.iter().any(|s| s.0 == key) || LISTS.iter().any(|l| l.0 == key), "the studio has no section for `{key}`");
+        }
     }
 }

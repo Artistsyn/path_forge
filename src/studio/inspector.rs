@@ -174,6 +174,26 @@ fn widget(ui: &mut Ui, schema: &Schema, fs: &Value, path: &str, v: &mut Value, o
             changed
         }
         Value::Number(_) => number(ui, fs, path, v),
+        // A prop layer's `def` and the grade: a pick from the built-in ones, or anything typed
+        // (a kit of your own, a .cube file).
+        Value::String(s) if crate::scene::form::text_choices(&crate::scene::form::pattern_of(path)).is_some() => {
+            let choices = crate::scene::form::text_choices(&crate::scene::form::pattern_of(path)).unwrap_or_default();
+            let label = |v: &str| choices.iter().find(|c| c["value"] == v).and_then(|c| c["label"].as_str()).map(str::to_owned);
+            let mut changed = false;
+            ui.horizontal(|ui| {
+                let shown = label(s).unwrap_or_else(|| s.clone());
+                egui::ComboBox::from_id_salt(("choice", path)).selected_text(shown).width(170.0).show_ui(ui, |ui| {
+                    for c in &choices {
+                        let (val, lab) = (c["value"].as_str().unwrap_or(""), c["label"].as_str().unwrap_or(""));
+                        let r = ui.selectable_label(s == val, lab);
+                        let r = match c["help"].as_str() { Some(h) if !h.is_empty() => r.on_hover_text(h), _ => r };
+                        if r.clicked() && s != val { *s = val.to_owned(); changed = true; }
+                    }
+                });
+                changed |= ui.add(egui::TextEdit::singleline(s).desired_width(110.0)).on_hover_text("Or type one: a kit of your own (kits/<name>#<prop>), a .cube file").changed();
+            });
+            changed
+        }
         Value::String(s) => ui.add(egui::TextEdit::singleline(s).desired_width(150.0)).changed(),
         Value::Array(_) if is_colour(v) => {
             let a = v.as_array().unwrap();

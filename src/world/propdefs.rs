@@ -36,6 +36,22 @@ pub struct PropDefs {
 }
 
 /// Kits compiled in, used as `def: "@<name>#<prop>"`: drawn from shapes, so they need no files.
+/// Every prop of the built-in kits as a layer's `def` names it (`@kit#prop`), with a label for
+/// a picker ("Village: cottage") and its description.
+pub fn builtin_props() -> Vec<(String, String, String)> {
+    let mut out = Vec::new();
+    for (kit, text) in BUILTIN_KITS {
+        let title = match kit { "wayside" => "Wayside", "settlement" => "Village", "waterside" => "Waterside", "wildlife" => "Wildlife", k => k };
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(text) else { continue };
+        let Some(props) = v.get("props").and_then(|p| p.as_object()) else { continue };
+        for (name, d) in props {
+            let desc = d.get("description").and_then(|x| x.as_str()).unwrap_or("").to_owned();
+            out.push((format!("@{kit}#{name}"), format!("{title}: {}", name.replace('_', " ")), desc));
+        }
+    }
+    out
+}
+
 pub const BUILTIN_KITS: [(&str, &str); 4] = [
     ("wayside", include_str!("../../kits/wayside/kit.json")),
     ("settlement", include_str!("../../kits/settlement/kit.json")),

@@ -205,7 +205,9 @@ pub const PARTS: &[(&str, &str, Option<&str>)] = &[
     ("sky", "Sky", None), ("path", "Path", None), ("verge", "Sides", None), ("walls", "Walls", None), ("ceiling", "Ceiling", None),
     ("light", "Light", None), ("weather", "Weather", None), ("props", "Props", Some("prop layer")), ("fixtures", "Lights", Some("light")),
     ("set_pieces", "Set pieces", Some("set piece")), ("particles", "Particles", Some("particles")), ("ground_cover", "Ground cover", Some("ground cover")),
-    ("companions", "Companions", Some("companion")), ("camera", "Camera", None), ("motion", "Motion", None), ("style", "Style", None),
+    ("companions", "Companions", Some("companion")), ("waterfalls", "Waterfalls", Some("waterfall")), ("fences", "Fences", Some("fence")),
+    ("wildlife", "Wildlife", None), ("season", "Season", None),
+    ("camera", "Camera", None), ("motion", "Motion", None), ("style", "Style", None),
     ("post", "Post", None), ("canvas", "Canvas", None),
 ];
 
@@ -245,7 +247,10 @@ fn node(schema: &Schema, fs: &Value, key: &str, path: &str, depth: usize) -> Opt
     let m = meta(path);
     if m.is_some_and(|m| m.adv) { o.insert("adv".into(), json!(true)); }
     let ty = d.get("type").and_then(|t| t.as_str());
-    let kind = if let Some(choices) = enum_choices(schema, fs) {
+    let kind = if let Some(choices) = text_choices(path) {
+        o.insert("choices".into(), json!(choices));
+        "enum"
+    } else if let Some(choices) = enum_choices(schema, fs) {
         o.insert("choices".into(), json!(choices));
         "enum"
     } else if d.get("properties").is_some() {
@@ -293,6 +298,24 @@ fn node(schema: &Schema, fs: &Value, key: &str, path: &str, depth: usize) -> Opt
     };
     o.insert("kind".into(), json!(kind));
     Some(Value::Object(o))
+}
+
+/// Text fields an editor offers as a choice: a prop layer's `def` (a built-in kit's props; the
+/// layer's own `kind` when empty) and the colour grade (the built-in ones; none when empty).
+pub fn text_choices(path: &str) -> Option<Vec<Value>> {
+    match path {
+        "props.*.def" => {
+            let mut c = vec![json!({ "value": "", "label": "Its kind (above)", "help": "Draw the built-in prop kind chosen above." })];
+            c.extend(crate::world::propdefs::builtin_props().into_iter().map(|(v, l, h)| json!({ "value": v, "label": l, "help": h })));
+            Some(c)
+        }
+        "style.grade" => {
+            let mut c = vec![json!({ "value": "", "label": "None" })];
+            c.extend(crate::world::looks::BUILTIN.iter().map(|g| json!({ "value": g, "label": g })));
+            Some(c)
+        }
+        _ => None,
+    }
 }
 
 /// An enum's choices (value, label, help), or None when it is not a plain choice of names.
@@ -372,7 +395,18 @@ mod tests {
         assert_eq!(part("props")["one"], "prop layer");
         // Seeds are advanced; file paths are left out.
         assert_eq!(find(find(sky, "clouds"), "seed")["adv"], true);
-        assert!(part("props")["item"]["fields"].as_array().unwrap().iter().all(|f| f["key"] != "def"));
+        // A prop layer's `def` picks a built-in kit's prop; the grade a built-in grade.
+        let def = find(&part("props")["item"], "def");
+        assert_eq!(def["kind"], "enum");
+        assert!(def["choices"].as_array().unwrap().iter().any(|c| c["value"] == "@settlement#cottage" && c["help"].as_str().is_some_and(|h| !h.is_empty())));
+        assert!(find(part("style"), "grade")["choices"].as_array().unwrap().iter().any(|c| c["value"] == "Sepia"));
+        // Every part of a scene can be reached (only its name, version and own prop definitions,
+        // edited as files, are left out).
+        let schema = serde_json::to_value(schemars::schema_for!(crate::scene::Scene)).unwrap();
+        for key in schema["properties"].as_object().unwrap().keys() {
+            if ["name", "version", "prop_defs"].contains(&key.as_str()) { continue; }
+            assert!(PARTS.iter().any(|p| p.0 == key), "the editors have no part for `{key}`");
+        }
         // Every number has a slider range or at least a floor, and the whole form is small enough
         // to hand to a phone.
         assert!(serde_json::to_string(&f).unwrap().len() < 2_000_000);
