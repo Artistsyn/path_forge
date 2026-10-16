@@ -174,6 +174,7 @@ pub fn tools() -> Vec<Value> {
             with_source(json!({"properties": {
                 "t": {"type": "number", "description": "Position in the loop, 0..1 (default 0)."},
                 "distance": {"type": "number", "description": "Position in metres instead of t."},
+                "intro": {"type": "number", "description": "Seconds into the intro (camera.moves.swing_in / fly_in): the frame as it plays."},
                 "scale": scale.clone(), "hide": hide.clone()
             }})), true),
         tool("pf_contact_sheet", "Contact sheet", "Several frames spread evenly across the loop in one image: shows how props, lights and particles move and repeat.",
@@ -203,7 +204,7 @@ pub fn tools() -> Vec<Value> {
             with_source(json!({"properties": {
                 "out_dir": {"type": "string", "description": "Output folder (relative paths resolve under the PathForge home folder). Default: exports/."},
                 "formats": {"type": "array", "items": {"type": "string", "enum": ["gif", "webp", "apng", "png", "sheet", "depth", "layers"]}, "description": "Default [\"gif\"]. webp is far smaller than gif at full colour. depth: 16-bit depth PNG per frame, so the game can hide enemies behind props exactly. layers: RGBA PNG frames per depth band (near/mid/far), to draw characters between them."},
-                "clip": {"type": "string", "enum": ["loop", "encounter", "transition"], "description": "transition: a one-shot walk from this scene into another (to_path or to_preset): the new world appears down the road and sweeps toward the camera; starts on this loop's frame 0 and ends on the other loop's frame 0. loop (default): the endless walk. encounter: a stop for a fight in three parts - <name>_stop (eases to a halt), <name>_idle (stands still while flames and particles keep moving; loop it for the fight), <name>_go (eases back and hands over to the loop exactly) - plus <name>_encounter.json with playback rules."},
+                "clip": {"type": "string", "enum": ["loop", "intro", "encounter", "transition"], "description": "intro: the camera's swing in or flight in (camera.moves.swing_in / fly_in) played once, as <name>_intro, ending where the loop begins: play it, then the loop from frame 0. transition: a one-shot walk from this scene into another (to_path or to_preset): the new world appears down the road and sweeps toward the camera; starts on this loop's frame 0 and ends on the other loop's frame 0. loop (default): the endless walk. encounter: a stop for a fight in three parts - <name>_stop (eases to a halt), <name>_idle (stands still while flames and particles keep moving; loop it for the fight), <name>_go (eases back and hands over to the loop exactly) - plus <name>_encounter.json with playback rules."},
                 "to_path": {"type": "string", "description": "transition: the scene file to walk into."},
                 "to_preset": {"type": "string", "description": "transition: the preset to walk into."},
                 "approach_m": {"type": "number", "description": "transition: how far ahead the new world first appears (default 30 m)."},
@@ -508,21 +509,24 @@ impl Server {
     fn opts(&self, l: &Loaded, scale: f32, layers: Layers, stats: bool) -> RenderOptions {
         let (w, h) = (l.scene.canvas.width.max(16), l.scene.canvas.height.max(16));
         let size = if scale < 0.999 { Some((((w as f32 * scale).round() as u32).max(16), ((h as f32 * scale).round() as u32).max(16))) } else { None };
-        RenderOptions { size, base_dir: Some(self.base_of(l)), layers, palette: None, stats, depth: false, time: None, pick: false, intro: None }
+        RenderOptions { size, base_dir: Some(self.base_of(l)), layers, palette: None, stats, depth: false, time: None, pick: false, intro: None, swing: None }
     }
 
     /// Render at `scale` of the canvas. Pixel styles render at full size and are box-scaled down so
     /// their art pixels survive; everything else renders directly at the preview size (faster).
-    fn preview(&mut self, l: &Loaded, distance: f32, scale: f32, layers: Layers) -> Image {
+    fn preview(&mut self, l: &Loaded, distance: f32, scale: f32, layers: Layers) -> Image { self.preview_at(l, distance, scale, layers, None) }
+
+    /// `preview`, `intro` seconds into the scene's intro.
+    fn preview_at(&mut self, l: &Loaded, distance: f32, scale: f32, layers: Layers, intro: Option<f32>) -> Image {
         let pixel_style = l.scene.style.pixel_size > 1;
         if pixel_style {
-            let img = self.renderer.render(&l.scene, distance, &self.opts(l, 1.0, layers, true));
+            let img = self.renderer.render(&l.scene, distance, &RenderOptions { intro, ..self.opts(l, 1.0, layers, true) });
             let stats = img.stats.clone();
             let mut small = review::downscale(&img, scale);
             small.stats = stats;
             small
         } else {
-            self.renderer.render(&l.scene, distance, &self.opts(l, scale, layers, true))
+            self.renderer.render(&l.scene, distance, &RenderOptions { intro, ..self.opts(l, scale, layers, true) })
         }
     }
 
@@ -741,10 +745,13 @@ impl Server {
         let len = l.scene.motion.loop_length.max(1.0);
         let d = num(args, "distance").map(|d| d as f32).unwrap_or_else(|| num(args, "t").unwrap_or(0.0) as f32 * len);
         let t0 = Instant::now();
-        let img = self.preview(&l, d, num(args, "scale").unwrap_or(0.5) as f32, hidden_layers(args)?);
+        let intro = num(args, "intro").map(|t| t.max(0.0) as f32);
+        let img = self.preview_at(&l, d, num(args, "scale").unwrap_or(0.5) as f32, hidden_layers(args)?, intro);
         let ms = t0.elapsed().as_secs_f64() * 1000.0;
+        let m = &l.scene.camera.moves;
         Ok(Reply::json(&json!({
             "source": l.label, "distance_m": round2(d), "t": round3(d / len), "size": [img.width, img.height],
+            "intro_s": intro, "intro_length_s": m.fly_in.max(0.0).max(m.swing_in.length()),
             "render_ms": (ms * 10.0).round() / 10.0, "frame": clean(&img.stats),
         })).with_image(&img))
     }
@@ -1283,6 +1290,7 @@ impl Server {
         let cancel = AtomicBool::new(false);
         let report = match string(args, "clip").unwrap_or("loop") {
             "loop" => export::export(&l.scene, &job, |_| {}, &cancel)?,
+            "intro" => export::export_intro(&l.scene, &job, |_| {}, &cancel)?,
             "encounter" => {
                 let e = export::Encounter { slow_m: num(args, "slow_m").unwrap_or(3.0) as f32, start_frame: int(args, "start_frame").unwrap_or(0).max(0) as u32 };
                 export::export_encounter(&l.scene, &job, &e, |_| {}, &cancel)?
@@ -1297,7 +1305,7 @@ impl Server {
                 let b_dir = to.file.as_ref().and_then(|f| f.parent().map(Path::to_path_buf));
                 export::export_transition(&l.scene, &to.scene, b_dir, &job, &tr, |_| {}, &cancel)?
             }
-            other => return Err(format!("unknown clip '{other}' (loop, encounter, transition)")),
+            other => return Err(format!("unknown clip '{other}' (loop, intro, encounter, transition)")),
         };
         let sizes: Vec<Value> = report.files.iter().map(|f| {
             let bytes = std::fs::metadata(f).map(|m| if m.is_dir() { dir_size(f) } else { m.len() }).unwrap_or(0);

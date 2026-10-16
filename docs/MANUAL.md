@@ -216,11 +216,25 @@ props, lights, weather), the loop still closes, and the GPU draws the same frame
   `horizon` to see more of the lane.
 - **Where the sun stands**: by default the sky keeps its place in the picture whichever way the
   camera looks (the sun where `sky.sun.pos` puts it), and its light and shadows turn with the
-  camera. Turn on `camera.world_sky` and the sun and moon (planets, a black hole, a rainbow) keep
-  their place in the world instead: `pos` is where they stand seen down the path, and turned to
-  the side the view swings away from them, so a sun ahead of the walk lies off to one side of a
+  camera. Turn on `camera.world_sky` and the sky keeps its place in the world instead: `pos` is
+  where the sun and moon stand seen down the path, and turned to the side the view swings away
+  from them, the clouds and stars with them, so a sun ahead of the walk lies off to one side of a
   side-scroller, its light and shadows coming from where it is. Two scenes of one place, one down
   the path and one from the side, then share one sun.
+- **A swing in** (`camera.moves.swing_in`): played once at the start, like the flight in, the
+  camera comes round from another view into the scene's own: from behind the walker (`from`:
+  `yaw`, `side`, `back` metres behind, `eye_height`, `horizon`, `zoom`) round to a side-scroller's
+  view, or the other way. It takes `seconds` after a `hold`, eased (`Smooth`, `Out` for a reveal,
+  `In`, `Linear`), with an `overshoot` like a crane's if you like. With `orbit` the camera circles
+  the spot on the path both views look at, so that spot (where a game's hero stands) stays in the
+  middle of the frame; without, it moves straight across. As it comes round to the side the near
+  side of the world (props, lamps, fences, the wall and ceiling) dissolves out of its way in an
+  ordered pattern, before the camera reaches it, the path's bends straighten and buildings that
+  face the path once turned come round to it; going the other way all of that comes back once
+  the camera has passed. `bars` puts letterbox bars over the top and bottom that slide away as it
+  ends. With `camera.world_sky` the sun and the sky sweep across as the camera turns. The game's
+  runtime reports the seconds left (`intro_left` in its state) so it can hold the player's
+  controls until the swing has landed, and places things on screen by the swinging camera.
 
 **Props from an angle.** A prop's `facing` says which way its picture faces. `Camera` (the
 default, and every built-in kind) keeps it turned to the camera: right for trees, rocks and lamps,

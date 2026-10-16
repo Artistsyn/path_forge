@@ -80,6 +80,9 @@ pub struct WalkState {
     pub end: bool,
     /// The day and night, when the scene has one or the game sets the hour (`set_hour`).
     pub day: Option<scene::DayState>,
+    /// Seconds left of the intro (the camera's flight in, its swing in) while it plays: a game
+    /// holds the player's controls until it ends.
+    pub intro_left: Option<f32>,
 }
 
 impl Runtime {
@@ -234,13 +237,21 @@ impl Runtime {
         if let (Some((_, _, at)), Some(stop)) = (self.journey.as_mut(), next.stop) { *at = stop; }
     }
 
-    /// Play the camera's flight in (`camera.moves.fly_in`) again from the top, as at the start.
+    /// Play the camera's flight in and swing in (`camera.moves.fly_in`, `swing_in`) again from the
+    /// top, as at the start.
     pub fn restart_intro(&mut self) { self.played = 0.0; }
 
-    /// Seconds into the flight in, while it is playing.
+    /// Seconds into the intro (the flight in, the swing in), while it is playing.
     fn intro(&self) -> Option<f32> {
-        let f = self.scene.camera.moves.fly_in;
+        let m = &self.scene.camera.moves;
+        let f = m.fly_in.max(0.0).max(m.swing_in.length());
         (f > 0.0 && self.played < f).then_some(self.played)
+    }
+
+    /// Seconds left of the intro while it plays (a game holds the player's controls until it ends).
+    pub fn intro_left(&self) -> Option<f32> {
+        let m = &self.scene.camera.moves;
+        self.intro().filter(|_| self.active.is_none()).map(|t| m.fly_in.max(0.0).max(m.swing_in.length()) - t)
     }
 
     /// The current frame of the runtime's own walk, `width` x `height` RGBA8.
@@ -370,7 +381,7 @@ impl Runtime {
             Some(Active::Fork { walk, travel, .. }) => (Some((travel / walk.length()).min(1.0)), walk.chosen.is_none().then(|| (walk.decide_by() - travel).max(0.0))),
         };
         let end = self.active.is_none() && self.journey.as_ref().is_some_and(|(j, _, at)| j.stops.get(at).is_some_and(|s| matches!(s.next, Next::End)));
-        WalkState { scene: self.scene.name.clone(), distance: self.distance, time: self.time, stop: self.journey.as_ref().map(|j| j.2.clone()), progress, choose_within, speed: self.scene.motion.speed, end, day: self.day() }
+        WalkState { scene: self.scene.name.clone(), distance: self.distance, time: self.time, stop: self.journey.as_ref().map(|j| j.2.clone()), progress, choose_within, speed: self.scene.motion.speed, end, day: self.day(), intro_left: self.intro_left() }
     }
 
     /// The camera of the runtime's own walk now, for a `width` x `height` frame. In a transition,
@@ -378,7 +389,10 @@ impl Runtime {
     pub fn camera_now(&self, width: u32, height: u32) -> Camera {
         match &self.active {
             Some(Active::Cross { next, walk, travel, .. }) => walk.camera(&self.scene, &next.scene, *travel, width, height),
-            _ => Camera::plain(&self.scene, self.distance, width, height),
+            _ => match self.intro().and_then(|t| self.scene.camera.moves.swing_in.pose(&self.scene.camera, t)) {
+                Some(p) => Camera::swinging(&self.scene, &p, self.distance, width, height),
+                None => Camera::plain(&self.scene, self.distance, width, height),
+            },
         }
     }
 
@@ -447,6 +461,29 @@ mod tests {
         assert!(landed == WorldRenderer::default().render(r.scene(), r.state().distance, &opts).rgba, "landed, it is the walk's own camera");
         r.restart_intro();
         assert!(r.frame(60, 107).to_vec() != landed, "and it can fly in again");
+    }
+
+    #[test]
+    fn the_swing_in_tells_the_game_when_it_ends_and_where_the_walker_is() {
+        let mut r = rt("Village Side Scroll");
+        let mut s = r.scene().clone();
+        s.camera.moves.swing_in = scene::Swing { seconds: 2.0, hold: 0.5, ..scene::Swing::default() };
+        // (A straight path, so the walker's spot is in the middle of the frame looking down it.)
+        s.path.winding.enabled = false;
+        r.set_scene(s);
+        assert_eq!(r.state().intro_left, Some(2.5));
+        // Behind the walker at first: the walker's spot in the middle of the frame, ahead.
+        let (w, h) = (160, 90);
+        let at = r.project_now(0.0, 0.0, 0.0, w, h).expect("the walker is in view");
+        assert!((at[0] - 80.0).abs() < 1.0, "{at:?}");
+        r.step(1.5, 0.0);
+        assert_eq!(r.state().intro_left, Some(1.0));
+        let mid = r.project_now(0.0, 0.0, 0.0, w, h).expect("still in view, coming round");
+        assert!((mid[0] - 80.0).abs() < 1.0, "{mid:?}");
+        r.step(1.0, 0.0);
+        assert_eq!(r.state().intro_left, None, "over: the game takes the controls");
+        let opts = RenderOptions { size: Some((w, h)), time: Some(r.state().time), ..RenderOptions::default() };
+        assert!(r.frame(w, h).to_vec() == WorldRenderer::default().render(r.scene(), r.state().distance, &opts).rgba, "and it is the scene's own camera");
     }
 
     #[test]

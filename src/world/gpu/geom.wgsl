@@ -22,7 +22,18 @@ struct Geom {
     tile_cols: u32, cast_bins: u32, sun_on: u32, n_lights: u32,
     sun_x: f32, sun_y: f32, sun_z: f32, clouds: f32,
     cloud_travel: f32, cloud_seed: u32, tiles_on: u32, cap: u32,
-    small_off: u32, n_small: u32, pad0: u32, pad1: u32,
+    small_off: u32, n_small: u32, fade_k: f32, fade_near: f32,
+    fade_cut: f32, pad0: u32, pad1: u32, pad2: u32,
+}
+
+// raster::Dissolve::hides: a swinging camera dissolving the ceiling, the wall on its side, and
+// fences and railings past the cut on that side.
+fn hides(p: GPix, x: i32, y: i32) -> bool {
+    if G.fade_k <= 0.0 { return false; }
+    let id = p.idr & 0xFFu;
+    let on = id == ID_CEILING || (id == ID_WALL_L && G.fade_near < 0.0) || (id == ID_WALL_R && G.fade_near > 0.0)
+        || (id >= ID_RAIL && id < ID_RAIL + 16u && p.x * G.fade_near > G.fade_cut);
+    return on && dissolved(x, y, G.fade_k);
 }
 
 @group(0) @binding(1) var<storage, read_write> gbuf: array<GPix>;
@@ -116,7 +127,9 @@ fn raster_main(@builtin(global_invocation_id) gid: vec3<u32>) {
         if x < s.x || x > s.y { continue; }
         let b = bary(t, px, py);
         if b.w >= g.depth { continue; }
-        g = tri_pix(t, b);
+        let tp = tri_pix(t, b);
+        if hides(tp, x, y) { continue; }
+        g = tp;
         win = t;
     }
     gbuf[i] = g;
@@ -141,8 +154,9 @@ fn small_z_main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_work
     for (var y = tint(t, 20u); y <= tint(t, 21u); y++) {
         let s = row_span(t, y);
         for (var x = s.x; x <= s.y; x++) {
-            let z = bary(t, f32(x) + 0.5, f32(y) + 0.5).w;
-            if z < bitcast<f32>(INF_BITS) { atomicMin(&racc[u32(y) * W.width + u32(x)], bitcast<u32>(z)); }
+            let b = bary(t, f32(x) + 0.5, f32(y) + 0.5);
+            let z = b.w;
+            if z < bitcast<f32>(INF_BITS) && !hides(tri_pix(t, b), x, y) { atomicMin(&racc[u32(y) * W.width + u32(x)], bitcast<u32>(z)); }
         }
     }
 }
@@ -156,9 +170,10 @@ fn small_pick_main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_w
     for (var y = tint(t, 20u); y <= tint(t, 21u); y++) {
         let s = row_span(t, y);
         for (var x = s.x; x <= s.y; x++) {
-            let z = bary(t, f32(x) + 0.5, f32(y) + 0.5).w;
+            let b = bary(t, f32(x) + 0.5, f32(y) + 0.5);
+            let z = b.w;
             let p = u32(y) * W.width + u32(x);
-            if z < bitcast<f32>(INF_BITS) && bitcast<u32>(z) == atomicLoad(&racc[p]) { atomicMin(&racc[n + p], t); }
+            if z < bitcast<f32>(INF_BITS) && bitcast<u32>(z) == atomicLoad(&racc[p]) && !hides(tri_pix(t, b), x, y) { atomicMin(&racc[n + p], t); }
         }
     }
 }

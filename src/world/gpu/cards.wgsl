@@ -16,6 +16,7 @@ struct Card {
     pan: u32, ph: array<f32, 9>, pq0: f32, pq1: f32, pq2: f32, strip: f32,
     tube: u32, ta0: f32, ta1: f32, ta2: f32, tu0: f32, tu1: f32, tu2: f32, tlen: f32, trad: f32,
     tb0: f32, tb1: f32, tb2: f32, te0: f32, te1: f32, te2: f32, cube: array<f32, 18>, tkf: f32, tcx: f32, tcy: f32,
+    fade: f32,
 }
 
 struct Pass { tile_cols: u32, pick: u32, n_cards: u32, pad: u32 }
@@ -194,6 +195,7 @@ fn cards_main(@builtin(global_invocation_id) gid: vec3<u32>) {
     for (var k = a0; k < a1; k++) {
         let cd = cards[bins[ntiles + 1u + k]];
         if px < cd.x0 || px > cd.x1 || py < cd.y0 || py > cd.y1 { continue; }
+        if dissolved(px, py, cd.fade) { continue; }
         if cd.tube != 0u {
             // A cylinder (render::Card::draw_rows, its tube).
             let th = tube_at(cd, f32(px) + 0.5, f32(py) + 0.5);

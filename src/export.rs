@@ -418,6 +418,48 @@ pub fn export_encounter(scene: &Scene, job: &ExportJob, e: &Encounter, mut progr
     })
 }
 
+/// The intro (`camera.moves.fly_in`, `swing_in`) as a one-shot clip that hands over to the loop:
+/// walking at the loop's pace, one frame a loop frame's distance, it ends where the loop begins,
+/// so the loop's frame 0 follows its last frame seamlessly (play it once, then the loop).
+pub fn export_intro(scene: &Scene, job: &ExportJob, mut progress: impl FnMut(Progress), cancel: &AtomicBool) -> Result<ExportReport, String> {
+    let t0 = Instant::now();
+    let m = &scene.camera.moves;
+    let length = m.fly_in.max(0.0).max(m.swing_in.length());
+    if length <= 0.0 { return Err("the scene has no intro: give camera.moves a swing_in (seconds) or a fly_in".into()); }
+    let stem = prepare(scene, job)?;
+    let n = job.frames.unwrap_or_else(|| scene.motion.frames()).clamp(2, 4000);
+    let (lp, loop_seconds) = (scene.motion.loop_length.max(1.0), scene.motion.loop_seconds());
+    let (mpf, spf) = (lp / n as f32, loop_seconds / n as f32);
+    // (Its last frame at or past the intro's end: the camera landed.)
+    let count = ((length / spf).ceil() as usize + 1).max(2);
+    // Frame k shows `k` frames into the intro, `count - k` frames before the loop's start (the
+    // world repeats every loop, so that is the loop's last frames, walked up to).
+    let back = count as f32 * mpf;
+    let laps = (back / lp).ceil();
+    let seq = Seq { frames: (0..count).map(|k| (laps * lp - back + k as f32 * mpf, Some(k as f32 * spf))).collect(), seconds: count as f32 * spf, looping: false };
+    let mut notes = Vec::new();
+    let mut renderer = WorldRenderer::auto();
+    let mut intro = |r: &mut WorldRenderer, d: f32, t: Option<f32>, o: &RenderOptions| r.render(scene, d, &RenderOptions { time: None, intro: t, ..o.clone() });
+    let out = export_frames(scene, job, &format!("{stem}_intro"), &seq, &mut renderer, &mut intro, &mut progress, cancel, &mut notes)?;
+    let mut files = out.files;
+    let meta = serde_json::json!({
+        "generator": concat!("PathForge ", env!("CARGO_PKG_VERSION"), " (scene v3)"),
+        "engine": renderer.engine(), "name": scene.name, "clip": "intro",
+        "frames": out.frames, "width": out.width, "height": out.height,
+        "fps": n as f32 / loop_seconds, "seconds": count as f32 * spf, "metres_per_frame": mpf,
+        "playback": "Play once, then the loop from its frame 0 (the intro ends where the loop begins). `pf splice` joins them into one file.",
+        "files": files.iter().filter_map(|f| f.file_name().map(|s| s.to_string_lossy().into_owned())).collect::<Vec<_>>(),
+        "sheet": out.sheet, "depth": out.depth,
+    });
+    let mpath = job.out_dir.join(format!("{stem}_intro.json"));
+    std::fs::write(&mpath, serde_json::to_string_pretty(&meta).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
+    files.push(mpath);
+    Ok(ExportReport {
+        files, frames: out.frames, fps: n as f32 / loop_seconds, loop_seconds, metres_per_frame: mpf,
+        width: out.width, height: out.height, elapsed_ms: t0.elapsed().as_millis() as u64, notes,
+    })
+}
+
 pub use crate::scene::transition::Transition;
 use crate::journey::{CrossWalk, Place};
 use crate::scene::transition::Crossing;

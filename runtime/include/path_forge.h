@@ -62,10 +62,13 @@ int pf_runtime_go(PfRuntime *rt, char *err, size_t err_len);
  * the JSON's full length (call again with a larger buffer if it did not fit), -1 for a null
  * handle, or -2 with the reason in out. */
 int pf_runtime_go_plan(PfRuntime *rt, char *out, size_t out_len);
-/* Where the walk stands, as JSON: {"scene","distance","time","stop","progress","choose_within","day"}.
- * choose_within is non-null while a fork waits for a choice (metres left). Returns length or -1. */
+/* Where the walk stands, as JSON: {"scene","distance","time","stop","progress","choose_within","day","intro_left"}.
+ * choose_within is non-null while a fork waits for a choice (metres left); intro_left is the
+ * seconds left of the intro (the camera's flight in or swing in) while it plays, so the game can
+ * hold the player's controls until it lands. Returns length or -1. */
 int pf_runtime_state(const PfRuntime *rt, char *out, size_t out_len);
-/* Where a point d metres ahead appears now (as pf_runtime_project, for the walk). */
+/* Where a point d metres ahead of the walker appears now (as pf_runtime_project, for the walk;
+ * while a swing has the camera standing behind the walker, d is still the walker's). */
 int pf_runtime_project_now(const PfRuntime *rt, float x, float y, float d, uint32_t width, uint32_t height, float *out_xy);
 
 /* ── Day and night ──────────────────────────────────────────────────────────
@@ -75,8 +78,9 @@ int pf_runtime_project_now(const PfRuntime *rt, float x, float y, float d, uint3
 /* Set the hour (0..24: 6 sunrise, 12 noon, 18 sunset, 0 midnight) on every scene drawn, turning
  * its day and night on; a negative hour gives each scene back its own. */
 int pf_runtime_set_hour(PfRuntime *rt, float hour);
-/* Play the camera's flight in (camera.moves.fly_in) again from the top: the camera comes down
- * from above over the next fly_in seconds of pf_runtime_step (it plays once at the start). */
+/* Play the intro again from the top: the camera's flight in (camera.moves.fly_in: it comes down
+ * from above) and swing in (camera.moves.swing_in: it comes round from another view into the
+ * scene's own) over the next seconds of pf_runtime_step (it plays once at the start). */
 int pf_runtime_restart_intro(PfRuntime *rt);
 /* Let the days pass: one day every `seconds` of pf_runtime_step time (0 holds the hour). */
 int pf_runtime_set_day_length(PfRuntime *rt, float seconds);

@@ -223,7 +223,7 @@ the path crosses on a deck. Walls carry on down into the gap.
 | `yaw` | number | `0.0` | Which way the camera looks, degrees from straight down the path (-90 .. 90; positive turns right). The whole loop is seen from this angle: 30 looks diagonally across the path; 90 or -90 looks straight across it, a side-scroller's view, the walk carrying the world sideways past (to the left when the camera looks left, at -90). Turned far, the path's bends are straightened and what stands between the camera and the path (walls, the ceiling, props nearer than `cutaway`) is left out, so the path is seen. |
 | `side` | number | `0.0` | Where the camera stands, metres sideways from the middle of the path (positive right). A side view wants it well out to the side: 10 m from a path at yaw -90, -10 at 90. |
 | `cutaway` | number | `0.4` | In a side view, how far from the camera's side of the path things are left out, metres past the path's edge (props, lights, walls): the cut through the near side of the world. |
-| `world_sky` | boolean | `false` | Whether the sun and moon (and planets, a black hole, a rainbow) keep their place in the world as the camera turns (`yaw`): `sky.sun.pos` is where they stand seen down the path, and turned to the side the view swings away from them, so a sun ahead of the walk is off to one side of a side-scroller, and its light and shadows still come from where it is. Off: they keep their place in the picture whichever way the camera looks, and their light turns with it. |
+| `world_sky` | boolean | `false` | Whether the sky keeps its place in the world as the camera turns (`yaw`): the sun and moon stand where `sky.sun.pos` puts them seen down the path, and turned to the side the view swings away from them, the clouds and stars with them, so a sun ahead of the walk is off to one side of a side-scroller, its light and shadows still coming from where it is (and a swinging camera sweeps across the sky). Off: the sky keeps its place in the picture whichever way the camera looks, and its light turns with it. |
 
 ### CameraMoves
 
@@ -245,6 +245,7 @@ runtime, `pf render --intro`, an export with an intro).
 | `dollies` | integer | `1` | Dolly zooms per loop (whole). |
 | `fly_in` | number | `0.0` | The flight in: seconds of coming down from above and over to the walker's eyes (0 none). |
 | `fly_height` | number | `18.0` | How high it starts, metres. |
+| `swing_in` | [Swing](#swing) | (see the type) | The swing in: played once at the start like the flight in, the camera comes round from another view (behind the walker, say) into the scene's own (a side-scroller's). |
 
 ### Canvas
 
@@ -1475,6 +1476,47 @@ The colours of a sunset.
 | `Fiery` | Blazing orange and red along the horizon, crimson and magenta clouds, a deep blue sky. |
 | `Pastel` | Soft peach and rose, a lavender sky, pink clouds: a hazy summer evening. |
 | `Dusk` | Just after the sun has gone: a thin red band at the horizon under violet and indigo, clouds dark with rose undersides. |
+
+### Swing
+
+A camera swing: once, the camera comes round from one view to another, for an intro into a
+scene (`CameraMoves::swing_in`) or a game's change of view. Circling the spot on the path both
+views look at (`orbit`), that spot stays in the middle of the frame as the camera comes round,
+the near side of the world dissolves out of its way, the path straightens and buildings turn
+to face it, as a side view has them; with `camera.world_sky` the sun and sky sweep across.
+
+| Field | Type | Default | Meaning |
+|---|---|---|---|
+| `seconds` | number | `0.0` | Seconds it takes to come round (0: no swing). |
+| `hold` | number | `0.5` | Seconds it holds the first view before it moves. |
+| `from` | [SwingView](#swingview) | (see the type) | The view it comes from (it ends on the scene's own camera). |
+| `ease` | [SwingEase](#swingease) | `"Smooth"` |  |
+| `overshoot` | number | `0.0` | How far past the end it swings before settling back, a share of the turn (0 none, up to 0.3): a crane's or a handheld camera's overshoot. |
+| `orbit` | boolean | `true` | Circling the spot on the path both views look at (true), or moving straight across from one place to the other, turning as it goes (false). |
+| `bars` | number | `0.0` | Letterbox bars over the top and bottom of the frame at the start, a share of its height each (0 none, up to 0.25), sliding away as the swing ends: the game starts. |
+
+### SwingEase
+
+| Value | Meaning |
+|---|---|
+| `Linear` |  |
+| `Smooth` | Gathering speed and settling gently. |
+| `Out` | Off at once, settling slowly: a reveal. |
+| `In` | Easing off the first view, arriving briskly. |
+
+### SwingView
+
+Where a swing's camera starts: as `Camera` has it, and `back` metres behind the walker (a
+third-person view; 0 at the walker's eyes).
+
+| Field | Type | Default | Meaning |
+|---|---|---|---|
+| `yaw` | number | `0.0` |  |
+| `side` | number | `0.0` |  |
+| `back` | number | `5.0` |  |
+| `eye_height` | number | `2.2` |  |
+| `horizon` | number | `0.4` |  |
+| `zoom` | number | `1.0` |  |
 
 ### Threshold
 

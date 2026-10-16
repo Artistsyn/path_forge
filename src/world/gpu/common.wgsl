@@ -594,3 +594,11 @@ fn df_div(x: vec2<f32>, n: f32) -> vec2<f32> {
     let r = df_add(x, df_neg(two_prod(q, n)));
     return df_norm(q, div(r.x + r.y, n));
 }
+
+// raster::dissolved: whether pixel (x, y) is left out of something dissolved k of the way.
+fn dissolved(x: i32, y: i32, k: f32) -> bool {
+    if k <= 0.0 { return false; }
+    let a = (x ^ y) & 3; let b = y & 3;
+    let rank = ((a & 1) << 3u) | ((b & 1) << 2u) | ((a >> 1u) << 1u) | (b >> 1u);
+    return (f32(rank) + 0.5) / 16.0 < k;
+}

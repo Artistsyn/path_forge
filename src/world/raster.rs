@@ -145,7 +145,39 @@ pub(crate) fn tiles_touched(t: &Prepared, cols: usize, out: &mut Vec<u32>) {
 /// Rasterise triangles (all vertices in front of the camera) into `gbuf` with depth testing.
 pub fn rasterize(gbuf: &mut [GPixel], w: usize, h: usize, tris: &[Tri], view: &super::view::View) {
     let prepared = prepare(w, h, tris, view);
-    raster_prepared(gbuf, w, &prepared);
+    raster_prepared(gbuf, w, &prepared, Dissolve::of(view));
+}
+
+/// Whether pixel (x, y) is left out of something dissolved `k` (0..1) of the way: a share `k` of
+/// its pixels go, spread evenly in a 4 x 4 ordered (Bayer) pattern, its rank in the pattern made
+/// from the bits of x ^ y and y interleaved.
+#[inline]
+pub fn dissolved(x: i64, y: i64, k: f32) -> bool {
+    if k <= 0.0 { return false; }
+    let (a, b) = ((x ^ y) & 3, y & 3);
+    let rank = ((a & 1) << 3) | ((b & 1) << 2) | ((a >> 1) << 1) | (b >> 1);
+    (rank as f32 + 0.5) / 16.0 < k
+}
+
+/// What of the geometry a swinging camera is dissolving (`View::side_k` between 0 and 1): the
+/// ceiling, the wall on its own side, and fences and railings past the cut on that side.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Dissolve { pub k: f32, pub near: f32, pub cut: f32 }
+
+impl Dissolve {
+    pub fn of(v: &super::view::View) -> Dissolve {
+        let k = if v.side_k > 0.0 && v.side_k < 1.0 { v.side_k } else { 0.0 };
+        Dissolve { k, near: v.near, cut: v.half_width + v.cutaway }
+    }
+    /// Whether a pixel of surface `id` at world `x` is left out at pixel (px, py).
+    #[inline]
+    pub fn hides(&self, id: u8, x: f32, px: i64, py: i64) -> bool {
+        if self.k <= 0.0 { return false; }
+        let on = id == self::id::CEILING
+            || (id == self::id::WALL_L && self.near < 0.0) || (id == self::id::WALL_R && self.near > 0.0)
+            || (self::id::is_rail(id) && x * self.near > self.cut);
+        on && dissolved(px, py, self.k)
+    }
 }
 
 /// Set up every triangle that shows (`rasterize`'s first half; the GPU rasterises from these too).
@@ -192,7 +224,7 @@ pub(crate) fn prepare(w: usize, h: usize, tris: &[Tri], view: &super::view::View
     }).collect()
 }
 
-fn raster_prepared(gbuf: &mut [GPixel], w: usize, prepared: &[Prepared]) {
+fn raster_prepared(gbuf: &mut [GPixel], w: usize, prepared: &[Prepared], fade: Dissolve) {
     const BAND: usize = 8;
     gbuf.par_chunks_mut(w * BAND).enumerate().for_each(|(band, rows)| {
         let y0 = (band * BAND) as i32;
@@ -237,7 +269,9 @@ fn raster_prepared(gbuf: &mut [GPixel], w: usize, prepared: &[Prepared]) {
                     let g = &mut row[x as usize];
                     if z >= g.depth { continue; }
                     let wz = |k: usize| (b0 * t.w_over_z[0][k] + b1 * t.w_over_z[1][k] + b2 * t.w_over_z[2][k]) * z;
-                    *g = GPixel { depth: z, id: t.id, x: wz(0), y: wz(1), d: wz(2), realm: t.realm, pad: 0 };
+                    let wx = wz(0);
+                    if fade.hides(t.id, wx, x as i64, y as i64) { continue; }
+                    *g = GPixel { depth: z, id: t.id, x: wx, y: wz(1), d: wz(2), realm: t.realm, pad: 0 };
                 }
             }
         }

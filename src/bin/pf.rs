@@ -23,7 +23,7 @@
 //! Exporting
 //!   pf export  (--preset NAME | --scene FILE) -o FOLDER [--formats gif,webp,apng,png,sheet,depth,layers]
 //!              [--quality 0..100] [--frames N] [--name STEM] [--lossy 0..1] [--dither on|off]
-//!              [--clip loop | encounter [--slow M] [--start FRAME]
+//!              [--clip loop | intro | encounter [--slow M] [--start FRAME]
 //!                     | transition (--to-preset NAME | --to-scene FILE) [--approach M] [--entries N]
 //!                     | fork (--left-preset NAME | --left-scene FILE) (--right-preset NAME | --right-scene FILE)]
 //!
@@ -341,7 +341,9 @@ fn parity_gpu(args: &Args) -> Result<(), String> {
     let mut cpu = Renderers::new(false);
     let mut gpu = Renderers::new(false);
     gpu.world.set_gpu(Some(world_gpu()?));
-    let times: Vec<f32> = match args.opts.get("t") { Some(t) => vec![t.parse().map_err(|_| "--t: a number")?], None => vec![0.0, 0.37] };
+    // --intro: frames of the camera's flight in or swing in (from the start of play).
+    (cpu.intro, gpu.intro) = (args.opts.contains_key("intro"), args.opts.contains_key("intro"));
+    let times: Vec<f32> = match args.opts.get("t") { Some(t) => t.split(',').map(|t| t.trim().parse().map_err(|_| "--t: numbers, comma-separated".to_string())).collect::<Result<_, _>>()?, None => vec![0.0, 0.37] };
     println!("{:<16} {:>5} {:>8} {:>7} {:>5}  {}", "scene", "t", "mean", "p99.9", "max", "verdict");
     let mut failed = 0;
     for (name, item) in items(args)? {
@@ -724,7 +726,8 @@ fn cmd_export(args: &Args) -> Result<(), String> {
             let (r, rd) = side("right-scene", "right-preset")?;
             path_forge::export::export_fork(&scene, (&l, ld), (&r, rd), &job, &Default::default(), |_| {}, &cancel)?
         }
-        other => return Err(format!("--clip {other}: expected loop, encounter, transition or fork")),
+        "intro" => path_forge::export::export_intro(&scene, &job, |_| {}, &cancel)?,
+        other => return Err(format!("--clip {other}: expected loop, intro, encounter, transition or fork")),
     };
     println!("{name}: {} frames at {:.1} fps ({:.2} s loop, {:.3} m per frame) in {} ms", report.frames, report.fps, report.loop_seconds, report.metres_per_frame, report.elapsed_ms);
     for f in &report.files {

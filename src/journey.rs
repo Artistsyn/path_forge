@@ -46,22 +46,32 @@ impl<'a> Place<'a> {
 pub struct Camera {
     pub view: View,
     pub beyond: Option<(f32, View)>,
+    /// Metres the camera stands behind the walker (a swing's third-person view; 0 at the walker's
+    /// eyes). Distances ahead are the walker's.
+    pub back: f32,
 }
 
 impl Camera {
     /// The camera `distance` metres along `scene`'s loop, for a `width` x `height` frame.
     pub fn plain(scene: &Scene, distance: f32, width: u32, height: u32) -> Camera {
-        Camera { view: View::new(scene, width.max(2) as usize, height.max(2) as usize).at(distance.rem_euclid(scene.motion.loop_length.max(1.0))), beyond: None }
+        Camera { view: View::new(scene, width.max(2) as usize, height.max(2) as usize).at(distance.rem_euclid(scene.motion.loop_length.max(1.0))), beyond: None, back: 0.0 }
     }
-    /// Where a point `x` metres right of the path centre, `y` up and `d` ahead appears (pixels from
-    /// the top left); None behind the camera.
+    /// The camera partway through a swing, the walker `distance` metres along `scene`'s loop.
+    pub fn swinging(scene: &Scene, pose: &crate::scene::SwingPose, distance: f32, width: u32, height: u32) -> Camera {
+        let v = View::posed(scene, &pose.camera, width.max(2) as usize, height.max(2) as usize, pose.turning);
+        Camera { view: v.at((distance - pose.back).rem_euclid(scene.motion.loop_length.max(1.0))), beyond: None, back: pose.back }
+    }
+    /// Where a point `x` metres right of the path centre, `y` up and `d` ahead of the walker
+    /// appears (pixels from the top left); None behind the camera.
     pub fn project(&self, x: f32, y: f32, d: f32) -> Option<[f32; 2]> {
+        let d = d + self.back;
         match self.beyond { Some((zb, b)) if d >= zb => b.world_to_px(x, y, d), _ => self.view.world_to_px(x, y, d) }
     }
-    /// How far ahead the ground on screen row `row` is (None above the horizon).
+    /// How far ahead of the walker the ground on screen row `row` is (None above the horizon).
     pub fn ground_distance(&self, row: f32) -> Option<f32> {
         let d = self.view.ground_distance(row);
-        match (self.beyond, d) { (Some((zb, b)), Some(d)) if d >= zb => b.ground_distance(row).map(|e| e.max(zb)), _ => d }
+        let d = match (self.beyond, d) { (Some((zb, b)), Some(d)) if d >= zb => b.ground_distance(row).map(|e| e.max(zb)), _ => d };
+        d.map(|d| d - self.back)
     }
 }
 
@@ -105,7 +115,7 @@ impl CrossWalk {
         let (zb, sa, sb) = self.at(travel);
         let pa = Camera::plain(a, sa, width, height).view;
         let pb = Camera::plain(b, sb, width, height).view;
-        if zb <= 0.0 { Camera { view: pb, beyond: None } } else { Camera { view: pa, beyond: Some((zb, pb)) } }
+        if zb <= 0.0 { Camera { view: pb, beyond: None, back: 0.0 } } else { Camera { view: pa, beyond: Some((zb, pb)), back: 0.0 } }
     }
 
     /// The frame at `travel` metres, with each world's clock.
