@@ -21,6 +21,7 @@ import java.nio.charset.StandardCharsets;
 final class Look {
     static final String[] SKIES = {"As designed", "Golden", "Fiery", "Pastel", "Dusk"};
     static final String[] CLOUDS = {"As designed", "Mixed"};
+    static final String[] SEASONS = {"As designed", "Spring", "Summer", "Autumn", "Winter", "Year cycle"};
     static final String[] TIMES = {"As designed", "Real time", "Dawn", "Noon", "Dusk", "Night", "Day cycle"};
     /** The hour each of TIMES' fixed times stands at. */
     private static final double[] HOURS = {-1, -1, 6.4, 12, 18.1, 23, 5};
@@ -134,6 +135,28 @@ final class Look {
             dn.put("real_time", i == 1);
             dn.put("days_per_loop", i == 6 ? 1 : 0);
             if (i >= 2) dn.put("hour", HOURS[i]);
+            scene = s.toString();
+        } catch (JSONException ignored) {
+        }
+    }
+
+    /** Index into SEASONS of the scene's season (0: none). */
+    int season() {
+        JSONObject se = parsed().optJSONObject("season");
+        if (se == null || !se.optBoolean("enabled")) return 0;
+        if (se.optInt("years_per_loop", 0) > 0) return 5;
+        return 1 + (int) Math.round(se.optDouble("season", 1)) % 4;
+    }
+
+    /** Set the season to SEASONS[i] (a year each loop for the last); 0 as designed. */
+    void setSeason(int i) {
+        try {
+            JSONObject s = parsed();
+            JSONObject se = obj(s, "season");
+            se.put("enabled", i > 0);
+            se.put("years_per_loop", i == 5 ? 1 : 0);
+            if (i >= 1 && i <= 4) se.put("season", i - 1);
+            if (i == 5) se.put("season", 0);
             scene = s.toString();
         } catch (JSONException ignored) {
         }

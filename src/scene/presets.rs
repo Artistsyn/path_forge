@@ -76,7 +76,7 @@ fn scene(name: &str) -> Scene {
     Scene {
         version: SCENE_VERSION, name: name.to_owned(), canvas: Canvas::default(), camera: Camera::default(),
         path: PathShape::default(), verge: Verge::default(), ground_cover: vec![], walls: Walls::default(), ceiling: Ceiling::default(),
-        sky: no_sky([0, 0, 0]), light: indoor_light(0.25, [0, 0, 0], 20.0), fixtures: vec![], props: vec![], set_pieces: vec![], companions: vec![], weather: Weather::default(), prop_defs: Default::default(),
+        sky: no_sky([0, 0, 0]), light: indoor_light(0.25, [0, 0, 0], 20.0), fixtures: vec![], props: vec![], set_pieces: vec![], companions: vec![], weather: Weather::default(), season: Season::default(), prop_defs: Default::default(),
         particles: vec![], post: Post::default(), style: Style::default(), motion: Motion::default(),
     }
 }

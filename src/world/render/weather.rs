@@ -721,7 +721,9 @@ pub(super) fn apply_mist(ctxs: &[Ctx], gbuf: &[GPixel], hdr: &mut [[f32; 3]]) {
                 let e = water::water_edge(ctx, gd) + 0.5 * m.spread.max(0.0);
                 if lx.abs() <= e { 1.0 } else { e / lx.abs() }
             } else { 1.0 };
-            let len = z * stretch * f * mist_mean(soft, top, eye, eye + (y_end - eye) * f);
+            // Only beyond the clear air in front (fog lying in the low ground ahead).
+            let near = if m.from > 0.0 { ((z - m.from) / z.max(1e-3)).clamp(0.0, 1.0) } else { 1.0 };
+            let len = z * stretch * f * near * mist_mean(soft, top, eye, eye + (y_end - eye) * f);
             if len <= 1e-3 { continue; }
             let tau = m.density.max(0.0) * mist_patch(ctx, gx * f, gd * f) * len;
             let a = 1.0 - (-tau).exp();
@@ -1096,7 +1098,48 @@ pub(super) fn aurora(ctx: &Ctx, gbuf: &[GPixel], hdr: &mut [[f32; 3]]) {
 }
 
 /// A rainbow round a point below the horizon, red outside, and a fainter, reversed second bow.
+/// The halos round the sun and moon this frame: centre (x, y), radius in pixels, and the light
+/// of the ring (its body's colour and brightness), as both renderers draw them.
+pub(super) fn halo_list(ctx: &Ctx) -> Vec<[f32; 6]> {
+    let sky = &ctx.scene.sky;
+    let h = &sky.halo;
+    if !sky.enabled || !h.enabled || h.strength <= 0.0 || sky.space.enabled || sky.tunnel.enabled { return Vec::new(); }
+    let v = &ctx.view;
+    let hy = v.horizon_px.max(2.0);
+    let (ox, oy) = (v.left as f32 + v.sky_dx(), v.top as f32);
+    let (fw, fhy) = (v.width as f32 - 2.0 * v.left as f32, (hy - v.top as f32).max(2.0));
+    let mut out = Vec::new();
+    for (on, body, k) in [(h.sun, &sky.sun, 0.04), (h.moon, &sky.moon.body, 0.18)] {
+        if !on || !body.enabled || body.pos[1] > 1.05 { continue; }
+        let c = scale3(rgb_lin(body.color), k * h.strength * body.intensity.max(0.0).min(3.0));
+        out.push([ox + body.pos[0] * fw, oy + body.pos[1] * fhy, (h.size * fhy).max(2.0), c[0], c[1], c[2]]);
+    }
+    out
+}
+
+/// A halo's light at (px, py): sharp and reddish on the inside, whiter and fading outwards.
+pub(super) fn halo_px(hl: &[f32; 6], px: f32, py: f32) -> [f32; 3] {
+    let d = ((px - hl[0]).powi(2) + (py - hl[1]).powi(2)).sqrt();
+    let r = hl[2];
+    let t = (d - r) / (0.07 * r);
+    let k = if t < 0.0 { (-(t * 4.8) * (t * 4.8)).exp() } else { (-t).exp() };
+    let tint = mix3([1.0, 0.55, 0.35], [0.9, 0.95, 1.0], ((d - r) / (0.1 * r) + 0.5).clamp(0.0, 1.0));
+    [hl[3] * tint[0] * k, hl[4] * tint[1] * k, hl[5] * tint[2] * k]
+}
+
 pub(super) fn rainbow(ctx: &Ctx, gbuf: &[GPixel], hdr: &mut [[f32; 3]]) {
+    let halos = halo_list(ctx);
+    if !halos.is_empty() {
+        let w = ctx.view.width;
+        let hy = ctx.view.horizon_px.max(2.0);
+        hdr.par_chunks_mut(w).enumerate().for_each(|(y, row)| {
+            if y as f32 >= hy { return; }
+            for (x, px) in row.iter_mut().enumerate() {
+                if gbuf[y * w + x].id != id::NONE { continue; }
+                for hl in &halos { *px = add3(*px, halo_px(hl, x as f32 + 0.5, y as f32 + 0.5)); }
+            }
+        });
+    }
     let r = &ctx.scene.sky.rainbow;
     if !r.enabled || r.intensity <= 0.0 { return; }
     let v = &ctx.view;
@@ -1113,6 +1156,7 @@ pub(super) fn rainbow(ctx: &Ctx, gbuf: &[GPixel], hdr: &mut [[f32; 3]]) {
     let (rad2, band2) = (1.21 * rad, 1.7 * band);
     let sun = ctx.sky_lights.first().map_or(0.6, |s| lum(s.color).clamp(0.2, 2.0));
     let k = r.intensity.max(0.0) * 0.32 * sun;
+    let sat = r.saturation.clamp(0.0, 1.0);
     let spectrum = |t: f32| -> [f32; 3] {
         // Violet (0) to red (1).
         let t = t.clamp(0.0, 1.0);
@@ -1133,7 +1177,12 @@ pub(super) fn rainbow(ctx: &Ctx, gbuf: &[GPixel], hdr: &mut [[f32; 3]]) {
                 let t2 = (d - (rad2 - band2 * 0.5)) / band2;
                 if (0.0..1.0).contains(&t2) { c = add3(c, scale3(spectrum(1.0 - t2), 0.4 * (std::f32::consts::PI * t2).sin().sqrt())); }
             }
-            if c != [0.0; 3] { *px = add3(*px, scale3(c, k * low)); }
+            if c != [0.0; 3] {
+                // A moonbow is pale: most of its colour washed out.
+                let g = (c[0] + c[1] + c[2]) / 3.0;
+                let c = mix3([g; 3], c, sat);
+                *px = add3(*px, scale3(c, k * low));
+            }
         }
     });
 }

@@ -72,7 +72,7 @@ public final class MainActivity extends Activity implements Editor.Host {
     private TextView speedLabel;
     private SeekBar speedBar;
     private TextView showButton;
-    private Ui.Chips skyChips, timeChips, cloudChips;
+    private Ui.Chips skyChips, timeChips, seasonChips, cloudChips;
     private LinearLayout strip;
     private int bottomInset, topInset;
     /** The strip's tiles: (name, one of yours?, its picture). */
@@ -231,6 +231,10 @@ public final class MainActivity extends Activity implements Editor.Host {
             sceneChanged(false);
         });
         body.addView(timeChips.view);
+
+        body.addView(Ui.label(this, "Season"));
+        seasonChips = new Ui.Chips(this, Look.SEASONS, look.season(), i -> { look.setSeason(i); sceneChanged(false); });
+        body.addView(seasonChips.view);
 
         body.addView(Ui.label(this, "Clouds"));
         LinearLayout clouds = new LinearLayout(this);
@@ -489,6 +493,7 @@ public final class MainActivity extends Activity implements Editor.Host {
         if (controls) {
             skyChips.select(look.sky());
             timeChips.select(look.time());
+            seasonChips.select(look.season());
             cloudChips.select(look.mixed() ? 1 : 0);
             speedBar.setProgress((int) Math.round((look.speed() - 0.5) / 0.1));
             showSpeed();

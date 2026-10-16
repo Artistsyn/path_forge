@@ -25,6 +25,7 @@ See [MANUAL.md](MANUAL.md) for what each part does and how to use it.
 | `companions` | list of [Companion](#companion) | `[]` | Things travelling along with the camera: a ship flying beside the path, a drone, a bird. |
 | `particles` | list of [Particles](#particles) | (see the type) |  |
 | `weather` | [Weather](#weather) | (see the type) | Lightning and fog banks. |
+| `season` | [Season](#season) | (see the type) | The time of year: foliage, grass and the ground through spring, summer, autumn and winter. |
 | `prop_defs` | map of name → [PropDef](#propdef) |  | Props described by data, by name: a prop layer uses one with `def: "<name>"`. Kits (folders with a kit.json) hold more, used as `def: "<folder>#<name>"`. |
 | `post` | [Post](#post) | (see the type) |  |
 | `style` | [Style](#style) | (see the type) |  |
@@ -504,6 +505,19 @@ One layer of ground cover. It stands on the ground itself (not at the path's edg
 | `patchiness` | number | `0.2` | 0 grows evenly; towards 1 it grows in patches with bare ground between. |
 | `seed` | integer | `0` |  |
 
+### Halo
+
+A halo: the ring of light round the sun or moon seen through thin high cloud (ice crystals
+bending its light), reddish on its sharp inner edge, fading out beyond.
+
+| Field | Type | Default | Meaning |
+|---|---|---|---|
+| `enabled` | boolean | `false` |  |
+| `sun` | boolean | `true` | Round the sun, round the moon (either or both, when they are up). |
+| `moon` | boolean | `true` |  |
+| `size` | number | `0.32` | The ring's radius, as a share of the sky's height. |
+| `strength` | number | `0.35` |  |
+
 ### HeatShimmer
 
 Heat haze: the picture wavers over the distant ground and just above the horizon.
@@ -649,6 +663,7 @@ Mist lying low over the ground, drifting, with wisps rising from it.
 | `over` | [MistOver](#mistover) | `"Everywhere"` | Where it lies: everywhere, or only over the path (a river's water, a road) and `spread` metres past its edges, fading out across them. |
 | `spread` | number | `1.0` | How far past the path's edges mist `over` the path reaches, metres. |
 | `glow` | number | `0.0` | How much brighter it glows looking towards the sun, as mist does lit from behind (0..2). |
+| `from` | number | `0.0` | Clear air this many metres ahead before the mist begins: fog lying in the low ground in the distance, a valley filled with it (0: from the camera on). |
 
 ### MistOver
 
@@ -946,6 +961,7 @@ A rainbow: an arc round the point opposite the sun, with a faint second bow outs
 | `x` | number | `0.5` | Where its centre is across the sky (0 left .. 1 right). |
 | `size` | number | `1.0` | Size: 1 spans the frame's width (a real 42-degree bow is wider than a portrait view). |
 | `double` | boolean | `true` | Draw the fainter second bow outside the first. |
+| `saturation` | number | `1.0` | How colourful: 1 a rainbow; about 0.2 a moonbow, the pale bow the moon makes at night. |
 
 ### Rings
 
@@ -972,6 +988,21 @@ a sand-coloured haze that hides the distance, and the sun dimmed to a disc.
 | `intensity` | number | `0.5` | 0.2 blowing sand .. 1 a wall of sand. |
 | `color` | integer × 3 | `[214,172,116]` |  |
 | `seed` | integer | `0` |  |
+
+### Season
+
+The time of year (`scene.season`), over the scene's own colours (taken as summer's): fresh light
+green and blossom in spring; turning gold, orange and red with leaves falling in autumn; bare
+broadleaf trees, straw-coloured grass and lying snow in winter. In between, one season turns
+into the next.
+
+| Field | Type | Default | Meaning |
+|---|---|---|---|
+| `enabled` | boolean | `false` |  |
+| `season` | number | `1.0` | Where in the year: 0 spring, 1 summer, 2 autumn, 3 winter (4 is spring again; fractions are the turn from one to the next). |
+| `years_per_loop` | integer | `0` | Whole years that pass in one loop (0 holds the season). |
+| `falling` | boolean | `true` | Blossom drifting down in spring, leaves falling in autumn. |
+| `snow` | boolean | `true` | Snow lying in winter. |
 
 ### SetPiece
 
@@ -1046,6 +1077,7 @@ One of `Both` \| `Left` \| `Right` \| `Center`.
 | `day_night` | [DayNight](#daynight) | (see the type) | A day and night: the sun crosses the sky and sets, the light, sky and fog follow it, the stars and moon come out and the lamps light at dusk. Set the hour, or let the days pass with the loop; a game can set the hour itself (`Runtime::set_hour`). |
 | `aurora` | [Aurora](#aurora) | (see the type) | Northern lights: curtains of green and violet light rippling across the sky. |
 | `rainbow` | [Rainbow](#rainbow) | (see the type) |  |
+| `halo` | [Halo](#halo) | (see the type) | A ring of light round the sun or moon in thin high cloud. |
 | `space` | [Space](#space) | (see the type) | Deep space: a dense starfield, nebulae, a galaxy band and planets. |
 | `tunnel` | [Tunnel](#tunnel) | (see the type) | A tunnel all round the path in place of the sky: hyperspace or a wormhole. |
 

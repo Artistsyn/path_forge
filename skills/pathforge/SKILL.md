@@ -339,6 +339,10 @@ choose the details unless the plan's warnings say to.
   `pf_runtime_open_journey`, `pf_runtime_step`, `pf_runtime_go`, `pf_runtime_choose`,
   `pf_runtime_state` (JSON). CLI: `pf transition --scene A --to-preset NAME -o sheet.png` (or
   `--left-*`/`--right-*`, `--take`), `pf journey --file F --out DIR`.
+- **Seasons:** `season` (`enabled`, `season` 0 spring / 1 summer / 2 autumn / 3 winter, `years_per_loop`,
+  `falling` blossom and leaves, `snow` in winter) recolours foliage, grass and verges; winter bares
+  broadleaf trees. `sky.halo` rings the sun/moon; `sky.rainbow.saturation` ~0.2 makes a moonbow;
+  `weather.mist.from` keeps the near air clear (valley fog).
 - **Day and night:** `sky.day_night` (`hour`, `days_per_loop` for a whole day each loop, `real_time`
   for the phone's clock, `sunrise`/`sunset`, `sun_height`, `sun_path`, `sunset_style`, `keep_look`,
   `night_light`, `sun`/`moon`/`stars`/`lamps`). Games: `Runtime::set_hour`, `set_day_length`,

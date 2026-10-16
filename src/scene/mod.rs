@@ -44,6 +44,8 @@ pub struct Scene {
     pub particles: Vec<Particles>,
     /// Lightning and fog banks.
     pub weather: Weather,
+    /// The time of year: foliage, grass and the ground through spring, summer, autumn and winter.
+    pub season: Season,
     /// Props described by data, by name: a prop layer uses one with `def: "<name>"`. Kits (folders
     /// with a kit.json) hold more, used as `def: "<folder>#<name>"`.
     #[serde(skip_serializing_if = "std::collections::BTreeMap::is_empty")]
@@ -561,6 +563,8 @@ pub struct Sky {
     /// Northern lights: curtains of green and violet light rippling across the sky.
     pub aurora: Aurora,
     pub rainbow: Rainbow,
+    /// A ring of light round the sun or moon in thin high cloud.
+    pub halo: Halo,
     /// Deep space: a dense starfield, nebulae, a galaxy band and planets.
     pub space: Space,
     /// A tunnel all round the path in place of the sky: hyperspace or a wormhole.
@@ -572,7 +576,7 @@ impl Default for Sky {
             enabled: true, top: [70, 110, 170], horizon: [200, 190, 160],
             sun: SkyBody::default(), moon: Moon::default(), stars: Stars::default(), meteors: Meteors::default(), clouds: Clouds::default(), cloud_layers: Vec::new(),
             cloud_mix: CloudMix::default(), sunset: Sunset::default(), day_night: DayNight::default(),
-            aurora: Aurora::default(), rainbow: Rainbow::default(), space: Space::default(), tunnel: Tunnel::default(),
+            aurora: Aurora::default(), rainbow: Rainbow::default(), halo: Halo::default(), space: Space::default(), tunnel: Tunnel::default(),
         }
     }
 }
@@ -1026,9 +1030,28 @@ pub struct Rainbow {
     pub size: f32,
     /// Draw the fainter second bow outside the first.
     pub double: bool,
+    /// How colourful: 1 a rainbow; about 0.2 a moonbow, the pale bow the moon makes at night.
+    pub saturation: f32,
 }
 impl Default for Rainbow {
-    fn default() -> Self { Rainbow { enabled: false, intensity: 0.5, x: 0.5, size: 1.0, double: true } }
+    fn default() -> Self { Rainbow { enabled: false, intensity: 0.5, x: 0.5, size: 1.0, double: true, saturation: 1.0 } }
+}
+
+/// A halo: the ring of light round the sun or moon seen through thin high cloud (ice crystals
+/// bending its light), reddish on its sharp inner edge, fading out beyond.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
+pub struct Halo {
+    pub enabled: bool,
+    /// Round the sun, round the moon (either or both, when they are up).
+    pub sun: bool,
+    pub moon: bool,
+    /// The ring's radius, as a share of the sky's height.
+    pub size: f32,
+    pub strength: f32,
+}
+impl Default for Halo {
+    fn default() -> Self { Halo { enabled: false, sun: true, moon: true, size: 0.32, strength: 0.35 } }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -1625,6 +1648,108 @@ impl DayNight {
 
 fn smooth(e0: f32, e1: f32, x: f32) -> f32 { let t = ((x - e0) / (e1 - e0)).clamp(0.0, 1.0); t * t * (3.0 - 2.0 * t) }
 
+/// The time of year (`scene.season`), over the scene's own colours (taken as summer's): fresh light
+/// green and blossom in spring; turning gold, orange and red with leaves falling in autumn; bare
+/// broadleaf trees, straw-coloured grass and lying snow in winter. In between, one season turns
+/// into the next.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
+pub struct Season {
+    pub enabled: bool,
+    /// Where in the year: 0 spring, 1 summer, 2 autumn, 3 winter (4 is spring again; fractions
+    /// are the turn from one to the next).
+    pub season: f32,
+    /// Whole years that pass in one loop (0 holds the season).
+    pub years_per_loop: u32,
+    /// Blossom drifting down in spring, leaves falling in autumn.
+    pub falling: bool,
+    /// Snow lying in winter.
+    pub snow: bool,
+    #[serde(skip)]
+    #[schemars(skip)]
+    pub baked: bool,
+}
+impl Default for Season {
+    fn default() -> Self { Season { enabled: false, season: 1.0, years_per_loop: 0, falling: true, snow: true, baked: false } }
+}
+
+impl Season {
+    /// How much of each season there is at `s` (spring, summer, autumn, winter), summing to 1:
+    /// each holds for most of its quarter and turns into the next at its end.
+    pub fn weights(s: f32) -> [f32; 4] {
+        let s = s.rem_euclid(4.0);
+        let i = (s.floor() as usize).min(3);
+        let t = smooth(0.65, 1.0, s - i as f32);
+        let mut w = [0.0; 4];
+        w[i] = 1.0 - t;
+        w[(i + 1) % 4] += t;
+        w
+    }
+
+    /// A copy of `scene` in its season `loop_phase` (0..1) of the way through its loop, or None
+    /// when it has none or this is already such a copy.
+    pub fn bake(scene: &Scene, loop_phase: f32) -> Option<Scene> {
+        let se = &scene.season;
+        if !se.enabled || se.baked { return None; }
+        let w = Season::weights(se.season + 4.0 * se.years_per_loop as f32 * loop_phase);
+        let mut s = scene.clone();
+        s.season.baked = true;
+        // A colour in each season: spring, the scene's own (summer), autumn, winter.
+        let blend = |own: Rgb, keys: [Option<Rgb>; 4]| -> Rgb {
+            let mut acc = [0.0f32; 3];
+            for (k, wk) in keys.iter().zip(w) {
+                let c = k.unwrap_or(own);
+                for i in 0..3 { acc[i] += c[i] as f32 * wk; }
+            }
+            acc.map(|v| v.round().clamp(0.0, 255.0) as u8)
+        };
+        let mixc = |a: Rgb, b: Rgb, t: f32| -> Rgb { [0, 1, 2].map(|i| (a[i] as f32 + (b[i] as f32 - a[i] as f32) * t).round() as u8) };
+        let winter_now = w[3] >= 0.5;
+        for (li, p) in s.props.iter_mut().enumerate() {
+            // Autumn turns each layer its own mix of gold, orange and red.
+            let h = ((li as u32).wrapping_mul(2_654_435_761) >> 16) as f32 / 65535.0;
+            let autumn = mixc([214, 150, 40], [186, 62, 28], h);
+            match p.kind {
+                PropKind::Tree | PropKind::Willow => {
+                    p.tint = blend(p.tint, [Some(mixc(p.tint, [120, 190, 70], 0.6)), None, Some(autumn), Some(p.tint)]);
+                    if winter_now && se.snow { (p.kind, p.tint) = (PropKind::DeadTree, [84, 70, 56]); }
+                    else if winter_now { (p.kind, p.tint) = (PropKind::DeadTree, [74, 62, 50]); }
+                }
+                PropKind::Bush => p.tint = blend(p.tint, [Some(mixc(p.tint, [120, 190, 70], 0.6)), None, Some(mixc(autumn, [120, 60, 30], 0.3)), Some([96, 80, 62])]),
+                PropKind::Pine => p.tint = blend(p.tint, [Some(mixc(p.tint, [70, 140, 70], 0.25)), None, None, Some(mixc(p.tint, [22, 56, 46], 0.4))]),
+                PropKind::Reeds => p.tint = blend(p.tint, [Some([110, 150, 60]), None, Some([176, 146, 72]), Some([156, 140, 104])]),
+                _ => {}
+            }
+        }
+        let grass = |c: Rgb, hi: bool| blend(c, [Some(if hi { [140, 190, 86] } else { [86, 148, 54] }), None, Some(if hi { [180, 160, 92] } else { [138, 124, 64] }), Some(if hi { [176, 166, 136] } else { [132, 126, 102] })]);
+        for g in s.ground_cover.iter_mut() {
+            match g.kind {
+                CoverKind::Grass | CoverKind::TallGrass => { g.color = grass(g.color, false); g.color2 = grass(g.color2, true); }
+                CoverKind::Wildflowers => { g.color = grass(g.color, false); g.density *= w[0] * 1.3 + w[1] + w[2] * 0.4; }
+                CoverKind::Moss => g.color = blend(g.color, [None, None, Some(mixc(g.color, [120, 110, 50], 0.4)), Some(mixc(g.color, [110, 110, 100], 0.5))]),
+            }
+        }
+        s.verge.tuft_color = grass(s.verge.tuft_color, false);
+        for m in [&mut s.verge.material, &mut s.path.material] {
+            if m.pattern == Pattern::Grass { m.base = grass(m.base, false); m.mortar = grass(m.mortar, false); }
+        }
+        if se.falling {
+            let fall = |kind: ParticleKind, color: Rgb, k: f32| Particles { kind, color, count: (70.0 * k).round() as u32, size: 1.0, speed: 1.0, seed: 0x5EA, enabled: true };
+            if w[0] > 0.05 && scene.sky.enabled { s.particles.push(fall(ParticleKind::Petals, [250, 196, 214], w[0])); }
+            if w[2] > 0.05 { s.particles.push(fall(ParticleKind::Leaves, [206, 112, 40], w[2])); }
+        }
+        if se.snow && w[3] > 0.02 {
+            let sc = &mut s.weather.snow_cover;
+            sc.enabled = true;
+            sc.props = sc.props.max(0.7 * w[3]);
+            sc.ground = sc.ground.max(0.65 * w[3]);
+        }
+        // Winter light is cooler and lower; autumn's warmer.
+        s.light.ambient_color = blend(s.light.ambient_color, [None, None, Some(mixc(s.light.ambient_color, [235, 200, 160], 0.25)), Some(mixc(s.light.ambient_color, [190, 205, 235], 0.3))]);
+        Some(s)
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(default)]
 pub struct Lighting {
@@ -2033,6 +2158,9 @@ pub struct Mist {
     pub spread: f32,
     /// How much brighter it glows looking towards the sun, as mist does lit from behind (0..2).
     pub glow: f32,
+    /// Clear air this many metres ahead before the mist begins: fog lying in the low ground in
+    /// the distance, a valley filled with it (0: from the camera on).
+    pub from: f32,
 }
 
 /// Where mist lies.
@@ -2044,7 +2172,7 @@ pub enum MistOver {
     Path,
 }
 impl Default for Mist {
-    fn default() -> Self { Mist { enabled: false, height: 0.8, density: 0.25, color: [205, 210, 220], patchiness: 0.6, wisps: 0.4, seed: 0, soft: 0.0, over: MistOver::Everywhere, spread: 1.0, glow: 0.0 } }
+    fn default() -> Self { Mist { enabled: false, height: 0.8, density: 0.25, color: [205, 210, 220], patchiness: 0.6, wisps: 0.4, seed: 0, soft: 0.0, over: MistOver::Everywhere, spread: 1.0, glow: 0.0, from: 0.0 } }
 }
 
 /// Light scattered by the air. Stronger in fog, mist, haze and dust.

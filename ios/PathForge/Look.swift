@@ -5,6 +5,7 @@ import Foundation
 /// is what is shown.
 struct Look {
     static let skies = ["As designed", "Golden", "Fiery", "Pastel", "Dusk"]
+    static let seasons = ["As designed", "Spring", "Summer", "Autumn", "Winter", "Year cycle"]
     static let times = ["As designed", "Real time", "Dawn", "Noon", "Dusk", "Night", "Day cycle"]
     /// The hour each of `times`' fixed times stands at.
     private static let hours: [Double] = [-1, -1, 6.4, 12, 18.1, 23, 5]
@@ -99,6 +100,24 @@ struct Look {
         dn["real_time"] = i == 1
         dn["days_per_loop"] = i == 6 ? 1 : 0
         if i >= 2 { dn["hour"] = Look.hours[i] }
+        store(s)
+    }
+
+    /// Index into `seasons` of the scene's season (0: none).
+    var season: Int {
+        guard let se = parsed()["season"] as? NSDictionary, (se["enabled"] as? Bool) == true else { return 0 }
+        if ((se["years_per_loop"] as? Int) ?? 0) > 0 { return 5 }
+        return 1 + Int(((se["season"] as? Double) ?? 1).rounded()) % 4
+    }
+
+    /// Set the season to seasons[i] (a year each loop for the last); 0 as designed.
+    mutating func setSeason(_ i: Int) {
+        let s = parsed()
+        let se = Look.obj(s, "season")
+        se["enabled"] = i > 0
+        se["years_per_loop"] = i == 5 ? 1 : 0
+        if i >= 1 && i <= 4 { se["season"] = Double(i - 1) }
+        if i == 5 { se["season"] = 0.0 }
         store(s)
     }
 

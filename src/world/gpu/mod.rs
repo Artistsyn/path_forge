@@ -192,7 +192,8 @@ pub(crate) struct SkyParams {
     pub w_center: f32, pub w_focal: f32, pub w_split: f32, pub w_near: f32, pub w_keep: [f32; 2], pub sp_star_var: f32, pub ss_prims: u32,
     /// A sunset's glow (render::clouds::Glow::rec, at ss_prims).
     pub ss_on: u32, pub sx_prims: u32, pub m_seed: u32, pub m_relief: f32,
-    pub m_gain: f32, pub mt_n: u32, pub mt_prims: u32, pub pad: u32,
+    pub m_gain: f32, pub mt_n: u32, pub mt_prims: u32, pub rb_sat: f32,
+    pub hl_n: u32, pub hl_prims: u32, pub pad: [u32; 2],
 }
 
 /// The sky pass's input: parameters, primitives (stars, blobs, bolt segments; 6 floats each) and
@@ -509,7 +510,7 @@ pub(crate) struct AirParams {
     /// weather::apply_mist: thinning with height, over the path only (1) reaching `spread` past
     /// its edges, and the glow towards the sun (at sun_x/sun_y, sky `fhy` pixels tall).
     pub soft: f32, pub over: u32, pub spread: f32, pub glow_on: u32,
-    pub sun_x: f32, pub sun_y: f32, pub fhy: f32, pub sun: [f32; 3], pub pad: u32,
+    pub sun_x: f32, pub sun_y: f32, pub fhy: f32, pub sun: [f32; 3], pub from: f32,
 }
 
 /// Textures kept on the GPU (see `Gpu::texel_buffer`): each held texture and where its levels

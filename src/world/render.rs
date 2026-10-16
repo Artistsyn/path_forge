@@ -926,6 +926,12 @@ impl WorldRenderer {
     }
 
     fn render_worlds(&mut self, worlds: &[WorldIn], layout: Option<Layout>, opts: &RenderOptions) -> Image {
+        // The season recolours a scene's foliage and ground: draw a copy that has them.
+        let seasons: Vec<Option<Scene>> = worlds.iter().map(|w| crate::scene::Season::bake(w.scene, loop_phase(w))).collect();
+        if seasons.iter().any(Option::is_some) {
+            let ws: Vec<WorldIn> = worlds.iter().zip(&seasons).map(|(w, b)| WorldIn { scene: b.as_ref().unwrap_or(w.scene), ..w.clone() }).collect();
+            return self.render_worlds(&ws, layout, opts);
+        }
         // A day and night sets a scene's colours for its hour: draw a copy that has them.
         let forced = self.hour;
         let days: Vec<Option<Scene>> = worlds.iter().map(|w| {
@@ -1459,7 +1465,7 @@ impl WorldRenderer {
                             let (glow_on, sun_x, sun_y, fhy, sun) = weather::mist_sun(c).map_or((0, 0.0, 0.0, 1.0, [0.0; 3]), |(x, y, f, s)| (1, x, y, f, s));
                             super::gpu::AirParams {
                                 mist_on: 1, density: m.density, top: m.height.max(0.05), patch: m.patchiness, travel, seed: m.seed, mist: rgb_lin(m.color),
-                                soft: m.soft.clamp(0.0, 1.0), over: (m.over == crate::scene::MistOver::Path) as u32, spread: m.spread, glow_on, sun_x, sun_y, fhy, sun, pad: 0,
+                                soft: m.soft.clamp(0.0, 1.0), over: (m.over == crate::scene::MistOver::Path) as u32, spread: m.spread, glow_on, sun_x, sun_y, fhy, sun, from: m.from.max(0.0),
                             }
                         }
                     })
@@ -3567,6 +3573,12 @@ fn gpu_sky(ctx: &Ctx, draw: bool, strike: Option<(&Strike, [f32; 3])>, bank: Opt
             let sun = ctx.sky_lights.first().map_or(0.6, |s| weather::lum(s.color).clamp(0.2, 2.0));
             p.rb_k = r.intensity.max(0.0) * 0.32 * sun;
             p.rb_double = r.double as u32;
+            p.rb_sat = r.saturation.clamp(0.0, 1.0);
+        }
+        let halos = weather::halo_list(ctx);
+        if !halos.is_empty() {
+            (p.hl_n, p.hl_prims) = (halos.len() as u32, prims.len() as u32);
+            for h in &halos { prims.extend(h); }
         }
         if let Some((s, flash)) = strike {
             (p.fl_on, p.fl) = (1, flash);
@@ -6049,5 +6061,39 @@ mod tests {
         let row = |dy: f32, p: f32| (0..64).map(|k| -1.0 + 2.0 * k as f32 / 63.0).map(|x| at(x, dy, [p, 1.3 * p]).map_or(0.0, |c| c.1)).collect::<Vec<f32>>();
         let moved = |dy: f32| row(dy, 0.0).iter().zip(row(dy, 2.0)).map(|(a, b)| (a - b).abs()).sum::<f32>();
         assert!(moved(-0.6) > 3.0 * moved(0.7), "the tip sways ({}) more than the base ({})", moved(-0.6), moved(0.7));
+    }
+
+    #[test]
+    fn the_seasons_turn_the_trees_and_a_year_can_pass_in_a_loop() {
+        let s = preset("Winding Trail");
+        let at = |v: f32| { let mut t = s.clone(); t.season = crate::scene::Season { enabled: true, season: v, ..Default::default() }; crate::scene::Season::bake(&t, 0.0).unwrap() };
+        let (autumn, winter) = (at(2.0), at(3.0));
+        let tree = |sc: &Scene| sc.props.iter().find(|p| matches!(p.kind, PropKind::Tree | PropKind::DeadTree)).unwrap().clone();
+        assert!(tree(&autumn).tint[0] > tree(&autumn).tint[1], "autumn leaves turn warm: {:?}", tree(&autumn).tint);
+        assert_eq!(tree(&winter).kind, PropKind::DeadTree, "broadleaf trees are bare in winter");
+        assert!(winter.weather.snow_cover.enabled && autumn.particles.iter().any(|p| p.kind == ParticleKind::Leaves));
+        // A year a loop closes seamlessly.
+        let mut y = s.clone();
+        y.season = crate::scene::Season { enabled: true, season: 0.0, years_per_loop: 1, ..Default::default() };
+        let (len, secs) = (y.motion.loop_length, y.motion.loop_seconds());
+        let o = |t: f32| RenderOptions { size: Some((90, 160)), time: Some(t), ..RenderOptions::default() };
+        let mut r = WorldRenderer::default();
+        assert_eq!(r.render(&y, 0.0, &o(0.0)).rgba, r.render(&y, len, &o(secs)).rgba, "the loop must close");
+    }
+
+    #[test]
+    fn halos_and_valley_fog_change_the_picture() {
+        let o = RenderOptions { size: Some((120, 214)), time: Some(0.5), ..RenderOptions::default() };
+        let mut r = WorldRenderer::default();
+        let mut s = preset("Night Road");
+        let a = r.render(&s, 3.0, &o).rgba;
+        s.sky.halo.enabled = true;
+        assert!(r.render(&s, 3.0, &o).rgba != a, "a halo rings the moon");
+        let mut m = preset("Misty River");
+        let near = r.render(&m, 3.0, &o).rgba;
+        m.weather.mist.from = 40.0;
+        let far = r.render(&m, 3.0, &o).rgba;
+        let bottom = |v: &[u8]| v[v.len() * 3 / 4..].iter().map(|x| *x as f32).sum::<f32>();
+        assert!((bottom(&near) - bottom(&far)).abs() > 1.0, "the mist clears from the near ground");
     }
 }

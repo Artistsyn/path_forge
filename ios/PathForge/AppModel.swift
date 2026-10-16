@@ -128,6 +128,8 @@ final class AppModel: ObservableObject {
         changed()
     }
 
+    func setSeason(_ i: Int) { look.setSeason(i); changed() }
+
     func setMix(_ on: Bool) { look.setMixed(on); changed() }
 
     func shuffle() { look.setMixed(true, seed: Int.random(in: 0..<9999)); changed() }

@@ -28,7 +28,7 @@ struct Air {
     travel: f32, seed: u32, mist_r: f32, mist_g: f32,
     mist_b: f32, soft: f32, over: u32, spread: f32,
     glow_on: u32, sun_x: f32, sun_y: f32, fhy: f32,
-    sun_r: f32, sun_g: f32, sun_b: f32, pad0: u32,
+    sun_r: f32, sun_g: f32, sun_b: f32, mist_from: f32,
 }
 @group(0) @binding(9) var<uniform> A: Air;
 
@@ -1033,7 +1033,9 @@ fn mist_main(@builtin(global_invocation_id) gid: vec3<u32>) {
         let e = water_edge(gd) + 0.5 * max(A.spread, 0.0);
         if abs(lx) > e { f = div(e, abs(lx)); }
     }
-    let len = z * stretch * f * mist_mean(top, eye, eye + (y_end - eye) * f);
+    var near = 1.0;
+    if A.mist_from > 0.0 { near = clamp(div(z - A.mist_from, max(z, 1e-3)), 0.0, 1.0); }
+    let len = z * stretch * f * near * mist_mean(top, eye, eye + (y_end - eye) * f);
     if len <= 1e-3 { return; }
     let tau = max(A.density, 0.0) * mist_patch(gx * f, gd * f) * len;
     let a = 1.0 - exp(-tau);

@@ -42,7 +42,9 @@ struct Sky {
     ss_on: u32, sx_prims: u32, m_seed: u32, m_relief: f32,
     // render::moon_gain
     // Shooting stars (render::meteor_list, 9 floats each at mt_prims).
-    m_gain: f32, mt_n: u32, mt_prims: u32, pad12: u32,
+    m_gain: f32, mt_n: u32, mt_prims: u32, rb_sat: f32,
+    // Halos round the sun and moon (render::weather::halo_list, 6 floats each at hl_prims).
+    hl_n: u32, hl_prims: u32, pad13: u32, pad14: u32,
 }
 
 @group(0) @binding(1) var<uniform> S: Sky;
@@ -1363,6 +1365,17 @@ fn sky_main(@builtin(global_invocation_id) gid: vec3<u32>) {
             if pc.w > 0.0 { c = c * (1.0 - pc.w) + pc.xyz; }
         }
     }
+    if S.hl_n != 0u && above {
+        for (var k = 0u; k < S.hl_n; k++) {
+            let b = S.hl_prims + k * 6u;
+            let d = sqrt((fx + 0.5 - prims[b]) * (fx + 0.5 - prims[b]) + (fy + 0.5 - prims[b + 1u]) * (fy + 0.5 - prims[b + 1u]));
+            let r = prims[b + 2u];
+            let t = (d - r) / (0.07 * r);
+            let kk = select(exp(-t), exp(-(t * 4.8) * (t * 4.8)), t < 0.0);
+            let tint = mix3(vec3<f32>(1.0, 0.55, 0.35), vec3<f32>(0.9, 0.95, 1.0), clamp((d - r) / (0.1 * r) + 0.5, 0.0, 1.0));
+            c += vec3<f32>(prims[b + 3u], prims[b + 4u], prims[b + 5u]) * tint * kk;
+        }
+    }
     if S.rb_on != 0u && above {
         let low = smoothstep_r(S.hy, S.hy - 0.08 * S.fhy, fy);
         let dx = fx + 0.5 - S.rb_cx; let dy = fy + 0.5 - S.rb_cy;
@@ -1375,7 +1388,10 @@ fn sky_main(@builtin(global_invocation_id) gid: vec3<u32>) {
             let t2 = (d - (S.rb_rad2 - S.rb_band2 * 0.5)) / S.rb_band2;
             if t2 >= 0.0 && t2 < 1.0 { rc += spectrum(1.0 - t2) * (0.4 * sqrt(sin(PI * t2))); }
         }
-        if any(rc != vec3<f32>(0.0)) { c += rc * (S.rb_k * low); }
+        if any(rc != vec3<f32>(0.0)) {
+            let g = (rc.x + rc.y + rc.z) / 3.0;
+            c += mix3(vec3<f32>(g), rc, S.rb_sat) * (S.rb_k * low);
+        }
     }
     if S.fl_on != 0u && y < min(u32(S.hy), W.height) {
         let k = 0.55 * pow(1.0 - max((fy - S.oy) / S.fhy, 0.0), 0.7) + 0.15;
