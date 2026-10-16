@@ -3484,6 +3484,11 @@ fn gpu_sky(ctx: &Ctx, draw: bool, strike: Option<(&Strike, [f32; 3])>, bank: Opt
             for s in &stars { prims.extend([s.x, s.y, s.r, s.ri as f32, s.b, s.t]); }
             bins.extend(bin_tiles(w, h, &boxes));
         }
+        let meteors = meteor_list(ctx);
+        if !meteors.is_empty() {
+            (p.mt_n, p.mt_prims) = (meteors.len() as u32, prims.len() as u32);
+            for m in &meteors { prims.extend(m); }
+        }
         if let Some(k) = weather::aurora_k(ctx) {
             p.au_on = 1;
             (p.au_a, p.au_m, p.au_cx, p.au_unit) = (k.a, k.m, k.cx, k.unit);
@@ -4137,6 +4142,54 @@ struct Star { x: f32, y: f32, r: f32, ri: i64, b: f32, t: f32 }
 const STAR_GLOW: f32 = 1.5;
 
 /// The stars of a world's sky this frame, in drawing order (the CPU and GPU skies both draw these).
+/// The shooting stars burning now, in pixels: tail (x, y), head (x, y), brightness, width and
+/// colour, as both renderers draw them (packed for the sky pass in this order).
+pub(super) fn meteor_list(ctx: &Ctx) -> Vec<[f32; 9]> {
+    let sky = &ctx.scene.sky;
+    let m = &sky.meteors;
+    if !sky.enabled || !m.enabled || m.count == 0 || m.brightness <= 0.0 || sky.tunnel.enabled { return Vec::new(); }
+    let v = &ctx.view;
+    let hy = v.horizon_px.max(2.0);
+    let (ox, oy) = (v.left as f32 + v.sky_dx(), v.top as f32);
+    let (fw, fhy) = (v.width as f32 - 2.0 * v.left as f32, (hy - v.top as f32).max(2.0));
+    let dur = (m.duration.max(0.05) / ctx.scene.motion.loop_seconds().max(0.1)).min(0.5);
+    let base = rgb_lin(m.color);
+    let w = (0.7 * (v.height as f32 / 854.0)).max(0.6);
+    let mut out = Vec::new();
+    for i in 0..m.count.min(64) as i64 {
+        let h = |k: u32| hf(m.seed.wrapping_mul(0x9E37) ^ k, i);
+        let p = (ctx.tphase - h(0x6E1)).rem_euclid(1.0);
+        if p >= dur { continue; }
+        let u = p / dur;
+        let a = (m.angle + (h(0x6E2) - 0.5) * m.spread).to_radians();
+        let (dx, dy) = (a.cos(), -a.sin());
+        let len = m.length * fhy * (0.6 + 0.8 * h(0x6E3));
+        let (sx, sy) = (ox + (h(0x6E4) * 1.2 - 0.1) * fw, oy + h(0x6E5) * 0.75 * fhy);
+        let (hx, hy2) = (sx + dx * len * u, sy + dy * len * u);
+        let tail = len * 0.35 * (u / 0.25).min(1.0);
+        let env = (std::f32::consts::PI * u).sin().max(0.0).sqrt() * m.brightness * (0.5 + h(0x6E6));
+        let tint = if h(0x6E7) < 0.5 { [0.55, 1.0, 0.65] } else { [1.0, 0.65, 0.35] };
+        let col = mix3(base, mul3(base, tint), m.tint.clamp(0.0, 1.0) * h(0x6E8));
+        out.push([hx - dx * tail, hy2 - dy * tail, hx, hy2, env, w, col[0], col[1], col[2]]);
+    }
+    out
+}
+
+/// One shooting star's light at pixel centre (px, py): a streak brightening to its head, and the
+/// head's glow.
+pub(super) fn meteor_px(m: &[f32; 9], px: f32, py: f32) -> [f32; 3] {
+    let (ax, ay, bx, by, env, w) = (m[0], m[1], m[2], m[3], m[4], m[5]);
+    let (vx, vy) = (bx - ax, by - ay);
+    let l2 = (vx * vx + vy * vy).max(1e-4);
+    let t = (((px - ax) * vx + (py - ay) * vy) / l2).clamp(0.0, 1.0);
+    let (qx, qy) = (ax + vx * t - px, ay + vy * t - py);
+    let d2 = qx * qx + qy * qy;
+    let (hx, hy) = (bx - px, by - py);
+    let h2 = hx * hx + hy * hy;
+    let k = env * (t * t * (-d2 / (2.0 * w * w)).exp() + 1.5 * (-h2 / (2.0 * 3.2 * w * w)).exp());
+    [m[6] * k, m[7] * k, m[8] * k]
+}
+
 fn star_list(ctx: &Ctx) -> Vec<Star> {
     let sky = &ctx.scene.sky;
     if !sky.stars.enabled { return Vec::new(); }
@@ -4432,6 +4485,15 @@ fn draw_sky_bodies(ctx: &Ctx, gbuf: &[GPixel], hdr: &mut [[f32; 3]]) {
             if behind_moon(px, py) { continue; }
             let d2 = (px as f32 + 0.5 - st.x).powi(2) + (py as f32 + 0.5 - st.y).powi(2);
             add(hdr, px, py, col, st.b * (-d2 / (st.r * st.r)).exp(), true);
+        }}
+    }
+    for m in meteor_list(ctx) {
+        let r = 4.0 * m[5] + 2.0;
+        let (x0, x1) = ((m[0].min(m[2]) - r).floor() as i64, (m[0].max(m[2]) + r).ceil() as i64);
+        let (y0, y1) = ((m[1].min(m[3]) - r).floor() as i64, (m[1].max(m[3]) + r).ceil() as i64);
+        for py in y0..=y1 { for px in x0..=x1 {
+            if behind_moon(px, py) { continue; }
+            add(hdr, px, py, meteor_px(&m, px as f32 + 0.5, py as f32 + 0.5), 1.0, true);
         }}
     }
     weather::aurora(ctx, gbuf, hdr);
@@ -5940,6 +6002,20 @@ mod tests {
         assert_eq!(r.render(&s, 0.0, &o(0.0)).rgba, r.render(&s, len, &o(secs)).rgba, "the loop must close");
         let (a, b) = (r.render(&s, 3.0, &o(secs * 0.1)), r.render(&s, 3.0, &o(secs * 0.4)));
         assert!(a.rgba != b.rgba, "the hour should move with the loop");
+    }
+
+    #[test]
+    fn shooting_stars_fall_and_keep_the_loop() {
+        let mut s = preset("Night Road");
+        s.sky.meteors = crate::scene::Meteors { enabled: true, count: 30, brightness: 2.0, ..crate::scene::Meteors::default() };
+        let (len, secs) = (s.motion.loop_length, s.motion.loop_seconds());
+        let o = |t: f32| RenderOptions { size: Some((90, 160)), time: Some(t), ..RenderOptions::default() };
+        let mut r = WorldRenderer::default();
+        assert_eq!(r.render(&s, 0.0, &o(0.0)).rgba, r.render(&s, len, &o(secs)).rgba, "the loop must close");
+        let with = r.render(&s, 3.0, &o(secs * 0.3)).rgba;
+        s.sky.meteors.enabled = false;
+        let without = r.render(&s, 3.0, &o(secs * 0.3)).rgba;
+        assert!(with != without, "some are falling at any moment of a 30-a-loop shower");
     }
 
     #[test]

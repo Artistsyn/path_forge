@@ -543,6 +543,8 @@ pub struct Sky {
     pub sun: SkyBody,
     pub moon: Moon,
     pub stars: Stars,
+    /// Shooting stars streaking across the sky (by night, or in space).
+    pub meteors: Meteors,
     pub clouds: Clouds,
     /// More layers of cloud over `clouds`, drawn in order (up to three): cirrus high over
     /// cumulus, heaps under an overcast. Give layers `patches` to share the sky between kinds.
@@ -568,7 +570,7 @@ impl Default for Sky {
     fn default() -> Self {
         Self {
             enabled: true, top: [70, 110, 170], horizon: [200, 190, 160],
-            sun: SkyBody::default(), moon: Moon::default(), stars: Stars::default(), clouds: Clouds::default(), cloud_layers: Vec::new(),
+            sun: SkyBody::default(), moon: Moon::default(), stars: Stars::default(), meteors: Meteors::default(), clouds: Clouds::default(), cloud_layers: Vec::new(),
             cloud_mix: CloudMix::default(), sunset: Sunset::default(), day_night: DayNight::default(),
             aurora: Aurora::default(), rainbow: Rainbow::default(), space: Space::default(), tunnel: Tunnel::default(),
         }
@@ -726,13 +728,16 @@ pub struct SpaceObject {
     pub aspect: f32,
     pub colors: [Rgb; 3],
     pub brightness: f32,
+    /// Whole turns or passes per loop (0 still): a binary's orbit, a pulsar's beams, a belt's
+    /// drift, a sun's flares, a ship's crossings. Whole numbers keep the loop seamless.
+    pub spin: i32,
     pub seed: u32,
 }
 impl Default for SpaceObject {
     fn default() -> Self {
         SpaceObject {
             enabled: true, kind: SpaceObjectKind::Emission, pos: [0.5, 0.35], size: 0.3, angle: 0.0, aspect: 1.0,
-            colors: SpaceObjectKind::Emission.colors(), brightness: 1.0, seed: 0,
+            colors: SpaceObjectKind::Emission.colors(), brightness: 1.0, spin: 1, seed: 0,
         }
     }
 }
@@ -759,11 +764,27 @@ pub enum SpaceObjectKind {
     Cluster,
     /// A comet: its curved dust tail, its straight blue ion tail, its glowing head.
     Comet,
+    /// Two stars circling each other (`spin` orbits a loop), a stream of gas between them: the
+    /// larger star, the smaller, the stream.
+    Binary,
+    /// A spinning dead star sweeping two beams round (`spin` turns a loop) inside the wisps of
+    /// the star it was: the star, its beams, the wisps.
+    Pulsar,
+    /// A band of asteroids across the sky, `angle` its slope and `size` its half thickness,
+    /// drifting along (`spin` passes a loop): its dust, its rocks, their lit sides.
+    Belt,
+    /// A sun seen close: a glowing disc with spots and a darker rim, its corona streaming out and
+    /// flares licking off its edge (changing `spin` times a loop): disc, corona, flares.
+    Sun,
+    /// A ship far off, crossing the sky `spin` times a loop along `angle` (its length is `size`),
+    /// its engine glowing and leaving a trail: hull, engine, running lights.
+    Ship,
 }
 impl SpaceObjectKind {
-    pub const ALL: [SpaceObjectKind; 9] = [
+    pub const ALL: [SpaceObjectKind; 14] = [
         SpaceObjectKind::Emission, SpaceObjectKind::Reflection, SpaceObjectKind::Dark, SpaceObjectKind::Planetary, SpaceObjectKind::Remnant,
         SpaceObjectKind::Spiral, SpaceObjectKind::Elliptical, SpaceObjectKind::Cluster, SpaceObjectKind::Comet,
+        SpaceObjectKind::Binary, SpaceObjectKind::Pulsar, SpaceObjectKind::Belt, SpaceObjectKind::Sun, SpaceObjectKind::Ship,
     ];
     /// Colours that suit it.
     pub fn colors(self) -> [Rgb; 3] {
@@ -777,6 +798,11 @@ impl SpaceObjectKind {
             SpaceObjectKind::Elliptical => [[255, 225, 190], [255, 240, 215], [0, 0, 0]],
             SpaceObjectKind::Cluster => [[255, 235, 205], [255, 230, 190], [0, 0, 0]],
             SpaceObjectKind::Comet => [[255, 235, 190], [110, 170, 255], [230, 255, 250]],
+            SpaceObjectKind::Binary => [[255, 240, 210], [150, 190, 255], [255, 140, 90]],
+            SpaceObjectKind::Pulsar => [[220, 235, 255], [120, 200, 255], [180, 110, 230]],
+            SpaceObjectKind::Belt => [[150, 130, 110], [120, 110, 100], [230, 210, 180]],
+            SpaceObjectKind::Sun => [[255, 220, 150], [255, 245, 225], [255, 120, 60]],
+            SpaceObjectKind::Ship => [[70, 75, 85], [120, 200, 255], [255, 80, 70]],
         }
     }
 }
@@ -857,6 +883,9 @@ pub enum PlanetKind {
     Ice,
     /// Dark crust (`color`) split by glowing lava (`color2`), which glows on the night side too.
     Lava,
+    /// A dry world of dunes and canyons (`color` the sand, `color2` the rock), thin dust storms
+    /// and small pale caps at its poles.
+    Desert,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -887,7 +916,32 @@ pub struct Planet {
     /// Earth: city lights on the night side.
     pub city_lights: f32,
     pub rings: Rings,
+    /// Circling another planet of the sky as its moon: it passes in front of it and behind it,
+    /// and casts its shadow across it as it crosses (an eclipse).
+    pub orbit: PlanetOrbit,
     pub seed: u32,
+}
+
+/// A planet's orbit round another (`Planet::orbit`).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
+pub struct PlanetOrbit {
+    pub enabled: bool,
+    /// Which planet of the list it circles (0 the first). Its own `pos` is then ignored.
+    pub around: u32,
+    /// How far out, in the other planet's radii.
+    pub distance: f32,
+    /// How steeply the orbit is seen: 0 edge-on (straight across, in front then behind) .. 90 face-on.
+    pub tilt: f32,
+    /// The orbit's slope on screen, degrees.
+    pub roll: f32,
+    /// Whole orbits per loop (negative the other way; 0 holds it at `phase`).
+    pub turns: i32,
+    /// Where on the orbit it is at the start, 0..1.
+    pub phase: f32,
+}
+impl Default for PlanetOrbit {
+    fn default() -> Self { PlanetOrbit { enabled: false, around: 0, distance: 2.2, tilt: 12.0, roll: -8.0, turns: 1, phase: 0.1 } }
 }
 impl Default for Planet {
     fn default() -> Self {
@@ -895,7 +949,7 @@ impl Default for Planet {
             enabled: true, kind: PlanetKind::Rocky, pos: [0.7, 0.4], radius: 0.25,
             color: [150, 130, 115], color2: [205, 190, 170], atmosphere: [120, 170, 255], atmosphere_strength: 0.0,
             light_angle: 30.0, night: 0.4, tilt: 15.0, spin: 0, clouds: 0.5, city_lights: 0.0,
-            rings: Rings::default(), seed: 0,
+            rings: Rings::default(), orbit: PlanetOrbit::default(), seed: 0,
         }
     }
 }
@@ -1017,6 +1071,34 @@ impl Default for Moon {
             body: SkyBody { pos: [0.25, 0.3], radius: 0.06, color: [222, 230, 255], intensity: 0.35, ..SkyBody::default() },
             phase: 0.0, opacity: 0.9, craters: true, relief: 1.0, seed: 0,
         }
+    }
+}
+
+/// Shooting stars: streaks of light crossing the sky, each flaring and fading as it burns up.
+/// Each one falls at its own moment of the loop, so the loop closes seamlessly.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
+pub struct Meteors {
+    pub enabled: bool,
+    /// How many fall in one loop (a shower: 10 or more).
+    pub count: u32,
+    /// How long each one lasts, seconds.
+    pub duration: f32,
+    /// How far each one travels, as a share of the sky's height.
+    pub length: f32,
+    /// Which way they fall, degrees (0 to the right, -90 straight down; a shower shares one way).
+    pub angle: f32,
+    /// How much their ways vary, degrees (180 from anywhere).
+    pub spread: f32,
+    pub brightness: f32,
+    pub color: Rgb,
+    /// How much some burn green or orange.
+    pub tint: f32,
+    pub seed: u32,
+}
+impl Default for Meteors {
+    fn default() -> Self {
+        Meteors { enabled: false, count: 6, duration: 0.7, length: 0.35, angle: -35.0, spread: 30.0, brightness: 1.0, color: [235, 242, 255], tint: 0.4, seed: 0 }
     }
 }
 
@@ -1487,6 +1569,7 @@ impl DayNight {
                 if !scene.sky.moon.body.enabled { sky.moon.body.intensity = 0.35; }
                 sky.moon.body.intensity *= mk;
             }
+            sky.meteors.brightness *= night;
             if dn.stars {
                 let base = if scene.sky.stars.enabled { scene.sky.stars.count } else { 180 };
                 sky.stars.count = (base as f32 * night).round() as u32;

@@ -41,7 +41,8 @@ struct Sky {
     // The realistic sky and the objects (render::space::SpaceK::pack, at sx_prims).
     ss_on: u32, sx_prims: u32, m_seed: u32, m_relief: f32,
     // render::moon_gain
-    m_gain: f32, pad10: u32, pad11: u32, pad12: u32,
+    // Shooting stars (render::meteor_list, 9 floats each at mt_prims).
+    m_gain: f32, mt_n: u32, mt_prims: u32, pad12: u32,
 }
 
 @group(0) @binding(1) var<uniform> S: Sky;
@@ -501,7 +502,8 @@ fn object_px(i: u32, px: f32, py: f32, sx: f32, sy: f32, c_in: vec3<f32>, dark_i
     let u = (dx * oc + dy * os) / r0;
     let v = (-dx * os + dy * oc) / (r0 * ob(i, 6u));
     let rho = sqrt(u * u + v * v);
-    if rho > ob(i, 18u) { return ObjOut(c_in, dark_in); }
+    let kind0 = i32(ob(i, 0u));
+    if select(rho > ob(i, 18u), abs(v) > ob(i, 18u), kind0 == 11) { return ObjOut(c_in, dark_in); }
     let b = ob(i, 16u); let so = ob(i, 17u);
     let c0 = ob3(i, 7u); let c1 = ob3(i, 10u); let c2 = ob3(i, 13u);
     let salt = 0x300u + 0x10u * i;
@@ -593,6 +595,106 @@ fn object_px(i: u32, px: f32, py: f32, sx: f32, sy: f32, c_in: vec3<f32>, dark_i
         let st = real_layer(px, py, 2.6 * S.sp_scale, min(prof, 0.92), 0.2 * b, salt)
             + real_layer(px, py, 7.0 * S.sp_scale, min(0.9 * prof, 0.92), 0.6 * b, salt + 8u);
         c += st * c0 * S.sp_sb;
+    } else if kind == 9 {
+        let rot = ob(i, 19u);
+        let cr = cos(rot); let sr = sin(rot);
+        let p1 = vec2<f32>(0.4 * cr, 0.4 * sr); let p2 = vec2<f32>(-0.7 * cr, -0.7 * sr);
+        let pxu = r0 * S.sp_unit;
+        let s0 = max(0.7 * S.sp_scale, 0.5) / max(pxu, 1e-3);
+        let d1 = sqrt((u - p1.x) * (u - p1.x) + (v - p1.y) * (v - p1.y));
+        let d2 = sqrt((u - p2.x) * (u - p2.x) + (v - p2.y) * (v - p2.y));
+        let core1 = exp(-d1 * d1 / (2.0 * 2.56 * s0 * s0));
+        let core2 = exp(-d2 * d2 / (2.0 * s0 * s0));
+        let ax = p1.x - p2.x; let ay = p1.y - p2.y;
+        let t = clamp(((u - p2.x) * ax + (v - p2.y) * ay) / max(ax * ax + ay * ay, 1e-4), 0.0, 1.0);
+        let sd = sqrt((p2.x + ax * t - u) * (p2.x + ax * t - u) + (p2.y + ay * t - v) * (p2.y + ay * t - v)) / (0.02 + 0.03 * t);
+        let stream = exp(-sd * sd) * 4.0 * t * (1.0 - t);
+        c += (c0 * (3.0 * core1 + 0.35 * exp(-d1 / 0.12)) + c1 * (2.0 * core2 + 0.25 * exp(-d2 / 0.08)) + c2 * (0.5 * stream)) * b;
+    } else if kind == 10 {
+        let pxu = r0 * S.sp_unit;
+        let s0 = max(0.7 * S.sp_scale, 0.5) / max(pxu, 1e-3);
+        let core = 3.0 * exp(-rho * rho / (2.0 * s0 * s0)) + 0.4 * exp(-rho / 0.05);
+        let rot = ob(i, 19u);
+        let cr = cos(rot); let sr = sin(rot);
+        let along = u * cr + v * sr;
+        let perp = -u * sr + v * cr;
+        let w = 0.02 + 0.1 * abs(along);
+        let beam = exp(-(perp / w) * (perp / w)) * exp(-abs(along) / 1.1) * (1.0 - smoothstep_r(2.5, 3.0, abs(along)));
+        let f = 1.0 - abs(2.0 * fbm4(u * 3.0 + so, v * 3.0) - 1.0);
+        let f2 = f * f;
+        let qw = rho / 0.9;
+        let wisp = f2 * f2 * exp(-qw * qw);
+        c += (c0 * core + c1 * (0.9 * beam) + c2 * (0.25 * wisp)) * b;
+    } else if kind == 11 {
+        let prof = exp(-v * v * 1.5);
+        c += c0 * (0.05 * b * prof * (0.6 + 0.8 * fbm4(u * 2.0 + so, v * 1.5)));
+        let pxu = r0 * S.sp_unit;
+        let drift = ob(i, 19u) / TAU;
+        for (var j = 0; j < 2; j++) {
+            let cu = select(16.0, 6.0, j == 0); let cvs = select(7.0, 3.0, j == 0);
+            let salt = select(0x350u, 0x340u, j == 0) + i * 16u; let big = select(0.45, 1.0, j == 0);
+            let us = (u + drift) * cu; let vs = v * cvs;
+            let ix = i32(floor(us)); let iy = i32(floor(vs));
+            let cell_v = (f32(iy) + 0.5) / cvs;
+            if cell_hash(ix, iy, salt) >= 0.7 * exp(-cell_v * cell_v * 1.5) { continue; }
+            let h3 = cell_hash(ix, iy, salt + 3u);
+            let ccx = f32(ix) + 0.3 + 0.4 * cell_hash(ix, iy, salt + 1u);
+            let ccy = f32(iy) + 0.3 + 0.4 * cell_hash(ix, iy, salt + 2u);
+            let du = (us - ccx) / cu; let dv = (vs - ccy) / cvs * ob(i, 6u);
+            let rr = big * (0.02 + 0.05 * h3 * h3);
+            let d = sqrt(du * du + dv * dv) / rr;
+            if d >= 1.0 { continue; }
+            let lit = clamp(0.5 - 0.5 * du / rr, 0.0, 1.0);
+            let col = mix3(c1, c2, 0.6 * lit) * (0.15 + 0.85 * lit);
+            let a = clamp((1.0 - d) * rr * pxu, 0.0, 1.0);
+            c = mix3(c, col * (0.9 * b), a);
+            dark = max(dark, a);
+        }
+    } else if kind == 12 {
+        let rd = 0.45;
+        let e = max(rho - rd, 0.0);
+        let ang = atan2(v, u);
+        let ca = cos(ang); let sa = sin(ang);
+        let streak = 0.6 + 0.8 * fbm4(ca * 3.0 + so, sa * 3.0);
+        let corona = c1 * (0.9 * exp(-e / 0.06) + 0.35 * exp(-e / 0.25) * streak);
+        let rot = ob(i, 19u);
+        let n = fbm4(ca * 4.0 + 0.5 * cos(rot) + so, sa * 4.0 + 0.5 * sin(rot));
+        let flare = smoothstep_r(0.55, 0.8, n) * exp(-e / (0.05 + 0.12 * n));
+        c += (corona + c2 * (1.5 * flare)) * b;
+        let pxu = r0 * S.sp_unit;
+        let cov = clamp((rd - rho) * pxu + 0.5, 0.0, 1.0);
+        if cov > 0.0 {
+            let mr = min(rho / rd, 1.0);
+            let mu = sqrt(max(1.0 - mr * mr, 0.0));
+            let gran = fbm4(u * 40.0 + so, v * 40.0);
+            let spots = smoothstep_r(0.72, 0.8, fbm4(u * 6.0 + so + 5.0, v * 6.0));
+            let disc = mix3(c2, c0, 0.5 + 0.5 * mu) * (1.8 * (0.35 + 0.65 * mu) * (0.9 + 0.2 * gran) * (1.0 - 0.8 * spots) * b);
+            c = mix3(c, disc, cov);
+        }
+    } else if kind == 13 {
+        let pxu = r0 * S.sp_unit;
+        let qq = (u + 0.1) / 0.65;
+        let q = qq * qq;
+        let hw = 0.2 * sqrt(max(1.0 - q, 0.0)) * select(1.0, 1.0 - 0.6 * u, u > 0.0);
+        if u > -0.6 && u < 0.6 && hw > 0.0 {
+            let a = clamp((hw - abs(v)) * pxu, 0.0, 1.0);
+            if a > 0.0 {
+                let shade = 0.55 + 0.45 * clamp(v / hw, -1.0, 1.0);
+                c = mix3(c, c0 * (shade * (0.3 + 0.7 * b)), a);
+            }
+        }
+        let ex = u + 0.62; let ey = v;
+        let s0 = max(0.07, 1.0 / max(pxu, 1e-3));
+        let glow = 2.5 * exp(-(ex * ex + ey * ey) / (2.0 * s0 * s0));
+        var trail = 0.0;
+        if ex < 0.0 { trail = exp(-(v / 0.05) * (v / 0.05)) * exp(ex * 1.8) * 0.8; }
+        let blink = 0.5 + 0.5 * sin(ob(i, 19u) * 8.0);
+        let ls = max(0.6 * S.sp_scale, 0.5) / max(pxu, 1e-3);
+        let wq = (0.05 + 0.1) / 0.65;
+        let wing = 0.2 * sqrt(1.0 - wq * wq);
+        let t1 = exp(-((u - 0.05) * (u - 0.05) + (v - wing) * (v - wing)) / (2.0 * ls * ls));
+        let t2 = exp(-((u - 0.05) * (u - 0.05) + (v + wing) * (v + wing)) / (2.0 * ls * ls));
+        c += c1 * (b * (glow + trail)) + c2 * (b * 2.0 * blink * (t1 + t2));
     } else {
         let up = max(u, 0.0);
         let on = smoothstep_r(-0.03, 0.02, u);
@@ -843,6 +945,17 @@ fn planet_surface(b: u32, u: f32, v: f32, ndl: f32) -> Surf {
         let crack = smoothstep_r(0.82, 0.97, r);
         return Surf(col * (0.7 + 0.6 * h), col2 * (crack * 1.6 * (0.7 + 0.3 * h)), 0.0);
     }
+    if kind == 5 {
+        let h = fbm_wrap(uo, v, 6, 3.0);
+        let dunes = 0.5 + 0.5 * sin(TAU * (v * 14.0 + 0.8 * fbm_wrap(uo, v, 10, 6.0)));
+        let canyon = smoothstep_r(0.85, 0.95, 1.0 - abs(2.0 * fbm_wrap(uo + 0.4, v, 12, 6.0) - 1.0));
+        var a = mix3(col, col2, smoothstep_r(0.4, 0.65, h)) * (0.9 + 0.12 * dunes);
+        a = mix3(a, col2 * 0.5, 0.7 * canyon);
+        let caps = smoothstep_r(0.86, 0.92, abs(v - 0.5) * 2.0 + 0.05 * (h - 0.5));
+        a = mix3(a, vec3<f32>(0.92, 0.9, 0.88), 0.9 * caps);
+        let dust = smoothstep_r(0.55, 0.75, fbm_wrap(uo + 0.2, v, 7, 4.0)) * clouds;
+        return Surf(mix3(a, col * 1.2, 0.4 * dust), vec3<f32>(0.0), 0.0);
+    }
     let h = fbm_wrap(uo, v, 6, 3.0);
     let h2 = fbm_wrap(uo + 0.37, v, 24, 12.0);
     let pits = smoothstep_r(0.6, 0.8, fbm_wrap(uo, v, 16, 8.0));
@@ -913,6 +1026,11 @@ fn planet_px(b: u32, x: u32, y: u32, c: vec3<f32>) -> vec3<f32> {
         if atm_k > 0.0 {
             let rim = 1.0 - nz;
             col += atm * (atm_k * (rim * rim * rim * smoothstep_r(-0.3, 0.3, ndl) + 0.15 * diff));
+        }
+        let shr = pl(b, 35u);
+        if shr > 0.0 {
+            let ds = sqrt((dx - pl(b, 33u)) * (dx - pl(b, 33u)) + (dy - pl(b, 34u)) * (dy - pl(b, 34u)));
+            col *= 1.0 - 0.88 * (1.0 - smoothstep_r(0.75 * shr, 1.25 * shr, ds));
         }
         out = mix3(out, col, cov);
     }
@@ -985,6 +1103,20 @@ fn tunnel_px(x: u32, y: u32) -> vec3<f32> {
 }
 
 // ── sunset glow (render::clouds::Glow::at; fields as Glow::rec) ─────────────────────────────
+// render::meteor_px
+fn meteor_px(b: u32, px: f32, py: f32) -> vec3<f32> {
+    let ax = prims[b]; let ay = prims[b + 1u]; let bx = prims[b + 2u]; let by = prims[b + 3u];
+    let env = prims[b + 4u]; let w = prims[b + 5u];
+    let vx = bx - ax; let vy = by - ay;
+    let l2 = max(vx * vx + vy * vy, 1e-4);
+    let t = clamp(((px - ax) * vx + (py - ay) * vy) / l2, 0.0, 1.0);
+    let qx = ax + vx * t - px; let qy = ay + vy * t - py;
+    let d2 = qx * qx + qy * qy;
+    let hx = bx - px; let hy = by - py;
+    let h2 = hx * hx + hy * hy;
+    let k = env * (t * t * exp(-d2 / (2.0 * w * w)) + 1.5 * exp(-h2 / (2.0 * 3.2 * w * w)));
+    return vec3<f32>(prims[b + 6u], prims[b + 7u], prims[b + 8u]) * k;
+}
 fn sunset_glow(fx: f32, fy: f32) -> vec3<f32> {
     let b = S.ss_prims;
     let t = max((prims[b + 1u] - (fy + 0.5)) / prims[b + 2u], 0.0) / prims[b + 5u];
@@ -1131,6 +1263,19 @@ fn sky_main(@builtin(global_invocation_id) gid: vec3<u32>) {
                 let r = prim(S.star_prims, s, 2u);
                 let d2 = (fx + 0.5 - sx) * (fx + 0.5 - sx) + (fy + 0.5 - sy) * (fy + 0.5 - sy);
                 c += mix3(vec3<f32>(0.75, 0.85, 1.0), vec3<f32>(1.0, 0.9, 0.75), prim(S.star_prims, s, 5u)) * (prim(S.star_prims, s, 4u) * exp(-d2 / (r * r)));
+            }
+        }
+    }
+    if S.mt_n != 0u && above {
+        let behind = S.md_on != 0u && (fx + 0.5 - S.md_x) * (fx + 0.5 - S.md_x) + (fy + 0.5 - S.md_y) * (fy + 0.5 - S.md_y) < S.md_r * S.md_r;
+        if !behind {
+            for (var k = 0u; k < S.mt_n; k++) {
+                let b = S.mt_prims + k * 9u;
+                let r = 4.0 * prims[b + 5u] + 2.0;
+                let x0 = i32(floor(min(prims[b], prims[b + 2u]) - r)); let x1 = i32(ceil(max(prims[b], prims[b + 2u]) + r));
+                let y0 = i32(floor(min(prims[b + 1u], prims[b + 3u]) - r)); let y1 = i32(ceil(max(prims[b + 1u], prims[b + 3u]) + r));
+                if i32(x) < x0 || i32(x) > x1 || i32(y) < y0 || i32(y) > y1 { continue; }
+                c += meteor_px(b, fx + 0.5, fy + 0.5);
             }
         }
     }

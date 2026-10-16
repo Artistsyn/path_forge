@@ -195,9 +195,11 @@ depth layers or a depth map).
   - `sky.space` (deep space: `stars` (`star_style` Realistic by default: a few bright among many
     faint, temperature colours, `star_clumps`, `star_glow`, `star_spikes`, optional `twinkle`),
     `nebula` (+ `nebula_dust`), `galaxy` (+ `galaxy_dust`), up to six `objects` of kind Emission,
-    Reflection, Dark, Planetary, Remnant, Spiral, Elliptical, Cluster or Comet (`pos`, `size`,
-    `angle`, `aspect`, three `colors`), and up to three `planets` of kind Rocky,
-    Gas, Earth, Ice or Lava with `rings`, `atmosphere`, `night`, whole-turn `spin`). With `below`,
+    Reflection, Dark, Planetary, Remnant, Spiral, Elliptical, Cluster, Comet, Binary, Pulsar,
+    Belt, Sun or Ship (`pos`, `size`, `angle`, `aspect`, three `colors`, whole-number `spin` per
+    loop), and up to three `planets` of kind Rocky, Gas, Earth, Ice, Lava or Desert with `rings`,
+    `atmosphere`, `night`, whole-turn `spin`, and `orbit` to make one a moon of another (it
+    eclipses it)). `sky.meteors` adds shooting stars (night or space). With `below`,
     space fills the drop under a `path.bridge` with `bottom: Void`: one bridge per loop, `length`
     = `spacing` = loop length, and the path material matching the deck, gives an endless walkway
     in space (presets Star Bridge, Nebula Crossing). Turn fog off for space.

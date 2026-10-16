@@ -85,18 +85,29 @@ pub(super) struct ObjK {
     pub so: f32,
     /// How far out it shows, in its radii.
     pub reach: f32,
+    /// How far round its `spin` has taken it this frame (radians).
+    pub rot: f32,
 }
 
 impl ObjK {
     /// `fw` and `fhy` the frame's width and sky height in pixels, `hy` and `oy` its horizon and top rows.
-    fn new(o: &SpaceObject, fw: f32, fhy: f32, hy: f32, oy: f32) -> ObjK {
+    fn new(o: &SpaceObject, fw: f32, fhy: f32, hy: f32, oy: f32, tphase: f32) -> ObjK {
         let a = o.angle.to_radians();
         let kind = SpaceObjectKind::ALL.iter().position(|k| *k == o.kind).unwrap_or(0);
-        let reach = [1.35, 1.45, 1.3, 1.5, 1.3, 1.25, 2.0, 1.6, 1.25][kind];
+        let reach = [1.35, 1.45, 1.3, 1.5, 1.3, 1.25, 2.0, 1.6, 1.25, 1.7, 3.0, 2.0, 2.2, 2.6][kind];
+        let (mut x, mut y) = ((o.pos[0] - 0.5) * fw / fhy, (hy - (oy + o.pos[1] * fhy)) / fhy);
+        if o.kind == SpaceObjectKind::Ship && o.spin != 0 {
+            // Across the whole sky along its way, `spin` times a loop, and back round unseen.
+            let p = (o.spin.unsigned_abs() as f32 * tphase + hf(o.seed ^ 0x5A7, 0)).rem_euclid(1.0);
+            let travel = 1.6 * fw / fhy + 4.0 * o.size.max(0.005);
+            let sgn = if o.spin < 0 { -1.0 } else { 1.0 };
+            x += a.cos() * sgn * (p - 0.5) * travel;
+            y += a.sin() * sgn * (p - 0.5) * travel;
+        }
         ObjK {
             kind: kind as f32,
-            x: (o.pos[0] - 0.5) * fw / fhy,
-            y: (hy - (oy + o.pos[1] * fhy)) / fhy,
+            x,
+            y,
             r: o.size.max(0.005),
             c: a.cos(),
             s: a.sin(),
@@ -105,6 +116,7 @@ impl ObjK {
             bright: o.brightness.max(0.0),
             so: (hf(o.seed ^ 0x0B7, 0) * 61.0).floor(),
             reach,
+            rot: TAU * o.spin as f32 * tphase,
         }
     }
 
@@ -113,7 +125,7 @@ impl ObjK {
         [
             self.kind, self.x, self.y, self.r, self.c, self.s, self.aspect,
             c[0][0], c[0][1], c[0][2], c[1][0], c[1][1], c[1][2], c[2][0], c[2][1], c[2][2],
-            self.bright, self.so, self.reach, 0.0,
+            self.bright, self.so, self.reach, self.rot,
         ]
     }
 }
@@ -141,7 +153,7 @@ pub(super) fn space_k(ctx: &Ctx) -> Option<SpaceK> {
     let (fw, fhy) = (v.width as f32 - 2.0 * ox, (hy - oy).max(2.0));
     let ang = s.galaxy_angle.to_radians();
     let objs: Vec<ObjK> = s.objects.iter().filter(|o| o.enabled && o.size > 0.0 && o.brightness > 0.0).take(MAX_OBJECTS)
-        .map(|o| ObjK::new(o, fw, fhy, hy, oy)).collect();
+        .map(|o| ObjK::new(o, fw, fhy, hy, oy, ctx.tphase)).collect();
     Some(SpaceK {
         below: s.below,
         scale: ((v.height as f32 - oy) / 854.0).max(0.25),
@@ -487,7 +499,8 @@ fn object_px(k: &SpaceK, o: &ObjK, i: u32, px: f32, py: f32, sx: f32, sy: f32, c
     let u = (dx * o.c + dy * o.s) / o.r;
     let v = (-dx * o.s + dy * o.c) / (o.r * o.aspect);
     let rho = (u * u + v * v).sqrt();
-    if rho > o.reach { return (c, dark); }
+    // A belt runs right across the sky: only its thickness bounds it.
+    if if o.kind as i32 == 11 { v.abs() > o.reach } else { rho > o.reach } { return (c, dark); }
     let (b, so) = (o.bright, o.so);
     let [c0, c1, c2] = o.col;
     let salt = 0x300 + 0x10 * i;
@@ -592,6 +605,110 @@ fn object_px(k: &SpaceK, o: &ObjK, i: u32, px: f32, py: f32, sx: f32, sy: f32, c
             );
             c = add3(c, scale3(mul3(st, c0), k.sb));
         }
+        9 => {
+            // Two stars round their common centre, the lighter one further out, gas streaming
+            // from it to the other.
+            let (cr, sr) = (o.rot.cos(), o.rot.sin());
+            let (p1, p2) = ([0.4 * cr, 0.4 * sr], [-0.7 * cr, -0.7 * sr]);
+            let pxu = o.r * k.unit;
+            let s0 = (0.7 * k.scale).max(0.5) / pxu.max(1e-3);
+            let d1 = ((u - p1[0]).powi(2) + (v - p1[1]).powi(2)).sqrt();
+            let d2 = ((u - p2[0]).powi(2) + (v - p2[1]).powi(2)).sqrt();
+            let core1 = (-d1 * d1 / (2.0 * 2.56 * s0 * s0)).exp();
+            let core2 = (-d2 * d2 / (2.0 * s0 * s0)).exp();
+            let (ax, ay) = (p1[0] - p2[0], p1[1] - p2[1]);
+            let t = (((u - p2[0]) * ax + (v - p2[1]) * ay) / (ax * ax + ay * ay).max(1e-4)).clamp(0.0, 1.0);
+            let sd = ((p2[0] + ax * t - u).powi(2) + (p2[1] + ay * t - v).powi(2)).sqrt() / (0.02 + 0.03 * t);
+            let stream = (-sd * sd).exp() * 4.0 * t * (1.0 - t);
+            let light = add3(add3(scale3(c0, 3.0 * core1 + 0.35 * (-d1 / 0.12).exp()), scale3(c1, 2.0 * core2 + 0.25 * (-d2 / 0.08).exp())), scale3(c2, 0.5 * stream));
+            c = add3(c, scale3(light, b));
+        }
+        10 => {
+            // A dead star spinning: two beams sweeping round, inside the wisps it threw off.
+            let pxu = o.r * k.unit;
+            let s0 = (0.7 * k.scale).max(0.5) / pxu.max(1e-3);
+            let core = 3.0 * (-rho * rho / (2.0 * s0 * s0)).exp() + 0.4 * (-rho / 0.05).exp();
+            let (cr, sr) = (o.rot.cos(), o.rot.sin());
+            let along = u * cr + v * sr;
+            let perp = -u * sr + v * cr;
+            let w = 0.02 + 0.1 * along.abs();
+            let beam = (-(perp / w) * (perp / w)).exp() * (-along.abs() / 1.1).exp() * (1.0 - smoothstep(2.5, 3.0, along.abs()));
+            let f = 1.0 - (2.0 * fbm4(u * 3.0 + so, v * 3.0) - 1.0).abs();
+            let f2 = f * f;
+            let qw = rho / 0.9;
+            let wisp = f2 * f2 * (-qw * qw).exp();
+            c = add3(c, scale3(add3(add3(scale3(c0, core), scale3(c1, 0.9 * beam)), scale3(c2, 0.25 * wisp)), b));
+        }
+        11 => {
+            // A band of dust with rocks drifting along it, lit from one side.
+            let prof = (-v * v * 1.5).exp();
+            c = add3(c, scale3(c0, 0.05 * b * prof * (0.6 + 0.8 * fbm4(u * 2.0 + so, v * 1.5))));
+            let pxu = o.r * k.unit;
+            // Drifting a whole number of cells a loop, so it comes round seamlessly.
+            let drift = o.rot / TAU;
+            for (cu, cvs, salt, big) in [(6.0f32, 3.0f32, 0x340u32, 1.0f32), (16.0, 7.0, 0x350, 0.45)] {
+                let (us, vs) = ((u + drift) * cu, v * cvs);
+                let (ix, iy) = (us.floor() as i32, vs.floor() as i32);
+                let cell_v = (iy as f32 + 0.5) / cvs;
+                if cell_hash(ix, iy, salt + i * 16) >= 0.7 * (-cell_v * cell_v * 1.5).exp() { continue; }
+                let h3 = cell_hash(ix, iy, salt + i * 16 + 3);
+                let ccx = ix as f32 + 0.3 + 0.4 * cell_hash(ix, iy, salt + i * 16 + 1);
+                let ccy = iy as f32 + 0.3 + 0.4 * cell_hash(ix, iy, salt + i * 16 + 2);
+                let (du, dv) = ((us - ccx) / cu, (vs - ccy) / cvs * o.aspect);
+                let rr = big * (0.02 + 0.05 * h3 * h3);
+                let d = (du * du + dv * dv).sqrt() / rr;
+                if d >= 1.0 { continue; }
+                let lit = (0.5 - 0.5 * du / rr).clamp(0.0, 1.0);
+                let col = scale3(mix3(c1, c2, 0.6 * lit), 0.15 + 0.85 * lit);
+                let a = ((1.0 - d) * rr * pxu).clamp(0.0, 1.0);
+                c = mix3(c, scale3(col, 0.9 * b), a);
+                dark = dark.max(a);
+            }
+        }
+        12 => {
+            // A sun close up: its disc darker to the rim, mottled and spotted; its corona; flares.
+            let rd = 0.45;
+            let e = (rho - rd).max(0.0);
+            let ang = v.atan2(u);
+            let (ca, sa) = (ang.cos(), ang.sin());
+            let streak = 0.6 + 0.8 * fbm4(ca * 3.0 + so, sa * 3.0);
+            let corona = scale3(c1, 0.9 * (-e / 0.06).exp() + 0.35 * (-e / 0.25).exp() * streak);
+            let n = fbm4(ca * 4.0 + 0.5 * o.rot.cos() + so, sa * 4.0 + 0.5 * o.rot.sin());
+            let flare = smoothstep(0.55, 0.8, n) * (-e / (0.05 + 0.12 * n)).exp();
+            c = add3(c, scale3(add3(corona, scale3(c2, 1.5 * flare)), b));
+            let pxu = o.r * k.unit;
+            let cov = ((rd - rho) * pxu + 0.5).clamp(0.0, 1.0);
+            if cov > 0.0 {
+                let mu = (1.0 - (rho / rd).min(1.0).powi(2)).max(0.0).sqrt();
+                let gran = fbm4(u * 40.0 + so, v * 40.0);
+                let spots = smoothstep(0.72, 0.8, fbm4(u * 6.0 + so + 5.0, v * 6.0));
+                let disc = scale3(mix3(c2, c0, 0.5 + 0.5 * mu), 1.8 * (0.35 + 0.65 * mu) * (0.9 + 0.2 * gran) * (1.0 - 0.8 * spots) * b);
+                c = mix3(c, disc, cov);
+            }
+        }
+        13 => {
+            // A ship far off: a dark hull lit along its top, its engine glowing, a trail behind,
+            // and blinking lights at its wingtips.
+            let pxu = o.r * k.unit;
+            let q = ((u + 0.1) / 0.65).powi(2);
+            let hw = 0.2 * (1.0 - q).max(0.0).sqrt() * if u > 0.0 { 1.0 - 0.6 * u } else { 1.0 };
+            if u > -0.6 && u < 0.6 && hw > 0.0 {
+                let a = ((hw - v.abs()) * pxu).clamp(0.0, 1.0);
+                if a > 0.0 {
+                    let shade = 0.55 + 0.45 * (v / hw).clamp(-1.0, 1.0);
+                    c = mix3(c, scale3(c0, shade * (0.3 + 0.7 * b)), a);
+                }
+            }
+            let (ex, ey) = (u + 0.62, v);
+            let s0 = 0.07f32.max(1.0 / pxu.max(1e-3));
+            let glow = 2.5 * (-(ex * ex + ey * ey) / (2.0 * s0 * s0)).exp();
+            let trail = if ex < 0.0 { (-(v / 0.05) * (v / 0.05)).exp() * (ex * 1.8).exp() * 0.8 } else { 0.0 };
+            let blink = 0.5 + 0.5 * (o.rot * 8.0).sin();
+            let ls = (0.6 * k.scale).max(0.5) / pxu.max(1e-3);
+            let tip = |tv: f32| { let (du, dv) = (u - 0.05, v - tv); (-(du * du + dv * dv) / (2.0 * ls * ls)).exp() };
+            let wing = 0.2 * (1.0 - ((0.05f32 + 0.1) / 0.65).powi(2)).sqrt();
+            c = add3(c, add3(scale3(c1, b * (glow + trail)), scale3(c2, b * 2.0 * blink * (tip(wing) + tip(-wing)))));
+        }
         _ => {
             let up = u.max(0.0);
             let on = smoothstep(-0.03, 0.02, u);
@@ -638,6 +755,8 @@ pub(super) struct PlanetK {
     r_s: f32,
     r_col: [f32; 3],
     r_op: f32,
+    /// A moon's shadow across it: its centre on the disc and radius, in the planet's radii (r 0: none).
+    sh: [f32; 3],
 }
 
 impl PlanetK {
@@ -649,7 +768,7 @@ impl PlanetK {
         let (la, th) = (p.light_angle.to_radians(), p.night.clamp(0.0, 1.0) * std::f32::consts::PI);
         let (ta, ra) = (p.tilt.to_radians(), p.rings.angle.to_radians());
         PlanetK {
-            kind: match p.kind { PlanetKind::Rocky => 0.0, PlanetKind::Gas => 1.0, PlanetKind::Earth => 2.0, PlanetKind::Ice => 3.0, PlanetKind::Lava => 4.0 },
+            kind: match p.kind { PlanetKind::Rocky => 0.0, PlanetKind::Gas => 1.0, PlanetKind::Earth => 2.0, PlanetKind::Ice => 3.0, PlanetKind::Lava => 4.0, PlanetKind::Desert => 5.0 },
             cx: ox + v.sky_dx() + p.pos[0] * fw,
             cy: oy + p.pos[1] * fhy,
             r: (p.radius * fhy).max(1.0),
@@ -672,6 +791,7 @@ impl PlanetK {
             r_s: ra.sin(),
             r_col: rgb_lin(p.rings.color),
             r_op: p.rings.opacity.clamp(0.0, 1.0),
+            sh: [0.0; 3],
         }
     }
 
@@ -683,7 +803,7 @@ impl PlanetK {
             self.atm[0], self.atm[1], self.atm[2], self.atm_k,
             self.s[0], self.s[1], self.s[2], self.tc, self.ts, self.lon0, self.clouds, self.lights, self.so,
             self.ring_on, self.r_in, self.r_out, self.r_open, self.r_c, self.r_s,
-            self.r_col[0], self.r_col[1], self.r_col[2], self.r_op,
+            self.r_col[0], self.r_col[1], self.r_col[2], self.r_op, self.sh[0], self.sh[1], self.sh[2],
         ];
         o[..vals.len()].copy_from_slice(&vals);
         o
@@ -738,6 +858,18 @@ fn surface(p: &PlanetK, u: f32, v: f32, ndl: f32) -> ([f32; 3], [f32; 3], f32) {
             let r = 1.0 - (2.0 * fbm_wrap(uo + 0.21, v, 10, 5.0) - 1.0).abs();
             let crack = smoothstep(0.82, 0.97, r);
             (scale3(p.col, 0.7 + 0.6 * h), scale3(p.col2, crack * 1.6 * (0.7 + 0.3 * h)), 0.0)
+        }
+        5 => {
+            // Dunes in long bands, canyons cut through, dust blowing, small pale caps.
+            let h = fbm_wrap(uo, v, 6, 3.0);
+            let dunes = 0.5 + 0.5 * (TAU * (v * 14.0 + 0.8 * fbm_wrap(uo, v, 10, 6.0))).sin();
+            let canyon = smoothstep(0.85, 0.95, 1.0 - (2.0 * fbm_wrap(uo + 0.4, v, 12, 6.0) - 1.0).abs());
+            let mut a = scale3(mix3(p.col, p.col2, smoothstep(0.4, 0.65, h)), 0.9 + 0.12 * dunes);
+            a = mix3(a, scale3(p.col2, 0.5), 0.7 * canyon);
+            let caps = smoothstep(0.86, 0.92, (v - 0.5).abs() * 2.0 + 0.05 * (h - 0.5));
+            a = mix3(a, [0.92, 0.9, 0.88], 0.9 * caps);
+            let dust = smoothstep(0.55, 0.75, fbm_wrap(uo + 0.2, v, 7, 4.0)) * p.clouds;
+            (mix3(a, scale3(p.col, 1.2), 0.4 * dust), [0.0; 3], 0.0)
         }
         _ => {
             let h = fbm_wrap(uo, v, 6, 3.0);
@@ -816,6 +948,11 @@ pub(super) fn planet_px(p: &PlanetK, x: usize, y: usize, c: [f32; 3]) -> [f32; 3
             let rim = 1.0 - nz;
             col = add3(col, scale3(p.atm, p.atm_k * (rim * rim * rim * smoothstep(-0.3, 0.3, ndl) + 0.15 * diff)));
         }
+        if p.sh[2] > 0.0 {
+            // A moon's shadow: a dark core and a soft edge.
+            let ds = ((dx - p.sh[0]).powi(2) + (dy - p.sh[1]).powi(2)).sqrt();
+            col = scale3(col, 1.0 - 0.88 * (1.0 - smoothstep(0.75 * p.sh[2], 1.25 * p.sh[2], ds)));
+        }
         out = mix3(out, col, cov);
     }
     if ring_a > 0.0 && ring_front { out = mix3(out, ring_col, ring_a); }
@@ -825,7 +962,37 @@ pub(super) fn planet_px(p: &PlanetK, x: usize, y: usize, c: [f32; 3]) -> [f32; 3
 /// The planets of a world's sky this frame, in drawing order.
 pub(super) fn planet_list(ctx: &Ctx) -> Vec<PlanetK> {
     match space_k(ctx) {
-        Some(_) => ctx.scene.sky.space.planets.iter().filter(|p| p.enabled && p.radius > 0.0).take(MAX_PLANETS).map(|p| PlanetK::new(ctx, p)).collect(),
+        Some(_) => {
+            let ps: Vec<&Planet> = ctx.scene.sky.space.planets.iter().filter(|p| p.enabled && p.radius > 0.0).take(MAX_PLANETS).collect();
+            let mut ks: Vec<(PlanetK, f32)> = ps.iter().map(|p| (PlanetK::new(ctx, p), 0.0)).collect();
+            // Moons go round their planets: placed from them, in front or behind, their shadows
+            // falling across them.
+            for i in 0..ps.len() {
+                let o = &ps[i].orbit;
+                let j = o.around as usize;
+                if !o.enabled || j >= ps.len() || j == i || ps[j].orbit.enabled { continue; }
+                let parent = ks[j].0;
+                let th = TAU * (o.phase + o.turns as f32 * ctx.tphase);
+                let (ti, ro) = (o.tilt.to_radians(), o.roll.to_radians());
+                let r = o.distance.max(1.05);
+                let (x, yu, z) = (r * th.cos(), r * th.sin() * ti.sin(), r * th.sin() * ti.cos());
+                let (xs, ys) = (x * ro.cos() - yu * ro.sin(), x * ro.sin() + yu * ro.cos());
+                ks[i].0.cx = parent.cx + xs * parent.r;
+                ks[i].0.cy = parent.cy - ys * parent.r;
+                ks[i].1 = z;
+                // Where the shadow falls: along the sunlight from the moon to the planet's face.
+                let s = parent.s;
+                let ms = xs * s[0] + ys * s[1] + z * s[2];
+                let m2 = xs * xs + ys * ys + z * z;
+                let disc = ms * ms - m2 + 1.0;
+                let t = ms - disc.max(0.0).sqrt();
+                let q = [xs - t * s[0], ys - t * s[1], z - t * s[2]];
+                if disc > 0.0 && t > 0.0 && q[2] > 0.0 { ks[j].0.sh = [q[0], -q[1], ks[i].0.r / parent.r]; }
+            }
+            // Back to front: moons behind their planets first.
+            ks.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+            ks.into_iter().map(|(k, _)| k).collect()
+        }
         None => Vec::new(),
     }
 }
@@ -1099,15 +1266,15 @@ mod tests {
         // Each field packed as its own position + 1, so a moved field shows which.
         let k = PlanetK { kind: 1.0, cx: 2.0, cy: 3.0, r: 4.0, col: [5.0, 6.0, 7.0], col2: [8.0, 9.0, 10.0], atm: [11.0, 12.0, 13.0], atm_k: 14.0,
             s: [15.0, 16.0, 17.0], tc: 18.0, ts: 19.0, lon0: 20.0, clouds: 21.0, lights: 22.0, so: 23.0, ring_on: 24.0, r_in: 25.0, r_out: 26.0,
-            r_open: 27.0, r_c: 28.0, r_s: 29.0, r_col: [30.0, 31.0, 32.0], r_op: 33.0 };
+            r_open: 27.0, r_c: 28.0, r_s: 29.0, r_col: [30.0, 31.0, 32.0], r_op: 33.0, sh: [34.0, 35.0, 36.0] };
         for (i, v) in k.pack().iter().enumerate() {
-            assert_eq!(*v, if i < 33 { (i + 1) as f32 } else { 0.0 }, "float {i} of a packed planet moved");
+            assert_eq!(*v, (i + 1) as f32, "float {i} of a packed planet moved");
         }
         // And sky.wgsl reads them from those places.
         let wgsl = include_str!("../gpu/sky.wgsl");
         for read in ["pl3(b, 4u)", "pl3(b, 7u)", "pl3(b, 10u)", "pl(b, 13u)", "pl3(b, 14u)", "pl(b, 17u)", "pl(b, 18u)", "pl(b, 19u)",
             "pl(b, 20u)", "pl(b, 21u)", "pl(b, 22u)", "pl(b, 23u)", "pl(b, 24u)", "pl(b, 25u)", "pl(b, 26u)", "pl(b, 27u)", "pl(b, 28u)",
-            "pl3(b, 29u)", "pl(b, 32u)", &format!("k * {}u", PLANET_FLOATS)] {
+            "pl3(b, 29u)", "pl(b, 32u)", "pl(b, 33u)", "pl(b, 34u)", "pl(b, 35u)", &format!("k * {}u", PLANET_FLOATS)] {
             assert!(wgsl.contains(read), "sky.wgsl no longer reads `{read}`");
         }
     }
@@ -1155,7 +1322,7 @@ mod tests {
         let base = r.render(&s, 3.0, &opts(0.5));
         for kind in crate::scene::SpaceObjectKind::ALL {
             let mut t = s.clone();
-            t.sky.space.objects = vec![crate::scene::SpaceObject { kind, colors: kind.colors(), pos: [0.5, 0.4], size: 0.25, ..crate::scene::SpaceObject::default() }];
+            t.sky.space.objects = vec![crate::scene::SpaceObject { kind, colors: kind.colors(), pos: [0.5, 0.4], size: 0.25, spin: 0, ..crate::scene::SpaceObject::default() }];
             let a = r.render(&t, 3.0, &opts(0.5));
             assert!(diff(&a, &base) > 0.3, "{kind:?} should show ({})", diff(&a, &base));
             // At infinity: walking on and waiting change nothing of it (no twinkle here).
@@ -1164,6 +1331,33 @@ mod tests {
             let sky = |img: &Image| img.rgba[..img.rgba.len() * 3 / 10].to_vec();
             assert_eq!(sky(&b), sky(&c), "{kind:?} should stay put in the sky");
         }
+    }
+
+    #[test]
+    fn spinning_objects_and_orbiting_moons_move_and_keep_the_loop() {
+        let mut r = WorldRenderer::default();
+        let mut s = preset("Asteroid Belt");
+        s.companions.clear();
+        s.props.clear();
+        let (len, secs) = (s.motion.loop_length, s.motion.loop_seconds());
+        assert_eq!(r.render(&s, 0.0, &opts(0.0)).rgba, r.render(&s, len, &opts(secs)).rgba, "the loop must close");
+        let (a, b) = (r.render(&s, 3.0, &opts(secs * 0.1)), r.render(&s, 3.0, &opts(secs * 0.4)));
+        assert!(diff(&a, &b) > 0.2, "the ship, pulsar, belt and moon move with time ({})", diff(&a, &b));
+    }
+
+    #[test]
+    fn a_moon_in_front_of_its_planet_casts_its_shadow_on_it() {
+        let ctx_planets = |phase: f32| {
+            let mut s = preset("Asteroid Belt");
+            s.sky.space.planets[1].orbit.turns = 0;
+            s.sky.space.planets[1].orbit.phase = phase;
+            s.sky.space.planets[1].radius = 0.06;
+            let mut r = WorldRenderer::default();
+            r.render(&s, 3.0, &RenderOptions { size: Some((240, 427)), time: Some(0.5), ..RenderOptions::default() })
+        };
+        // A quarter round: in front of the planet (its shadow falls on it); three quarters: behind.
+        let (front, behind) = (ctx_planets(0.25), ctx_planets(0.75));
+        assert!(diff(&front, &behind) > 0.1, "in front the moon and its shadow show on the planet");
     }
 
     #[test]
@@ -1183,7 +1377,7 @@ mod tests {
         let wgsl = include_str!("../gpu/sky.wgsl");
         assert!(wgsl.contains(&format!("S.sx_prims + {}u + i * {}u", SPACE_HEAD, OBJ_FLOATS)), "sky.wgsl must step objects as SpaceK::pack lays them out");
         // The kinds in the order ObjK numbers them.
-        assert_eq!(crate::scene::SpaceObjectKind::ALL.len(), 9);
-        assert!(wgsl.contains("} else if kind == 7 {"), "sky.wgsl's object kinds");
+        assert_eq!(crate::scene::SpaceObjectKind::ALL.len(), 14);
+        assert!(wgsl.contains("} else if kind == 13 {"), "sky.wgsl's object kinds");
     }
 }

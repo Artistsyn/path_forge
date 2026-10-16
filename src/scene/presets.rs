@@ -253,6 +253,38 @@ pub fn nebula_crossing() -> Scene {
     s
 }
 
+/// A deck through an asteroid belt round a desert world: rocks drifting in a band across the sky,
+/// a moon circling the planet and throwing its shadow across it, a close sun with flares, a
+/// pulsar sweeping its beams, a far ship crossing and the odd shooting star.
+pub fn asteroid_belt() -> Scene {
+    let mut s = star_bridge();
+    s.name = "Asteroid Belt".into();
+    s.sky.top = [2, 2, 8];
+    s.sky.horizon = [10, 8, 20];
+    s.sky.sun.pos = [0.95, 0.05];
+    s.sky.sun.radius = 0.01;
+    let obj = |kind: SpaceObjectKind, pos: [f32; 2], size: f32, angle: f32, aspect: f32, spin: i32| SpaceObject { kind, pos, size, angle, aspect, spin, colors: kind.colors(), ..SpaceObject::default() };
+    s.sky.space = Space {
+        enabled: true, stars: 1.1, nebula: 0.4, nebula_colors: [[170, 80, 110], [70, 80, 170]], galaxy: 0.5, galaxy_angle: 30.0, galaxy_height: 0.8,
+        objects: vec![
+            obj(SpaceObjectKind::Sun, [0.86, 0.1], 0.2, 0.0, 1.0, 1),
+            obj(SpaceObjectKind::Belt, [0.5, 0.52], 0.1, -10.0, 0.6, 1),
+            obj(SpaceObjectKind::Pulsar, [0.15, 0.2], 0.07, 0.0, 1.0, 2),
+            obj(SpaceObjectKind::Ship, [0.4, 0.5], 0.035, 8.0, 1.0, 1),
+        ],
+        planets: vec![
+            Planet { kind: PlanetKind::Desert, pos: [0.45, 0.38], radius: 0.16, color: [205, 150, 95], color2: [150, 80, 50], light_angle: 20.0, night: 0.35, clouds: 0.5, tilt: -8.0, seed: 2, ..Planet::default() },
+            Planet { kind: PlanetKind::Rocky, radius: 0.035, light_angle: 20.0, night: 0.35, seed: 4,
+                orbit: PlanetOrbit { enabled: true, around: 0, distance: 1.7, tilt: 8.0, roll: -10.0, turns: 1, phase: 0.1 }, ..Planet::default() },
+        ],
+        seed: 21,
+        ..Space::default()
+    };
+    s.sky.meteors = Meteors { enabled: true, count: 4, angle: -150.0, ..Meteors::default() };
+    s.props.retain(|p| p.kind != PropKind::Satellite && p.kind != PropKind::CargoPod);
+    s
+}
+
 /// An endless deck floating in a tunnel: one bridge per loop as long as the loop, over nothing,
 /// with iron rails, the path material matching the deck, no fog and a dark void.
 fn tunnel_deck(name: &str, deck: Material, rail: Rgb) -> Scene {
@@ -1074,6 +1106,7 @@ pub const ALL: &[(&str, fn() -> Scene)] = &[
 ("Day and Night", day_and_night),
     ("Star Bridge", star_bridge),
     ("Nebula Crossing", nebula_crossing),
+    ("Asteroid Belt", asteroid_belt),
 ("Hyperspace Run", hyperspace_run),
 ("Wormhole", wormhole),
 ("Starship Flight", starship_flight),

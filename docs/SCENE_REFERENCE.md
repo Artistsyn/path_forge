@@ -614,6 +614,24 @@ A tiling surface material generated procedurally.
 | `ripples` | number | `0.0` | Ripples (water) or roughness (wet stone) that break reflections up: 0 glassy .. 1 choppy. |
 | `glow` | number | `0.0` | How brightly the lit parts of a futuristic pattern shine (Panels' light bars, Grid lines, Hex seams, Circuit traces, in the `mortar` colour): 0 they are only inlays, 1 bright. |
 
+### Meteors
+
+Shooting stars: streaks of light crossing the sky, each flaring and fading as it burns up.
+Each one falls at its own moment of the loop, so the loop closes seamlessly.
+
+| Field | Type | Default | Meaning |
+|---|---|---|---|
+| `enabled` | boolean | `false` |  |
+| `count` | integer | `6` | How many fall in one loop (a shower: 10 or more). |
+| `duration` | number | `0.7` | How long each one lasts, seconds. |
+| `length` | number | `0.35` | How far each one travels, as a share of the sky's height. |
+| `angle` | number | `-35.0` | Which way they fall, degrees (0 to the right, -90 straight down; a shower shares one way). |
+| `spread` | number | `30.0` | How much their ways vary, degrees (180 from anywhere). |
+| `brightness` | number | `1.0` |  |
+| `color` | integer × 3 | `[235,242,255]` |  |
+| `tint` | number | `0.4` | How much some burn green or orange. |
+| `seed` | integer | `0` |  |
+
 ### Mist
 
 Mist lying low over the ground, drifting, with wisps rising from it.
@@ -768,6 +786,7 @@ One of `Cobblestone` \| `Brick` \| `StoneBlock` \| `Sand` \| `Dirt` \| `Grass` \
 | `clouds` | number | `0.5` | Earth and gas giants: how much white cloud. |
 | `city_lights` | number | `0.0` | Earth: city lights on the night side. |
 | `rings` | [Rings](#rings) | (see the type) |  |
+| `orbit` | [PlanetOrbit](#planetorbit) | (see the type) | Circling another planet of the sky as its moon: it passes in front of it and behind it, and casts its shadow across it as it crosses (an eclipse). |
 | `seed` | integer | `0` |  |
 
 ### PlanetKind
@@ -781,6 +800,21 @@ What a planet's surface is made of.
 | `Earth` | Oceans (`color`), land (`color2`), ice caps and white cloud; city lights on the night side. |
 | `Ice` | Pale ice (`color`) with bright cracks (`color2`). |
 | `Lava` | Dark crust (`color`) split by glowing lava (`color2`), which glows on the night side too. |
+| `Desert` | A dry world of dunes and canyons (`color` the sand, `color2` the rock), thin dust storms and small pale caps at its poles. |
+
+### PlanetOrbit
+
+A planet's orbit round another (`Planet::orbit`).
+
+| Field | Type | Default | Meaning |
+|---|---|---|---|
+| `enabled` | boolean | `false` |  |
+| `around` | integer | `0` | Which planet of the list it circles (0 the first). Its own `pos` is then ignored. |
+| `distance` | number | `2.2` | How far out, in the other planet's radii. |
+| `tilt` | number | `12.0` | How steeply the orbit is seen: 0 edge-on (straight across, in front then behind) .. 90 face-on. |
+| `roll` | number | `-8.0` | The orbit's slope on screen, degrees. |
+| `turns` | integer | `1` | Whole orbits per loop (negative the other way; 0 holds it at `phase`). |
+| `phase` | number | `0.1` | Where on the orbit it is at the start, 0..1. |
 
 ### Post
 
@@ -1004,6 +1038,7 @@ One of `Both` \| `Left` \| `Right` \| `Center`.
 | `sun` | [SkyBody](#skybody) | (see the type) |  |
 | `moon` | [Moon](#moon) | (see the type) |  |
 | `stars` | [Stars](#stars) | (see the type) |  |
+| `meteors` | [Meteors](#meteors) | (see the type) | Shooting stars streaking across the sky (by night, or in space). |
 | `clouds` | [Clouds](#clouds) | (see the type) |  |
 | `cloud_layers` | list of [Clouds](#clouds) | `[]` | More layers of cloud over `clouds`, drawn in order (up to three): cirrus high over cumulus, heaps under an overcast. Give layers `patches` to share the sky between kinds. |
 | `cloud_mix` | [CloudMix](#cloudmix) | (see the type) | Clouds of several kinds chosen at random from a seed, added over the layers above. |
@@ -1086,6 +1121,7 @@ stars. `colors` mean something different for each kind (see `SpaceObjectKind`).
 | `aspect` | number | `1.0` | How round it is: 1 round .. 0.1 seen almost edge-on. |
 | `colors` | integer × 3 × 3 | `[[235,70,110],[90,220,215],[255,180,120]]` |  |
 | `brightness` | number | `1.0` |  |
+| `spin` | integer | `1` | Whole turns or passes per loop (0 still): a binary's orbit, a pulsar's beams, a belt's drift, a sun's flares, a ship's crossings. Whole numbers keep the loop seamless. |
 | `seed` | integer | `0` |  |
 
 ### SpaceObjectKind
@@ -1101,6 +1137,11 @@ stars. `colors` mean something different for each kind (see `SpaceObjectKind`).
 | `Elliptical` | A smooth elliptical galaxy: its glow, its core. |
 | `Cluster` | A star cluster: its stars' tint, its glow. |
 | `Comet` | A comet: its curved dust tail, its straight blue ion tail, its glowing head. |
+| `Binary` | Two stars circling each other (`spin` orbits a loop), a stream of gas between them: the larger star, the smaller, the stream. |
+| `Pulsar` | A spinning dead star sweeping two beams round (`spin` turns a loop) inside the wisps of the star it was: the star, its beams, the wisps. |
+| `Belt` | A band of asteroids across the sky, `angle` its slope and `size` its half thickness, drifting along (`spin` passes a loop): its dust, its rocks, their lit sides. |
+| `Sun` | A sun seen close: a glowing disc with spots and a darker rim, its corona streaming out and flares licking off its edge (changing `spin` times a loop): disc, corona, flares. |
+| `Ship` | A ship far off, crossing the sky `spin` times a loop along `angle` (its length is `size`), its engine glowing and leaving a trail: hull, engine, running lights. |
 
 ### SpikeShape
 
