@@ -38,7 +38,8 @@ struct Sky {
     mode: u32, w_fork: u32, w_base: f32,
     w_center: f32, w_focal: f32, w_split: f32, w_near: f32, w_keep0: f32, w_keep1: f32, sp_star_var: f32, ss_prims: u32,
     // A sunset's glow (render::clouds::Glow::rec, at ss_prims).
-    ss_on: u32, pad7: u32, pad8: u32, pad9: u32,
+    // The realistic sky and the objects (render::space::SpaceK::pack, at sx_prims).
+    ss_on: u32, sx_prims: u32, pad8: u32, pad9: u32,
 }
 
 @group(0) @binding(1) var<uniform> S: Sky;
@@ -245,6 +246,7 @@ fn space_backdrop(x: u32, y: u32, c0: vec3<f32>) -> vec3<f32> {
     return space_features(f32(x) + 0.5, fy + 0.5, c);
 }
 fn space_features(px: f32, py: f32, c0: vec3<f32>) -> vec3<f32> {
+    if spx(0u) != 0.0 { return features_real(px, py, c0); }
     var c = c0;
     let sx = (px - S.sp_cx) / S.sp_unit; let sy = (S.hy - py) / S.sp_unit;
     var dark = 0.0;
@@ -278,6 +280,10 @@ fn space_features(px: f32, py: f32, c0: vec3<f32>) -> vec3<f32> {
             dark = max(dark, 0.8 * dust);
         }
     }
+    for (var i = 0u; i < u32(spx(10u)); i++) {
+        let r = object_px(i, px, py, sx, sy, c, dark);
+        c = r.c; dark = r.dark;
+    }
     if S.sp_stars > 0.0 {
         let dens = S.sp_stars * (1.0 + 2.5 * min(S.sp_gal, 1.0) * band) * (1.0 - dark);
         let k = S.sp_scale;
@@ -287,6 +293,277 @@ fn space_features(px: f32, py: f32, c0: vec3<f32>) -> vec3<f32> {
         c += st * (S.sp_sb * (1.0 - 0.7 * dark));
     }
     return c;
+}
+
+// The realistic sky: render/space.rs features_real and what it calls, step for step, from the
+// block SpaceK::pack writes at S.sx_prims: real, glow, clumps, spikes, lines, twinkle, tw_n,
+// tphase, neb_dust, gal_dust, n_obj, 0, then render::space::OBJ_FLOATS per object.
+fn spx(k: u32) -> f32 { return prims[S.sx_prims + k]; }
+fn temp_col(t: f32) -> vec3<f32> {
+    let x = clamp(t, 0.0, 1.0) * 4.0;
+    var col: vec3<f32>;
+    if x < 1.0 {
+        col = mix3(vec3<f32>(1.0, 0.46, 0.15), vec3<f32>(1.0, 0.68, 0.4), x);
+    } else if x < 2.0 {
+        col = mix3(vec3<f32>(1.0, 0.68, 0.4), vec3<f32>(1.0, 0.93, 0.85), x - 1.0);
+    } else if x < 3.0 {
+        col = mix3(vec3<f32>(1.0, 0.93, 0.85), vec3<f32>(0.76, 0.84, 1.0), x - 2.0);
+    } else {
+        col = mix3(vec3<f32>(0.76, 0.84, 1.0), vec3<f32>(0.5, 0.62, 1.0), x - 3.0);
+    }
+    let lum = 0.2126 * col.x + 0.7152 * col.y + 0.0722 * col.z;
+    return col * (1.0 / (0.35 + 0.65 * lum));
+}
+fn star_col(h: f32) -> vec3<f32> {
+    let u = 2.0 * h - 1.0;
+    return mix3(vec3<f32>(1.0, 0.97, 0.93), temp_col(0.5 + 0.5 * u * pow(abs(u), 0.6)), 0.75 * S.sp_star_var);
+}
+fn star_flux(ix: i32, iy: i32, salt: u32, f0: f32, cap: f32) -> f32 {
+    let u = max(cell_hash(ix, iy, salt + 3u), 0.003);
+    var f = f0 * min(pow(u, -0.9), cap);
+    let tw = spx(5u);
+    if tw > 0.0 {
+        let n = spx(6u) * (1.0 + floor(cell_hash(ix, iy, salt + 5u) * 2.0));
+        f *= 1.0 + 0.6 * tw * sin(TAU * (n * spx(7u) + cell_hash(ix, iy, salt + 6u)));
+    }
+    return f;
+}
+fn real_layer(px: f32, py: f32, cell: f32, prob: f32, f0: f32, salt: u32) -> vec3<f32> {
+    let ix0 = i32(floor(div(px, cell) - 0.5)); let iy0 = i32(floor(div(py, cell) - 0.5));
+    let s0 = 0.5 * S.sp_scale;
+    let sigma = max(s0, 0.5);
+    var out = vec3<f32>(0.0);
+    for (var j = 0; j < 2; j++) {
+        for (var i = 0; i < 2; i++) {
+            let ix = ix0 + i; let iy = iy0 + j;
+            if cell_hash(ix, iy, salt) >= prob { continue; }
+            let sx = (f32(ix) + cell_hash(ix, iy, salt + 1u)) * cell;
+            let sy = (f32(iy) + cell_hash(ix, iy, salt + 2u)) * cell;
+            let d2 = (px - sx) * (px - sx) + (py - sy) * (py - sy);
+            let f = star_flux(ix, iy, salt, f0, 12.0) * (s0 / sigma) * (s0 / sigma);
+            out += star_col(cell_hash(ix, iy, salt + 4u)) * (f * exp(-d2 / (2.0 * sigma * sigma)));
+        }
+    }
+    return out;
+}
+fn bright_stars(px: f32, py: f32, salt: u32) -> vec3<f32> {
+    let s = S.sp_scale;
+    let cell = 70.0 * s;
+    let ix = i32(floor(div(px, cell))); let iy = i32(floor(div(py, cell)));
+    let prob = min(0.3 * S.sp_stars, 0.95);
+    let s0 = 0.6 * s;
+    let sigma = max(s0, 0.5);
+    let spikes = spx(3u); let lines = spx(4u);
+    var out = vec3<f32>(0.0);
+    for (var j = -1; j <= 1; j++) {
+        for (var i = -1; i <= 1; i++) {
+            let cx = ix + i; let cy = iy + j;
+            if cell_hash(cx, cy, salt) >= prob { continue; }
+            let dx = px - (f32(cx) + cell_hash(cx, cy, salt + 1u)) * cell;
+            let dy = py - (f32(cy) + cell_hash(cx, cy, salt + 2u)) * cell;
+            let d2 = dx * dx + dy * dy;
+            if d2 > 0.9 * cell * 0.9 * cell { continue; }
+            let f = star_flux(cx, cy, salt, 0.5, 30.0);
+            let d = sqrt(d2);
+            var a = f * (s0 / sigma) * (s0 / sigma) * exp(-d2 / (2.0 * sigma * sigma)) + 0.05 * f * exp(-d / (2.5 * s));
+            if spikes > 0.0 && f > 2.0 {
+                let len = s * (1.2 + 1.8 * sqrt(f));
+                let w2 = 2.0 * 0.64 * sigma * sigma;
+                var sp = 0.0;
+                var l = 0.0;
+                while l < lines {
+                    let th = PI * l / lines;
+                    let cs = cos(th); let sn = sin(th);
+                    let al = dx * cs + dy * sn; let pe = -dx * sn + dy * cs;
+                    sp += exp(-abs(al) / len) * exp(-pe * pe / w2);
+                    l += 1.0;
+                }
+                a += 0.25 * spikes * f * smoothstep_r(2.0, 6.0, f) * sp;
+            }
+            out += star_col(cell_hash(cx, cy, salt + 4u)) * a;
+        }
+    }
+    return out;
+}
+fn features_real(px: f32, py: f32, c0: vec3<f32>) -> vec3<f32> {
+    var c = c0;
+    let sx = (px - S.sp_cx) / S.sp_unit; let sy = (S.hy - py) / S.sp_unit;
+    var dark = 0.0;
+    if S.sp_neb > 0.0 {
+        let nx = sx * S.sp_neb_f + S.sp_so; let ny = sy * S.sp_neb_f;
+        let wx = fbm4(nx + 5.2, ny + 1.3); let wy = fbm4(nx + 1.7, ny + 9.2);
+        let ux = nx + 1.6 * wx; let uy = ny + 1.6 * wy;
+        let n1 = fbm4(ux, uy);
+        let n2 = fbm4(ux * 1.7 + 13.1, uy * 1.7 + 5.3);
+        let body = smoothstep_r(0.42, 0.8, n1);
+        let rid = 1.0 - abs(2.0 * fbm4(ux * 2.6 + 3.0, uy * 2.6) - 1.0);
+        let r2 = rid * rid;
+        let fil = r2 * r2 * r2 * smoothstep_r(0.3, 0.55, n1);
+        let col = mix3(vec3<f32>(S.sp_n1_r, S.sp_n1_g, S.sp_n1_b), vec3<f32>(S.sp_n2_r, S.sp_n2_g, S.sp_n2_b), smoothstep_r(0.3, 0.7, n2));
+        let dust = smoothstep_r(0.5, 0.72, fbm4(ux * 2.2 + 31.0, uy * 2.2)) * spx(8u);
+        let gas = S.sp_neb * (0.2 * body * body + 0.12 * fil + 0.03 * smoothstep_r(0.3, 0.6, n1)) * (1.0 - 0.85 * dust);
+        c = c * (1.0 - 0.5 * dust * min(S.sp_neb, 1.0)) + col * gas;
+        dark = 0.75 * dust * min(S.sp_neb, 1.0);
+    }
+    var band = 0.0;
+    if S.sp_gal > 0.0 {
+        let dy = sy - S.sp_gal_h;
+        let along = sx * S.sp_gal_c + dy * S.sp_gal_s;
+        let across0 = -sx * S.sp_gal_s + dy * S.sp_gal_c;
+        let across = across0 + 0.3 * S.sp_gal_w * (fbm4(along * 1.1 + S.sp_so, 3.7) - 0.47);
+        let q = across / S.sp_gal_w;
+        if abs(q) < 3.2 {
+            band = exp(-q * q);
+            let skirt = exp(-0.2 * q * q);
+            let mott = 0.35 + 1.3 * smoothstep_r(0.3, 0.75, fbm4(along * 6.0 + 3.0, q * 1.5 + S.sp_so));
+            let ca = (along - S.sp_gal_core) / 0.3;
+            let cq = across / (1.6 * S.sp_gal_w);
+            let core = exp(-ca * ca - cq * cq);
+            let wq = (q + 0.8 * (fbm4(along * 2.0 + S.sp_so + 9.0, 1.3) - 0.47)) / 0.4;
+            let rift = exp(-wq * wq) * smoothstep_r(0.35, 0.6, fbm4(along * 2.5 + S.sp_so + 17.0, q * 0.8 + 3.0));
+            let lq = q / 0.9;
+            let lanes = smoothstep_r(0.45, 0.7, fbm4(along * 5.0 + S.sp_so, q * 2.0 + 11.0)) * exp(-lq * lq);
+            let dust = spx(9u) * max(rift, lanes);
+            let gc = vec3<f32>(S.sp_gc_r, S.sp_gc_g, S.sp_gc_b);
+            let col = mix3(gc, gc * vec3<f32>(1.0, 0.8, 0.58), 0.8 * core);
+            let glow = 0.09 * band * mott + 0.025 * skirt + 0.3 * core;
+            c += col * (S.sp_gal * glow * (1.0 - 0.92 * dust));
+            dark = max(dark, 0.9 * dust);
+        }
+    }
+    for (var i = 0u; i < u32(spx(10u)); i++) {
+        let r = object_px(i, px, py, sx, sy, c, dark);
+        c = r.c; dark = r.dark;
+    }
+    if S.sp_stars > 0.0 {
+        let clump = max(1.0 + spx(2u) * 3.0 * (fbm4(sx * 2.5 + S.sp_so + 50.0, sy * 2.5 + 20.0) - 0.47), 0.1);
+        let field = S.sp_stars * clump * (1.0 + 2.5 * min(S.sp_gal, 1.0) * band) * (1.0 - dark);
+        c += vec3<f32>(1.0, 0.94, 0.86) * (0.012 * spx(1u) * field * S.sp_sb);
+        let s = S.sp_scale;
+        var st = real_layer(px, py, 3.0 * s, min(0.22 * field, 0.95), 0.025, 0xA0u);
+        st += real_layer(px, py, 7.0 * s, min(0.3 * field, 0.95), 0.06, 0xB0u);
+        st += real_layer(px, py, 18.0 * s, min(0.4 * S.sp_stars * sqrt(clump) * (1.0 - 0.5 * dark), 0.95), 0.15, 0xC0u);
+        st += bright_stars(px, py, 0xE0u);
+        c += st * (S.sp_sb * (1.0 - 0.7 * dark));
+    }
+    return c;
+}
+struct ObjOut { c: vec3<f32>, dark: f32, }
+fn ob(i: u32, f: u32) -> f32 { return prims[S.sx_prims + 12u + i * 20u + f]; }
+fn ob3(i: u32, f: u32) -> vec3<f32> { return vec3<f32>(ob(i, f), ob(i, f + 1u), ob(i, f + 2u)); }
+fn object_px(i: u32, px: f32, py: f32, sx: f32, sy: f32, c_in: vec3<f32>, dark_in: f32) -> ObjOut {
+    let dx = sx - ob(i, 1u); let dy = sy - ob(i, 2u);
+    let r0 = ob(i, 3u); let oc = ob(i, 4u); let os = ob(i, 5u);
+    let u = (dx * oc + dy * os) / r0;
+    let v = (-dx * os + dy * oc) / (r0 * ob(i, 6u));
+    let rho = sqrt(u * u + v * v);
+    if rho > ob(i, 18u) { return ObjOut(c_in, dark_in); }
+    let b = ob(i, 16u); let so = ob(i, 17u);
+    let c0 = ob3(i, 7u); let c1 = ob3(i, 10u); let c2 = ob3(i, 13u);
+    let salt = 0x300u + 0x10u * i;
+    let dp2 = (dx * dx + dy * dy) * S.sp_unit * S.sp_unit;
+    let ps = max(0.6 * S.sp_scale, 0.5);
+    let point = exp(-dp2 / (2.0 * ps * ps));
+    var c = c_in;
+    var dark = dark_in;
+    let kind = i32(ob(i, 0u));
+    if kind == 0 {
+        let a = u * 1.6 + so; let bb = v * 1.6;
+        let w1 = fbm4(a + 5.2, bb + 1.3); let w2 = fbm4(a + 1.7, bb + 9.2);
+        let wa = a + 1.4 * w1; let wb = bb + 1.4 * w2;
+        let n = fbm4(wa, wb);
+        let fall = 1.0 - smoothstep_r(0.25, 1.25, rho + 0.6 * (n - 0.47));
+        let body = fall * (0.3 + 1.4 * smoothstep_r(0.4, 0.75, n));
+        let rid = 1.0 - abs(2.0 * fbm4(wa * 2.3 + 7.0, wb * 2.3) - 1.0);
+        let r2 = rid * rid;
+        let fil = r2 * r2 * rid * fall;
+        let core = exp(-rho * rho * 5.0);
+        let col = mix3(c0, c1, min(core * 1.4, 1.0));
+        let dn = fbm4(wa * 1.8 + 31.0, wb * 1.8 + 4.0);
+        let dust = smoothstep_r(0.52, 0.7, dn) * fall;
+        let rim = smoothstep_r(0.44, 0.52, dn) * (1.0 - smoothstep_r(0.52, 0.6, dn)) * fall;
+        let gas = b * (0.2 * body + 0.16 * fil + 0.3 * core * fall);
+        c = c * (1.0 - 0.5 * dust) + (col * (gas * (1.0 - 0.7 * dust)) + c2 * (0.12 * b * rim));
+        dark = max(dark, 0.8 * dust);
+        c += real_layer(px, py, 13.0 * S.sp_scale, 0.55 * exp(-rho * rho * 3.0), 0.5, salt) * S.sp_sb;
+    } else if kind == 1 {
+        let a = u * 1.4 + so; let bb = v * 1.4;
+        let n = fbm4(a + 1.4 * fbm4(a + 5.2, bb + 1.3), bb + 1.4 * fbm4(a + 1.7, bb + 9.2));
+        let streak = fbm4(u * 1.2 + so + 3.0, v * 7.0);
+        let glow = exp(-rho * rho * 2.2) * (0.35 + 0.9 * smoothstep_r(0.35, 0.75, n)) * (0.5 + 1.0 * streak);
+        let halo = exp(-rho * rho * 9.0);
+        c += mix3(c0, c2, smoothstep_r(0.4, 0.7, streak)) * (0.45 * b * glow) + c1 * (0.2 * b * halo);
+        dark = max(dark, 0.3 * smoothstep_r(0.6, 0.75, n) * exp(-rho * rho * 2.0));
+        c += real_layer(px, py, 16.0 * S.sp_scale, 0.85 * exp(-rho * rho * 7.0), 1.0, salt) * S.sp_sb;
+    } else if kind == 2 {
+        let a = u * 1.5 + so; let bb = v * 1.5;
+        let n = fbm4(a + 1.3 * fbm4(a + 5.2, bb + 1.3), bb + 1.3 * fbm4(a + 1.7, bb + 9.2));
+        let shape = 1.0 - smoothstep_r(0.15, 1.0, rho + 1.6 * (0.5 - n));
+        let op = clamp(shape * (0.4 + 1.2 * n), 0.0, 1.0) * min(b, 1.0);
+        let lit = 0.3 + 0.7 * smoothstep_r(-0.3, 0.9, u / max(rho, 1e-3));
+        let rim = smoothstep_r(0.02, 0.25, shape) * (1.0 - smoothstep_r(0.25, 0.6, shape)) * lit;
+        c = c * (1.0 - 0.95 * op) + (c1 * (0.04 * op * b) + c0 * (0.06 * b * rim));
+        dark = max(dark, 0.97 * op);
+    } else if kind == 3 {
+        let rn = rho + 0.1 * (fbm4(u * 3.0 + so, v * 3.0) - 0.47);
+        let fil = fbm4(u * 7.0 + so, v * 7.0);
+        let q1 = (rn - 0.55) / 0.16; let q2 = rn / 0.45; let q3 = (rn - 0.8) / 0.1;
+        let shell = exp(-q1 * q1); let inner = exp(-q2 * q2); let outer = exp(-q3 * q3);
+        let halo = exp(-rn * rn * 1.5);
+        let gas = c1 * (0.3 * shell * (0.6 + 0.8 * fil) + 0.22 * inner) + c0 * (0.35 * outer * (0.5 + fil) + 0.1 * shell) + c2 * (0.05 * halo);
+        c += gas * b + vec3<f32>(0.85, 0.9, 1.0) * (2.0 * b * point);
+    } else if kind == 4 {
+        let rn = rho + 0.2 * (fbm4(u * 2.0 + so, v * 2.0) - 0.47);
+        let g1 = 1.0 - abs(2.0 * fbm4(u * 3.2 + so + 11.0, v * 3.2) - 1.0);
+        let g2 = 1.0 - abs(2.0 * fbm4(u * 5.0 + so + 23.0, v * 5.0 + 4.0) - 1.0);
+        let h1 = (g1 * g1) * (g1 * g1); let h2 = (g2 * g2) * (g2 * g2);
+        let f1 = h1 * h1; let f2 = h2 * h2;
+        let qs = (rn - 0.8) / 0.14;
+        let shell = exp(-qs * qs);
+        let qf = rn / 0.75;
+        let fill = exp(-qf * qf);
+        let gas = c0 * (0.5 * shell * (0.15 + 1.6 * f1)) + c1 * (0.65 * shell * f2) + c2 * (0.02 * fill + 0.12 * fill * f2);
+        c += gas * b;
+    } else if kind == 5 {
+        let rr = max(rho, 0.015);
+        let ph = 2.0 * atan2(v, u) - 3.6 * log(rr) + so;
+        let arm0 = 0.5 + 0.5 * cos(ph);
+        let arm = arm0 * arm0 * arm0;
+        let l = 0.5 + 0.5 * cos(ph - 0.55);
+        let l2 = l * l; let l4 = l * l * l * l;
+        let lane = l4 * l4 * l2 * smoothstep_r(0.08, 0.25, rr);
+        let n = fbm4(u * 6.0 + so, v * 6.0);
+        let disk = exp(-rr * 3.0) * (1.0 - smoothstep_r(0.75, 1.2, rr));
+        let bulge = exp(-rr * rr * 45.0);
+        let knots = smoothstep_r(0.62, 0.8, fbm4(u * 16.0 + so, v * 16.0)) * arm * disk;
+        let arms = disk * (0.18 + 1.2 * arm * (0.5 + 0.8 * n));
+        let gal = c0 * (0.35 * arms * (1.0 - 0.75 * lane)) + c1 * (0.9 * bulge + 0.15 * disk) + c2 * (0.5 * knots);
+        c += gal * b;
+    } else if kind == 6 {
+        let glow = exp(-rho * 3.5) * (1.0 - smoothstep_r(1.2, 2.0, rho));
+        let core = exp(-rho * rho * 80.0);
+        c += c0 * (0.35 * b * glow) + c1 * (0.8 * b * core);
+    } else if kind == 7 {
+        let prof = (1.0 - smoothstep_r(1.0, 1.6, rho)) / (1.0 + 10.0 * rho * rho);
+        c += c1 * (0.08 * b * prof * sqrt(prof));
+        let st = real_layer(px, py, 2.6 * S.sp_scale, min(prof, 0.92), 0.2 * b, salt)
+            + real_layer(px, py, 7.0 * S.sp_scale, min(0.9 * prof, 0.92), 0.6 * b, salt + 8u);
+        c += st * c0 * S.sp_sb;
+    } else {
+        let up = max(u, 0.0);
+        let on = smoothstep_r(-0.03, 0.02, u);
+        let wi = 0.012 + 0.05 * up;
+        let qi = v / wi;
+        let ion = on * exp(-qi * qi) * exp(-up * 2.0) * (0.55 + 0.9 * fbm4(up * 9.0 + so, qi * 0.4));
+        let wd = 0.025 + 0.22 * up;
+        let qd = (v - 0.22 * up * up) / wd;
+        let dust = on * exp(-qd * qd) * exp(-up * 1.6);
+        let qc = rho / 0.035; let qh = rho / 0.12;
+        let coma = exp(-qc * qc); let head = exp(-qh * qh);
+        let tail = c0 * (0.4 * dust + 0.15 * head) + c1 * (0.45 * ion) + c2 * (1.2 * coma);
+        c += tail * b + vec3<f32>(1.0, 1.0, 0.95) * (2.0 * b * point);
+    }
+    return ObjOut(c, dark);
 }
 
 // render/blackhole.rs, step for step, from the block BhK::pack writes at S.bh_prims: the header,

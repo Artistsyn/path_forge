@@ -3463,6 +3463,8 @@ fn gpu_sky(ctx: &Ctx, draw: bool, strike: Option<(&Strike, [f32; 3])>, bank: Opt
             (p.sp_gal, p.sp_gc, p.sp_gal_c, p.sp_gal_s, p.sp_gal_w, p.sp_gal_h, p.sp_gal_core) = (k.gal, k.gal_col, k.gal_c, k.gal_s, k.gal_w, k.gal_h, k.gal_core);
             p.sp_so = k.so;
             p.sp_star_var = k.star_var;
+            p.sx_prims = prims.len() as u32;
+            prims.extend(k.pack());
             let planets = space::planet_list(ctx);
             (p.pl_n, p.pl_prims) = (planets.len() as u32, prims.len() as u32);
             for pk in &planets { prims.extend(pk.pack()); }

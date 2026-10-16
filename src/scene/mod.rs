@@ -625,16 +625,33 @@ pub struct Space {
     /// gaps beside a floating walkway) shows space too, instead of the void colour. The sky's
     /// `top`..`horizon` gradient is mirrored below the horizon.
     pub below: bool,
+    /// How the starfield is drawn. Realistic: a few bright stars among a great many faint ones,
+    /// coloured by temperature, gathered in clouds and lanes. Classic: the even field of small
+    /// dots of earlier versions (and of ball_swing_game).
+    pub star_style: StarStyle,
     /// The dense field of faint stars: 0 none .. 1 a rich field .. 2 a crowded one.
     pub stars: f32,
     pub star_brightness: f32,
     /// The stars' colours: 1 hot blue-white to cool orange; 0 all the faint blue-white of
     /// ball_swing_game's starfield.
     pub star_colors: f32,
+    /// Realistic stars: the faint glow of stars too many and too far to see one by one.
+    pub star_glow: f32,
+    /// Realistic stars: how unevenly they gather, 0 evenly .. 1 in clouds and voids.
+    pub star_clumps: f32,
+    /// Realistic stars: the bright stars' diffraction spikes (as a telescope sees them), 0 none.
+    pub star_spikes: f32,
+    pub spike_shape: SpikeShape,
+    /// How much the stars twinkle (0 steady, as in airless space .. 1 strongly).
+    pub twinkle: f32,
+    /// Whole twinkles per loop for the slowest stars (some go twice as fast), so the loop closes.
+    pub twinkle_speed: u32,
     /// Glowing gas clouds: strength 0 .. 2, two colours, and size (1 about a sky's height across).
     pub nebula: f32,
     pub nebula_colors: [Rgb; 2],
     pub nebula_scale: f32,
+    /// How much dark dust threads the gas and hides the stars behind it.
+    pub nebula_dust: f32,
     /// The band of a galaxy seen edge-on, with dark dust lanes and a brighter core.
     pub galaxy: f32,
     pub galaxy_color: Rgb,
@@ -646,6 +663,10 @@ pub struct Space {
     pub galaxy_height: f32,
     /// Where its bright core sits along the band: -1 left .. 1 right.
     pub galaxy_core: f32,
+    /// How much its dark dust lanes and rifts hide.
+    pub galaxy_dust: f32,
+    /// Up to six things far off in the sky: nebulae, galaxies, star clusters and comets.
+    pub objects: Vec<SpaceObject>,
     /// Up to three planets, drawn in order (later ones in front).
     pub planets: Vec<Planet>,
     /// A black hole: its shadow, a glowing disk lensed round it, and matter falling in.
@@ -655,10 +676,103 @@ pub struct Space {
 impl Default for Space {
     fn default() -> Self {
         Space {
-            enabled: false, below: true, stars: 1.0, star_brightness: 1.0, star_colors: 1.0,
-            nebula: 0.6, nebula_colors: [[190, 70, 200], [60, 120, 255]], nebula_scale: 1.0,
+            enabled: false, below: true, star_style: StarStyle::Realistic, stars: 1.0, star_brightness: 1.0, star_colors: 1.0,
+            star_glow: 0.5, star_clumps: 0.5, star_spikes: 0.4, spike_shape: SpikeShape::Four, twinkle: 0.0, twinkle_speed: 2,
+            nebula: 0.6, nebula_colors: [[190, 70, 200], [60, 120, 255]], nebula_scale: 1.0, nebula_dust: 0.5,
             galaxy: 0.7, galaxy_color: [235, 225, 255], galaxy_angle: 18.0, galaxy_width: 0.22, galaxy_height: 0.55, galaxy_core: 0.25,
-            planets: Vec::new(), black_hole: BlackHole::default(), seed: 0,
+            galaxy_dust: 0.7, objects: Vec::new(), planets: Vec::new(), black_hole: BlackHole::default(), seed: 0,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub enum StarStyle {
+    #[default]
+    Realistic,
+    Classic,
+}
+
+/// The bright stars' diffraction spikes: four (a cross), six or eight points.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub enum SpikeShape {
+    #[default]
+    Four,
+    Six,
+    Eight,
+}
+impl SpikeShape {
+    /// Lines through the star (each makes two spikes).
+    pub fn lines(self) -> u32 { match self { SpikeShape::Four => 2, SpikeShape::Six => 3, SpikeShape::Eight => 4 } }
+}
+
+/// Something far off in the space sky, behind the planets and bent round a black hole like the
+/// stars. `colors` mean something different for each kind (see `SpaceObjectKind`).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
+pub struct SpaceObject {
+    pub enabled: bool,
+    pub kind: SpaceObjectKind,
+    /// Centre: x 0..1 across the frame, y 0 (top) .. 1 (horizon).
+    pub pos: [f32; 2],
+    /// Its radius as a share of the sky's height (a comet: its tail's length).
+    pub size: f32,
+    /// Its turn on screen, degrees (a comet: where its tail points, 0 right, 90 up).
+    pub angle: f32,
+    /// How round it is: 1 round .. 0.1 seen almost edge-on.
+    pub aspect: f32,
+    pub colors: [Rgb; 3],
+    pub brightness: f32,
+    pub seed: u32,
+}
+impl Default for SpaceObject {
+    fn default() -> Self {
+        SpaceObject {
+            enabled: true, kind: SpaceObjectKind::Emission, pos: [0.5, 0.35], size: 0.3, angle: 0.0, aspect: 1.0,
+            colors: SpaceObjectKind::Emission.colors(), brightness: 1.0, seed: 0,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub enum SpaceObjectKind {
+    /// A glowing cloud of gas lit by the young stars inside it, with dark dust pillars and lanes:
+    /// `colors` its outer gas (hydrogen red), its hot heart (oxygen teal) and the dust's lit edges.
+    #[default]
+    Emission,
+    /// Dust lit blue by a few bright stars inside it: its glow, the stars' halo, its streaks.
+    Reflection,
+    /// A cloud of dust hiding the stars behind it: its lit rim, and its faint body.
+    Dark,
+    /// A dying star's glowing shell round a white dwarf: the outer rim, the inner shell, the halo.
+    Planetary,
+    /// The wisps of an exploded star's shell: two filament colours and the faint fill.
+    Remnant,
+    /// A spiral galaxy: its arms, its core and its pink star-forming knots.
+    Spiral,
+    /// A smooth elliptical galaxy: its glow, its core.
+    Elliptical,
+    /// A star cluster: its stars' tint, its glow.
+    Cluster,
+    /// A comet: its curved dust tail, its straight blue ion tail, its glowing head.
+    Comet,
+}
+impl SpaceObjectKind {
+    pub const ALL: [SpaceObjectKind; 9] = [
+        SpaceObjectKind::Emission, SpaceObjectKind::Reflection, SpaceObjectKind::Dark, SpaceObjectKind::Planetary, SpaceObjectKind::Remnant,
+        SpaceObjectKind::Spiral, SpaceObjectKind::Elliptical, SpaceObjectKind::Cluster, SpaceObjectKind::Comet,
+    ];
+    /// Colours that suit it.
+    pub fn colors(self) -> [Rgb; 3] {
+        match self {
+            SpaceObjectKind::Emission => [[235, 70, 110], [90, 220, 215], [255, 180, 120]],
+            SpaceObjectKind::Reflection => [[90, 140, 255], [200, 220, 255], [140, 170, 255]],
+            SpaceObjectKind::Dark => [[255, 140, 90], [40, 24, 20], [0, 0, 0]],
+            SpaceObjectKind::Planetary => [[240, 80, 90], [90, 230, 220], [120, 90, 200]],
+            SpaceObjectKind::Remnant => [[255, 90, 110], [100, 200, 255], [160, 120, 220]],
+            SpaceObjectKind::Spiral => [[170, 195, 255], [255, 225, 175], [255, 110, 170]],
+            SpaceObjectKind::Elliptical => [[255, 225, 190], [255, 240, 215], [0, 0, 0]],
+            SpaceObjectKind::Cluster => [[255, 235, 205], [255, 230, 190], [0, 0, 0]],
+            SpaceObjectKind::Comet => [[255, 235, 190], [110, 170, 255], [230, 255, 250]],
         }
     }
 }

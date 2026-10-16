@@ -194,6 +194,10 @@ pub fn star_bridge() -> Scene {
                 },
                 Planet { kind: PlanetKind::Rocky, pos: [0.62, 0.17], radius: 0.035, light_angle: 22.0, night: 0.3, seed: 7, ..Planet::default() },
             ],
+            objects: vec![
+                SpaceObject { pos: [0.78, 0.36], size: 0.2, angle: 30.0, brightness: 0.8, seed: 2, ..SpaceObject::default() },
+                SpaceObject { kind: SpaceObjectKind::Spiral, pos: [0.12, 0.08], size: 0.06, angle: -25.0, aspect: 0.45, colors: SpaceObjectKind::Spiral.colors(), seed: 4, ..SpaceObject::default() },
+            ],
             ..Space::default()
         },
         ..Sky::default()
@@ -211,6 +215,41 @@ pub fn star_bridge() -> Scene {
         PropLayer { side: Side::Right, jitter: 2.0, scale_var: 0.3, float: 2.5, float_var: 1.5, offset: 17.0, shadow: false, ..props(PropKind::CargoPod, 6.0, 40.0, 1.0, 87) },
     ];
     s.motion = Motion { loop_length: 40.0, speed: 5.0, fps: 24 };
+    s
+}
+
+/// A walkway across a stellar nursery: glowing pink and teal gas threaded with dark dust, a
+/// dark cloud hiding the stars, a dying star's ring, a comet, and a starfield of a few bright
+/// stars among a great many faint ones.
+pub fn nebula_crossing() -> Scene {
+    let mut s = star_bridge();
+    s.name = "Nebula Crossing".into();
+    s.camera.horizon = 0.45;
+    s.sky.top = [3, 2, 8];
+    s.sky.horizon = [14, 8, 26];
+    // A small far sun at the frame's edge lights the deck.
+    s.sky.sun.pos = [0.97, 0.03];
+    s.sky.sun.radius = 0.012;
+    s.sky.space = Space {
+        enabled: true, stars: 1.2, star_glow: 0.7, star_spikes: 0.6, twinkle: 0.15,
+        nebula: 0.9, nebula_colors: [[200, 60, 120], [50, 110, 220]], nebula_scale: 1.4, nebula_dust: 0.6,
+        galaxy: 0.6, galaxy_angle: -28.0, galaxy_height: 0.75, galaxy_core: 0.4,
+        objects: vec![
+            SpaceObject { pos: [0.42, 0.3], size: 0.36, angle: 15.0, aspect: 0.85, brightness: 1.2, seed: 11, ..SpaceObject::default() },
+            SpaceObject { kind: SpaceObjectKind::Dark, pos: [0.25, 0.42], size: 0.13, angle: 160.0, colors: SpaceObjectKind::Dark.colors(), seed: 3, ..SpaceObject::default() },
+            SpaceObject { kind: SpaceObjectKind::Planetary, pos: [0.83, 0.12], size: 0.05, colors: SpaceObjectKind::Planetary.colors(), seed: 5, ..SpaceObject::default() },
+            SpaceObject { kind: SpaceObjectKind::Comet, pos: [0.8, 0.62], size: 0.3, angle: 140.0, colors: SpaceObjectKind::Comet.colors(), brightness: 0.9, seed: 7, ..SpaceObject::default() },
+        ],
+        planets: vec![
+            Planet { kind: PlanetKind::Ice, pos: [0.12, 0.72], radius: 0.06, color: [190, 210, 230], color2: [240, 250, 255], light_angle: 20.0, night: 0.5, seed: 9, ..Planet::default() },
+        ],
+        seed: 12,
+        ..Space::default()
+    };
+    s.light.ambient = 0.3;
+    s.light.ambient_color = [170, 130, 190];
+    s.post.bloom = 0.4;
+    s.props.retain(|p| p.kind != PropKind::Satellite && p.kind != PropKind::CargoPod);
     s
 }
 
@@ -508,6 +547,9 @@ pub fn event_horizon() -> Scene {
             enabled: true, stars: 1.0, nebula: 0.35, nebula_colors: [[150, 60, 120], [70, 60, 170]],
             galaxy: 0.5, galaxy_angle: -14.0, galaxy_height: 0.7, galaxy_core: -0.6,
             black_hole: BlackHole { enabled: true, pos: [0.5, 0.5], size: 0.12, tilt: 85.0, light: 1.2, ..BlackHole::default() },
+            objects: vec![
+                SpaceObject { kind: SpaceObjectKind::Cluster, pos: [0.82, 0.18], size: 0.08, colors: SpaceObjectKind::Cluster.colors(), seed: 1, ..SpaceObject::default() },
+            ],
             seed: 4,
             ..Space::default()
         },
@@ -543,7 +585,7 @@ pub fn black_hole_arena() -> Scene {
     s.sky = Sky {
         enabled: true, top: [5, 5, 15], horizon: [5, 5, 15],
         space: Space {
-            enabled: true, stars: 0.03, star_brightness: 2.2, star_colors: 0.0, nebula: 0.0, galaxy: 0.0,
+            enabled: true, star_style: StarStyle::Classic, stars: 0.03, star_brightness: 2.2, star_colors: 0.0, nebula: 0.0, galaxy: 0.0,
             black_hole: BlackHole {
                 enabled: true, pos: [0.5, 0.92], size: 0.24, tilt: 82.0, roll: -6.0,
                 disk_colors: [[210, 255, 245], [200, 90, 240], [70, 30, 150]], brightness: 0.9, doppler: 0.6, spin: 3,
@@ -609,6 +651,9 @@ pub fn starship_flight() -> Scene {
                 },
             ],
             black_hole: BlackHole { enabled: true, pos: [0.5, 0.62], size: 0.09, tilt: 85.0, roll: 6.0, infall: 24, light: 1.0, ..BlackHole::default() },
+            objects: vec![
+                SpaceObject { kind: SpaceObjectKind::Spiral, pos: [0.2, 0.2], size: 0.07, angle: 35.0, aspect: 0.4, colors: SpaceObjectKind::Spiral.colors(), seed: 6, ..SpaceObject::default() },
+            ],
             ..Space::default()
         },
         ..Sky::default()
@@ -1014,6 +1059,7 @@ pub const ALL: &[(&str, fn() -> Scene)] = &[
 ("Desert Ruins", desert_ruins),
 ("Ice Cave", ice_cave),
 ("Star Bridge", star_bridge),
+    ("Nebula Crossing", nebula_crossing),
 ("Hyperspace Run", hyperspace_run),
 ("Wormhole", wormhole),
 ("Starship Flight", starship_flight),

@@ -1015,21 +1015,68 @@ The sky seen from space. It sits at infinity, so it stays put while the camera w
 |---|---|---|---|
 | `enabled` | boolean | `false` |  |
 | `below` | boolean | `true` | Space all round: where nothing is drawn below the horizon (a bridge's bottomless drop, the gaps beside a floating walkway) shows space too, instead of the void colour. The sky's `top`..`horizon` gradient is mirrored below the horizon. |
+| `star_style` | [StarStyle](#starstyle) | `"Realistic"` | How the starfield is drawn. Realistic: a few bright stars among a great many faint ones, coloured by temperature, gathered in clouds and lanes. Classic: the even field of small dots of earlier versions (and of ball_swing_game). |
 | `stars` | number | `1.0` | The dense field of faint stars: 0 none .. 1 a rich field .. 2 a crowded one. |
 | `star_brightness` | number | `1.0` |  |
 | `star_colors` | number | `1.0` | The stars' colours: 1 hot blue-white to cool orange; 0 all the faint blue-white of ball_swing_game's starfield. |
+| `star_glow` | number | `0.5` | Realistic stars: the faint glow of stars too many and too far to see one by one. |
+| `star_clumps` | number | `0.5` | Realistic stars: how unevenly they gather, 0 evenly .. 1 in clouds and voids. |
+| `star_spikes` | number | `0.4` | Realistic stars: the bright stars' diffraction spikes (as a telescope sees them), 0 none. |
+| `spike_shape` | [SpikeShape](#spikeshape) | `"Four"` |  |
+| `twinkle` | number | `0.0` | How much the stars twinkle (0 steady, as in airless space .. 1 strongly). |
+| `twinkle_speed` | integer | `2` | Whole twinkles per loop for the slowest stars (some go twice as fast), so the loop closes. |
 | `nebula` | number | `0.6` | Glowing gas clouds: strength 0 .. 2, two colours, and size (1 about a sky's height across). |
 | `nebula_colors` | integer × 3 × 2 | `[[190,70,200],[60,120,255]]` |  |
 | `nebula_scale` | number | `1.0` |  |
+| `nebula_dust` | number | `0.5` | How much dark dust threads the gas and hides the stars behind it. |
 | `galaxy` | number | `0.7` | The band of a galaxy seen edge-on, with dark dust lanes and a brighter core. |
 | `galaxy_color` | integer × 3 | `[235,225,255]` |  |
 | `galaxy_angle` | number | `18.0` | Tilt of the band in degrees (0 level, positive rising to the right). |
 | `galaxy_width` | number | `0.22` | Its width, as a share of the sky's height. |
 | `galaxy_height` | number | `0.55` | Where the band crosses the middle of the frame, in sky heights above the horizon. |
 | `galaxy_core` | number | `0.25` | Where its bright core sits along the band: -1 left .. 1 right. |
+| `galaxy_dust` | number | `0.7` | How much its dark dust lanes and rifts hide. |
+| `objects` | list of [SpaceObject](#spaceobject) | `[]` | Up to six things far off in the sky: nebulae, galaxies, star clusters and comets. |
 | `planets` | list of [Planet](#planet) | `[]` | Up to three planets, drawn in order (later ones in front). |
 | `black_hole` | [BlackHole](#blackhole) | (see the type) | A black hole: its shadow, a glowing disk lensed round it, and matter falling in. |
 | `seed` | integer | `0` |  |
+
+### SpaceObject
+
+Something far off in the space sky, behind the planets and bent round a black hole like the
+stars. `colors` mean something different for each kind (see `SpaceObjectKind`).
+
+| Field | Type | Default | Meaning |
+|---|---|---|---|
+| `enabled` | boolean | `true` |  |
+| `kind` | [SpaceObjectKind](#spaceobjectkind) | `"Emission"` |  |
+| `pos` | number × 2 | `[0.5,0.35]` | Centre: x 0..1 across the frame, y 0 (top) .. 1 (horizon). |
+| `size` | number | `0.3` | Its radius as a share of the sky's height (a comet: its tail's length). |
+| `angle` | number | `0.0` | Its turn on screen, degrees (a comet: where its tail points, 0 right, 90 up). |
+| `aspect` | number | `1.0` | How round it is: 1 round .. 0.1 seen almost edge-on. |
+| `colors` | integer × 3 × 3 | `[[235,70,110],[90,220,215],[255,180,120]]` |  |
+| `brightness` | number | `1.0` |  |
+| `seed` | integer | `0` |  |
+
+### SpaceObjectKind
+
+| Value | Meaning |
+|---|---|
+| `Emission` | A glowing cloud of gas lit by the young stars inside it, with dark dust pillars and lanes: `colors` its outer gas (hydrogen red), its hot heart (oxygen teal) and the dust's lit edges. |
+| `Reflection` | Dust lit blue by a few bright stars inside it: its glow, the stars' halo, its streaks. |
+| `Dark` | A cloud of dust hiding the stars behind it: its lit rim, and its faint body. |
+| `Planetary` | A dying star's glowing shell round a white dwarf: the outer rim, the inner shell, the halo. |
+| `Remnant` | The wisps of an exploded star's shell: two filament colours and the faint fill. |
+| `Spiral` | A spiral galaxy: its arms, its core and its pink star-forming knots. |
+| `Elliptical` | A smooth elliptical galaxy: its glow, its core. |
+| `Cluster` | A star cluster: its stars' tint, its glow. |
+| `Comet` | A comet: its curved dust tail, its straight blue ion tail, its glowing head. |
+
+### SpikeShape
+
+The bright stars' diffraction spikes: four (a cross), six or eight points.
+
+One of `Four` \| `Six` \| `Eight`.
 
 ### SpriteRef
 
@@ -1066,6 +1113,10 @@ walker (smoothly over each flight), and the loop still closes: the view one flig
 | `size` | number | `1.0` |  |
 | `twinkle` | number | `0.5` |  |
 | `seed` | integer | `0` |  |
+
+### StarStyle
+
+One of `Realistic` \| `Classic`.
 
 ### Stop
 

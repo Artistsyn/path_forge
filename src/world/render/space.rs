@@ -6,7 +6,7 @@
 //! sky pass), with the numbers `space_k` and `PlanetK::pack` hand it.
 
 use super::*;
-use crate::scene::{Planet, PlanetKind, TunnelKind};
+use crate::scene::{Planet, PlanetKind, SpaceObject, SpaceObjectKind, StarStyle, TunnelKind};
 use crate::world::looks::value_noise;
 
 /// Planets drawn at most, and floats per planet in the sky pass's prims.
@@ -45,6 +45,90 @@ pub(super) struct SpaceK {
     pub gal_core: f32,
     /// Where this seed's sky starts in the noise.
     pub so: f32,
+    /// Realistic stars (`StarStyle::Realistic`), and the rest of their numbers.
+    pub real: bool,
+    pub glow: f32,
+    pub clumps: f32,
+    pub spikes: f32,
+    /// Lines of spikes through a bright star (2, 3 or 4).
+    pub lines: f32,
+    pub twinkle: f32,
+    /// Whole twinkles per loop, and how far through the loop the frame is.
+    pub tw_n: f32,
+    pub tphase: f32,
+    pub neb_dust: f32,
+    pub gal_dust: f32,
+    /// The objects far off in the sky (`objs[..n_obj]`).
+    pub n_obj: usize,
+    pub objs: [ObjK; MAX_OBJECTS],
+}
+
+/// Objects drawn at most, and floats each in the sky pass's prims.
+pub(super) const MAX_OBJECTS: usize = 6;
+pub(super) const OBJ_FLOATS: usize = 20;
+/// Floats before the objects in the block `SpaceK::pack` writes.
+pub(super) const SPACE_HEAD: usize = 12;
+
+/// One object far off in the sky (`SpaceObject`), in sky units: x from the frame's middle and y
+/// up from the horizon, in sky heights.
+#[derive(Clone, Copy, Debug, Default)]
+pub(super) struct ObjK {
+    pub kind: f32,
+    pub x: f32,
+    pub y: f32,
+    pub r: f32,
+    pub c: f32,
+    pub s: f32,
+    pub aspect: f32,
+    pub col: [[f32; 3]; 3],
+    pub bright: f32,
+    pub so: f32,
+    /// How far out it shows, in its radii.
+    pub reach: f32,
+}
+
+impl ObjK {
+    /// `fw` and `fhy` the frame's width and sky height in pixels, `hy` and `oy` its horizon and top rows.
+    fn new(o: &SpaceObject, fw: f32, fhy: f32, hy: f32, oy: f32) -> ObjK {
+        let a = o.angle.to_radians();
+        let kind = SpaceObjectKind::ALL.iter().position(|k| *k == o.kind).unwrap_or(0);
+        let reach = [1.35, 1.45, 1.3, 1.5, 1.3, 1.25, 2.0, 1.6, 1.25][kind];
+        ObjK {
+            kind: kind as f32,
+            x: (o.pos[0] - 0.5) * fw / fhy,
+            y: (hy - (oy + o.pos[1] * fhy)) / fhy,
+            r: o.size.max(0.005),
+            c: a.cos(),
+            s: a.sin(),
+            aspect: o.aspect.clamp(0.05, 1.0),
+            col: [rgb_lin(o.colors[0]), rgb_lin(o.colors[1]), rgb_lin(o.colors[2])],
+            bright: o.brightness.max(0.0),
+            so: (hf(o.seed ^ 0x0B7, 0) * 61.0).floor(),
+            reach,
+        }
+    }
+
+    fn pack(&self) -> [f32; OBJ_FLOATS] {
+        let c = &self.col;
+        [
+            self.kind, self.x, self.y, self.r, self.c, self.s, self.aspect,
+            c[0][0], c[0][1], c[0][2], c[1][0], c[1][1], c[1][2], c[2][0], c[2][1], c[2][2],
+            self.bright, self.so, self.reach, 0.0,
+        ]
+    }
+}
+
+impl SpaceK {
+    /// What the sky pass reads beyond its uniforms: the realistic sky's numbers, then the objects.
+    pub(super) fn pack(&self) -> Vec<f32> {
+        let mut o = vec![
+            self.real as u32 as f32, self.glow, self.clumps, self.spikes, self.lines, self.twinkle,
+            self.tw_n, self.tphase, self.neb_dust, self.gal_dust, self.n_obj as f32, 0.0,
+        ];
+        debug_assert_eq!(o.len(), SPACE_HEAD);
+        for ob in &self.objs[..self.n_obj] { o.extend(ob.pack()); }
+        o
+    }
 }
 
 pub(super) fn space_k(ctx: &Ctx) -> Option<SpaceK> {
@@ -56,6 +140,8 @@ pub(super) fn space_k(ctx: &Ctx) -> Option<SpaceK> {
     let (ox, oy) = (v.left as f32, v.top as f32);
     let (fw, fhy) = (v.width as f32 - 2.0 * ox, (hy - oy).max(2.0));
     let ang = s.galaxy_angle.to_radians();
+    let objs: Vec<ObjK> = s.objects.iter().filter(|o| o.enabled && o.size > 0.0 && o.brightness > 0.0).take(MAX_OBJECTS)
+        .map(|o| ObjK::new(o, fw, fhy, hy, oy)).collect();
     Some(SpaceK {
         below: s.below,
         scale: ((v.height as f32 - oy) / 854.0).max(0.25),
@@ -80,6 +166,22 @@ pub(super) fn space_k(ctx: &Ctx) -> Option<SpaceK> {
         gal_h: s.galaxy_height,
         gal_core: s.galaxy_core * 0.5 * fw / fhy,
         so: (hf(s.seed ^ 0x5A1, 0) * 97.0).floor(),
+        real: s.star_style == StarStyle::Realistic,
+        glow: s.star_glow.max(0.0),
+        clumps: s.star_clumps.clamp(0.0, 1.0),
+        spikes: s.star_spikes.max(0.0),
+        lines: s.spike_shape.lines() as f32,
+        twinkle: s.twinkle.clamp(0.0, 1.0),
+        tw_n: s.twinkle_speed.max(1) as f32,
+        tphase: ctx.tphase,
+        neb_dust: s.nebula_dust.clamp(0.0, 1.0),
+        gal_dust: s.galaxy_dust.clamp(0.0, 1.0),
+        n_obj: objs.len(),
+        objs: {
+            let mut a = [ObjK::default(); MAX_OBJECTS];
+            a[..objs.len()].copy_from_slice(&objs);
+            a
+        },
     })
 }
 
@@ -168,6 +270,7 @@ pub(super) fn backdrop_px(k: &SpaceK, bh: Option<&super::blackhole::BhK>, x: usi
 /// The nebulae, galaxy and stars seen at (px, py), a pixel centre or (round a black hole) where a
 /// bent ray comes from, over `c`.
 pub(super) fn features(k: &SpaceK, px: f32, py: f32, c: [f32; 3]) -> [f32; 3] {
+    if k.real { return features_real(k, px, py, c); }
     let mut c = c;
     let (sx, sy) = ((px - k.cx) / k.unit, (k.hy - py) / k.unit);
     let mut dark = 0.0;
@@ -201,6 +304,9 @@ pub(super) fn features(k: &SpaceK, px: f32, py: f32, c: [f32; 3]) -> [f32; 3] {
             dark = dark.max(0.8 * dust);
         }
     }
+    for (i, o) in k.objs[..k.n_obj].iter().enumerate() {
+        (c, dark) = object_px(k, o, i as u32, px, py, sx, sy, c, dark);
+    }
     if k.stars > 0.0 {
         let dens = k.stars * (1.0 + 2.5 * k.gal.min(1.0) * band) * (1.0 - dark);
         let s = k.scale;
@@ -210,6 +316,298 @@ pub(super) fn features(k: &SpaceK, px: f32, py: f32, c: [f32; 3]) -> [f32; 3] {
         c = add3(c, scale3(st, k.sb * (1.0 - 0.7 * dark)));
     }
     c
+}
+
+/// A star's colour from its temperature, t 0 (3000 K, red-orange) .. 1 (20000 K, blue), each
+/// about as bright.
+fn temp_col(t: f32) -> [f32; 3] {
+    let x = t.clamp(0.0, 1.0) * 4.0;
+    let col = if x < 1.0 {
+        mix3([1.0, 0.46, 0.15], [1.0, 0.68, 0.4], x)
+    } else if x < 2.0 {
+        mix3([1.0, 0.68, 0.4], [1.0, 0.93, 0.85], x - 1.0)
+    } else if x < 3.0 {
+        mix3([1.0, 0.93, 0.85], [0.76, 0.84, 1.0], x - 2.0)
+    } else {
+        mix3([0.76, 0.84, 1.0], [0.5, 0.62, 1.0], x - 3.0)
+    };
+    let lum = 0.2126 * col[0] + 0.7152 * col[1] + 0.0722 * col[2];
+    scale3(col, 1.0 / (0.35 + 0.65 * lum))
+}
+
+/// A realistic star's colour from its hash: most yellow-white, fewer orange or blue.
+fn star_col(k: &SpaceK, h: f32) -> [f32; 3] {
+    let u = 2.0 * h - 1.0;
+    mix3([1.0, 0.97, 0.93], temp_col(0.5 + 0.5 * u * u.abs().powf(0.6)), 0.75 * k.star_var)
+}
+
+/// How bright the star in cell (ix, iy) is: a steep power law above `f0` (a few bright, most
+/// faint), twinkling a whole number of times per loop.
+fn star_flux(k: &SpaceK, ix: i32, iy: i32, salt: u32, f0: f32, cap: f32) -> f32 {
+    let u = cell_hash(ix, iy, salt + 3).max(0.003);
+    let mut f = f0 * u.powf(-0.9).min(cap);
+    if k.twinkle > 0.0 {
+        let n = k.tw_n * (1.0 + (cell_hash(ix, iy, salt + 5) * 2.0).floor());
+        f *= 1.0 + 0.6 * k.twinkle * (TAU * (n * k.tphase + cell_hash(ix, iy, salt + 6))).sin();
+    }
+    f
+}
+
+/// One layer of realistic stars: at most one per square cell (`prob` of them) anywhere in it,
+/// from the four cells nearest the pixel, `f0` the faintest.
+fn real_layer(k: &SpaceK, px: f32, py: f32, cell: f32, prob: f32, f0: f32, salt: u32) -> [f32; 3] {
+    let (ix0, iy0) = ((px / cell - 0.5).floor() as i32, (py / cell - 0.5).floor() as i32);
+    let s0 = 0.5 * k.scale;
+    let sigma = s0.max(0.5);
+    let mut out = [0.0f32; 3];
+    for j in 0..2 {
+        for i in 0..2 {
+            let (ix, iy) = (ix0 + i, iy0 + j);
+            if cell_hash(ix, iy, salt) >= prob { continue; }
+            let sx = (ix as f32 + cell_hash(ix, iy, salt + 1)) * cell;
+            let sy = (iy as f32 + cell_hash(ix, iy, salt + 2)) * cell;
+            let d2 = (px - sx) * (px - sx) + (py - sy) * (py - sy);
+            let f = star_flux(k, ix, iy, salt, f0, 12.0) * (s0 / sigma) * (s0 / sigma);
+            out = add3(out, scale3(star_col(k, cell_hash(ix, iy, salt + 4)), f * (-d2 / (2.0 * sigma * sigma)).exp()));
+        }
+    }
+    out
+}
+
+/// The few bright stars: big cells, each star anywhere in its own, with a soft halo and (the
+/// brightest) diffraction spikes reaching into the cells round it.
+fn bright_stars(k: &SpaceK, px: f32, py: f32, salt: u32) -> [f32; 3] {
+    let s = k.scale;
+    let cell = 70.0 * s;
+    let (ix, iy) = ((px / cell).floor() as i32, (py / cell).floor() as i32);
+    let prob = (0.3 * k.stars).min(0.95);
+    let s0 = 0.6 * s;
+    let sigma = s0.max(0.5);
+    let mut out = [0.0f32; 3];
+    for j in -1..=1 {
+        for i in -1..=1 {
+            let (cx, cy) = (ix + i, iy + j);
+            if cell_hash(cx, cy, salt) >= prob { continue; }
+            let (dx, dy) = (px - (cx as f32 + cell_hash(cx, cy, salt + 1)) * cell, py - (cy as f32 + cell_hash(cx, cy, salt + 2)) * cell);
+            let d2 = dx * dx + dy * dy;
+            if d2 > 0.9 * cell * 0.9 * cell { continue; }
+            let f = star_flux(k, cx, cy, salt, 0.5, 30.0);
+            let d = d2.sqrt();
+            let mut a = f * (s0 / sigma) * (s0 / sigma) * (-d2 / (2.0 * sigma * sigma)).exp() + 0.05 * f * (-d / (2.5 * s)).exp();
+            if k.spikes > 0.0 && f > 2.0 {
+                let len = s * (1.2 + 1.8 * f.sqrt());
+                let w2 = 2.0 * 0.64 * sigma * sigma;
+                let mut sp = 0.0;
+                let mut l = 0.0;
+                while l < k.lines {
+                    let th = std::f32::consts::PI * l / k.lines;
+                    let (cs, sn) = (th.cos(), th.sin());
+                    let (al, pe) = (dx * cs + dy * sn, -dx * sn + dy * cs);
+                    sp += (-al.abs() / len).exp() * (-pe * pe / w2).exp();
+                    l += 1.0;
+                }
+                a += 0.25 * k.spikes * f * smoothstep(2.0, 6.0, f) * sp;
+            }
+            out = add3(out, scale3(star_col(k, cell_hash(cx, cy, salt + 4)), a));
+        }
+    }
+    out
+}
+
+/// The realistic sky at (px, py): drifting gas threaded with dust, the galaxy's band of
+/// unresolved stars split by dark rifts, the objects, and a starfield of a few bright stars among
+/// a great many faint ones gathered in clouds.
+fn features_real(k: &SpaceK, px: f32, py: f32, c: [f32; 3]) -> [f32; 3] {
+    let mut c = c;
+    let (sx, sy) = ((px - k.cx) / k.unit, (k.hy - py) / k.unit);
+    let mut dark = 0.0;
+    if k.neb > 0.0 {
+        let (nx, ny) = (sx * k.neb_f + k.so, sy * k.neb_f);
+        let (wx, wy) = (fbm4(nx + 5.2, ny + 1.3), fbm4(nx + 1.7, ny + 9.2));
+        let (ux, uy) = (nx + 1.6 * wx, ny + 1.6 * wy);
+        let n1 = fbm4(ux, uy);
+        let n2 = fbm4(ux * 1.7 + 13.1, uy * 1.7 + 5.3);
+        let body = smoothstep(0.42, 0.8, n1);
+        let rid = 1.0 - (2.0 * fbm4(ux * 2.6 + 3.0, uy * 2.6) - 1.0).abs();
+        let r2 = rid * rid;
+        let fil = r2 * r2 * r2 * smoothstep(0.3, 0.55, n1);
+        let col = mix3(k.neb1, k.neb2, smoothstep(0.3, 0.7, n2));
+        let dust = smoothstep(0.5, 0.72, fbm4(ux * 2.2 + 31.0, uy * 2.2)) * k.neb_dust;
+        let gas = k.neb * (0.2 * body * body + 0.12 * fil + 0.03 * smoothstep(0.3, 0.6, n1)) * (1.0 - 0.85 * dust);
+        c = add3(scale3(c, 1.0 - 0.5 * dust * k.neb.min(1.0)), scale3(col, gas));
+        dark = 0.75 * dust * k.neb.min(1.0);
+    }
+    let mut band = 0.0;
+    if k.gal > 0.0 {
+        let dy = sy - k.gal_h;
+        let along = sx * k.gal_c + dy * k.gal_s;
+        let across0 = -sx * k.gal_s + dy * k.gal_c;
+        let across = across0 + 0.3 * k.gal_w * (fbm4(along * 1.1 + k.so, 3.7) - 0.47);
+        let q = across / k.gal_w;
+        if q.abs() < 3.2 {
+            band = (-q * q).exp();
+            let skirt = (-0.2 * q * q).exp();
+            let mott = 0.35 + 1.3 * smoothstep(0.3, 0.75, fbm4(along * 6.0 + 3.0, q * 1.5 + k.so));
+            let ca = (along - k.gal_core) / 0.3;
+            let cq = across / (1.6 * k.gal_w);
+            let core = (-ca * ca - cq * cq).exp();
+            let wq = (q + 0.8 * (fbm4(along * 2.0 + k.so + 9.0, 1.3) - 0.47)) / 0.4;
+            let rift = (-wq * wq).exp() * smoothstep(0.35, 0.6, fbm4(along * 2.5 + k.so + 17.0, q * 0.8 + 3.0));
+            let lq = q / 0.9;
+            let lanes = smoothstep(0.45, 0.7, fbm4(along * 5.0 + k.so, q * 2.0 + 11.0)) * (-lq * lq).exp();
+            let dust = k.gal_dust * rift.max(lanes);
+            let col = mix3(k.gal_col, mul3(k.gal_col, [1.0, 0.8, 0.58]), 0.8 * core);
+            let glow = 0.09 * band * mott + 0.025 * skirt + 0.3 * core;
+            c = add3(c, scale3(col, k.gal * glow * (1.0 - 0.92 * dust)));
+            dark = dark.max(0.9 * dust);
+        }
+    }
+    for (i, o) in k.objs[..k.n_obj].iter().enumerate() {
+        (c, dark) = object_px(k, o, i as u32, px, py, sx, sy, c, dark);
+    }
+    if k.stars > 0.0 {
+        let clump = (1.0 + k.clumps * 3.0 * (fbm4(sx * 2.5 + k.so + 50.0, sy * 2.5 + 20.0) - 0.47)).max(0.1);
+        let field = k.stars * clump * (1.0 + 2.5 * k.gal.min(1.0) * band) * (1.0 - dark);
+        c = add3(c, scale3([1.0, 0.94, 0.86], 0.012 * k.glow * field * k.sb));
+        let s = k.scale;
+        let mut st = real_layer(k, px, py, 3.0 * s, (0.22 * field).min(0.95), 0.025, 0xA0);
+        st = add3(st, real_layer(k, px, py, 7.0 * s, (0.3 * field).min(0.95), 0.06, 0xB0));
+        st = add3(st, real_layer(k, px, py, 18.0 * s, (0.4 * k.stars * clump.sqrt() * (1.0 - 0.5 * dark)).min(0.95), 0.15, 0xC0));
+        st = add3(st, bright_stars(k, px, py, 0xE0));
+        c = add3(c, scale3(st, k.sb * (1.0 - 0.7 * dark)));
+    }
+    c
+}
+
+/// One object far off in the sky (`ObjK`, the `i`th) over `c` at pixel (px, py), sky point
+/// (sx, sy); returns the colour and how much dust now hides the stars behind.
+#[allow(clippy::too_many_arguments)]
+fn object_px(k: &SpaceK, o: &ObjK, i: u32, px: f32, py: f32, sx: f32, sy: f32, c: [f32; 3], dark: f32) -> ([f32; 3], f32) {
+    let (dx, dy) = (sx - o.x, sy - o.y);
+    let u = (dx * o.c + dy * o.s) / o.r;
+    let v = (-dx * o.s + dy * o.c) / (o.r * o.aspect);
+    let rho = (u * u + v * v).sqrt();
+    if rho > o.reach { return (c, dark); }
+    let (b, so) = (o.bright, o.so);
+    let [c0, c1, c2] = o.col;
+    let salt = 0x300 + 0x10 * i;
+    // A point of light at the centre (a white dwarf, a comet's nucleus), in pixels.
+    let dp2 = (dx * dx + dy * dy) * k.unit * k.unit;
+    let ps = (0.6 * k.scale).max(0.5);
+    let point = (-dp2 / (2.0 * ps * ps)).exp();
+    let mut c = c;
+    let mut dark = dark;
+    match o.kind as i32 {
+        0 => {
+            let (a, bb) = (u * 1.6 + so, v * 1.6);
+            let (w1, w2) = (fbm4(a + 5.2, bb + 1.3), fbm4(a + 1.7, bb + 9.2));
+            let (wa, wb) = (a + 1.4 * w1, bb + 1.4 * w2);
+            let n = fbm4(wa, wb);
+            let fall = 1.0 - smoothstep(0.25, 1.25, rho + 0.6 * (n - 0.47));
+            let body = fall * (0.3 + 1.4 * smoothstep(0.4, 0.75, n));
+            let rid = 1.0 - (2.0 * fbm4(wa * 2.3 + 7.0, wb * 2.3) - 1.0).abs();
+            let r2 = rid * rid;
+            let fil = r2 * r2 * rid * fall;
+            let core = (-rho * rho * 5.0).exp();
+            let col = mix3(c0, c1, (core * 1.4).min(1.0));
+            let dn = fbm4(wa * 1.8 + 31.0, wb * 1.8 + 4.0);
+            let dust = smoothstep(0.52, 0.7, dn) * fall;
+            let rim = smoothstep(0.44, 0.52, dn) * (1.0 - smoothstep(0.52, 0.6, dn)) * fall;
+            let gas = b * (0.2 * body + 0.16 * fil + 0.3 * core * fall);
+            c = add3(scale3(c, 1.0 - 0.5 * dust), add3(scale3(col, gas * (1.0 - 0.7 * dust)), scale3(c2, 0.12 * b * rim)));
+            dark = dark.max(0.8 * dust);
+            let ys = real_layer(k, px, py, 13.0 * k.scale, 0.55 * (-rho * rho * 3.0).exp(), 0.5, salt);
+            c = add3(c, scale3(ys, k.sb));
+        }
+        1 => {
+            let (a, bb) = (u * 1.4 + so, v * 1.4);
+            let n = fbm4(a + 1.4 * fbm4(a + 5.2, bb + 1.3), bb + 1.4 * fbm4(a + 1.7, bb + 9.2));
+            let streak = fbm4(u * 1.2 + so + 3.0, v * 7.0);
+            let glow = (-rho * rho * 2.2).exp() * (0.35 + 0.9 * smoothstep(0.35, 0.75, n)) * (0.5 + 1.0 * streak);
+            let halo = (-rho * rho * 9.0).exp();
+            c = add3(c, add3(scale3(mix3(c0, c2, smoothstep(0.4, 0.7, streak)), 0.45 * b * glow), scale3(c1, 0.2 * b * halo)));
+            dark = dark.max(0.3 * smoothstep(0.6, 0.75, n) * (-rho * rho * 2.0).exp());
+            let ys = real_layer(k, px, py, 16.0 * k.scale, 0.85 * (-rho * rho * 7.0).exp(), 1.0, salt);
+            c = add3(c, scale3(ys, k.sb));
+        }
+        2 => {
+            let (a, bb) = (u * 1.5 + so, v * 1.5);
+            let n = fbm4(a + 1.3 * fbm4(a + 5.2, bb + 1.3), bb + 1.3 * fbm4(a + 1.7, bb + 9.2));
+            let shape = 1.0 - smoothstep(0.15, 1.0, rho + 1.6 * (0.5 - n));
+            let op = (shape * (0.4 + 1.2 * n)).clamp(0.0, 1.0) * b.min(1.0);
+            let lit = 0.3 + 0.7 * smoothstep(-0.3, 0.9, u / rho.max(1e-3));
+            let rim = smoothstep(0.02, 0.25, shape) * (1.0 - smoothstep(0.25, 0.6, shape)) * lit;
+            c = add3(scale3(c, 1.0 - 0.95 * op), add3(scale3(c1, 0.04 * op * b), scale3(c0, 0.06 * b * rim)));
+            dark = dark.max(0.97 * op);
+        }
+        3 => {
+            let rn = rho + 0.1 * (fbm4(u * 3.0 + so, v * 3.0) - 0.47);
+            let fil = fbm4(u * 7.0 + so, v * 7.0);
+            let (q1, q2, q3) = ((rn - 0.55) / 0.16, rn / 0.45, (rn - 0.8) / 0.1);
+            let (shell, inner, outer) = ((-q1 * q1).exp(), (-q2 * q2).exp(), (-q3 * q3).exp());
+            let halo = (-rn * rn * 1.5).exp();
+            let gas = add3(add3(scale3(c1, 0.3 * shell * (0.6 + 0.8 * fil) + 0.22 * inner), scale3(c0, 0.35 * outer * (0.5 + fil) + 0.1 * shell)), scale3(c2, 0.05 * halo));
+            c = add3(c, add3(scale3(gas, b), scale3([0.85, 0.9, 1.0], 2.0 * b * point)));
+        }
+        4 => {
+            let rn = rho + 0.2 * (fbm4(u * 2.0 + so, v * 2.0) - 0.47);
+            let f1 = 1.0 - (2.0 * fbm4(u * 3.2 + so + 11.0, v * 3.2) - 1.0).abs();
+            let f2 = 1.0 - (2.0 * fbm4(u * 5.0 + so + 23.0, v * 5.0 + 4.0) - 1.0).abs();
+            let (f1, f2) = ((f1 * f1) * (f1 * f1), (f2 * f2) * (f2 * f2));
+            let (f1, f2) = (f1 * f1, f2 * f2);
+            let qs = (rn - 0.8) / 0.14;
+            let shell = (-qs * qs).exp();
+            let qf = rn / 0.75;
+            let fill = (-qf * qf).exp();
+            let gas = add3(add3(scale3(c0, 0.5 * shell * (0.15 + 1.6 * f1)), scale3(c1, 0.65 * shell * f2)), scale3(c2, 0.02 * fill + 0.12 * fill * f2));
+            c = add3(c, scale3(gas, b));
+        }
+        5 => {
+            let rr = rho.max(0.015);
+            let ph = 2.0 * v.atan2(u) - 3.6 * rr.ln() + so;
+            let arm = 0.5 + 0.5 * ph.cos();
+            let arm = arm * arm * arm;
+            let l = 0.5 + 0.5 * (ph - 0.55).cos();
+            let (l2, l4) = (l * l, l * l * l * l);
+            let lane = l4 * l4 * l2 * smoothstep(0.08, 0.25, rr);
+            let n = fbm4(u * 6.0 + so, v * 6.0);
+            let disk = (-rr * 3.0).exp() * (1.0 - smoothstep(0.75, 1.2, rr));
+            let bulge = (-rr * rr * 45.0).exp();
+            let knots = smoothstep(0.62, 0.8, fbm4(u * 16.0 + so, v * 16.0)) * arm * disk;
+            let arms = disk * (0.18 + 1.2 * arm * (0.5 + 0.8 * n));
+            let gal = add3(add3(scale3(c0, 0.35 * arms * (1.0 - 0.75 * lane)), scale3(c1, 0.9 * bulge + 0.15 * disk)), scale3(c2, 0.5 * knots));
+            c = add3(c, scale3(gal, b));
+        }
+        6 => {
+            let glow = (-rho * 3.5).exp() * (1.0 - smoothstep(1.2, 2.0, rho));
+            let core = (-rho * rho * 80.0).exp();
+            c = add3(c, add3(scale3(c0, 0.35 * b * glow), scale3(c1, 0.8 * b * core)));
+        }
+        7 => {
+            let prof = (1.0 - smoothstep(1.0, 1.6, rho)) / (1.0 + 10.0 * rho * rho);
+            c = add3(c, scale3(c1, 0.08 * b * prof * prof.sqrt()));
+            let st = add3(
+                real_layer(k, px, py, 2.6 * k.scale, prof.min(0.92), 0.2 * b, salt),
+                real_layer(k, px, py, 7.0 * k.scale, (0.9 * prof).min(0.92), 0.6 * b, salt + 8),
+            );
+            c = add3(c, scale3(mul3(st, c0), k.sb));
+        }
+        _ => {
+            let up = u.max(0.0);
+            let on = smoothstep(-0.03, 0.02, u);
+            let wi = 0.012 + 0.05 * up;
+            let qi = v / wi;
+            let ion = on * (-qi * qi).exp() * (-up * 2.0).exp() * (0.55 + 0.9 * fbm4(up * 9.0 + so, qi * 0.4));
+            let wd = 0.025 + 0.22 * up;
+            let qd = (v - 0.22 * up * up) / wd;
+            let dust = on * (-qd * qd).exp() * (-up * 1.6).exp();
+            let (qc, qh) = (rho / 0.035, rho / 0.12);
+            let (coma, head) = ((-qc * qc).exp(), (-qh * qh).exp());
+            let tail = add3(add3(scale3(c0, 0.4 * dust + 0.15 * head), scale3(c1, 0.45 * ion)), scale3(c2, 1.2 * coma));
+            c = add3(c, add3(scale3(tail, b), scale3([1.0, 1.0, 0.95], 2.0 * b * point)));
+        }
+    }
+    (c, dark)
 }
 
 /// One planet's numbers for a frame (packed for the GPU in this order by `pack`).
@@ -712,5 +1110,80 @@ mod tests {
             "pl3(b, 29u)", "pl(b, 32u)", &format!("k * {}u", PLANET_FLOATS)] {
             assert!(wgsl.contains(read), "sky.wgsl no longer reads `{read}`");
         }
+    }
+
+    /// A space sky alone: no props, ship or planets, so only the backdrop shows above the horizon.
+    fn bare_sky() -> Scene {
+        let mut s = preset("Nebula Crossing");
+        s.companions.clear();
+        s.props.clear();
+        s.sky.space.planets.clear();
+        s
+    }
+    fn luma(img: &Image, top: f32) -> Vec<f32> {
+        let n = (img.rgba.len() / 4) as f32 * top;
+        img.rgba.chunks_exact(4).take(n as usize).map(|p| 0.2126 * p[0] as f32 + 0.7152 * p[1] as f32 + 0.0722 * p[2] as f32).collect()
+    }
+
+    #[test]
+    fn realistic_stars_are_a_few_bright_among_many_faint() {
+        let mut r = WorldRenderer::default();
+        let mut s = bare_sky();
+        s.sky.space.objects.clear();
+        (s.sky.space.nebula, s.sky.space.galaxy) = (0.0, 0.0);
+        let o = RenderOptions { size: Some((360, 640)), time: Some(0.5), ..RenderOptions::default() };
+        let mut l = luma(&r.render(&s, 3.0, &o), 0.4);
+        l.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let at = |q: f32| l[((l.len() - 1) as f32 * q) as usize];
+        // Mostly dark sky between the stars, a scatter of faint ones, and a very few near white.
+        assert!(at(0.5) < 40.0, "most of the sky should be dark ({})", at(0.5));
+        assert!(at(0.9995) > 150.0, "a few stars should be bright ({})", at(0.9995));
+        let bright = l.iter().filter(|v| **v > 130.0).count() as f32 / l.len() as f32;
+        let faint = l.iter().filter(|v| **v > at(0.5) + 12.0 && **v < 100.0).count() as f32 / l.len() as f32;
+        assert!(faint > 4.0 * bright, "faint stars should far outnumber bright ones ({faint} vs {bright})");
+        // The classic field is the even one it was: no star much brighter than the rest.
+        s.sky.space.star_style = crate::scene::StarStyle::Classic;
+        let c = luma(&r.render(&s, 3.0, &o), 0.4);
+        assert!(c.iter().any(|v| *v > 40.0), "the classic stars still show");
+    }
+
+    #[test]
+    fn every_kind_of_space_object_draws_and_stays_put() {
+        let mut r = WorldRenderer::default();
+        let mut s = bare_sky();
+        s.sky.space.objects.clear();
+        let base = r.render(&s, 3.0, &opts(0.5));
+        for kind in crate::scene::SpaceObjectKind::ALL {
+            let mut t = s.clone();
+            t.sky.space.objects = vec![crate::scene::SpaceObject { kind, colors: kind.colors(), pos: [0.5, 0.4], size: 0.25, ..crate::scene::SpaceObject::default() }];
+            let a = r.render(&t, 3.0, &opts(0.5));
+            assert!(diff(&a, &base) > 0.3, "{kind:?} should show ({})", diff(&a, &base));
+            // At infinity: walking on and waiting change nothing of it (no twinkle here).
+            t.sky.space.twinkle = 0.0;
+            let (b, c) = (r.render(&t, 3.0, &opts(0.5)), r.render(&t, 9.0, &opts(1.7)));
+            let sky = |img: &Image| img.rgba[..img.rgba.len() * 3 / 10].to_vec();
+            assert_eq!(sky(&b), sky(&c), "{kind:?} should stay put in the sky");
+        }
+    }
+
+    #[test]
+    fn twinkling_stars_keep_the_loop_seamless() {
+        let mut r = WorldRenderer::default();
+        let mut s = bare_sky();
+        s.sky.space.twinkle = 1.0;
+        let (len, secs) = (s.motion.loop_length, s.motion.loop_seconds());
+        assert_eq!(r.render(&s, 0.0, &opts(0.0)).rgba, r.render(&s, len, &opts(secs)).rgba, "the loop must close");
+        let a = r.render(&s, 3.0, &opts(secs * 0.2));
+        let b = r.render(&s, 3.0, &opts(secs * 0.45));
+        assert!(diff(&a, &b) > 0.05, "the stars should twinkle with time alone ({})", diff(&a, &b));
+    }
+
+    #[test]
+    fn space_numbers_sit_where_the_shader_reads_them() {
+        let wgsl = include_str!("../gpu/sky.wgsl");
+        assert!(wgsl.contains(&format!("S.sx_prims + {}u + i * {}u", SPACE_HEAD, OBJ_FLOATS)), "sky.wgsl must step objects as SpaceK::pack lays them out");
+        // The kinds in the order ObjK numbers them.
+        assert_eq!(crate::scene::SpaceObjectKind::ALL.len(), 9);
+        assert!(wgsl.contains("} else if kind == 7 {"), "sky.wgsl's object kinds");
     }
 }
