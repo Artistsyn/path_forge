@@ -25,6 +25,8 @@ char *pfm_gpu_init(void);
 /** Open a scene, drawn on the GPU when `gpu` and there is one; NULL on failure. */
 PfmHandle *pfm_open(const char *json, const char *base_dir, bool gpu);
 bool pfm_set_scene(PfmHandle *h, const char *json);
+/* The phone's local time of day, hours (0..24), for scenes whose day and night follow the clock. */
+void pfm_set_clock(float hour);
 void pfm_close(PfmHandle *h);
 /** [loop length (m), loop seconds, fps, canvas width, canvas height] into info[5]. */
 bool pfm_info(PfmHandle *h, float *info);

@@ -122,6 +122,12 @@ final class AppModel: ObservableObject {
         changed()
     }
 
+    func setTime(_ i: Int) {
+        guard look.hasSky else { note = Note(title: "This scene has no sky", text: "Switch it on under Edit every setting → Sky."); return }
+        look.setTime(i)
+        changed()
+    }
+
     func setMix(_ on: Bool) { look.setMixed(on); changed() }
 
     func shuffle() { look.setMixed(true, seed: Int.random(in: 0..<9999)); changed() }

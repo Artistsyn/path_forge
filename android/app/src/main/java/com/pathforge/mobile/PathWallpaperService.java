@@ -141,9 +141,22 @@ public final class PathWallpaperService extends WallpaperService {
             }
         }
 
+        /** When the wallpaper last checked whether the clock has moved on from its frames. */
+        private long checked;
+
         private void tick() {
             handler.removeCallbacks(tick);
             if (!visible || destroyed) return;
+            // A scene on the clock: bake it again for the new time of day every 20 minutes or so,
+            // playing the old frames meanwhile.
+            long now = SystemClock.uptimeMillis();
+            if (player != null && baking == null && now - checked > 60_000) {
+                checked = now;
+                try {
+                    Look look = Look.load(PathWallpaperService.this);
+                    if (Bake.hoursStale(PathWallpaperService.this, look.scene()) > 0.33f) bakeHere();
+                } catch (RuntimeException ignored) { }
+            }
             draw();
             if (player == null) return;
             // On to the next frame when its turn comes.

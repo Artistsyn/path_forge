@@ -138,6 +138,7 @@ final class PreviewView extends SurfaceView implements SurfaceHolder.Callback, R
                 float t = ((SystemClock.uptimeMillis() - t0) / 1000f) % secs;
                 float d = t / secs * len;
                 long a = System.nanoTime();
+                Native.tickClock();
                 boolean ok = Native.render(h, d, t, rw, rh, buf);
                 avg = avg * 0.8f + (System.nanoTime() - a) / 1e6f * 0.2f;
                 if (ok) {

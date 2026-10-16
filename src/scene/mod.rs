@@ -552,6 +552,10 @@ pub struct Sky {
     /// A sunset (or sunrise): the sky, a glow along the horizon, the clouds and the light all
     /// take the colours of a low sun.
     pub sunset: Sunset,
+    /// A day and night: the sun crosses the sky and sets, the light, sky and fog follow it, the
+    /// stars and moon come out and the lamps light at dusk. Set the hour, or let the days pass
+    /// with the loop; a game can set the hour itself (`Runtime::set_hour`).
+    pub day_night: DayNight,
     /// Northern lights: curtains of green and violet light rippling across the sky.
     pub aurora: Aurora,
     pub rainbow: Rainbow,
@@ -565,7 +569,7 @@ impl Default for Sky {
         Self {
             enabled: true, top: [70, 110, 170], horizon: [200, 190, 160],
             sun: SkyBody::default(), moon: Moon::default(), stars: Stars::default(), clouds: Clouds::default(), cloud_layers: Vec::new(),
-            cloud_mix: CloudMix::default(), sunset: Sunset::default(),
+            cloud_mix: CloudMix::default(), sunset: Sunset::default(), day_night: DayNight::default(),
             aurora: Aurora::default(), rainbow: Rainbow::default(), space: Space::default(), tunnel: Tunnel::default(),
         }
     }
@@ -1278,6 +1282,259 @@ impl Sunset {
         Some(s)
     }
 }
+
+/// A day and night (`sky.day_night`). The hour sets everything: the sun's place on its arc and
+/// its colour, the sky's colours (the sunset's `sunset_style` at dusk and dawn, the blue hour,
+/// night), the light and its colour, the fog and mist, the stars and moon, and the lamps. The
+/// scene's own colours keep their hue (`keep_look`) while their brightness follows the hour.
+/// Has no effect under a space sky or a tunnel, or with the sky off.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
+pub struct DayNight {
+    pub enabled: bool,
+    /// The hour of the day, 0..24: 6 sunrise, 12 noon, 18 sunset, 0 midnight (with the default
+    /// `sunrise` and `sunset`).
+    pub hour: f32,
+    /// Whole days that pass in one loop, so a loop runs through dawn, day, dusk and night and
+    /// closes seamlessly (0: the hour stays put).
+    pub days_per_loop: u32,
+    /// When the sun rises and sets, hours.
+    pub sunrise: f32,
+    pub sunset: f32,
+    /// How high the sun climbs at noon, as a share of the sky: past 1 it passes overhead, out of
+    /// the frame (the moon climbs a little lower, and stays in it).
+    pub sun_height: f32,
+    /// Where across the frame the sun rises and where it sets (0 left .. 1 right).
+    pub sun_path: [f32; 2],
+    /// The colours of its dawns and dusks.
+    pub sunset_style: SunsetStyle,
+    /// How bright the dawn and dusk glow is (0..2).
+    pub glow: f32,
+    /// How much of the scene's own colours it keeps: 0 the hour's own sky .. 1 the scene's hues,
+    /// only their brightness following the hour.
+    pub keep_look: f32,
+    /// How bright the night's light is against the day's (0..1).
+    pub night_light: f32,
+    /// The sun crosses the sky (on even when the scene has no sun of its own).
+    pub sun: bool,
+    /// The moon crosses the night sky.
+    pub moon: bool,
+    /// Stars come out after dusk.
+    pub stars: bool,
+    /// The lamps (torches, lanterns, street lamps...) light at dusk and go out at dawn, and
+    /// fireflies come out at night.
+    pub lamps: bool,
+    /// For live wallpapers and games: follow the device's own clock instead of `hour`.
+    pub real_time: bool,
+    /// Set on the copy of a scene whose colours have been set for its hour, so it is done once.
+    #[serde(skip)]
+    #[schemars(skip)]
+    pub baked: bool,
+}
+impl Default for DayNight {
+    fn default() -> Self {
+        DayNight {
+            enabled: false, hour: 12.0, days_per_loop: 0, sunrise: 6.0, sunset: 18.0, sun_height: 1.15, sun_path: [0.15, 0.85],
+            sunset_style: SunsetStyle::Golden, glow: 1.0, keep_look: 0.6, night_light: 0.3, sun: true, moon: true, stars: true,
+            lamps: true, real_time: false, baked: false,
+        }
+    }
+}
+
+/// Where the day stands at an hour (`DayNight::at`), for the renderer and for games.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize)]
+pub struct DayState {
+    /// The hour, 0..24.
+    pub hour: f32,
+    /// The sun's height: 1 at noon, 0 on the horizon at sunrise and sunset, -1 at midnight.
+    pub altitude: f32,
+    /// How far through the day (sunrise 0 .. sunset 1) or the night (sunset 0 .. sunrise 1).
+    pub arc: f32,
+    pub is_day: bool,
+    /// How much daylight there is, 0 (night) .. 1 (full day), smooth through dawn and dusk.
+    pub daylight: f32,
+    /// "night", "dawn", "day" or "dusk".
+    pub phase: &'static str,
+}
+
+/// The hour's own colours and light.
+struct DayKey { top: [f32; 3], horizon: [f32; 3], sun: [f32; 3], ambient: [f32; 3], ambient_k: f32, sun_k: f32 }
+
+impl DayNight {
+    /// Whether it changes anything for this sky.
+    pub fn on(sky: &Sky) -> bool { sky.day_night.enabled && sky.enabled && !sky.space.enabled && !sky.tunnel.enabled }
+
+    /// The hour `loop_phase` (0..1) of the way through a loop.
+    pub fn hour_at(&self, loop_phase: f32) -> f32 { (self.hour + 24.0 * self.days_per_loop as f32 * loop_phase).rem_euclid(24.0) }
+
+    /// Where the day stands at `hour`.
+    pub fn at(&self, hour: f32) -> DayState {
+        let h = hour.rem_euclid(24.0);
+        let rise = self.sunrise.rem_euclid(24.0);
+        let mut set = self.sunset.rem_euclid(24.0);
+        if (set - rise).abs() < 0.5 { set = (rise + 12.0).rem_euclid(24.0); }
+        let day_len = (set - rise).rem_euclid(24.0);
+        let since_rise = (h - rise).rem_euclid(24.0);
+        let pi = std::f32::consts::PI;
+        let (is_day, arc, altitude) = if since_rise <= day_len {
+            let a = since_rise / day_len;
+            (true, a, (pi * a).sin())
+        } else {
+            let a = (since_rise - day_len) / (24.0 - day_len);
+            (false, a, -(pi * a).sin())
+        };
+        let daylight = smooth(-0.12, 0.2, altitude);
+        let phase = if altitude > 0.2 { "day" } else if altitude < -0.12 { "night" } else if (is_day && arc < 0.5) || (!is_day && arc > 0.5) { "dawn" } else { "dusk" };
+        DayState { hour: h, altitude, arc, is_day, daylight, phase }
+    }
+
+    fn key(&self, a: f32) -> DayKey {
+        let st = self.sunset_style.colors();
+        let c = |v: Rgb| v.map(|x| x as f32);
+        let mx = |p: [f32; 3], q: [f32; 3], t: f32| [0, 1, 2].map(|i| p[i] + (q[i] - p[i]) * t);
+        let nk = self.night_light.clamp(0.0, 1.0);
+        // (altitude, top, horizon, sun, ambient, ambient strength, sun strength)
+        let keys: [(f32, [f32; 3], [f32; 3], [f32; 3], [f32; 3], f32, f32); 7] = [
+            (-1.0, [4.0, 6.0, 18.0], [12.0, 18.0, 40.0], c(st.sun), [70.0, 85.0, 140.0], 0.8 * nk, 0.0),
+            (-0.3, [8.0, 12.0, 30.0], [22.0, 30.0, 62.0], c(st.sun), [90.0, 105.0, 160.0], nk, 0.0),
+            (-0.1, [24.0, 32.0, 78.0], mx([96.0, 84.0, 128.0], c(st.glow[2]), 0.3), c(st.sun), [120.0, 120.0, 175.0], nk.max(0.4), 0.0),
+            (0.0, c(st.top), c(st.horizon), c(st.sun), c(st.ambient), 0.65, 0.55),
+            (0.12, mx(c(st.top), [80.0, 130.0, 205.0], 0.5), mx(c(st.horizon), [220.0, 200.0, 170.0], 0.4), mx(c(st.sun), [255.0, 232.0, 190.0], 0.5), mx(c(st.ambient), [230.0, 215.0, 200.0], 0.5), 0.85, 0.85),
+            (0.35, [78.0, 134.0, 212.0], [190.0, 214.0, 238.0], [255.0, 244.0, 224.0], [210.0, 215.0, 230.0], 0.95, 1.0),
+            (1.0, [64.0, 124.0, 210.0], [172.0, 206.0, 238.0], [255.0, 250.0, 240.0], [205.0, 215.0, 235.0], 1.0, 1.0),
+        ];
+        let a = a.clamp(-1.0, 1.0);
+        let i = keys.windows(2).position(|w| a <= w[1].0).unwrap_or(keys.len() - 2);
+        let (p, q) = (&keys[i], &keys[i + 1]);
+        let t = ((a - p.0) / (q.0 - p.0)).clamp(0.0, 1.0);
+        let t = t * t * (3.0 - 2.0 * t);
+        DayKey {
+            top: mx(p.1, q.1, t), horizon: mx(p.2, q.2, t), sun: mx(p.3, q.3, t), ambient: mx(p.4, q.4, t),
+            ambient_k: p.5 + (q.5 - p.5) * t, sun_k: p.6 + (q.6 - p.6) * t,
+        }
+    }
+
+    /// A copy of `scene` set for `hour` (its own `day_night` hour when None): sky, sun, moon,
+    /// stars, light, fog, mist and lamps. None when it has no day and night (`on`) and no hour
+    /// is forced, or this is already such a copy. A forced hour turns the cycle on with the
+    /// scene's own settings. The dawn and dusk glow is left to `sky.sunset`, set here.
+    pub fn bake(scene: &Scene, hour: Option<f32>) -> Option<Scene> {
+        let sky = &scene.sky;
+        let dn = &sky.day_night;
+        if dn.baked || !sky.enabled || sky.space.enabled || sky.tunnel.enabled { return None; }
+        if !dn.enabled && hour.is_none() { return None; }
+        let hour = hour.unwrap_or(dn.hour);
+        let st = dn.at(hour);
+        let a = st.altitude;
+        let k = dn.key(a);
+        let mut s = scene.clone();
+        // In the dimmer light of dawn, dusk and night the hour's own colours take over more.
+        let keep = dn.keep_look.clamp(0.0, 1.0) * (0.3 + 0.7 * smooth(-0.15, 0.3, a));
+        let lum = |c: [f32; 3]| 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2];
+        let to = |c: [f32; 3]| c.map(|x| x.round().clamp(0.0, 255.0) as u8);
+        // The hour the scene was made for: the one whose horizon is as bright as the scene's
+        // (the daytime one, of two).
+        let own_h = lum(scene.sky.horizon.map(|x| x as f32));
+        let mut ref_a = 1.0f32;
+        let mut best = f32::MAX;
+        for i in 0..=40 {
+            let t = 1.0 - i as f32 / 20.0;
+            let e = (lum(dn.key(t).horizon) - own_h).abs();
+            if e < best - 1.0 { (best, ref_a) = (e, t); }
+        }
+        let r = dn.key(ref_a);
+        // The scene's colour relit from its own hour to this one, mixed with the hour's own.
+        let relit = |own: Rgb, key: [f32; 3], at_ref: [f32; 3]| -> Rgb {
+            // A scene made for the night stays moody by day, and a day one dark by night.
+            let f = (lum(key) / lum(at_ref).max(1.0)).min(3.0);
+            let o = own.map(|x| x as f32 * f);
+            // Keep the hue when a channel would clip.
+            let m = o[0].max(o[1]).max(o[2]);
+            let o = if m > 255.0 { o.map(|x| x * 255.0 / m) } else { o };
+            to([0, 1, 2].map(|i| key[i] + (o[i] - key[i]) * keep))
+        };
+        let dim = (lum(k.horizon) / lum(r.horizon).max(1.0)).clamp(0.05, 1.5);
+        let scale = |c: Rgb, f: f32| c.map(|x| (x as f32 * f).round().clamp(0.0, 255.0) as u8);
+        let night = 1.0 - smooth(-0.3, -0.02, a);
+        {
+            let sky = &mut s.sky;
+            sky.top = relit(sky.top, k.top, r.top);
+            sky.horizon = relit(sky.horizon, k.horizon, r.horizon);
+            // The sun on its arc (below the horizon after sunset, as it sinks).
+            let [x0, x1] = dn.sun_path;
+            let sun_arc = if st.is_day { st.arc } else if st.arc < 0.5 { 1.0 + 0.3 * st.arc } else { -0.3 * (1.0 - st.arc) };
+            let base_k = if scene.sky.sun.enabled { scene.sky.sun.intensity / r.sun_k.max(0.3) } else { 1.0 };
+            if dn.sun {
+                sky.sun.enabled = a > -0.12;
+                sky.sun.pos = [x0 + (x1 - x0) * sun_arc, 1.0 - dn.sun_height.clamp(0.05, 2.0) * a];
+                sky.sun.color = to(k.sun);
+                sky.sun.intensity = base_k * k.sun_k;
+                sky.sun.emits_light = true;
+            }
+            if dn.moon {
+                let mk = 1.0 - smooth(-0.15, 0.1, a);
+                let (moon_arc, up) = if st.is_day { (if st.arc < 0.5 { 1.0 } else { 0.0 }, 0.0) } else { (st.arc, (std::f32::consts::PI * st.arc).sin()) };
+                let op = if scene.sky.moon.body.enabled { scene.sky.moon.opacity } else { 0.9 };
+                sky.moon.body.enabled = mk > 0.01 && up > 0.02;
+                sky.moon.body.pos = [x0 + (x1 - x0) * moon_arc, 1.0 - (0.85 * dn.sun_height).clamp(0.05, 0.8) * up];
+                sky.moon.opacity = op * mk;
+                if !scene.sky.moon.body.enabled { sky.moon.body.intensity = 0.35; }
+                sky.moon.body.intensity *= mk;
+            }
+            if dn.stars {
+                let base = if scene.sky.stars.enabled { scene.sky.stars.count } else { 180 };
+                sky.stars.count = (base as f32 * night).round() as u32;
+                sky.stars.enabled = sky.stars.count > 0;
+            }
+            // The dawn and dusk glow and the clouds lit low.
+            let g = (a - 0.02) / 0.13;
+            let amount = (-g * g).exp();
+            sky.sunset.enabled = amount > 0.01;
+            sky.sunset.style = dn.sunset_style;
+            sky.sunset.amount = amount;
+            sky.sunset.glow = dn.glow * if scene.sky.sunset.enabled { scene.sky.sunset.glow } else { 1.0 };
+            sky.sunset.light = 0.0;
+            sky.sunset.clouds = 1.0;
+            // Clouds darken into the night.
+            let cl = |t: Rgb| { let d = scale(t, (0.25 + 0.75 * dim).min(1.0)); to([0, 1, 2].map(|i| d[i] as f32 + ([60.0, 70.0, 100.0][i] * dim.clamp(0.3, 1.0) - d[i] as f32) * 0.4 * night)) };
+            sky.clouds.tint = cl(sky.clouds.tint);
+            for c in sky.cloud_layers.iter_mut() { c.tint = cl(c.tint); }
+            sky.cloud_mix.tint = cl(sky.cloud_mix.tint);
+            sky.day_night.baked = true;
+            sky.day_night.enabled = true;
+        }
+        s.light.ambient *= k.ambient_k / r.ambient_k.max(0.1);
+        // Shafts of sunlight stream towards you from a low sun, not from one overhead.
+        s.weather.light_shafts.sun *= (1.3 - a).clamp(0.3, 1.0);
+        s.light.ambient_color = relit(s.light.ambient_color, k.ambient, r.ambient);
+        // Fog and the far distance keep the scene's own colours more: they set its mood.
+        let deep = |own: Rgb| { let o = scale(own, dim); to([0, 1, 2].map(|i| o[i] as f32 + (k.horizon[i] * (lum(o.map(|x| x as f32)) / lum(k.horizon).max(1.0)) - o[i] as f32) * 0.5 * (1.0 - keep))) };
+        // Fog that took the sky's horizon takes the scene's own, dimmed or brightened gently: the
+        // relit sky is too bright for a thick fog by day.
+        if s.light.fog.match_sky {
+            s.light.fog.match_sky = false;
+            s.light.fog.color = deep(scene.sky.horizon);
+        } else {
+            s.light.fog.color = deep(s.light.fog.color);
+        }
+        s.light.void_color = deep(s.light.void_color);
+        s.weather.mist.color = scale(s.weather.mist.color, (0.2 + 0.8 * dim).min(1.0));
+        if dn.lamps {
+            let lit = 1.0 - smooth(-0.05, 0.15, a);
+            for f in s.fixtures.iter_mut() {
+                use FixtureKind::*;
+                f.intensity *= match f.kind {
+                    Firefly => lit,
+                    Torch | Lantern | Candle | Brazier | StreetLamp | PaperLantern | Campfire | Beacon | Chandelier => 0.1 + 0.9 * lit,
+                    _ => 0.6 + 0.4 * lit,
+                };
+            }
+        }
+        Some(s)
+    }
+}
+
+fn smooth(e0: f32, e1: f32, x: f32) -> f32 { let t = ((x - e0) / (e1 - e0)).clamp(0.0, 1.0); t * t * (3.0 - 2.0 * t) }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(default)]

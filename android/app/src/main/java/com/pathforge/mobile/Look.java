@@ -21,6 +21,9 @@ import java.nio.charset.StandardCharsets;
 final class Look {
     static final String[] SKIES = {"As designed", "Golden", "Fiery", "Pastel", "Dusk"};
     static final String[] CLOUDS = {"As designed", "Mixed"};
+    static final String[] TIMES = {"As designed", "Real time", "Dawn", "Noon", "Dusk", "Night", "Day cycle"};
+    /** The hour each of TIMES' fixed times stands at. */
+    private static final double[] HOURS = {-1, -1, 6.4, 12, 18.1, 23, 5};
     static final String[] QUALITIES = {"Battery saver", "Balanced", "Smooth"};
     static final String DEFAULT_PRESET = "Sunset Pier";
 
@@ -109,6 +112,33 @@ final class Look {
         }
     }
 
+    /** Index into TIMES of the scene's day and night (0: none). */
+    int time() {
+        JSONObject sky = parsed().optJSONObject("sky");
+        JSONObject dn = sky == null ? null : sky.optJSONObject("day_night");
+        if (dn == null || !dn.optBoolean("enabled")) return 0;
+        if (dn.optBoolean("real_time")) return 1;
+        if (dn.optInt("days_per_loop", 0) > 0) return 6;
+        double h = dn.optDouble("hour", 12);
+        int best = 3;
+        for (int i = 2; i < 6; i++) if (Math.abs(HOURS[i] - h) < Math.abs(HOURS[best] - h)) best = i;
+        return best;
+    }
+
+    /** Set the scene's time of day to TIMES[i]: the clock, a fixed hour, or a day each loop; 0 as designed. */
+    void setTime(int i) {
+        try {
+            JSONObject s = parsed();
+            JSONObject dn = obj(obj(s, "sky"), "day_night");
+            dn.put("enabled", i > 0);
+            dn.put("real_time", i == 1);
+            dn.put("days_per_loop", i == 6 ? 1 : 0);
+            if (i >= 2) dn.put("hour", HOURS[i]);
+            scene = s.toString();
+        } catch (JSONException ignored) {
+        }
+    }
+
     boolean mixed() {
         JSONObject sky = parsed().optJSONObject("sky");
         JSONObject mix = sky == null ? null : sky.optJSONObject("cloud_mix");
@@ -148,6 +178,17 @@ final class Look {
     boolean hasSky() {
         JSONObject sky = parsed().optJSONObject("sky");
         return sky == null || sky.optBoolean("enabled", true);
+    }
+
+    /** Whether a scene's day and night follow the phone's clock (sky.day_night.real_time). */
+    static boolean followsClock(String scene) {
+        try {
+            JSONObject sky = new JSONObject(scene).optJSONObject("sky");
+            JSONObject dn = sky == null ? null : sky.optJSONObject("day_night");
+            return dn != null && dn.optBoolean("enabled", false) && dn.optBoolean("real_time", false);
+        } catch (JSONException e) {
+            return false;
+        }
     }
 
     /** Whether a scene draws in big pixels (then it is scaled up without smoothing). */

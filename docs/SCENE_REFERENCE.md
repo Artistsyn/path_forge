@@ -299,6 +299,33 @@ Where a layer of ground cover grows.
 
 One of `Verge` \| `Path` \| `Both`.
 
+### DayNight
+
+A day and night (`sky.day_night`). The hour sets everything: the sun's place on its arc and
+its colour, the sky's colours (the sunset's `sunset_style` at dusk and dawn, the blue hour,
+night), the light and its colour, the fog and mist, the stars and moon, and the lamps. The
+scene's own colours keep their hue (`keep_look`) while their brightness follows the hour.
+Has no effect under a space sky or a tunnel, or with the sky off.
+
+| Field | Type | Default | Meaning |
+|---|---|---|---|
+| `enabled` | boolean | `false` |  |
+| `hour` | number | `12.0` | The hour of the day, 0..24: 6 sunrise, 12 noon, 18 sunset, 0 midnight (with the default `sunrise` and `sunset`). |
+| `days_per_loop` | integer | `0` | Whole days that pass in one loop, so a loop runs through dawn, day, dusk and night and closes seamlessly (0: the hour stays put). |
+| `sunrise` | number | `6.0` | When the sun rises and sets, hours. |
+| `sunset` | number | `18.0` |  |
+| `sun_height` | number | `1.15` | How high the sun climbs at noon, as a share of the sky: past 1 it passes overhead, out of the frame (the moon climbs a little lower, and stays in it). |
+| `sun_path` | number × 2 | `[0.15,0.85]` | Where across the frame the sun rises and where it sets (0 left .. 1 right). |
+| `sunset_style` | [SunsetStyle](#sunsetstyle) | `"Golden"` | The colours of its dawns and dusks. |
+| `glow` | number | `1.0` | How bright the dawn and dusk glow is (0..2). |
+| `keep_look` | number | `0.6` | How much of the scene's own colours it keeps: 0 the hour's own sky .. 1 the scene's hues, only their brightness following the hour. |
+| `night_light` | number | `0.3` | How bright the night's light is against the day's (0..1). |
+| `sun` | boolean | `true` | The sun crosses the sky (on even when the scene has no sun of its own). |
+| `moon` | boolean | `true` | The moon crosses the night sky. |
+| `stars` | boolean | `true` | Stars come out after dusk. |
+| `lamps` | boolean | `true` | The lamps (torches, lanterns, street lamps...) light at dusk and go out at dawn, and fireflies come out at night. |
+| `real_time` | boolean | `false` | For live wallpapers and games: follow the device's own clock instead of `hour`. |
+
 ### Dither
 
 One of `None` \| `Bayer2` \| `Bayer4` \| `Bayer8`.
@@ -979,6 +1006,7 @@ One of `Both` \| `Left` \| `Right` \| `Center`.
 | `cloud_layers` | list of [Clouds](#clouds) | `[]` | More layers of cloud over `clouds`, drawn in order (up to three): cirrus high over cumulus, heaps under an overcast. Give layers `patches` to share the sky between kinds. |
 | `cloud_mix` | [CloudMix](#cloudmix) | (see the type) | Clouds of several kinds chosen at random from a seed, added over the layers above. |
 | `sunset` | [Sunset](#sunset) | (see the type) | A sunset (or sunrise): the sky, a glow along the horizon, the clouds and the light all take the colours of a low sun. |
+| `day_night` | [DayNight](#daynight) | (see the type) | A day and night: the sun crosses the sky and sets, the light, sky and fog follow it, the stars and moon come out and the lamps light at dusk. Set the hour, or let the days pass with the loop; a game can set the hour itself (`Runtime::set_hour`). |
 | `aurora` | [Aurora](#aurora) | (see the type) | Northern lights: curtains of green and violet light rippling across the sky. |
 | `rainbow` | [Rainbow](#rainbow) | (see the type) |  |
 | `space` | [Space](#space) | (see the type) | Deep space: a dense starfield, nebulae, a galaxy band and planets. |

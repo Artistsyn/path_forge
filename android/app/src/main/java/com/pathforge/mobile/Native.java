@@ -38,4 +38,12 @@ final class Native {
     static native void exportCancel();
     /** Draw into a direct buffer of w * h * 4 bytes (RGBA, as an ARGB_8888 bitmap holds it). */
     static native boolean render(long handle, float distance, float time, int w, int h, ByteBuffer out);
+    /** The phone's local time of day, hours (0..24), for scenes whose day and night follow the clock. */
+    static native void setClock(float hour);
+
+    /** Hand the phone's time of day to scenes that follow the clock. */
+    static void tickClock() {
+        java.util.Calendar c = java.util.Calendar.getInstance();
+        setClock(c.get(java.util.Calendar.HOUR_OF_DAY) + c.get(java.util.Calendar.MINUTE) / 60f + c.get(java.util.Calendar.SECOND) / 3600f);
+    }
 }

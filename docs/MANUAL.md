@@ -58,11 +58,12 @@ pf presets
 pf render --preset "Forest Path" -o forest.png
 ```
 
-There are 36 presets: Stone Dungeon, Stone Crypt, Mossy Sewer, Forest Path, Desert Canyon, Night
+There are 37 presets: Stone Dungeon, Stone Crypt, Mossy Sewer, Forest Path, Desert Canyon, Night
 Road, Magic Cavern, Ice Dungeon, Ruins Path, Dark Street, Mountain Pass, Volcanic Rift, Haunted
 Forest, Ruined Castle, Fiery Dungeon, Tower Stair, Bog Boardwalk, Desert Ruins, Ice Cave, Star Bridge,
 Nebula Crossing, Hyperspace Run, Wormhole, Starship Flight, Event Horizon, Black Hole Arena, River Run, Canal Lanterns,
-Jungle River, Lagoon Swim, Sunset Pier, Frozen Channel, Misty River, Dawn Road, Winding Trail and Hyperspace Jump.
+Jungle River, Lagoon Swim, Sunset Pier, Frozen Channel, Misty River, Dawn Road, Winding Trail, Day and Night and
+Hyperspace Jump.
 Every one loops without a seam (`pf seam` checks them all).
 
 ## 2. Scenes
@@ -252,6 +253,7 @@ falling. Each is off until `enabled`. Field by field, see
 | Cloud shadows | `sky.clouds.shadows` | Shadows drifting over the ground and walls, with the wind if there is one. They need a sun that gives light, and work with the clouds themselves switched off. |
 | Heat shimmer | `weather.heat_shimmer` | The distance wavers just above the horizon. Deserts, lava fields. |
 | Aurora | `sky.aurora` | A band of curtains across a night sky: a thin bright folding edge (`low`), rays rising from it, a violet veil above (`high`) and pink knots (`accent`), each part fading in and out on its own. `coverage`, `rays`, `waves`, `arc`, `tall`, `edge` shape it; `ground_glow` tints the ground. |
+| Day and night | `sky.day_night` | The hour of the day (`hour`, 0..24) sets everything at once: the sun on its arc from `sun_path[0]` to `sun_path[1]` (as high as `sun_height`; past 1 it passes overhead, out of the frame) and its colour, the sky (dawns and dusks in `sunset_style`, with their glow, then the blue hour and night), the light and its colour, the fog and mist, the stars coming out after dusk, the moon crossing the night, and the lamps lighting at nightfall (`lamps`; fireflies only at night). The scene keeps its own hues (`keep_look`) while their brightness follows the hour, so a night scene stays moody by day and a sunny one goes dark at night (`night_light`). `days_per_loop` runs whole days through each loop, seamlessly (preset Day and Night); `real_time` follows the phone's clock (the Android wallpaper redraws as the hours pass). Games set the hour themselves (§12). `sunrise`/`sunset` move the day. No effect under space or a tunnel, or with the sky off. `pf render --hour H` draws any scene at hour H. |
 | Deep space | `sky.space` | A sky with no air. `star_style` Realistic (the default) draws stars as a sky photograph shows them: a few bright ones among a great many faint ones, coloured by temperature (most yellow-white, fewer orange or blue; `star_colors` how strongly), gathered in clouds and voids (`star_clumps`) over the faint glow of stars too far to see one by one (`star_glow`), the brightest with diffraction `star_spikes` (`spike_shape` Four, Six or Eight). `twinkle` makes them shimmer, `twinkle_speed` whole times per loop. Classic keeps the even field of small dots of earlier versions. Glowing gas (`nebula`, two `nebula_colors`, `nebula_scale`) drifts in folded wisps and bright filaments, threaded with dark dust that hides the stars behind it (`nebula_dust`); the galaxy band (`galaxy_*`) is the glow of countless stars, mottled with star clouds, warmer at its core and split by dark rifts and lanes (`galaxy_dust`). Up to six `objects` (below) and up to three `planets`. With `below` on, space also fills everything below the horizon where nothing is drawn, such as a bridge's bottomless drop (`path.bridge.bottom: Void`), so a walkway floats in space. The sun loses its glow in the air and keeps only a tight glare. |
 | Objects | `sky.space.objects[]` | Things far off in the sky, behind the planets and bent round a black hole like the stars: `kind` Emission (a stellar nursery: glowing gas, a hot heart, dark dust pillars and young stars), Reflection (blue dust lit by a few bright stars), Dark (a dust cloud blotting out the stars, its edge lit), Planetary (a dying star's glowing ring round a white dwarf), Remnant (the filaments of an exploded star's shell), Spiral and Elliptical galaxies, Cluster (a ball of stars) and Comet (a glowing head, a curved dust tail and a straight blue ion tail, pointing along `angle`). `pos`, `size`, `angle`, `aspect` (1 round .. 0.1 edge-on), three `colors` (each kind's meaning is in the reference), `brightness`, `seed`. Nebula Crossing shows several. |
 | Planets | `sky.space.planets[]` | `kind` Rocky, Gas (bands and a storm), Earth (oceans, land, ice caps, cloud, city lights on the night side), Ice or Lava (glowing cracks); `pos`, `radius`, two colours, `atmosphere` glow round the rim, `light_angle` and `night` for where the sunlight falls, `tilt`, `spin` in whole turns per loop, and `rings` (near half in front, far half behind, the planet's shadow across them). |
@@ -607,7 +609,12 @@ rt.step(dt, speed);                 // each frame
 let rgba = rt.frame(270, 480);
 rt.go()?;                           // walk on to where the journey leads (returns the plan)
 rt.choose(Branch::Right);           // at a fork, before the junction
-let s = rt.state();                 // scene, stop, progress, choose_within, speed, end
+let s = rt.state();                 // scene, stop, progress, choose_within, speed, end, day
+
+// Day and night, from the game's own clock:
+rt.set_hour(Some(19.5));            // dusk on every scene with an open sky
+rt.set_day_length(600.0);           // or let a day pass every 10 minutes of step time
+if rt.day().is_some_and(|d| d.daylight < 0.2) { /* night: spawn the bats */ }
 ```
 
 | Method | Purpose |
@@ -620,6 +627,9 @@ let s = rt.state();                 // scene, stop, progress, choose_within, spe
 | `choose(branch)` | Take a branch of the fork ahead. Returns false when there is none or it is too late. |
 | `finish()` | Jump to the end of what is under way. |
 | `state()` | Where the walk stands: `scene`, `distance`, `time`, `stop`, `progress` (0..1 through a transition), `choose_within` (metres left to choose), `speed`, `end`. |
+| `set_hour(Some(h))`, `set_hour(None)` | Set the hour of the day (0..24) on every scene drawn (transitions and forks too), turning `sky.day_night` on with the scene's own settings; None gives each scene its own hour back. |
+| `set_day_length(seconds)`, `hour()` | Let a day pass every `seconds` of `step` time (0 holds the hour); the hour now. |
+| `day()` | Where the day stands: `hour`, `altitude` (sun height, -1..1), `is_day`, `daylight` (0 night .. 1 day), `phase` ("night", "dawn", "day", "dusk"); None without an open sky. Also in `state().day`. |
 | `project(…)`, `project_now(x, y, d, w, h)` | A point x m right of the path, y m up and d m ahead → screen pixels. |
 | `ground_distance(…)`, `ground_distance_now(row, w, h)` | A screen row → metres ahead. |
 | `path_edges`, `view`, `camera_now` | Path edges at a distance; the camera. |
@@ -636,7 +646,8 @@ Functions: `pf_runtime_open`, `pf_runtime_from_json`, `pf_runtime_open_journey`,
 `pf_runtime_free`, `pf_runtime_canvas`, `pf_runtime_loop_length`, `pf_runtime_loop_seconds`,
 `pf_runtime_render`, `pf_runtime_project`, `pf_runtime_ground_distance`, `pf_runtime_step`,
 `pf_runtime_frame`, `pf_runtime_go`, `pf_runtime_transition_to`, `pf_runtime_fork`,
-`pf_runtime_choose`, `pf_runtime_state` (JSON), `pf_runtime_project_now`. Return codes and
+`pf_runtime_choose`, `pf_runtime_state` (JSON), `pf_runtime_project_now`, `pf_runtime_set_hour`,
+`pf_runtime_set_day_length`, `pf_runtime_day`. Return codes and
 buffer sizes are documented in the header.
 
 ## 13. Quartz games and quartz_forge

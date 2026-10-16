@@ -38,6 +38,12 @@ final class Bake {
     static void bake(Context c, String scene, int quality, int sw, int sh, Progress p) throws IOException {
         long h = Gpu.open(c, scene);
         if (h == 0) throw new IOException(Native.lastError());
+        // A scene on the clock is baked for the time it is now (the wallpaper bakes it again as
+        // the hours pass).
+        Native.tickClock();
+        java.util.Calendar now = java.util.Calendar.getInstance();
+        c.getSharedPreferences("wallpaper", Context.MODE_PRIVATE).edit()
+                .putFloat("hour", now.get(java.util.Calendar.HOUR_OF_DAY) + now.get(java.util.Calendar.MINUTE) / 60f).apply();
         try {
             float[] info = Native.info(h);
             float len = info[0], secs = info[1];
@@ -157,6 +163,19 @@ final class Bake {
 
     /** Which bake the wallpaper should show: bumped by each new bake, so a running wallpaper
      *  picks the new frames up. */
+    /** The hour of the day the frames were baked at. */
+    static float bakedHour(Context c) { return c.getSharedPreferences("wallpaper", Context.MODE_PRIVATE).getFloat("hour", -1f); }
+
+    /** Hours on the clock since the frames were baked (round the day), when the scene follows it;
+     *  -1 when it does not. */
+    static float hoursStale(Context c, String scene) {
+        if (!Look.followsClock(scene)) return -1f;
+        java.util.Calendar now = java.util.Calendar.getInstance();
+        float h = now.get(java.util.Calendar.HOUR_OF_DAY) + now.get(java.util.Calendar.MINUTE) / 60f;
+        float d = Math.abs(h - bakedHour(c)) % 24f;
+        return Math.min(d, 24f - d);
+    }
+
     static int version(Context c) { return c.getSharedPreferences("wallpaper", Context.MODE_PRIVATE).getInt("version", 0); }
 
     static void bump(Context c) {

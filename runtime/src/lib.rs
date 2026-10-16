@@ -191,7 +191,7 @@ pub unsafe extern "C" fn pf_runtime_go(rt: *mut Runtime, err: *mut c_char, err_l
     match guard(Err("panic".to_string()), || r.go()) { Ok(_) => 0, Err(e) => { write_err(err, err_len, &e); -2 } }
 }
 
-/// Where the walk stands, as JSON {scene, distance, time, stop, progress, choose_within} written
+/// Where the walk stands, as JSON {scene, distance, time, stop, progress, choose_within, day} written
 /// into `out`. Returns the length written, or -1.
 #[no_mangle]
 pub unsafe extern "C" fn pf_runtime_state(rt: *const Runtime, out: *mut c_char, out_len: usize) -> i32 {
@@ -199,6 +199,38 @@ pub unsafe extern "C" fn pf_runtime_state(rt: *const Runtime, out: *mut c_char, 
     let json = serde_json::to_string(&r.state()).unwrap_or_default();
     write_err(out, out_len, &json);
     json.len().min(out_len.saturating_sub(1)) as i32
+}
+
+/// Set the hour of the day (0..24) on every scene the runtime draws; a negative hour gives each
+/// scene back its own. 0, or -1 for a null handle.
+#[no_mangle]
+pub unsafe extern "C" fn pf_runtime_set_hour(rt: *mut Runtime, hour: f32) -> i32 {
+    let Some(r) = rt.as_mut() else { return -1 };
+    r.set_hour((hour >= 0.0).then_some(hour));
+    0
+}
+
+/// Let the days pass: one day every `seconds` of pf_runtime_step time (0 holds the hour).
+#[no_mangle]
+pub unsafe extern "C" fn pf_runtime_set_day_length(rt: *mut Runtime, seconds: f32) -> i32 {
+    let Some(r) = rt.as_mut() else { return -1 };
+    r.set_day_length(seconds);
+    0
+}
+
+/// The day now: writes the hour and the daylight (0 night .. 1 day) and returns 1, or 0 when
+/// the scene has no day and night (no open sky), -1 for a null handle. Either pointer may be NULL.
+#[no_mangle]
+pub unsafe extern "C" fn pf_runtime_day(rt: *const Runtime, hour: *mut f32, daylight: *mut f32) -> i32 {
+    let Some(r) = rt.as_ref() else { return -1 };
+    match r.day() {
+        Some(d) => {
+            if !hour.is_null() { *hour = d.hour; }
+            if !daylight.is_null() { *daylight = d.daylight; }
+            1
+        }
+        None => 0,
+    }
 }
 
 /// `pf_runtime_project` for the runtime's own walk.
@@ -240,6 +272,46 @@ mod tests {
             let state = CStr::from_ptr(out.as_ptr()).to_str().unwrap();
             assert!(n > 0 && state.contains("Forest Path"), "{state}");
             assert_eq!(pf_runtime_choose(rt, 1), 0, "no fork ahead");
+            pf_runtime_free(rt);
+            std::fs::remove_dir_all(&dir).ok();
+        }
+    }
+
+    #[test]
+    fn a_game_sets_the_hour_and_lets_the_days_pass() {
+        unsafe {
+            let dir = std::env::temp_dir().join(format!("pf_c_day_{}", std::process::id()));
+            std::fs::create_dir_all(&dir).unwrap();
+            let fp = path_forge::scene::presets::ALL.iter().find(|p| p.0 == "Forest Path").map(|p| (p.1)()).unwrap();
+            let a = dir.join("a.json");
+            std::fs::write(&a, serde_json::to_string(&fp).unwrap()).unwrap();
+            let mut err = [0 as c_char; 256];
+            let pa = CString::new(a.to_str().unwrap()).unwrap();
+            let rt = pf_runtime_open(pa.as_ptr(), err.as_mut_ptr(), err.len());
+            let (mut h, mut dl) = (0.0f32, 0.0f32);
+            assert_eq!(pf_runtime_day(rt, &mut h, &mut dl), 0, "no day and night until asked");
+            let mut noon = vec![0u8; 36 * 64 * 4];
+            let mut night = noon.clone();
+            assert_eq!(pf_runtime_set_hour(rt, 12.0), 0);
+            assert_eq!(pf_runtime_day(rt, &mut h, &mut dl), 1);
+            assert!((h - 12.0).abs() < 1e-4 && dl > 0.99, "noon: {h} {dl}");
+            pf_runtime_frame(rt, 36, 64, noon.as_mut_ptr(), noon.len());
+            // A day every 24 seconds: 12 seconds on it is midnight.
+            pf_runtime_set_day_length(rt, 24.0);
+            for _ in 0..120 { pf_runtime_step(rt, 0.1, 0.0); }
+            pf_runtime_day(rt, &mut h, &mut dl);
+            assert!((h.rem_euclid(24.0) - 0.0).abs() < 0.05 || (h - 24.0).abs() < 0.05, "midnight: {h}");
+            assert!(dl < 0.01, "no daylight at midnight: {dl}");
+            pf_runtime_frame(rt, 36, 64, night.as_mut_ptr(), night.len());
+            let sum = |b: &[u8]| b.iter().map(|v| *v as u64).sum::<u64>();
+            assert!(sum(&night) * 2 < sum(&noon), "midnight should be far darker than noon ({} vs {})", sum(&night), sum(&noon));
+            let mut out = [0 as c_char; 1024];
+            pf_runtime_state(rt, out.as_mut_ptr(), out.len());
+            let state = CStr::from_ptr(out.as_ptr()).to_str().unwrap();
+            assert!(state.contains("\"phase\":\"night\""), "{state}");
+            pf_runtime_set_hour(rt, -1.0);
+            pf_runtime_set_day_length(rt, 0.0);
+            assert_eq!(pf_runtime_day(rt, &mut h, &mut dl), 0, "the scene's own sky again");
             pf_runtime_free(rt);
             std::fs::remove_dir_all(&dir).ok();
         }

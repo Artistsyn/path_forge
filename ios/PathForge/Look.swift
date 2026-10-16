@@ -5,6 +5,9 @@ import Foundation
 /// is what is shown.
 struct Look {
     static let skies = ["As designed", "Golden", "Fiery", "Pastel", "Dusk"]
+    static let times = ["As designed", "Real time", "Dawn", "Noon", "Dusk", "Night", "Day cycle"]
+    /// The hour each of `times`' fixed times stands at.
+    private static let hours: [Double] = [-1, -1, 6.4, 12, 18.1, 23, 5]
     static let defaultPreset = "Sunset Pier"
 
     var name: String
@@ -76,6 +79,26 @@ struct Look {
                 light["ambient"] = max((light["ambient"] as? Double) ?? 0.6, 0.35)
             }
         }
+        store(s)
+    }
+
+    /// Index into `times` of the scene's day and night (0: none).
+    var time: Int {
+        guard let dn = (parsed()["sky"] as? NSDictionary)?["day_night"] as? NSDictionary, (dn["enabled"] as? Bool) == true else { return 0 }
+        if (dn["real_time"] as? Bool) == true { return 1 }
+        if ((dn["days_per_loop"] as? Int) ?? 0) > 0 { return 6 }
+        let h = (dn["hour"] as? Double) ?? 12
+        return (2..<6).min(by: { abs(Look.hours[$0] - h) < abs(Look.hours[$1] - h) }) ?? 3
+    }
+
+    /// Set the time of day to times[i]: the clock, a fixed hour, or a day each loop; 0 as designed.
+    mutating func setTime(_ i: Int) {
+        let s = parsed()
+        let dn = Look.obj(Look.obj(s, "sky"), "day_night")
+        dn["enabled"] = i > 0
+        dn["real_time"] = i == 1
+        dn["days_per_loop"] = i == 6 ? 1 : 0
+        if i >= 2 { dn["hour"] = Look.hours[i] }
         store(s)
     }
 

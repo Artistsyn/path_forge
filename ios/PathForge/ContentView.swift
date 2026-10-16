@@ -166,6 +166,8 @@ struct Panel: View {
                     }
                     SectionLabel(text: "Sunset")
                     Chips(labels: Look.skies, selected: model.look.sky) { model.setSky($0) }
+                    SectionLabel(text: "Time of day")
+                    Chips(labels: Look.times, selected: model.look.time) { model.setTime($0) }
                     SectionLabel(text: "Clouds")
                     HStack {
                         Chips(labels: ["As designed", "Mixed"], selected: model.look.mixed ? 1 : 0) { model.setMix($0 == 1) }

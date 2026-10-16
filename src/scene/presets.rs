@@ -800,6 +800,19 @@ pub fn winding_trail() -> Scene {
     s
 }
 
+/// A whole day on a country trail in one loop: dawn, the sun climbing and setting, dusk, stars
+/// and the moon, the lanterns along the way lit at nightfall and out at sunrise.
+pub fn day_and_night() -> Scene {
+    let mut s = winding_trail();
+    s.name = "Day and Night".into();
+    s.sky.day_night = DayNight { enabled: true, hour: 4.0, days_per_loop: 1, ..DayNight::default() };
+    s.sky.clouds.enabled = true;
+    s.sky.clouds.count = 8;
+    s.fixtures = vec![Fixture { kind: FixtureKind::Lantern, mount: Mount::Ground, post: LampPost::Pole, lateral: 0.3, height: 1.6, spacing: 12.0, radius: 7.0, intensity: 1.0, side: Side::Both, ..Fixture::default() }];
+    s.motion = Motion { loop_length: 96.0, speed: 3.0, fps: 24 };
+    s
+}
+
 pub fn forest_path() -> Scene {
     let mut s = scene("Forest Path");
     s.camera.horizon = 0.3;
@@ -1058,7 +1071,8 @@ pub const ALL: &[(&str, fn() -> Scene)] = &[
 ("Bog Boardwalk", bog_boardwalk),
 ("Desert Ruins", desert_ruins),
 ("Ice Cave", ice_cave),
-("Star Bridge", star_bridge),
+("Day and Night", day_and_night),
+    ("Star Bridge", star_bridge),
     ("Nebula Crossing", nebula_crossing),
 ("Hyperspace Run", hyperspace_run),
 ("Wormhole", wormhole),

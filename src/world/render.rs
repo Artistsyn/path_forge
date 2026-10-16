@@ -131,6 +131,9 @@ pub struct WorldRenderer {
     /// GPU passes, when a device was given (`set_gpu`); every pass without one runs on the CPU.
     #[cfg(feature = "gpu")]
     gpu: Option<Arc<super::gpu::Gpu>>,
+    /// An hour of the day forced on every scene with a sky (`set_hour`): a game's or a live
+    /// wallpaper's clock.
+    hour: Option<f32>,
 }
 
 /// Times the stages of one frame when profiling is on; costs one branch per stage when it is off.
@@ -771,6 +774,15 @@ pub struct WorldIn<'a> {
     pub base_dir: Option<PathBuf>,
 }
 
+/// How far through its loop's time a world's frame is (0..1), as `world_ctx` reckons it.
+fn loop_phase(w: &WorldIn) -> f32 {
+    let loop_len = w.scene.motion.loop_length.max(1.0);
+    match w.time {
+        Some(t) => (t / w.scene.motion.loop_seconds().max(1e-3)).rem_euclid(1.0),
+        None => w.distance.rem_euclid(loop_len) / loop_len,
+    }
+}
+
 /// How the worlds of a frame with more than one are laid out.
 #[derive(Clone, Copy)]
 pub enum Layout<'a> {
@@ -828,6 +840,11 @@ impl WorldRenderer {
     /// Run the passes that have a GPU form on this device (None: everything on the CPU).
     #[cfg(feature = "gpu")]
     pub fn set_gpu(&mut self, gpu: Option<Arc<super::gpu::Gpu>>) { self.gpu = gpu; }
+
+    /// Force the hour of the day (0..24) on every scene with an open sky, turning its day and
+    /// night (`sky.day_night`) on with the scene's own settings; None leaves each scene's own.
+    pub fn set_hour(&mut self, hour: Option<f32>) { self.hour = hour.map(|h| h.rem_euclid(24.0)); }
+    pub fn hour(&self) -> Option<f32> { self.hour }
 
     /// A renderer that draws on the GPU where there is one (`gpu::shared`), else on the CPU.
     pub fn auto() -> WorldRenderer {
@@ -904,6 +921,17 @@ impl WorldRenderer {
     }
 
     fn render_worlds(&mut self, worlds: &[WorldIn], layout: Option<Layout>, opts: &RenderOptions) -> Image {
+        // A day and night sets a scene's colours for its hour: draw a copy that has them.
+        let forced = self.hour;
+        let days: Vec<Option<Scene>> = worlds.iter().map(|w| {
+            let dn = &w.scene.sky.day_night;
+            let hour = forced.or_else(|| (dn.enabled && dn.days_per_loop > 0).then(|| dn.hour_at(loop_phase(w))));
+            crate::scene::DayNight::bake(w.scene, hour)
+        }).collect();
+        if days.iter().any(Option::is_some) {
+            let ws: Vec<WorldIn> = worlds.iter().zip(&days).map(|(w, b)| WorldIn { scene: b.as_ref().unwrap_or(w.scene), ..w.clone() }).collect();
+            return self.render_worlds(&ws, layout, opts);
+        }
         // A sunset takes a scene's colours towards its own: draw a copy that has them.
         let baked: Vec<Option<Scene>> = worlds.iter().map(|w| crate::scene::Sunset::bake(w.scene)).collect();
         if baked.iter().any(Option::is_some) {
@@ -5768,5 +5796,49 @@ mod tests {
         for p in s.props.iter_mut() { p.shadow = false; }
         let without = r.render(&s, 2.0, &opts).rgba;
         assert!(with != without, "turning prop shadows off changes the frame");
+    }
+
+    #[test]
+    fn the_day_stands_where_the_hour_says() {
+        let dn = crate::scene::DayNight::default();
+        let at = |h: f32| dn.at(h);
+        assert!(at(6.0).altitude.abs() < 1e-4 && at(18.0).altitude.abs() < 1e-4, "the sun is on the horizon at sunrise and sunset");
+        assert!((at(12.0).altitude - 1.0).abs() < 1e-4 && (at(0.0).altitude + 1.0).abs() < 1e-4);
+        assert_eq!((at(12.0).phase, at(0.0).phase, at(6.3).phase, at(17.8).phase), ("day", "night", "dawn", "dusk"));
+        assert!(at(12.0).daylight > 0.99 && at(23.0).daylight < 0.01);
+        assert!((at(25.0).hour - 1.0).abs() < 1e-4, "hours wrap round the day");
+    }
+
+    #[test]
+    fn the_light_follows_the_hour() {
+        let mut r = WorldRenderer::default();
+        let s = preset("Forest Path");
+        let o = RenderOptions { size: Some((90, 160)), time: Some(0.5), ..RenderOptions::default() };
+        let sum = |img: &Image| img.rgba.iter().map(|v| *v as f64).sum::<f64>();
+        let mut at = |h: f32| { r.set_hour(Some(h)); sum(&r.render(&s, 3.0, &o)) };
+        let (noon, dusk, night) = (at(12.0), at(18.25), at(0.0));
+        assert!(noon > dusk * 1.3 && dusk > night * 1.2, "noon {noon} > dusk {dusk} > midnight {night}");
+        // The lamps are lit by night and out by day; the stars and moon only show at night.
+        let bog = preset("Bog Boardwalk");
+        let lamps = |h: f32| crate::scene::DayNight::bake(&bog, Some(h)).unwrap().fixtures[0].intensity;
+        assert!(lamps(0.0) > 4.0 * lamps(12.0));
+        let sky = |h: f32| crate::scene::DayNight::bake(&s, Some(h)).unwrap().sky;
+        assert!(sky(0.0).stars.enabled && sky(0.0).moon.body.enabled && !sky(0.0).sun.enabled);
+        assert!(!sky(12.0).stars.enabled && !sky(12.0).moon.body.enabled && sky(12.0).sun.enabled);
+        // No sky, no day: a dungeon is left as it is.
+        assert!(crate::scene::DayNight::bake(&preset("Stone Dungeon"), Some(12.0)).is_none());
+        assert!(crate::scene::DayNight::bake(&preset("Star Bridge"), Some(12.0)).is_none(), "nor is space");
+    }
+
+    #[test]
+    fn days_that_pass_with_the_loop_keep_it_seamless() {
+        let mut r = WorldRenderer::default();
+        let mut s = preset("Forest Path");
+        s.sky.day_night = crate::scene::DayNight { enabled: true, days_per_loop: 1, hour: 5.0, ..crate::scene::DayNight::default() };
+        let (len, secs) = (s.motion.loop_length, s.motion.loop_seconds());
+        let o = |t: f32| RenderOptions { size: Some((90, 160)), time: Some(t), ..RenderOptions::default() };
+        assert_eq!(r.render(&s, 0.0, &o(0.0)).rgba, r.render(&s, len, &o(secs)).rgba, "the loop must close");
+        let (a, b) = (r.render(&s, 3.0, &o(secs * 0.1)), r.render(&s, 3.0, &o(secs * 0.4)));
+        assert!(a.rgba != b.rgba, "the hour should move with the loop");
     }
 }

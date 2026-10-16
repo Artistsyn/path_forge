@@ -337,6 +337,11 @@ choose the details unless the plan's warnings say to.
   `pf_runtime_open_journey`, `pf_runtime_step`, `pf_runtime_go`, `pf_runtime_choose`,
   `pf_runtime_state` (JSON). CLI: `pf transition --scene A --to-preset NAME -o sheet.png` (or
   `--left-*`/`--right-*`, `--take`), `pf journey --file F --out DIR`.
+- **Day and night:** `sky.day_night` (`hour`, `days_per_loop` for a whole day each loop, `real_time`
+  for the phone's clock, `sunrise`/`sunset`, `sun_height`, `sun_path`, `sunset_style`, `keep_look`,
+  `night_light`, `sun`/`moon`/`stars`/`lamps`). Games: `Runtime::set_hour`, `set_day_length`,
+  `day()` (daylight, phase); C `pf_runtime_set_hour`, `pf_runtime_set_day_length`, `pf_runtime_day`.
+  Preview any scene at an hour with `pf render --hour H` (preset Day and Night).
 - **Quartz games:** the `quartz_path_forge` crate's `PathForgePlugin` plays a scene or journey on a
   game object (live, or the png export), driven by `RunPlugin "path_forge"` (`next`,
   `choose:left|right`, `stop`, `walk`, `speed:`); in quartz_forge it is a background type

@@ -138,6 +138,19 @@ pub fn export_cancel() { EXPORT_CANCEL.store(true, Ordering::Relaxed); }
 /// Every scene setting as an editor builds itself from it (`path_forge::scene::form::form`).
 pub fn form() -> String { path_forge::scene::form::form().to_string() }
 
+/// The device's clock, hours 0..24 local time, as the platform last gave it (`set_clock`); NaN
+/// until it does.
+static CLOCK: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0x7fc0_0000);
+
+/// The device's local time of day in hours (0..24), for scenes whose day and night follow the
+/// clock (`sky.day_night.real_time`). A negative hour forgets it.
+pub fn set_clock(hour: f32) {
+    let v = if hour >= 0.0 { hour.rem_euclid(24.0) } else { f32::NAN };
+    CLOCK.store(v.to_bits(), Ordering::Relaxed);
+}
+
+fn clock() -> Option<f32> { let v = f32::from_bits(CLOCK.load(Ordering::Relaxed)); (!v.is_nan()).then_some(v) }
+
 /// One scene being drawn.
 pub struct Handle { rt: Runtime }
 
@@ -170,6 +183,8 @@ impl Handle {
     pub fn render(&mut self, distance: f32, time: f32, w: u32, h: u32, out: &mut [u8]) -> Result<(), String> {
         if w == 0 || h == 0 { return Err("empty frame".into()); }
         let r = &mut self.rt;
+        let dn = &r.scene().sky.day_night;
+        r.set_hour(if dn.enabled && dn.real_time { clock() } else { None });
         if r.engine() == "gpu" {
             if !GPU_BROKEN.load(Ordering::Relaxed) {
                 match catch_unwind(AssertUnwindSafe(|| r.render_into(distance, time, w, h, out))) {
@@ -188,6 +203,18 @@ impl Handle {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_scene_on_the_clock_follows_it() {
+        let mut s: path_forge::scene::Scene = serde_json::from_str(&preset_scene("Forest Path").unwrap()).unwrap();
+        s.sky.day_night.enabled = true;
+        s.sky.day_night.real_time = true;
+        let mut h = Handle::open(&serde_json::to_string(&s).unwrap(), None, false).unwrap();
+        let mut at = |hour: f32| { set_clock(hour); let mut b = vec![0u8; 36 * 64 * 4]; h.render(1.0, 0.5, 36, 64, &mut b).unwrap(); b.iter().map(|v| *v as u64).sum::<u64>() };
+        let (noon, night) = (at(12.0), at(0.5));
+        set_clock(-1.0);
+        assert!(noon > night * 2, "noon {noon} vs night {night}");
+    }
 
     #[test]
     fn presets_round_trip_and_render() {

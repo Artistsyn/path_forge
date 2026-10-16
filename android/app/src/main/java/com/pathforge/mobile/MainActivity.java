@@ -72,7 +72,7 @@ public final class MainActivity extends Activity implements Editor.Host {
     private TextView speedLabel;
     private SeekBar speedBar;
     private TextView showButton;
-    private Ui.Chips skyChips, cloudChips;
+    private Ui.Chips skyChips, timeChips, cloudChips;
     private LinearLayout strip;
     private int bottomInset, topInset;
     /** The strip's tiles: (name, one of yours?, its picture). */
@@ -222,6 +222,15 @@ public final class MainActivity extends Activity implements Editor.Host {
             sceneChanged(false);
         });
         body.addView(skyChips.view);
+
+        body.addView(Ui.label(this, "Time of day"));
+        timeChips = new Ui.Chips(this, Look.TIMES, look.time(), i -> {
+            if (!look.hasSky()) { toast("This scene has no sky (switch it on under Edit → Sky)"); timeChips.select(0); return; }
+            look.setTime(i);
+            if (i == 1) toast("Follows your phone's clock; the wallpaper redraws as the hours pass");
+            sceneChanged(false);
+        });
+        body.addView(timeChips.view);
 
         body.addView(Ui.label(this, "Clouds"));
         LinearLayout clouds = new LinearLayout(this);
@@ -479,6 +488,7 @@ public final class MainActivity extends Activity implements Editor.Host {
         highlight();
         if (controls) {
             skyChips.select(look.sky());
+            timeChips.select(look.time());
             cloudChips.select(look.mixed() ? 1 : 0);
             speedBar.setProgress((int) Math.round((look.speed() - 0.5) / 0.1));
             showSpeed();

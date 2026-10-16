@@ -58,11 +58,25 @@ int pf_runtime_fork(PfRuntime *rt, const char *left, const char *right, const ch
 int pf_runtime_choose(PfRuntime *rt, int side);
 /* Walk to where the journey leads from the current stop. 0 on success, -2 with the reason in err. */
 int pf_runtime_go(PfRuntime *rt, char *err, size_t err_len);
-/* Where the walk stands, as JSON: {"scene","distance","time","stop","progress","choose_within"}.
+/* Where the walk stands, as JSON: {"scene","distance","time","stop","progress","choose_within","day"}.
  * choose_within is non-null while a fork waits for a choice (metres left). Returns length or -1. */
 int pf_runtime_state(const PfRuntime *rt, char *out, size_t out_len);
 /* Where a point d metres ahead appears now (as pf_runtime_project, for the walk). */
 int pf_runtime_project_now(const PfRuntime *rt, float x, float y, float d, uint32_t width, uint32_t height, float *out_xy);
+
+/* ── Day and night ──────────────────────────────────────────────────────────
+ * Every scene with an open sky can run through the day: the sun crosses the sky and sets, the
+ * light, sky and fog follow it, stars and moon come out and lamps light at dusk. */
+
+/* Set the hour (0..24: 6 sunrise, 12 noon, 18 sunset, 0 midnight) on every scene drawn, turning
+ * its day and night on; a negative hour gives each scene back its own. */
+int pf_runtime_set_hour(PfRuntime *rt, float hour);
+/* Let the days pass: one day every `seconds` of pf_runtime_step time (0 holds the hour). */
+int pf_runtime_set_day_length(PfRuntime *rt, float seconds);
+/* The day now: writes the hour and the daylight (0 night .. 1 day; either may be NULL) and
+ * returns 1; 0 when the scene has no open sky; -1 for a null handle. pf_runtime_state's "day"
+ * also gives "altitude" (sun height, -1..1), "is_day" and "phase" ("night", "dawn", "day", "dusk"). */
+int pf_runtime_day(const PfRuntime *rt, float *hour, float *daylight);
 
 #ifdef __cplusplus
 }

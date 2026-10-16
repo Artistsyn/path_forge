@@ -99,6 +99,10 @@ pub extern "system" fn Java_com_pathforge_mobile_Native_info(env: JNIEnv, _: JCl
     }
 }
 
+/// The phone's local time of day, hours (0..24), for scenes that follow the clock.
+#[no_mangle]
+pub extern "system" fn Java_com_pathforge_mobile_Native_setClock(_: JNIEnv, _: JClass, hour: jfloat) { crate::set_clock(hour); }
+
 /// Into a direct buffer of w * h * 4 bytes (RGBA, as `Bitmap.copyPixelsFromBuffer` reads an
 /// ARGB_8888 bitmap).
 #[no_mangle]

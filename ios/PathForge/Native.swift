@@ -48,6 +48,9 @@ final class PathScene {
 
     /// The view `distance` metres along at `time` seconds, as opaque RGBA rows.
     func render(distance: Float, time: Float, width: Int, height: Int) -> Data? {
+        // Scenes whose day and night follow the clock take the phone's time of day.
+        let now = Calendar.current.dateComponents([.hour, .minute, .second], from: Date())
+        pfm_set_clock(Float(now.hour ?? 12) + Float(now.minute ?? 0) / 60 + Float(now.second ?? 0) / 3600)
         let n = width * height * 4
         var data = Data(count: n)
         let ok = data.withUnsafeMutableBytes { raw -> Bool in

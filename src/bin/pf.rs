@@ -77,6 +77,8 @@ impl Renderers {
     fn for_args(args: &Args) -> Result<Self, String> {
         let mut r = Self::new(gpu_backend(args)?);
         r.world = world_for(args)?;
+        // --hour H: the hour of the day on every scene with a sky (sky.day_night).
+        if let Some(h) = args.opts.get("hour") { r.world.set_hour(Some(h.parse().map_err(|_| format!("--hour: cannot read `{h}`"))?)); }
         Ok(r)
     }
 

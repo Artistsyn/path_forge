@@ -70,6 +70,10 @@ pub extern "C" fn pfm_set_scene(h: *mut Handle, json: *const c_char) -> bool {
     guard(false, || { handle(h)?.set_scene(&arg(json)?)?; Ok(true) })
 }
 
+/// The phone's local time of day, hours (0..24), for scenes that follow the clock.
+#[no_mangle]
+pub extern "C" fn pfm_set_clock(hour: f32) { crate::set_clock(hour); }
+
 #[no_mangle]
 pub extern "C" fn pfm_close(h: *mut Handle) {
     if !h.is_null() {
