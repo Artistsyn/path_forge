@@ -58,10 +58,10 @@ pf presets
 pf render --preset "Forest Path" -o forest.png
 ```
 
-There are 42 presets: Stone Dungeon, Stone Crypt, Mossy Sewer, Forest Path, Desert Canyon, Night
+There are 44 presets: Stone Dungeon, Stone Crypt, Mossy Sewer, Forest Path, Desert Canyon, Night
 Road, Magic Cavern, Ice Dungeon, Ruins Path, Dark Street, Mountain Pass, Volcanic Rift, Haunted
 Forest, Ruined Castle, Fiery Dungeon, Tower Stair, Bog Boardwalk, Desert Ruins, Ice Cave, Day and
-Night, Village Evening, Lily Harbour, Waterfall Glen, Miniature Village, Star Bridge, Nebula Crossing, Asteroid Belt,
+Night, Village Evening, Lily Harbour, Waterfall Glen, Miniature Village, Village Side Scroll, Village Corner, Star Bridge, Nebula Crossing, Asteroid Belt,
 Hyperspace Run, Wormhole, Starship Flight, Event Horizon, Black Hole Arena, River Run, Canal
 Lanterns, Jungle River, Lagoon Swim, Sunset Pier, Frozen Channel, Misty River, Dawn Road, Winding
 Trail and Hyperspace Jump.
@@ -76,7 +76,7 @@ times in seconds.
 | Part | What it controls |
 |---|---|
 | `canvas` | Output size in pixels (default 480 × 854, portrait). |
-| `camera` | Eye height, horizon position, zoom, lens curve, and `moves`: see [Camera moves](#camera-moves). |
+| `camera` | Eye height, horizon position, zoom, lens curve, the angle it looks from (`yaw`, `side`; side-scrollers): see [Camera angle and side-scrollers](#camera-angle-and-side-scrollers), and `moves`: see [Camera moves](#camera-moves). |
 | `path` | The road: width, flare, bend (curving left or right), hill (rising or dipping), ragged edges, material and pattern (cobblestone, brick, stone block, sand, dirt, grass, planks, water, ice, and the futuristic panels, grid, hex and circuit, whose lit parts glow with `material.glow`), stairs, bridges, side paths, roads that divide in two or three, side passages that branch off as scenery, and `edge_lights` (glowing lines along both edges, solid or dashed, the dashes running ahead with `flow`). `surface: false` draws no ground at all: the camera flies the route through open space (Starship Flight, Hyperspace Jump), with floating props, companions and the sky all round. |
 | `verge` | The ground beside an open path: its material and grass tufts. Off, the path edge drops into void (walls usually cover it). |
 | `walls` | Walls either side (a corridor, a canyon, a street) and their material. |
@@ -196,6 +196,27 @@ water, or a bottomless void. With water, `water_level` sets how far below the de
 at each end of every railing: stone for parapets, balustrades and iron, wood for posts and rope.
 Every railing is built as solid pieces, with faces on all the sides the camera can see. In the
 studio, switching between Iron and Rope also switches `rail_color`, unless you have chosen a colour yourself.
+
+### Camera angle and side-scrollers
+
+`camera.yaw` turns the camera for the whole loop, in degrees from straight down the path (-90 ..
+90, positive to the right), and `camera.side` sets where it stands, metres sideways from the
+middle of the path. Everything is drawn from that angle (the ground, walls, bridges, fences,
+props, lights, weather), the loop still closes, and the GPU draws the same frame as the CPU.
+
+- **An angle on the path**: yaw 20-35 with the camera at the path's edge (`side` -1 for a turn
+  to the right) looks along the path diagonally (preset Village Corner).
+- **A side-scroller**: yaw -90 with the camera 4-10 m out to the right (`side` 5) looks straight
+  across the path; the walk carries the world past from right to left, with true parallax (near
+  things pass faster than far ones), seamlessly. Yaw 90 with `side` -5 looks the other way. A
+  landscape canvas (854 x 480) suits it (preset Village Side Scroll). Seen from the side the
+  path's bends are straightened, set pieces that span the path are left out, and the wall,
+  ceiling, fences, lights and props on the camera's side are cut away beyond `camera.cutaway`
+  metres past the path's edge, so the walking lane stays in view. Raise `eye_height` and lower
+  `horizon` to see more of the lane.
+
+Props stay flat images that face the camera, so a cottage shows its front from any angle. To look
+down on a scene, raise `eye_height` and move `horizon` up: verticals stay vertical.
 
 ### Camera moves
 

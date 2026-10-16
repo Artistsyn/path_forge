@@ -157,6 +157,8 @@ pub(crate) struct WorldParams {
     /// Ground cover (render::cover): how many layers, the wind in them, and each layer's record.
     pub gc_n: u32, pub gc_sway: f32, pub gc_lean: f32, pub gc_phase: f32,
     pub gc: [[f32; 4]; 12],
+    /// The camera turned (View::yaw_c, yaw_s, cam_x; turned as 0 or 1).
+    pub cam_yc: f32, pub cam_ys: f32, pub cam_x: f32, pub cam_turned: u32,
 }
 
 /// The sky pass's parameters; `Sky` in sky.wgsl, field for field.
@@ -1569,7 +1571,7 @@ mod tests {
     fn world_params_match_the_wgsl_struct_size() {
         // A uniform block's size is a multiple of 16; the WGSL struct has the same fields.
         assert_eq!(std::mem::size_of::<WorldParams>() % 16, 0);
-        assert_eq!(std::mem::size_of::<WorldParams>(), 4 * 292);
+        assert_eq!(std::mem::size_of::<WorldParams>(), 4 * 296);
         assert_eq!(std::mem::size_of::<CardGpu>(), 4 * 53);
         assert_eq!(std::mem::size_of::<SplatGpu>(), 4 * 24);
         assert_eq!(std::mem::size_of::<AirParams>(), 80);

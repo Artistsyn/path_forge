@@ -341,12 +341,20 @@ fn air_light(ctx: &Ctx, x: f32, y: f32, d: f32) -> [f32; 3] { air_light_among(ct
 
 /// `air_light` looking only at the lamps in `near` (the ones that can reach this part of the screen).
 fn air_light_among(ctx: &Ctx, x: f32, y: f32, d: f32, near: Option<&[u16]>) -> [f32; 3] {
-    if d < 18.0 { ctx.light_among(x, y, d, None, 0, 1.0, None, near) } else { ctx.sky_lights.iter().fold(ctx.ambient, |a, s| add3(a, scale3(s.color, 0.5))) }
+    if ctx.view.depth_of(x, d) < 18.0 { ctx.light_among(x, y, d, None, 0, 1.0, None, near) } else { ctx.sky_lights.iter().fold(ctx.ambient, |a, s| add3(a, scale3(s.color, 0.5))) }
 }
 
-/// Half the width of the ground in view at the far end of `range`, or between the walls.
+/// Half the width of the ground in view at the far end of `range`, or between the walls. (A
+/// turned camera looks across the path: the band reaches out to where it stands.)
 fn spread(ctx: &Ctx, range: f32) -> f32 {
-    if ctx.scene.walls.enabled { ctx.wall_x(5.0) } else { 0.5 * ctx.view.width as f32 / ctx.view.focal_px * range + 2.0 }
+    let w = if ctx.scene.walls.enabled { ctx.wall_x(5.0) } else { 0.5 * ctx.view.width as f32 / ctx.view.focal_px * range + 2.0 };
+    if ctx.view.turned { w.max(ctx.view.cam_x.abs() + 0.6 * range) } else { w }
+}
+
+/// The stretch of the path, metres from the camera's place, that weather out to `range` metres
+/// is drawn over: just ahead out to `range`, or round a turned camera.
+fn window(ctx: &Ctx, range: f32) -> (f32, f32) {
+    if ctx.view.turned { (ctx.d_lo.max(-range), ctx.d_hi.min(range)) } else { (0.0, range) }
 }
 
 /// A splash where a drop lands at (x, d), `age` 0..1 through it: a ring spreading on the ground
@@ -388,7 +396,8 @@ pub(super) fn draw_precip(ctx: &Ctx, out: &mut Vec<Splat>) {
     let lat = spread(ctx, range);
     let top = 10.0f32;
     let tint = rgb_lin(p.tint);
-    let copies = (range / ctx.loop_len).ceil() as i64 + 1;
+    let (wlo, whi) = window(ctx, range);
+    let copies = ((whi - wlo) / ctx.loop_len).ceil() as i64 + 1;
     let area = 2.0 * lat * ctx.loop_len;
     #[derive(Clone, Copy, PartialEq)]
     enum Fall { Drop, Flake, Slush, Hail }
@@ -423,8 +432,8 @@ pub(super) fn draw_precip(ctx: &Ctx, out: &mut Vec<Splat>) {
             // Blown across the band and back in at the other side, so a strong wind does not empty it.
             let x = (x0 + wind * f * fall_t + wob + lat).rem_euclid(2.0 * lat) - lat;
             for cpy in 0..copies {
-                let d = (d0 - ctx.scroll).rem_euclid(ctx.loop_len) + cpy as f32 * ctx.loop_len;
-                if d < 0.25 || d > range || !ctx.owns(x, y, d) { continue; }
+                let d = wlo + (d0 - ctx.scroll - wlo).rem_euclid(ctx.loop_len) + cpy as f32 * ctx.loop_len;
+                if (if ctx.view.turned { d > whi } else { d < 0.25 || d > range }) || !ctx.owns(x, y, d) { continue; }
                 let c0 = v.to_cam(x, y, d);
                 if c0[2] < 0.2 { continue; }
                 let Some([sx, sy]) = v.project(c0) else { continue };
@@ -517,7 +526,8 @@ pub(super) fn draw_drips(ctx: &Ctx, out: &mut Vec<Splat>) {
     // The share of each drip's cycle spent forming at the top (the rest falling and splashing).
     let form = (1.0 - (fall_t + 0.15) / period).clamp(0.1, 0.9);
     let range = ctx.far.min(25.0);
-    let copies = (range / ctx.loop_len).ceil() as i64 + 1;
+    let (wlo, whi) = window(ctx, range);
+    let copies = ((whi - wlo) / ctx.loop_len).ceil() as i64 + 1;
     let col = rgb_lin(dr.color);
     let lat = if s.walls.enabled { ctx.wall_x(5.0) } else { ctx.view.path_half_width(5.0) + 1.0 };
     let n = ((dr.rate * ctx.loop_len) as i64).clamp(1, 4000);
@@ -526,8 +536,8 @@ pub(super) fn draw_drips(ctx: &Ctx, out: &mut Vec<Splat>) {
         let d0 = hf(dr.seed ^ 0xD2, k) * ctx.loop_len;
         let a = (hf(dr.seed ^ 0xD3, k) + cd * ctx.tphase).rem_euclid(1.0);
         for cpy in 0..copies {
-            let d = (d0 - ctx.scroll).rem_euclid(ctx.loop_len) + cpy as f32 * ctx.loop_len;
-            if d < 0.3 || d > range || !ctx.owns(x, 0.0, d) { continue; }
+            let d = wlo + (d0 - ctx.scroll - wlo).rem_euclid(ctx.loop_len) + cpy as f32 * ctx.loop_len;
+            if (if ctx.view.turned { d > whi } else { d < 0.3 || d > range }) || !ctx.owns(x, 0.0, d) { continue; }
             let z = v.to_cam(x, 0.0, d)[2];
             // Wet drops catch the light: a little brighter than what lights them.
             let light = |y: f32| ctx.apply_fog(scale3(mul3(air_light(ctx, x, y, d), col), 1.4), z);
@@ -563,7 +573,8 @@ pub(super) fn draw_sandstorm(ctx: &Ctx, out: &mut Vec<Splat>) {
     let speed = ctx.wx.wind.abs().max(5.0 + 9.0 * k);
     let range = ctx.far.min(30.0);
     let lat = spread(ctx, range);
-    let copies = (range / ctx.loop_len).ceil() as i64 + 1;
+    let (wlo, whi) = window(ctx, range);
+    let copies = ((whi - wlo) / ctx.loop_len).ceil() as i64 + 1;
     let col = rgb_lin(st.color);
     let cl = cycles(2.0, ls);
     let life = ls / cl;
@@ -577,8 +588,8 @@ pub(super) fn draw_sandstorm(ctx: &Ctx, out: &mut Vec<Splat>) {
         let d0 = hf(st.seed ^ 0xE4, key) * ctx.loop_len;
         let alpha = (std::f32::consts::PI * a).sin() * 0.45;
         for cpy in 0..copies {
-            let d = (d0 - ctx.scroll).rem_euclid(ctx.loop_len) + cpy as f32 * ctx.loop_len;
-            if d < 0.3 || d > range || !ctx.owns(x, y, d) { continue; }
+            let d = wlo + (d0 - ctx.scroll - wlo).rem_euclid(ctx.loop_len) + cpy as f32 * ctx.loop_len;
+            if (if ctx.view.turned { d > whi } else { d < 0.3 || d > range }) || !ctx.owns(x, y, d) { continue; }
             let c0 = v.to_cam(x, y, d);
             let (Some(s0), Some(s1)) = (v.project(c0), v.project(v.to_cam(x - dir * speed * 0.03, y, d))) else { continue };
             if s0[0] < -60.0 || s0[0] > w as f32 + 60.0 || s0[1] < 0.0 || s0[1] > h as f32 { continue; }
@@ -601,7 +612,8 @@ pub(super) fn draw_wisps(ctx: &Ctx, out: &mut Vec<Splat>) {
     let range = ctx.far.min(30.0);
     let lat = if m.over == MistOver::Path { water::water_edge(ctx, 5.0) + 0.5 * m.spread.max(0.0) }
         else if ctx.scene.walls.enabled { ctx.wall_x(5.0) } else { ctx.view.path_half_width(5.0) + 5.0 };
-    let copies = (range / ctx.loop_len).ceil() as i64 + 1;
+    let (wlo, whi) = window(ctx, range);
+    let copies = ((whi - wlo) / ctx.loop_len).ceil() as i64 + 1;
     let col = rgb_lin(m.color);
     let n = ((m.wisps.clamp(0.0, 1.0) * 1.6 * ctx.loop_len) as i64).min(2000);
     for j in 0..n {
@@ -614,8 +626,8 @@ pub(super) fn draw_wisps(ctx: &Ctx, out: &mut Vec<Splat>) {
         let size = 0.45 + 0.7 * a;
         let alpha = 0.22 * m.wisps.min(1.0) * (std::f32::consts::PI * a).sin();
         for cpy in 0..copies {
-            let d = (d0 - ctx.scroll).rem_euclid(ctx.loop_len) + cpy as f32 * ctx.loop_len;
-            if d < 0.8 || d > range || !ctx.owns(x, y, d) { continue; }
+            let d = wlo + (d0 - ctx.scroll - wlo).rem_euclid(ctx.loop_len) + cpy as f32 * ctx.loop_len;
+            if (if ctx.view.turned { d > whi } else { d < 0.8 || d > range }) || !ctx.owns(x, y, d) { continue; }
             let c = v.to_cam(x, y, d);
             let Some([sx, sy]) = v.project(c) else { continue };
             let r = v.px_per_m(c[2]) * size;

@@ -67,6 +67,8 @@ struct World {
     // Ground cover (render::cover): layers, the wind in them (Wx::sway_parts), CoverK::rec each.
     gc_n: u32, gc_sway: f32, gc_lean: f32, gc_phase: f32,
     gc: array<vec4<f32>, 12>,
+    // The camera turned (View::to_cam).
+    cam_yc: f32, cam_ys: f32, cam_x: f32, cam_turned: u32,
 }
 
 // Every pass binds the world's parameters here.
@@ -298,8 +300,16 @@ fn path_half_width(d: f32) -> f32 {
     if t <= 0.0 { return a; }
     return a + (flared(W.sp_hw_b, W.sp_flare_b, d) - a) * t;
 }
+// View::rot_dir: a world direction as the turned camera sees it.
+fn rot_dir(v: vec3<f32>) -> vec3<f32> {
+    if W.cam_turned == 0u { return v; }
+    return vec3<f32>(rnd(W.cam_yc * v.x) - rnd(W.cam_ys * v.z), v.y, rnd(W.cam_ys * v.x) + rnd(W.cam_yc * v.z));
+}
 fn to_cam(x: f32, y: f32, d: f32) -> vec3<f32> {
-    return vec3<f32>(x + bend_x(d) + shear_x(d), y - W.eye_height + hill_y(d) + lift(d), d);
+    let c = vec3<f32>(x + bend_x(d) + shear_x(d), y - W.eye_height + hill_y(d) + lift(d), d);
+    if W.cam_turned == 0u { return c; }
+    let px = c.x - W.cam_x;
+    return vec3<f32>(rnd(W.cam_yc * px) - rnd(W.cam_ys * c.z), c.y, rnd(W.cam_ys * px) + rnd(W.cam_yc * c.z));
 }
 
 // ── Ctx helpers (render.rs) ─────────────────────────────────────────────

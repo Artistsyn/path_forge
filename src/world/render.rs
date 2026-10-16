@@ -302,6 +302,11 @@ struct Ctx<'a> {
     tphase: f32,
     scroll: f32,
     far: f32,
+    /// A turned camera (View::turned): the stretch of the path it can see (metres from where it
+    /// stands; behind it too) and how far out to either side.
+    d_lo: f32,
+    d_hi: f32,
+    x_reach: f32,
     path_tex: Arc<Texture>,
     verge_tex: Arc<Texture>,
     wall_tex: Arc<Texture>,
@@ -632,6 +637,20 @@ impl<'a> Ctx<'a> {
     /// Whether `d` metres ahead is on a bridge (the ground beside the path has dropped away).
     fn on_bridge(&self, d: f32) -> bool { self.bridge.is_some_and(|b| b.contains(self.scroll + d)) }
 
+    /// The stretch of the path to gather things over, metres from where the camera stands: as a
+    /// gatherer reckons it for a camera looking down the path (`lo`..`hi`), or all a turned camera
+    /// can see.
+    fn span(&self, lo: f32, hi: f32) -> (f32, f32) { if self.view.turned { (self.d_lo, self.d_hi) } else { (lo, hi) } }
+
+    /// Whether something standing `x` metres from the middle of the path is on the camera's side
+    /// of the cut a side view makes (`camera.cutaway` past the path's edge), and so left out.
+    fn cut_away(&self, x: f32) -> bool {
+        let c = &self.scene.camera;
+        if !c.side_view() { return false; }
+        let near = if self.view.cam_x != 0.0 { self.view.cam_x.signum() } else { -self.view.yaw_s.signum() };
+        x * near > self.view.half_width + c.cutaway.max(0.0)
+    }
+
     fn wall_top(&self) -> f32 {
         let w = &self.scene.walls;
         let mut top = if w.height > 0.0 { w.height } else { 1.0e4 };
@@ -680,13 +699,15 @@ impl<'a> Ctx<'a> {
     fn light_among(&self, x: f32, y: f32, d: f32, n: Option<[f32; 3]>, skip: u8, sun_mask: f32, except: Option<usize>, only: Option<&[u16]>) -> [f32; 3] {
         let mut l = self.ambient;
         for s in &self.sky_lights {
-            let ndl = match n { Some(n) => dot3(n, s.dir).max(0.0), None => (0.45 - 0.35 * s.dir[2]).clamp(0.15, 0.8) };
+            let ndl = match n { Some(n) => dot3(n, s.dir).max(0.0), None => (0.45 - 0.35 * self.view.rot_dir(s.dir)[2]).clamp(0.15, 0.8) };
             if ndl <= 0.0 { continue; }
             let vis = self.sky_visibility(x, y, d, s.dir, skip) * sun_mask;
             if vis > 0.0 { l = add3(l, scale3(s.color, ndl * vis)); }
         }
         if !self.lights.is_empty() {
             let p = self.view.to_cam(x, y, d);
+            // (Lights stand where the camera sees them: the normal is turned to match.)
+            let n = n.map(|n| self.view.rot_dir(n));
             let mut add = |li: usize| {
                 if Some(li) == except { return; }
                 let pl = &self.lights[li];
@@ -1690,7 +1711,9 @@ impl WorldRenderer {
         for (body, gain) in [(&scene.sky.sun, 1.8 * sun_through), (&scene.sky.moon.body, 0.6 * sun_through.sqrt())] {
             if scene.sky.enabled && body.enabled && body.emits_light {
                 // As the camera turns with the path, the light comes from that much further round.
-                let az = (body.pos[0] - 0.5) * 2.4 - view.turn_tan().atan();
+                // (A turned camera sees the sky where it always does: the light turns with it.)
+                let yaw = if view.turned { view.yaw_s.atan2(view.yaw_c) } else { 0.0 };
+                let az = (body.pos[0] - 0.5) * 2.4 - view.turn_tan().atan() + yaw;
                 let el = (1.0 - body.pos[1].clamp(0.0, 1.0)) * 1.15 + 0.08;
                 let dir = [az.sin() * el.cos(), el.sin(), az.cos() * el.cos()];
                 sky_lights.push(DirLight { dir, color: scale3(rgb_lin(body.color), gain * body.intensity.max(0.0)) });
@@ -1704,8 +1727,9 @@ impl WorldRenderer {
             sky_lights.push(DirLight { dir: [dir[0] / n, dir[1] / n, dir[2] / n], color: flash });
         }
 
+        let (d_lo, d_hi, x_reach) = view.footprint(far, 8.0);
         let ctx = Ctx {
-            scene, view, loop_len, tphase, scroll, far,
+            scene, view, loop_len, tphase, scroll, far, d_lo, d_hi, x_reach,
             path_tex: self.textures.get(&scene.path.material),
             verge_tex: self.textures.get(&scene.verge.material),
             wall_tex: self.textures.get(&scene.walls.material),
@@ -1867,8 +1891,9 @@ impl WorldRenderer {
             // Those shifted along the path can come from the places either side of what is in view.
             let (along, stagger) = (f.jitter_along.clamp(0.0, 1.0), f.stagger.clamp(0.0, 1.0));
             let shifted = along > 0.0 || stagger > 0.0;
-            let k_lo = ((ctx.scroll - reach - f.offset) / sp).ceil() as i64 - if shifted { 2 } else { 0 };
-            let k_hi = ((ctx.scroll + ctx.far.min(80.0) - f.offset) / sp).floor() as i64 + if shifted { 1 } else { 0 };
+            let (lo, hi) = ctx.span(-reach, ctx.far.min(80.0));
+            let k_lo = ((ctx.scroll + lo - f.offset) / sp).ceil() as i64 - if shifted { 2 } else { 0 };
+            let k_hi = ((ctx.scroll + hi - f.offset) / sp).floor() as i64 + if shifted { 1 } else { 0 };
             let cluster = f.cluster.clamp(1, 8) as i64;
             let (body_h0, mut flame_frac) = fixture_body(f.kind);
             let body = if f.sprite.is_set() {
@@ -1893,7 +1918,7 @@ impl WorldRenderer {
             let (places, n): (Vec<(i64, f32)>, i64) = match on_posts {
                 Some(b) => {
                     let per = ((ctx.loop_len / b.period).round() as i64).max(1);
-                    let v = b.within(scroll - reach - 1.0, scroll + ctx.far.min(80.0) + 1.0).into_iter().flat_map(|(s0, e)| {
+                    let v = b.within(scroll + lo - 1.0, scroll + hi + 1.0).into_iter().flat_map(|(s0, e)| {
                         let kb = ((s0 - b.offset) / b.period).round() as i64;
                         b.post_places(s0, e).into_iter().enumerate().map(move |(j, w)| (kb.rem_euclid(per) * 16 + j as i64, w - scroll))
                     }).collect();
@@ -1913,7 +1938,7 @@ impl WorldRenderer {
                     let d = if on_posts.is_some() { d0 } else {
                         d0 + if si == 1 { stagger * sp } else { 0.0 } + if along > 0.0 { (hf(seed ^ 0x9A, skey) - 0.5) * along * sp } else { 0.0 }
                     };
-                    if (shifted || on_posts.is_some()) && (d < -reach || d > ctx.far.min(80.0)) { continue; }
+                    if (shifted || on_posts.is_some()) && (d < lo || d > hi) { continue; }
                     match f.place {
                         _ if on_posts.is_some() => {}
                         LightPlace::Bridges if !ctx.on_bridge(d) => continue,
@@ -1947,6 +1972,7 @@ impl WorldRenderer {
                             (sign * hw * 0.6 + jx, (top - 0.55 * size).min(f.height.max(0.3)))
                         }
                     };
+                    if ctx.cut_away(x) { continue; }
                     // Over a bridge's gap there is no ground beside the path: a lamp that stood there
                     // hangs on the railing instead, so the rhythm of light carries across.
                     if matches!(f.mount, Mount::Wall) && scene.walls.enabled && sign != 0.0
@@ -2095,14 +2121,16 @@ impl WorldRenderer {
         let scene = ctx.scene;
         for (wi, wf) in scene.waterfalls.iter().enumerate().filter(|(_, w)| w.enabled && w.height > 0.0) {
             let sp = snap_to_loop(wf.spacing.max(5.0), ctx.loop_len);
-            let k_lo = ((ctx.scroll - 2.0 - wf.offset) / sp).ceil() as i64;
-            let k_hi = ((ctx.scroll + ctx.far.min(150.0) - wf.offset) / sp).floor() as i64;
+            let (lo, hi) = ctx.span(-2.0, ctx.far.min(150.0));
+            let k_lo = ((ctx.scroll + lo - wf.offset) / sp).ceil() as i64;
+            let k_hi = ((ctx.scroll + hi - wf.offset) / sp).floor() as i64;
             let n = (ctx.loop_len / sp).round() as i64;
             for k in k_lo..=k_hi {
                 let d = k as f32 * sp + wf.offset - ctx.scroll;
-                if d < NEAR { continue; }
+                if !ctx.view.turned && d < NEAR { continue; }
                 for &sign in wf.side.signs() {
                     let x = sign * (ctx.view.path_half_width(d) + wf.lateral + 0.5 * wf.width);
+                    if ctx.cut_away(x - sign * 0.5 * wf.width) || ctx.view.depth_of(x, d) < NEAR { continue; }
                     let h = wf.height.max(0.5);
                     let sprite = self.sprites.cliff(wf.rock, hash(wf.seed ^ 0xC2, k.rem_euclid(n)) as u32);
                     let base = -0.05;
@@ -2125,9 +2153,12 @@ impl WorldRenderer {
         for (li, p) in scene.set_pieces.iter().enumerate().filter(|(_, p)| p.enabled) {
             let sp = snap_to_loop(p.spacing.max(1.0), ctx.loop_len);
             let n = (ctx.loop_len / sp).round() as i64;
+            // (Seen from the side, a piece spanning the path would stand between the camera and it.)
+            if scene.camera.side_view() { continue; }
             // Portals light the path a little before they come into view.
-            let k_lo = ((ctx.scroll - 6.0 - p.offset) / sp).ceil() as i64;
-            let k_hi = ((ctx.scroll + far - p.offset) / sp).floor() as i64;
+            let (lo, hi) = ctx.span(-6.0, far);
+            let k_lo = ((ctx.scroll + lo - p.offset) / sp).ceil() as i64;
+            let k_hi = ((ctx.scroll + hi - p.offset) / sp).floor() as i64;
             let seed = p.seed.wrapping_add(li as u32 * 7_919);
             for k in k_lo..=k_hi {
                 let d = k as f32 * sp + p.offset - ctx.scroll;
@@ -2148,7 +2179,7 @@ impl WorldRenderer {
                         radius: (ow + oh).max(4.0),
                     });
                 }
-                if d < NEAR + 0.2 { continue; }
+                if ctx.view.depth_of(0.0, d) < NEAR + 0.2 { continue; }
                 let file = p.sprite.path.trim();
                 let (sprite, height) = if !file.is_empty() {
                     match self.sprites.file(opts.base_dir.as_deref(), file) {
@@ -2225,8 +2256,9 @@ impl WorldRenderer {
             let sp = snap_to_loop(p.spacing, ctx.loop_len);
             let n = (ctx.loop_len / sp).round() as i64;
             // (One place more at each end: a prop shifted along the path can stand in view when its place does not.)
-            let k_lo = ((ctx.scroll + NEAR - p.offset) / sp).ceil() as i64 - 2;
-            let k_hi = ((ctx.scroll + far - p.offset) / sp).floor() as i64 + 1;
+            let (lo, hi) = ctx.span(NEAR, far);
+            let k_lo = ((ctx.scroll + lo - p.offset) / sp).ceil() as i64 - 2;
+            let k_hi = ((ctx.scroll + hi - p.offset) / sp).floor() as i64 + 1;
             let (along, stagger) = (p.jitter_along.clamp(0.0, 1.0), p.stagger.clamp(0.0, 1.0));
             let seed = p.seed.wrapping_add(li as u32 * 104_729);
             let hanging = look.hanging && ceiling.is_some();
@@ -2241,7 +2273,7 @@ impl WorldRenderer {
                         // Rows further out are staggered along the path so they do not line up.
                         let shift = if row > 0 { along.max(0.8) } else { along };
                         let d = d0 + if si == 1 { stagger * sp } else { 0.0 } + if shift > 0.0 { (hf(seed ^ 0x9A, ikey) - 0.5) * sp * shift } else { 0.0 };
-                        if d < NEAR || d > far { continue; }
+                        if !ctx.view.turned && (d < NEAR || d > far) { continue; }
                         let jit = (hf(seed ^ 0x1F, ikey) * 2.0 - 1.0) * p.jitter;
                         let edge = ctx.view.path_half_width(d);
                         // Round the path on a ring: each strand winds along it as a screw's thread does, and
@@ -2263,6 +2295,7 @@ impl WorldRenderer {
                             None if sign == 0.0 => p.lateral + jit,
                             None => sign * (edge + p.lateral + row as f32 * p.row_spacing + jit),
                         };
+                        if ctx.view.turned && (ctx.cut_away(x) || ctx.view.depth_of(x, d) < NEAR || d < lo || d > hi) { continue; }
                         // Nothing stands beside the deck of a bridge: the ground there has fallen away.
                         let floating = p.float > 0.0 || ring.is_some();
                         if ctx.on_bridge(d) && x.abs() > edge - 0.05 && !floating { continue; }
@@ -2637,23 +2670,27 @@ fn build_geometry(ctx: &Ctx, layers: &Layers) -> Vec<Tri> {
     // Open flight: no ground at all, so nothing of the path, its verge or its bridges is built.
     let ground_layer = Layers { ground: layers.ground && s.path.surface, ..*layers };
     let layers = &ground_layer;
-    let mut ds = vec![NEAR];
-    while *ds.last().unwrap() < ctx.far {
+    // A turned camera sees the path behind where it stands and to either side: the ground is cut
+    // from the near end of what it sees to the far end, finer close to the camera.
+    let (lo, hi) = if v.turned { (ctx.d_lo, ctx.d_hi) } else { (NEAR, ctx.far) };
+    let mut ds = vec![lo];
+    while *ds.last().unwrap() < hi {
         let d = *ds.last().unwrap();
         // (Fine enough to follow the bends of a winding path.)
-        ds.push(d + (d * 0.05).max(0.05).min(v.wind_length().map_or(f32::MAX, |l| l / 24.0)));
+        let near = if v.turned { d.abs().max(v.cam_x.abs()) } else { d };
+        ds.push(d + (near * 0.05).max(0.05).min(v.wind_length().map_or(f32::MAX, |l| l / 24.0)));
     }
     // Bridges: surfaces are cut where each one starts and ends, so a quad is either over the gap or not.
-    let spans: Vec<(f32, f32)> = ctx.bridge.map(|b| b.within(v.scroll, v.scroll + ctx.far).into_iter().map(|(s, e)| (s - v.scroll, e - v.scroll)).collect()).unwrap_or_default();
+    let spans: Vec<(f32, f32)> = ctx.bridge.map(|b| b.within(v.scroll + lo.min(0.0), v.scroll + hi).into_iter().map(|(s, e)| (s - v.scroll, e - v.scroll)).collect()).unwrap_or_default();
     let walls_on = s.walls.enabled && layers.walls;
     let openings: Vec<(f32, f32, f32)> = match (&ctx.fork, walls_on) {
-        (Some(f), true) => f.openings(v.scroll, v.scroll + ctx.far).into_iter().map(|(a, b, side)| (a - v.scroll, b - v.scroll, side)).collect(),
+        (Some(f), true) => f.openings(v.scroll + lo.min(0.0), v.scroll + hi).into_iter().map(|(a, b, side)| (a - v.scroll, b - v.scroll, side)).collect(),
         _ => Vec::new(),
     };
     let cuts: Vec<f32> = spans.iter().flat_map(|&(s, e)| [s, e]).chain(openings.iter().flat_map(|&(a, b, _)| [a, b]))
-        .filter(|&c| c > NEAR && c < ctx.far).collect();
+        .filter(|&c| c > lo && c < hi).collect();
     if !cuts.is_empty() {
-        ds.retain(|&x| x == NEAR || cuts.iter().all(|&c| (x - c).abs() > 0.01));
+        ds.retain(|&x| x == lo || cuts.iter().all(|&c| (x - c).abs() > 0.01));
         ds.extend(&cuts);
         ds.sort_by(|a, b| a.partial_cmp(b).unwrap());
     }
@@ -2661,12 +2698,12 @@ fn build_geometry(ctx: &Ctx, layers: &Layers) -> Vec<Tri> {
     // before a riser ends a hair short of it (on the lower step); the riser face fills the gap.
     const STEP_EPS: f32 = 1e-3;
     let risers: Vec<f32> = match &v.stairs {
-        Some(st) => st.risers(v.scroll + NEAR + STEP_EPS, v.scroll + ctx.far).into_iter().map(|e| e - v.scroll).collect(),
+        Some(st) => st.risers(v.scroll + lo + STEP_EPS, v.scroll + hi).into_iter().map(|e| e - v.scroll).collect(),
         None => Vec::new(),
     };
     if !risers.is_empty() {
         // Make room so each riser's two cuts stay exactly as computed: the riser below reuses them.
-        ds.retain(|&x| x == NEAR || risers.iter().all(|&r| (x - r).abs() > 0.01 && (x - (r - STEP_EPS)).abs() > 0.01));
+        ds.retain(|&x| x == lo || risers.iter().all(|&r| (x - r).abs() > 0.01 && (x - (r - STEP_EPS)).abs() > 0.01));
         ds.extend(risers.iter().flat_map(|&d| [d - STEP_EPS, d]));
         ds.sort_by(|a, b| a.partial_cmp(b).unwrap());
     }
@@ -2675,8 +2712,11 @@ fn build_geometry(ctx: &Ctx, layers: &Layers) -> Vec<Tri> {
     let walls = s.walls.enabled && layers.walls;
     let top = ctx.wall_top();
     let ext = |d: f32| {
-        if walls { ctx.wall_x(d) } else if s.verge.enabled { wide(d) } else { v.path_half_width(d) + s.path.edge_noise.abs() }
+        if walls { ctx.wall_x(d) } else if s.verge.enabled { if v.turned { ctx.x_reach } else { wide(d) } } else { v.path_half_width(d) + s.path.edge_noise.abs() }
     };
+    // A side view cuts away what stands between the camera and the path: the wall and the ceiling.
+    let side = s.camera.side_view();
+    let near_side = if v.cam_x != 0.0 { v.cam_x.signum() } else { -v.yaw_s.signum() };
     let mut tris = Vec::with_capacity(ds.len() * 8);
     if layers.ground {
         for &d in &risers {
@@ -2693,15 +2733,17 @@ fn build_geometry(ctx: &Ctx, layers: &Layers) -> Vec<Tri> {
         for &(s0, e) in &spans {
             // The far side of the gap, facing the camera: its top edge is the near edge of the ground
             // beyond, its foot the far edge of the bottom, so the three meet without cracks.
-            if e > NEAR && e < ctx.far {
-                let (h, x) = (v.path_half_width(e), ext(e));
+            // (A turned camera sees the near side of the gap too, facing the other way.)
+            for (at, show) in [(e, e > NEAR && e < ctx.far), (s0, v.turned)] {
+                if !show || at < lo || at > hi { continue; }
+                let (h, x) = (v.path_half_width(at), ext(at));
                 if x > h + 1e-4 {
                     for sign in [-1.0f32, 1.0] {
-                        raster::quad(&mut tris, [vert(sign * h, -b.floor, e), vert(sign * x, -b.floor, e), vert(sign * x, 0.0, e), vert(sign * h, 0.0, e)], id::CLIFF);
+                        raster::quad(&mut tris, [vert(sign * h, -b.floor, at), vert(sign * x, -b.floor, at), vert(sign * x, 0.0, at), vert(sign * h, 0.0, at)], id::CLIFF);
                     }
                 }
             }
-            railing(v, b, s0, e, &ds, ctx.far, &mut tris);
+            railing(v, b, s0, e, &ds, (if v.turned { lo } else { NEAR }, hi), &mut tris);
         }
     }
     if layers.ground { fences(ctx, &ds, &mut tris); }
@@ -2711,7 +2753,7 @@ fn build_geometry(ctx: &Ctx, layers: &Layers) -> Vec<Tri> {
         let h = passage_h.unwrap_or(top);
         for &(_, e, side) in &openings {
             // The far post of each opening faces the camera; the near one faces away and is never seen.
-            if e <= NEAR || e >= ctx.far { continue; }
+            if e <= lo || e >= hi { continue; }
             let (wx, px) = (side * ctx.wall_x(e), side * (ctx.wall_x(e) + f.depth));
             // It faces the camera like the far side of a bridge's gap, and is shaded as such.
             raster::quad(&mut tris, [vert(wx, 0.0, e), vert(px, 0.0, e), vert(px, h, e), vert(wx, h, e)], id::CLIFF);
@@ -2748,6 +2790,7 @@ fn build_geometry(ctx: &Ctx, layers: &Layers) -> Vec<Tri> {
             let open = ctx.fork.filter(|_| !openings.is_empty());
             let mid = v.scroll + 0.5 * (d0 + d1);
             for (sign, wid) in [(-1.0f32, id::WALL_L), (1.0, id::WALL_R)] {
+                if side && sign == near_side { continue; }
                 let (x0, x1) = (sign * ctx.wall_x(d0), sign * ctx.wall_x(d1));
                 if let Some(f) = open.filter(|f| f.opens(mid, sign)) {
                     // A side passage: floor and ceiling run back into the dark, a lintel above.
@@ -2774,9 +2817,9 @@ fn build_geometry(ctx: &Ctx, layers: &Layers) -> Vec<Tri> {
                 }
             }
         }
-        if s.ceiling.enabled && layers.walls {
+        if s.ceiling.enabled && layers.walls && !side {
             let ch = s.ceiling.height.max(0.2);
-            let ext = |d: f32| if walls { ctx.wall_x(d) } else { wide(d) };
+            let ext = |d: f32| if walls { ctx.wall_x(d) } else if v.turned { ctx.x_reach } else { wide(d) };
             let (e0, e1) = (ext(d0), ext(d1));
             raster::quad(&mut tris, [vert(-e0, ch, d0), vert(-e1, ch, d1), vert(e1, ch, d1), vert(e0, ch, d0)], id::CEILING);
         }
@@ -2795,7 +2838,8 @@ pub(crate) fn fence_paint(s: &Scene) -> [f32; 3] {
 /// path's edge, built from the faces the camera can see, as a bridge's railing is.
 fn fences(ctx: &Ctx, ds: &[f32], tris: &mut Vec<Tri>) {
     let v = &ctx.view;
-    let far = ctx.far.min(120.0);
+    let far = if v.turned { ctx.d_hi } else { ctx.far.min(120.0) };
+    let near = if v.turned { ctx.d_lo } else { NEAR };
     let vert = |x: f32, y: f32, d: f32| Vert { cam: v.to_cam(x, y, d), world: [x, y, d] };
     for f in ctx.scene.fences.iter().filter(|f| f.enabled && f.height > 0.0) {
         let sp = snap_to_loop(f.spacing.max(1.0), ctx.loop_len);
@@ -2805,7 +2849,7 @@ fn fences(ctx: &Ctx, ds: &[f32], tris: &mut Vec<Tri>) {
         let base = |d: f32| v.path_half_width(d) + f.lateral;
         // A box over [d0, d1] standing `xi`..`xo` metres out from the fence's line.
         let block = |tris: &mut Vec<Tri>, sign: f32, d0: f32, d1: f32, xi: f32, xo: f32, y0: f32, y1: f32, m: u8| {
-            if d0 < NEAR || d0 > far { return; }
+            if d0 < near || d0 > far { return; }
             let h = base(0.5 * (d0 + d1));
             let (a, c) = (sign * (h + xi), sign * (h + xo));
             raster::quad(tris, [vert(a, y0, d0), vert(c, y0, d0), vert(c, y1, d0), vert(a, y1, d0)], id::rail(m, id::FRONT));
@@ -2815,7 +2859,7 @@ fn fences(ctx: &Ctx, ds: &[f32], tris: &mut Vec<Tri>) {
         };
         // A long box from `a` to `b` along the line, cut where the ground is so it bends with it.
         let run = |tris: &mut Vec<Tri>, sign: f32, a: f32, b: f32, xi: f32, xo: f32, y0: f32, y1: f32, m: u8| {
-            let (lo, hi) = (a.max(NEAR), b.min(far));
+            let (lo, hi) = (a.max(near), b.min(far));
             if hi <= lo { return; }
             let mut cuts: Vec<f32> = ds.iter().copied().filter(|&d| d > lo && d < hi).collect();
             cuts.push(lo);
@@ -2823,7 +2867,7 @@ fn fences(ctx: &Ctx, ds: &[f32], tris: &mut Vec<Tri>) {
             cuts.sort_by(|p, q| p.partial_cmp(q).unwrap());
             cuts.dedup_by(|p, q| (*p - *q).abs() < 1e-3);
             let at = |d: f32| (sign * (base(d) + xi), sign * (base(d) + xo));
-            if a >= NEAR {
+            if a >= near {
                 let (i, o) = at(a);
                 raster::quad(tris, [vert(i, y0, a), vert(o, y0, a), vert(o, y1, a), vert(i, y1, a)], id::rail(m, id::FRONT));
             }
@@ -2836,16 +2880,17 @@ fn fences(ctx: &Ctx, ds: &[f32], tris: &mut Vec<Tri>) {
         };
         let ht = f.height;
         let (paint, wood) = (id::FENCE, id::WOOD);
-        let k_lo = ((ctx.scroll - len - f.offset) / sp).floor() as i64;
+        let k_lo = ((ctx.scroll + near.min(0.0) - len - f.offset) / sp).floor() as i64;
         let k_hi = ((ctx.scroll + far - f.offset) / sp).ceil() as i64;
         for k in k_lo..=k_hi {
             let a = k as f32 * sp + f.offset - ctx.scroll;
             let b = a + len;
-            if b < NEAR || a > far { continue; }
+            if b < near || a > far { continue; }
             // Not over a bridge's drop.
             if ctx.on_bridge(0.5 * (a + b)) { continue; }
             let posts = ((len / f.post_spacing.max(0.5)).round() as usize).max(1);
             for sign in f.side.signs().iter().copied() {
+                if ctx.cut_away(sign * (ctx.view.half_width + f.lateral)) { continue; }
                 let (pw, pm) = match f.style { FenceStyle::Rails => (0.12, wood), _ => (0.09, paint) };
                 // Posts (a joined fence's last post is the next run's first).
                 let last = if joined { posts - 1 } else { posts };
@@ -2884,7 +2929,7 @@ fn fences(ctx: &Ctx, ds: &[f32], tris: &mut Vec<Tri>) {
 /// One bridge's railings, both sides. Every part is a box built from the faces the camera can
 /// see (its far end always faces away), so it reads as solid from any bend of the path, and each
 /// face carries its own id, so it is lit with its own normal.
-fn railing(v: &View, b: Spans, s0: f32, e: f32, ds: &[f32], far: f32, tris: &mut Vec<Tri>) {
+fn railing(v: &View, b: Spans, s0: f32, e: f32, ds: &[f32], (near, far): (f32, f32), tris: &mut Vec<Tri>) {
     if b.railing == Railing::None { return; }
     let rh = b.rail_h;
     // The railing stands on the deck: its outer face flush with the deck's edge.
@@ -2892,7 +2937,7 @@ fn railing(v: &View, b: Spans, s0: f32, e: f32, ds: &[f32], far: f32, tris: &mut
     let vert = |x: f32, y: f32, d: f32| Vert { cam: v.to_cam(x, y, d), world: [x, y, d] };
     // A box over [d0, d1] whose sides stand `xi` and `xo` metres out from the deck's edge.
     let block = |tris: &mut Vec<Tri>, sign: f32, d0: f32, d1: f32, xi: f32, xo: f32, y0: f32, y1: f32, m: u8| {
-        if d0 < NEAR || d0 > far { return; }
+        if d0 < near || d0 > far { return; }
         let h = v.path_half_width(0.5 * (d0 + d1)) - inset;
         let (a, c) = (sign * (h + xi), sign * (h + xo));
         raster::quad(tris, [vert(a, y0, d0), vert(c, y0, d0), vert(c, y1, d0), vert(a, y1, d0)], id::rail(m, id::FRONT));
@@ -2903,7 +2948,7 @@ fn railing(v: &View, b: Spans, s0: f32, e: f32, ds: &[f32], far: f32, tris: &mut
     // A long box from `a` to `b` that follows the deck's edge, cut where the ground is so it bends
     // with the path; `sag` lets a rope hang between its ends.
     let run = |tris: &mut Vec<Tri>, sign: f32, a: f32, b: f32, xi: f32, xo: f32, y0: f32, y1: f32, sag: f32, m: u8| {
-        let (lo, hi) = (a.max(NEAR), b.min(far));
+        let (lo, hi) = (a.max(near), b.min(far));
         if hi <= lo { return; }
         let pieces = if sag > 0.0 { 8 } else { 1 };
         let mut cuts: Vec<f32> = (0..=pieces).map(|k| a + (b - a) * k as f32 / pieces as f32).filter(|&c| c > lo && c < hi).collect();
@@ -2917,7 +2962,7 @@ fn railing(v: &View, b: Spans, s0: f32, e: f32, ds: &[f32], far: f32, tris: &mut
             let (h, dip) = (v.path_half_width(d) - inset, sag * 4.0 * t * (1.0 - t));
             (sign * (h + xi), sign * (h + xo), y0 - dip, y1 - dip)
         };
-        if a >= NEAR {
+        if a >= near {
             let (i, o, l, u) = at(a);
             raster::quad(tris, [vert(i, l, a), vert(o, l, a), vert(o, u, a), vert(i, u, a)], id::rail(m, id::FRONT));
         }
@@ -3320,7 +3365,7 @@ fn shade_px(ctx: &Ctx, g: &GPixel, gbuf: &[GPixel], i: usize, x: usize, y: usize
         let footprint = (p[2] * p[2] / (ctx.view.focal_px * eye)).max(p[2] / ctx.view.focal_px);
         let (sx, sz) = ripple_slope(ctx, g.x, ctx.scroll + g.d, ripples, footprint);
         let (sx, sz) = (sx + rings.0, sz + rings.1);
-        let n = { let n = [-sx, 1.0, -sz]; let l = dot3(n, n).sqrt(); [n[0] / l, n[1] / l, n[2] / l] };
+        let n = { let n = [-sx, 1.0, -sz]; let l = dot3(n, n).sqrt(); ctx.view.rot_dir([n[0] / l, n[1] / l, n[2] / l]) };
         let ndv = dot3(n, v).max(1e-3);
         let fres = |c: f32| 0.02 + 0.98 * (1.0 - c).max(0.0).powi(5);
         let r = gloss * fres(ndv);
@@ -3357,7 +3402,7 @@ fn shade_px(ctx: &Ctx, g: &GPixel, gbuf: &[GPixel], i: usize, x: usize, y: usize
             let dist = d2.sqrt().max(1e-4);
             lobe([lp[0] / dist, lp[1] / dist, lp[2] / dist], pl.color, wgt * wgt / (1.0 + 0.3 * d2));
         }
-        for sl in &ctx.sky_lights { lobe(sl.dir, sl.color, sun_mask[i]); }
+        for sl in &ctx.sky_lights { lobe(ctx.view.rot_dir(sl.dir), sl.color, sun_mask[i]); }
         c = add3(add3(scale3(c, 1.0 - r), scale3(env, r)), spec);
         rf = Refl { r: r * ctx.fog_t(g.depth), env: scale3(env, ctx.gain), rough, sx };
     }
@@ -3488,6 +3533,7 @@ fn gpu_params(ctx: &Ctx, layers: &Layers) -> super::gpu::WorldParams {
         ww_kind: ctx.water.map_or(0, |k| k.kind), ww_dens: ctx.water.map_or(0.0, |k| k.dens), ww_fcol: ctx.water.map_or([0.0; 3], |k| k.fcol),
         ww_fsize: ctx.water.map_or(1.0, |k| k.fsize), ww_period: ctx.water.map_or(1.0, |k| k.period), ww_cs: ctx.water.map_or(1.0, |k| k.cs), ww_seed: ctx.water.map_or(0, |k| k.seed),
         br_inset: ctx.bridge.map_or(0.0, |b| b.rail_inset()), ww_frozen: ctx.water.map_or(0.0, |k| k.frozen), ww_hw: ctx.water.map_or(1.0, |k| k.hw), fence: fence_paint(s), spare: [0.0; 2], wind: v.wind_now(), gc_n: ctx.cover.len() as u32, gc_sway: ctx.wx.sway_parts().0, gc_lean: ctx.wx.sway_parts().1, gc_phase: ctx.wx.sway_parts().2, gc: { let mut a = [[0.0f32; 4]; 12]; for (i, k) in ctx.cover.iter().enumerate() { a[i * 4..i * 4 + 4].copy_from_slice(&k.rec()); } a },
+        cam_yc: v.yaw_c, cam_ys: v.yaw_s, cam_x: v.cam_x, cam_turned: v.turned as u32,
         ..bytemuck::Zeroable::zeroed()
     }
 }
@@ -5059,9 +5105,10 @@ fn draw_falls(ctx: &Ctx, out: &mut Vec<Splat>) {
         let width = *width;
         let lit = add3(ctx.light_at(x0, 0.5 * top, d, None, 0, 1.0), [0.1; 3]);
         // Deep water is the water's colour; broken into foam it is nearly white.
-        let water = ctx.apply_fog(mul3(rgb_lin(wf.water), lit), d);
-        let white = ctx.apply_fog(mul3(mix3(rgb_lin(wf.water), [1.0; 3], 0.7), lit), d);
-        let glass = ctx.apply_fog(mul3(scale3(rgb_lin(wf.water), 0.55), lit), d);
+        let dz = v.depth_of(x0, d);
+        let water = ctx.apply_fog(mul3(rgb_lin(wf.water), lit), dz);
+        let white = ctx.apply_fog(mul3(mix3(rgb_lin(wf.water), [1.0; 3], 0.7), lit), dz);
+        let glass = ctx.apply_fog(mul3(scale3(rgb_lin(wf.water), 0.55), lit), dz);
         let ppm = v.px_per_m(d.max(NEAR));
         let h = |k: u32, i: i64| hf(wf.seed ^ k, i);
         // The curtain, water drawn pixel by pixel (splat::fall_at): it speeds up as it falls
@@ -5135,7 +5182,7 @@ fn draw_falls(ctx: &Ctx, out: &mut Vec<Splat>) {
             puff(out, c, r, 0.8, ctx.apply_fog(mul3([0.93, 0.96, 1.0], lit), c[2]), 0.3 * spray * (1.0 - p) * (p / 0.1).min(1.0));
         }
         // A haze of fine mist over the lower part of the fall.
-        puff(out, v.to_cam(x0, 0.3 * top, d - 0.5), ppm * width * 1.6, 0.9, ctx.apply_fog(mul3([0.9, 0.93, 0.97], lit), d), 0.12 * spray);
+        puff(out, v.to_cam(x0, 0.3 * top, d - 0.5), ppm * width * 1.6, 0.9, ctx.apply_fog(mul3([0.9, 0.93, 0.97], lit), dz), 0.12 * spray);
         // A rainbow in the spray, low over the foot.
         if sun && wf.rainbow > 0.0 {
             let rad = width * 0.9;
@@ -5174,18 +5221,19 @@ fn draw_cascades(ctx: &Ctx, out: &mut Vec<Splat>) {
     let dir = if ww.flow < 0 { 1.0 } else { -1.0 };
     let foam = rgb_lin(ww.foam_color);
     let offset = 0.37 * sp;
-    let k_lo = ((ctx.scroll - 3.0 - offset) / sp).ceil() as i64;
-    let k_hi = ((ctx.scroll + ctx.far.min(120.0) - offset) / sp).floor() as i64;
+    let (lo, hi) = ctx.span(-3.0, ctx.far.min(120.0));
+    let k_lo = ((ctx.scroll + lo - offset) / sp).ceil() as i64;
+    let k_hi = ((ctx.scroll + hi - offset) / sp).floor() as i64;
     let cyc = cycles(1.1, loop_seconds).max(1.0);
     let fc = cycles(0.35, loop_seconds).max(1.0);
     for k in k_lo..=k_hi {
         let d = k as f32 * sp + offset - ctx.scroll;
-        if d < NEAR { continue; }
+        if !v.turned && d < NEAR { continue; }
         let seed = ww.seed ^ hash(0xCA5C, k.rem_euclid(n)) as u32;
         let hw = v.path_half_width(d).max(0.3);
         let ridge = 0.08 + 0.3 * size;
         let lit = add3(ctx.light_at(0.0, 0.2, d, None, 0, 1.0), [0.08; 3]);
-        let col = ctx.apply_fog(mul3(foam, lit), d);
+        let col = ctx.apply_fog(mul3(foam, lit), v.depth_of(0.0, d).max(NEAR));
         let cols = ((hw * 2.0 * 18.0).round() as i64).clamp(12, 220);
         for i in 0..cols {
             let h = |q: u32| hf(seed ^ q, i);
@@ -5296,8 +5344,10 @@ fn draw_tufts(ctx: &Ctx, out: &mut Vec<Splat>) {
     let sp = snap_to_loop(0.22 / s.verge.tuft_density.clamp(0.1, 4.0), ctx.loop_len);
     let n = (ctx.loop_len / sp).round() as i64;
     let range = ctx.far.min(30.0);
-    let k_lo = ((ctx.scroll + 0.3) / sp).ceil() as i64;
-    let k_hi = ((ctx.scroll + range) / sp).floor() as i64;
+    let (lo, hi) = ctx.span(0.3, range);
+    let (lo, hi) = if v.turned { (lo.max(-range), hi.min(range)) } else { (lo, hi) };
+    let k_lo = ((ctx.scroll + lo) / sp).ceil() as i64;
+    let k_hi = ((ctx.scroll + hi) / sp).floor() as i64;
     let base = rgb_lin(s.verge.tuft_color);
     for k in (k_lo..=k_hi).rev() {
         let key = k.rem_euclid(n);
@@ -5309,6 +5359,7 @@ fn draw_tufts(ctx: &Ctx, out: &mut Vec<Splat>) {
             let x = sign * (ctx.path_edge(d) + (hf(0x7B, ikey) - 0.3) * 0.18);
             if ctx.on_fork(x, d) || !ctx.owns(x, 0.0, d) { continue; }
             let c = v.to_cam(x, 0.0, d);
+            if c[2] < NEAR { continue; }
             let Some([sx, sy]) = v.project(c) else { continue };
             let hp = v.px_per_m(c[2]) * s.verge.tuft_height * (0.6 + 0.8 * hf(0x7C, ikey));
             if hp < 0.8 || sy < 0.0 || sx < -hp || sx > w as f32 + hp { continue; }
@@ -5335,7 +5386,10 @@ fn draw_particles(ctx: &Ctx, p: &Particles, loop_seconds: f32, out: &mut Vec<Spl
     let top = if s.ceiling.enabled { s.ceiling.height } else if s.walls.enabled && s.walls.height > 0.0 { s.walls.height.min(8.0) } else { 6.0 };
     let color = rgb_lin(p.color);
     let range = ctx.far.min(36.0);
-    let copies = (range / ctx.loop_len).ceil() as i64 + 1;
+    // (A turned camera sees them behind where it stands too.)
+    let lo = if v.turned { ctx.d_lo.max(-range) } else { 0.0 };
+    let hi = if v.turned { ctx.d_hi.min(range) } else { range };
+    let copies = ((hi - lo) / ctx.loop_len).ceil() as i64 + 1;
     let speed = p.speed.max(0.0);
     let (rate, size_m, emissive, streak) = match p.kind {
         ParticleKind::Dust => (0.05, 0.012, false, false),
@@ -5396,12 +5450,13 @@ fn draw_particles(ctx: &Ctx, p: &Particles, loop_seconds: f32, out: &mut Vec<Spl
         if p.kind == ParticleKind::Petals { life *= 0.45 + 0.55 * (TAU * cycles(0.8, loop_seconds) * t + ph * 3.0).sin().abs(); }
         if life <= 0.0 { continue; }
         for cpy in 0..copies {
-            let d = (d0 - ctx.scroll).rem_euclid(ctx.loop_len) + cpy as f32 * ctx.loop_len;
-            if d < 0.3 || d > range { continue; }
+            let d = lo + (d0 - ctx.scroll - lo).rem_euclid(ctx.loop_len) + cpy as f32 * ctx.loop_len;
+            if if v.turned { d > hi } else { d < 0.3 || d > range } { continue; }
             // Blown out of the band at one side, back in at the other.
             let x = if sideways { x0 + dx } else { (x0 + dx + lat).rem_euclid(2.0 * lat) - lat };
             if !ctx.owns(x, y, d) { continue; }
             let c = v.to_cam(x, y, d);
+            if v.turned && c[2] < 0.3 { continue; }
             let Some([sx, sy]) = v.project(c) else { continue };
             let r = (v.px_per_m(c[2]) * size_m * p.size).max(0.5);
             let fade = ctx.fog_t(c[2]) * ctx.gain;
@@ -5827,7 +5882,7 @@ mod tests {
             let opts = RenderOptions { size: Some((90, 160)), layers: Layers { particles: false, post: false, ..Layers::default() }, ..RenderOptions::default() };
             let ctx_view = View::new(&s, 90, 160).at(k as f32 * 0.7);
             let ctx = Ctx {
-                scene: &s, view: ctx_view, loop_len: 24.0, tphase: 0.0, scroll: k as f32 * 0.7, far: 320.0,
+                scene: &s, view: ctx_view, loop_len: 24.0, tphase: 0.0, scroll: k as f32 * 0.7, far: 320.0, d_lo: 0.0, d_hi: 320.0, x_reach: 0.0,
                 path_tex: r.textures.get(&s.path.material), verge_tex: r.textures.get(&s.verge.material),
                 wall_tex: r.textures.get(&s.walls.material), ceil_tex: r.textures.get(&s.ceiling.material),
                 path_tile: 1.0, verge_tile: 1.0, wall_tile: 1.0, ceil_tile: 1.0,
@@ -5947,7 +6002,7 @@ mod tests {
         let mut r = WorldRenderer::default();
         let mut frame = |s: &Scene, scroll: f32| {
             let ctx = Ctx {
-                scene: s, view: View::new(s, 90, 160).at(scroll), loop_len: 24.0, tphase: 0.0, scroll, far: 320.0,
+                scene: s, view: View::new(s, 90, 160).at(scroll), loop_len: 24.0, tphase: 0.0, scroll, far: 320.0, d_lo: 0.0, d_hi: 320.0, x_reach: 0.0,
                 path_tex: r.textures.get(&s.path.material), verge_tex: r.textures.get(&s.verge.material),
                 wall_tex: r.textures.get(&s.walls.material), ceil_tex: r.textures.get(&s.ceiling.material),
                 path_tile: 1.0, verge_tile: 1.0, wall_tile: 1.0, ceil_tile: 1.0,
@@ -5991,7 +6046,7 @@ mod tests {
         for k in 0..16 {
             let scroll = k as f32 * 0.77;
             let ctx = Ctx {
-                scene: &s, view: View::new(&s, 90, 160).at(scroll), loop_len: 24.0, tphase: 0.0, scroll, far: 320.0,
+                scene: &s, view: View::new(&s, 90, 160).at(scroll), loop_len: 24.0, tphase: 0.0, scroll, far: 320.0, d_lo: 0.0, d_hi: 320.0, x_reach: 0.0,
                 path_tex: r.textures.get(&s.path.material), verge_tex: r.textures.get(&s.verge.material),
                 wall_tex: r.textures.get(&s.walls.material), ceil_tex: r.textures.get(&s.ceiling.material),
                 path_tile: 1.0, verge_tile: 1.0, wall_tile: 1.0, ceil_tile: 1.0,
@@ -6024,7 +6079,7 @@ mod tests {
         let mut r = WorldRenderer::default();
         let gbuf_of = |r: &mut WorldRenderer, s: &Scene, scroll: f32| {
             let ctx = Ctx {
-                scene: s, view: View::new(s, 120, 214).at(scroll), loop_len: 24.0, tphase: 0.0, scroll, far: 320.0,
+                scene: s, view: View::new(s, 120, 214).at(scroll), loop_len: 24.0, tphase: 0.0, scroll, far: 320.0, d_lo: 0.0, d_hi: 320.0, x_reach: 0.0,
                 path_tex: r.textures.get(&s.path.material), verge_tex: r.textures.get(&s.verge.material),
                 wall_tex: r.textures.get(&s.walls.material), ceil_tex: r.textures.get(&s.ceiling.material),
                 path_tile: 1.0, verge_tile: 1.0, wall_tile: 1.0, ceil_tile: 1.0,
@@ -6117,7 +6172,7 @@ mod tests {
         let view = View::new(&s, w, h);
         let (hz, f, eye) = (view.horizon_px, view.focal_px, view.eye_height);
         let ctx = Ctx {
-            scene: &s, view: view.clone(), loop_len: 24.0, tphase: 0.0, scroll: 0.0, far: 320.0,
+            scene: &s, view: view.clone(), loop_len: 24.0, tphase: 0.0, scroll: 0.0, far: 320.0, d_lo: 0.0, d_hi: 320.0, x_reach: 0.0,
             path_tex: r.textures.get(&s.path.material), verge_tex: r.textures.get(&s.verge.material),
             wall_tex: r.textures.get(&s.walls.material), ceil_tex: r.textures.get(&s.ceiling.material),
             path_tile: 1.0, verge_tile: 1.0, wall_tile: 1.0, ceil_tile: 1.0,
@@ -6175,7 +6230,7 @@ mod tests {
         assert_eq!(Spans::new(&b, 24.0, &[lamp(3)]).unwrap().post_places(2.0, 12.0).len(), 5);
         // The railing gains a post for each light between the ends.
         let v = View::new(&preset("Forest Path"), 90, 160);
-        let tris = |fx: &[Fixture]| { let mut t = Vec::new(); railing(&v, Spans::new(&b, 24.0, fx).unwrap(), 2.0, 12.0, &[], 300.0, &mut t); t.len() };
+        let tris = |fx: &[Fixture]| { let mut t = Vec::new(); railing(&v, Spans::new(&b, 24.0, fx).unwrap(), 2.0, 12.0, &[], (NEAR, 300.0), &mut t); t.len() };
         assert!(tris(&[lamp(2)]) > tris(&[]), "posts between the ends add to the railing");
         // In a frame, a light on every post each side of the bridge in view.
         b.end_pillars = false;
@@ -6216,7 +6271,7 @@ mod tests {
         let view = View::new(&s, w, h);
         let (hz, f, eye) = (view.horizon_px, view.focal_px, view.eye_height);
         let ctx = Ctx {
-            scene: &s, view: view.clone(), loop_len: 24.0, tphase: 0.0, scroll: 0.0, far: 320.0,
+            scene: &s, view: view.clone(), loop_len: 24.0, tphase: 0.0, scroll: 0.0, far: 320.0, d_lo: 0.0, d_hi: 320.0, x_reach: 0.0,
             path_tex: r.textures.get(&s.path.material), verge_tex: r.textures.get(&s.verge.material),
             wall_tex: r.textures.get(&s.walls.material), ceil_tex: r.textures.get(&s.ceiling.material),
             path_tile: 1.0, verge_tile: 1.0, wall_tile: 1.0, ceil_tile: 1.0,
@@ -6283,7 +6338,7 @@ mod tests {
             let (bw, bh) = (v.width, v.height);
             let (hz, f, eye) = (v.horizon_px, v.focal_px, v.eye_height);
             let ctx = Ctx {
-                scene: &s, view: v, loop_len: 24.0, tphase: 0.0, scroll: 0.0, far: 320.0,
+                scene: &s, view: v, loop_len: 24.0, tphase: 0.0, scroll: 0.0, far: 320.0, d_lo: 0.0, d_hi: 320.0, x_reach: 0.0,
                 path_tex: r.textures.get(&s.path.material), verge_tex: r.textures.get(&s.verge.material),
                 wall_tex: r.textures.get(&s.walls.material), ceil_tex: r.textures.get(&s.ceiling.material),
                 path_tile: 1.0, verge_tile: 1.0, wall_tile: 1.0, ceil_tile: 1.0,
@@ -6681,5 +6736,29 @@ mod tests {
         let var = |img: &[u8]| { let v: Vec<f32> = (0..w).map(|x| img[(4 * w + x) * 4] as f32).collect(); let m = v.iter().sum::<f32>() / w as f32; v.iter().map(|a| (a - m).powi(2)).sum::<f32>() };
         assert!(var(&depth) <= var(&plain), "the far distance is softer");
         assert!(depth != plain);
+    }
+
+    #[test]
+    fn a_turned_camera_keeps_the_loop_and_a_side_view_cuts_away_its_near_side() {
+        let mut r = WorldRenderer::default();
+        for name in ["Village Side Scroll", "Village Corner"] {
+            let s = preset(name);
+            let (len, secs) = (s.motion.loop_length, s.motion.loop_seconds());
+            let o = |t: f32| RenderOptions { size: Some((96, 96)), time: Some(t), ..RenderOptions::default() };
+            assert_eq!(r.render(&s, 0.0, &o(0.0)).rgba, r.render(&s, len, &o(secs)).rgba, "{name}: the loop must close");
+            let mut straight = s.clone();
+            (straight.camera.yaw, straight.camera.side) = (0.0, 0.0);
+            assert!(r.render(&s, 3.0, &o(1.0)).rgba != r.render(&straight, 3.0, &o(1.0)).rgba, "{name}: the turn shows");
+        }
+        // Seen from the side, nothing on the camera's side of the path stands in the way.
+        let s = preset("Village Side Scroll");
+        let v = View::new(&s, 96, 54);
+        assert!(v.turned && s.camera.side_view());
+        let near = s.camera.side.signum();
+        // A point on the path ahead of the camera is in front of it; the ground behind it is not.
+        assert!(v.to_cam(0.0, 0.0, 0.0)[2] > 4.0 && v.to_cam(near * 12.0, 0.0, 0.0)[2] < 0.0);
+        // Looking down the path changes nothing: the view is the one it always was.
+        let d = View::new(&preset("Village Evening"), 96, 96);
+        assert!(!d.turned && d.to_cam(1.0, 2.0, 7.0)[2] == 7.0);
     }
 }

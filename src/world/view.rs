@@ -59,6 +59,17 @@ pub struct View {
     pub pan_px: f32,
     #[serde(skip)]
     pub pan_max: f32,
+    /// The camera turned (`camera.yaw`): its cosine and sine, and where it stands sideways
+    /// (`camera.side`, metres). `turned` is false for a camera looking straight down the path,
+    /// which then sees exactly what it always has.
+    #[serde(skip)]
+    pub yaw_c: f32,
+    #[serde(skip)]
+    pub yaw_s: f32,
+    #[serde(skip)]
+    pub cam_x: f32,
+    #[serde(skip)]
+    pub turned: bool,
 }
 
 /// Where one world gives way to the next, as the camera sees it this frame. Path width and ground
@@ -179,12 +190,17 @@ impl View {
         let zoom = scene.camera.zoom.clamp(0.1, 8.0);
         let focal_px = (h - horizon_px).max(1.0) * zoom;
         let eye_height = scene.camera.eye_height.clamp(0.05, 50.0);
+        let yaw = scene.camera.yaw.clamp(-90.0, 90.0).to_radians();
+        let turned = yaw != 0.0 || scene.camera.side != 0.0;
+        // A side view straightens the path: its bends would swing it toward and away from the camera.
+        let straight = scene.camera.side_view();
         View {
             width, height, horizon_px, center_px: width as f32 * 0.5, focal_px, eye_height,
-            bend: scene.path.bend.clamp(-2.0, 2.0), wind: winding(scene), hill: scene.path.hill.clamp(-2.0, 2.0),
+            bend: if straight { 0.0 } else { scene.path.bend.clamp(-2.0, 2.0) }, wind: if straight { [[0.0; 4]; 4] } else { winding(scene) }, hill: scene.path.hill.clamp(-2.0, 2.0),
             half_width: scene.path.half_width.clamp(0.05, 50.0), flare: scene.path.flare.clamp(0.0, 0.95),
             near_ground: eye_height * zoom, lens_curve: scene.camera.lens_curve.clamp(-1.0, 1.0),
             stairs: StairProfile::new(&scene.path.stairs, scene.motion.loop_length), scroll: 0.0, top: 0, left: 0, split: None, shear: None, pan_px: 0.0, pan_max: 0.0,
+            yaw_c: yaw.cos(), yaw_s: yaw.sin(), cam_x: if turned { scene.camera.side.clamp(-200.0, 200.0) } else { 0.0 }, turned,
         }
     }
 
@@ -290,7 +306,41 @@ impl View {
     /// World (x sideways, y up, d ahead) to camera space.
     #[inline]
     pub fn to_cam(&self, x: f32, y: f32, d: f32) -> [f32; 3] {
-        [x + self.bend_x(d) + self.shear_x(d), y - self.eye_height + self.hill_y(d) + self.lift(d), d]
+        let c = [x + self.bend_x(d) + self.shear_x(d), y - self.eye_height + self.hill_y(d) + self.lift(d), d];
+        if !self.turned { return c; }
+        // Turned: from where the camera stands, round the vertical by the yaw.
+        let px = c[0] - self.cam_x;
+        [self.yaw_c * px - self.yaw_s * c[2], c[1], self.yaw_s * px + self.yaw_c * c[2]]
+    }
+
+    /// A direction in the world (x, y, d) as the camera sees it (turned with it).
+    #[inline]
+    pub fn rot_dir(&self, v: [f32; 3]) -> [f32; 3] {
+        if !self.turned { return v; }
+        [self.yaw_c * v[0] - self.yaw_s * v[2], v[1], self.yaw_s * v[0] + self.yaw_c * v[2]]
+    }
+
+    /// How far ahead of the camera (its depth) a point on the ground at (x, d) is: `d` itself for
+    /// a camera looking down the path.
+    #[inline]
+    pub fn depth_of(&self, x: f32, d: f32) -> f32 { if self.turned { self.to_cam(x, 0.0, d)[2] } else { d } }
+
+    /// The stretch of the path (metres ahead of where the camera stands, from .. to) and how far
+    /// out to either side a turned camera can see out to `far`, with `margin` more all round.
+    pub fn footprint(&self, far: f32, margin: f32) -> (f32, f32, f32) {
+        if !self.turned { return (0.0, far, 0.0); }
+        // Half the field of view across, a little wider for the edges of tall things.
+        let half = ((self.width as f32 * 0.5 + self.pan_px.abs()) / self.focal_px).atan() + 0.12;
+        let yaw = self.yaw_s.atan2(self.yaw_c);
+        let (mut lo, mut hi, mut xs) = (0.0f32, 0.0f32, self.cam_x.abs());
+        for k in 0..=16 {
+            let a = yaw - half + 2.0 * half * k as f32 / 16.0;
+            let (dd, xx) = (far * a.cos(), self.cam_x + far * a.sin());
+            lo = lo.min(dd);
+            hi = hi.max(dd);
+            xs = xs.max(xx.abs());
+        }
+        (lo - margin, hi + margin, xs + margin)
     }
 
     /// Camera space to pixels; None behind the near plane.

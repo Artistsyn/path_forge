@@ -149,7 +149,33 @@ pub fn rasterize(gbuf: &mut [GPixel], w: usize, h: usize, tris: &[Tri], view: &s
 }
 
 /// Set up every triangle that shows (`rasterize`'s first half; the GPU rasterises from these too).
+/// A triangle cut where it passes behind the camera's near plane: none, one or two triangles,
+/// the cut vertices placed (in camera space and in the world alike) where each edge crosses it.
+fn clip_near(t: &Tri) -> Vec<Tri> {
+    let z = |v: &Vert| v.cam[2];
+    let n = super::view::NEAR;
+    if t.v.iter().all(|v| z(v) >= n) { return vec![*t]; }
+    if t.v.iter().all(|v| z(v) < n) { return Vec::new(); }
+    let mut poly: Vec<Vert> = Vec::with_capacity(4);
+    for i in 0..3 {
+        let (a, b) = (t.v[i], t.v[(i + 1) % 3]);
+        if z(&a) >= n { poly.push(a); }
+        if (z(&a) >= n) != (z(&b) >= n) {
+            let k = (n - z(&a)) / (z(&b) - z(&a));
+            let lerp = |p: [f32; 3], q: [f32; 3]| [p[0] + (q[0] - p[0]) * k, p[1] + (q[1] - p[1]) * k, p[2] + (q[2] - p[2]) * k];
+            let mut cam = lerp(a.cam, b.cam);
+            cam[2] = n;
+            poly.push(Vert { cam, world: lerp(a.world, b.world) });
+        }
+    }
+    (1..poly.len().saturating_sub(1)).map(|k| Tri { v: [poly[0], poly[k], poly[k + 1]], ..*t }).collect()
+}
+
 pub(crate) fn prepare(w: usize, h: usize, tris: &[Tri], view: &super::view::View) -> Vec<Prepared> {
+    // A turned camera sees surfaces that pass behind it; they are cut at its near plane. (Looking
+    // down the path nothing is built behind the camera, and the frame stays exactly as it was.)
+    let clipped: Vec<Tri>;
+    let tris = if view.turned { clipped = tris.iter().flat_map(clip_near).collect(); &clipped[..] } else { tris };
     tris.par_iter().filter_map(|t| {
         let mut p = [[0.0f32; 2]; 3];
         for i in 0..3 { p[i] = view.project(t.v[i].cam)?; }

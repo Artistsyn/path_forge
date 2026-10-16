@@ -353,6 +353,9 @@ choose the details unless the plan's warnings say to.
   Rails, Boards; runs `length` every `spacing` with gate gaps) are joined geometry along the path,
   better than repeating fence props. `pf share --scene F` gives a short share code (`pf unshare`). Lights:
   `fixtures.*.string_lights` (festoon bulbs between posts) and `kind: Neon` (signs in `tint`).
+- **Angle / side-scroller:** `camera.yaw` (-90..90 deg) and `camera.side` (m sideways): yaw ~28 with
+  side -1 looks along the path diagonally; yaw -90 with side 5 on an 854x480 canvas is an endless
+  side-scroller (near side cut away past `camera.cutaway`; presets Village Side Scroll, Village Corner).
 - **Camera and lens:** `camera.moves` (`bob`/`stride`/`sway` step with the walk, `pan`/`pans` and
   `tilt`/`tilts` slow looks, `dolly`/`dolly_focus`/`dollies` a dolly zoom: all whole cycles a
   loop; `fly_in` seconds of coming down from `fly_height` at the start, only in the runtime or

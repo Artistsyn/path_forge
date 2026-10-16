@@ -896,6 +896,30 @@ pub fn waterfall_glen() -> Scene {
     s
 }
 
+/// The village street as an endless side-scroller (landscape): the camera stands beside the lane
+/// and looks across it, the walk carrying cottages, the market and the trees beyond past from
+/// right to left, the near side of the world cut away.
+pub fn village_side_scroll() -> Scene {
+    let mut s = village_evening();
+    s.name = "Village Side Scroll".into();
+    s.canvas = Canvas { width: 854, height: 480 };
+    s.sky.day_night.hour = 16.0;
+    s.camera = Camera { yaw: -90.0, side: 5.0, eye_height: 2.0, horizon: 0.5, zoom: 1.3, ..Camera::default() };
+    s.light.fog.distance = 140.0;
+    s
+}
+
+/// The village street seen at an angle: the camera stands at the edge of the lane and looks along
+/// it diagonally, the cottages turned toward it.
+pub fn village_corner() -> Scene {
+    let mut s = village_evening();
+    s.name = "Village Corner".into();
+    s.sky.day_night.hour = 17.5;
+    s.camera.yaw = 28.0;
+    s.camera.side = -1.0;
+    s
+}
+
 /// The village seen from above in the afternoon through a tilt-shift lens: a band across the
 /// middle sharp and the rest blurred, so the street looks like a model.
 pub fn miniature_village() -> Scene {
@@ -1193,6 +1217,8 @@ pub const ALL: &[(&str, fn() -> Scene)] = &[
     ("Lily Harbour", lily_harbour),
     ("Waterfall Glen", waterfall_glen),
     ("Miniature Village", miniature_village),
+    ("Village Side Scroll", village_side_scroll),
+    ("Village Corner", village_corner),
     ("Star Bridge", star_bridge),
     ("Nebula Crossing", nebula_crossing),
     ("Asteroid Belt", asteroid_belt),
