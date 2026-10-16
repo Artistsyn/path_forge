@@ -217,15 +217,16 @@ def log_corners(sp, hw, D, wy, e, k):
     bark = dark(mix(sp["log"], [g, g, g], 0.3), 0.2)
     def tube(p, q):
         return {"from": [r3(v) for v in p], "to": [r3(v) for v in q], "radius": r3(r * 0.97), "color": bark, "end": end, "mirror": True}
+    # Under the eaves the roof runs out over the tails (its underside falls `k` a metre outward
+    # from the wall's top at `wy`): every tail is cut to one length, short enough for all of them
+    # to tuck under it. A log with no room at all (its top above the wall's) ends flush.
+    room = [(wy - 0.03 - (y + r)) / k if k > 0 else e for y in front]
+    front = [y for y, m in zip(front, room) if m >= 0.08]
+    e = min([e] + [m for m in room if m >= 0.08])
     out = []
     for y in front:
-        # Under the eaves the roof runs out over the tails: each is cut short to tuck under it
-        # (its underside falls `k` a metre outward from the wall's top at `wy`), the top ones
-        # shorter by turns, and one with no room at all is left flush.
-        reach = min(e, (wy - 0.03 - (y + r)) / k) if k > 0 else e
-        if reach < 0.08: continue
-        out.append(tube([hw - 2 * r, y, a], [hw + reach, y, a]))          # the front wall's, out past the side
-        out.append(tube([hw - 2 * r, y, D - a], [hw + reach, y, D - a]))  # the back wall's
+        out.append(tube([hw - 2 * r, y, a], [hw + e, y, a]))              # the front wall's, out past the side
+        out.append(tube([hw - 2 * r, y, D - a], [hw + e, y, D - a]))      # the back wall's
     for y in side:
         out.append(tube([hw - a, y, 2 * r], [hw - a, y, -e]))             # the side wall's, out toward the path
         out.append(tube([hw - a, y, D - 2 * r], [hw - a, y, D + e]))      # and out the back
@@ -537,7 +538,7 @@ def cabins():
     base = {"wall": "log", "log_h": 0.3, "frame": [70, 50, 34], "door": [96, 70, 46], "panes": (2, 2), "chimney_kind": "stone", "chimney_col": [138, 132, 120]}
     out["log_cabin_small"] = building(dict(base, **{
         "description": "A small log cabin: round logs saddle-notched at the corners, their sawn tails stacking out both ways by turns; one lit window and a plank door, a shingle roof and a stone chimney built up outside its side wall.",
-        "hw": 2.1, "E": 2.3, "R": 4.2, "D": 5.0, "o": 0.4, "t": 0.12, "ends": 0.36,
+        "hw": 2.1, "E": 2.3, "R": 4.2, "D": 5.0, "o": 0.4, "t": 0.12, "ends": 0.24,
         "log": [126, 90, 58], "log_end": [190, 152, 104],
         "front_windows": [(-1.1, 0.9, 0.75, 0.85)], "door_at": (0.75, 0.85, 1.8, 0.0),
         "side_windows": [(1.6, 0.9, 0.7, 0.8), (3.6, 0.9, 0.7, 0.8, False)],
@@ -548,7 +549,7 @@ def cabins():
     pz = 1.8
     sp = dict(base, **{
         "description": "A log cabin with a front porch: a plank deck under a lean-to roof on posts, a railing either side of the steps, two lit windows and a stone chimney on the ridge.",
-        "hw": 2.6, "E": 2.5, "R": 4.7, "D": 6.0, "o": 0.45, "t": 0.12, "ends": 0.36,
+        "hw": 2.6, "E": 2.5, "R": 4.7, "D": 6.0, "o": 0.45, "t": 0.12, "ends": 0.24,
         "log": [108, 76, 50], "log_end": [180, 142, 96],
         "front_windows": [(-1.55, 0.95, 0.8, 0.9), (1.55, 0.95, 0.8, 0.9)], "door_at": (0.0, 0.9, 1.9, 0.35),
         "side_windows": [(2.0, 0.95, 0.75, 0.85), (4.2, 0.95, 0.75, 0.85, False)],
@@ -560,7 +561,7 @@ def cabins():
     out["log_cabin_porch"] = building(sp, 22)
     out["log_cabin_sod"] = building(dict(base, **{
         "description": "A log cabin with a turf roof in the northern way: dark logs, white window frames, grass and wild flowers growing over a low roof edged with birch bark.",
-        "hw": 2.3, "E": 2.2, "R": 3.9, "D": 5.5, "o": 0.35, "t": 0.22, "ends": 0.34,
+        "hw": 2.3, "E": 2.2, "R": 3.9, "D": 5.5, "o": 0.35, "t": 0.22, "ends": 0.24,
         "log": [92, 64, 44], "log_end": [170, 132, 92], "frame": [236, 234, 228],
         "front_windows": [(-1.25, 0.9, 0.7, 0.8), (1.25, 0.9, 0.7, 0.8)], "door_at": (0.0, 0.8, 1.75, 0.15),
         "side_windows": [(1.8, 0.9, 0.7, 0.8, False), (3.8, 0.9, 0.7, 0.8)],
