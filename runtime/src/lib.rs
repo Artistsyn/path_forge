@@ -26,6 +26,21 @@ unsafe fn text<'a>(p: *const c_char) -> Option<&'a str> {
 
 fn guard<T>(fallback: T, f: impl FnOnce() -> T) -> T { catch_unwind(AssertUnwindSafe(f)).unwrap_or(fallback) }
 
+/// The version of this C interface, raised whenever a function is added or changes, so a program
+/// that loads the library at run time (an editor's preview) can tell what it offers. Version 2
+/// added `pf_runtime_open_place`, `pf_runtime_go_plan` and `pf_journey_outline`.
+pub const PF_ABI_VERSION: u32 = 2;
+
+#[no_mangle]
+pub extern "C" fn pf_abi_version() -> u32 { PF_ABI_VERSION }
+
+/// Write `json` into `out` (truncated to fit, NUL-terminated) and return its full length, so a
+/// caller whose buffer was too small can call again with a larger one.
+unsafe fn write_json(out: *mut c_char, out_len: usize, json: &str) -> i32 {
+    write_err(out, out_len, json);
+    json.len() as i32
+}
+
 /// Open a scene file. Returns null on failure, with the reason in `err` (may be null).
 #[no_mangle]
 pub unsafe extern "C" fn pf_runtime_open(path: *const c_char, err: *mut c_char, err_len: usize) -> *mut Runtime {
@@ -37,6 +52,44 @@ pub unsafe extern "C" fn pf_runtime_open(path: *const c_char, err: *mut c_char, 
         Ok(rt) => Box::into_raw(Box::new(rt)),
         Err(e) => { write_err(err, err_len, &e); std::ptr::null_mut() }
     }
+}
+
+/// Open a place as a journey stop names one: a scene file (relative to `base_dir`, which may be
+/// NULL) or a built-in preset as `preset:Name`. NULL on failure, with the reason in `err`.
+#[no_mangle]
+pub unsafe extern "C" fn pf_runtime_open_place(name: *const c_char, base_dir: *const c_char, err: *mut c_char, err_len: usize) -> *mut Runtime {
+    let r = guard(Err("panic while opening the place".into()), || {
+        let n = text(name).ok_or_else(|| "name is null or not UTF-8".to_string())?;
+        let dir = text(base_dir).map(PathBuf::from);
+        path_forge::journey::load_place(n, dir.as_deref()).map(|(s, d)| Runtime::new(s, d))
+    });
+    match r {
+        Ok(rt) => Box::into_raw(Box::new(rt)),
+        Err(e) => { write_err(err, err_len, &e); std::ptr::null_mut() }
+    }
+}
+
+/// A journey file's outline, without opening it to walk: JSON {"start", "stops": [{"id", "scene",
+/// "next"}], "problems": [...]} written into `out`, where "next" is "end", {"go": to} or
+/// {"fork": [left, right]}. Returns the JSON's full length, or -2 with the reason in `out`.
+#[no_mangle]
+pub unsafe extern "C" fn pf_journey_outline(path: *const c_char, out: *mut c_char, out_len: usize) -> i32 {
+    let r = guard(Err("panic while reading the journey".to_string()), || {
+        use path_forge::journey::{Journey, Next};
+        let p = text(path).ok_or_else(|| "path is null or not UTF-8".to_string())?;
+        let j = Journey::load(std::path::Path::new(p))?;
+        let stops: Vec<serde_json::Value> = j.stops.iter().map(|(id, st)| {
+            let next = match &st.next {
+                Next::End => serde_json::json!("end"),
+                Next::Go { to, .. } => serde_json::json!({ "go": to }),
+                Next::Fork { left, right, .. } => serde_json::json!({ "fork": [left, right] }),
+            };
+            serde_json::json!({ "id": id, "scene": st.scene, "next": next })
+        }).collect();
+        let problems = j.problems(std::path::Path::new(p).parent());
+        Ok(serde_json::json!({ "start": j.start, "stops": stops, "problems": problems }).to_string())
+    });
+    match r { Ok(j) => write_json(out, out_len, &j), Err(e) => { write_err(out, out_len, &e); -2 } }
 }
 
 /// A scene from JSON text; files it names are relative to `base_dir` (may be null).
@@ -191,6 +244,18 @@ pub unsafe extern "C" fn pf_runtime_go(rt: *mut Runtime, err: *mut c_char, err_l
     match guard(Err("panic".to_string()), || r.go()) { Ok(_) => 0, Err(e) => { write_err(err, err_len, &e); -2 } }
 }
 
+/// `pf_runtime_go`, and what it planned: JSON {"kind", "notes", "warnings"} (the transition's
+/// threshold or "Fork", what was chosen and anything that went against the scenes) written into
+/// `out`. Returns its full length, -1 for a null handle, or -2 with the reason in `out`.
+#[no_mangle]
+pub unsafe extern "C" fn pf_runtime_go_plan(rt: *mut Runtime, out: *mut c_char, out_len: usize) -> i32 {
+    let Some(r) = rt.as_mut() else { return -1 };
+    match guard(Err("panic".to_string()), || r.go()) {
+        Ok(p) => write_json(out, out_len, &serde_json::to_string(&p).unwrap_or_default()),
+        Err(e) => { write_err(out, out_len, &e); -2 }
+    }
+}
+
 /// Where the walk stands, as JSON {scene, distance, time, stop, progress, choose_within, day} written
 /// into `out`. Returns the length written, or -1.
 #[no_mangle]
@@ -281,6 +346,46 @@ mod tests {
             let state = CStr::from_ptr(out.as_ptr()).to_str().unwrap();
             assert!(n > 0 && state.contains("Forest Path"), "{state}");
             assert_eq!(pf_runtime_choose(rt, 1), 0, "no fork ahead");
+            pf_runtime_free(rt);
+            std::fs::remove_dir_all(&dir).ok();
+        }
+    }
+
+    #[test]
+    fn an_editor_opens_presets_reads_journeys_and_hears_the_plan() {
+        unsafe {
+            assert_eq!(pf_abi_version(), PF_ABI_VERSION);
+            let mut err = [0 as c_char; 256];
+            let preset = CString::new("preset:Forest Path").unwrap();
+            let rt = pf_runtime_open_place(preset.as_ptr(), std::ptr::null(), err.as_mut_ptr(), err.len());
+            assert!(!rt.is_null(), "{:?}", CStr::from_ptr(err.as_ptr()));
+            pf_runtime_free(rt);
+            let nope = CString::new("preset:Nowhere").unwrap();
+            assert!(pf_runtime_open_place(nope.as_ptr(), std::ptr::null(), err.as_mut_ptr(), err.len()).is_null());
+            assert!(CStr::from_ptr(err.as_ptr()).to_str().unwrap().contains("Nowhere"));
+
+            let dir = std::env::temp_dir().join(format!("pf_c_outline_{}", std::process::id()));
+            std::fs::create_dir_all(&dir).unwrap();
+            let jp = dir.join("g.journey.json");
+            std::fs::write(&jp, r#"{"version":1,"name":"g","start":"a","stops":{
+                "a":{"scene":"preset:Stone Dungeon","next":{"Go":{"to":"b","transition":{}}}},
+                "b":{"scene":"preset:Forest Path","next":"End"}}}"#).unwrap();
+            let pj = CString::new(jp.to_str().unwrap()).unwrap();
+            let mut out = vec![0 as c_char; 4096];
+            let n = pf_journey_outline(pj.as_ptr(), out.as_mut_ptr(), out.len());
+            let v: serde_json::Value = serde_json::from_str(CStr::from_ptr(out.as_ptr()).to_str().unwrap()).unwrap();
+            assert!(n > 0 && v["start"] == "a" && v["stops"].as_array().unwrap().len() == 2, "{v}");
+            assert!(v["problems"].as_array().unwrap().is_empty(), "{v}");
+            // Too small a buffer: the full length comes back, to call again.
+            let mut tiny = [0 as c_char; 8];
+            assert_eq!(pf_journey_outline(pj.as_ptr(), tiny.as_mut_ptr(), tiny.len()), n);
+
+            let rt = pf_runtime_open_journey(pj.as_ptr(), err.as_mut_ptr(), err.len());
+            let n = pf_runtime_go_plan(rt, out.as_mut_ptr(), out.len());
+            let plan: serde_json::Value = serde_json::from_str(CStr::from_ptr(out.as_ptr()).to_str().unwrap()).unwrap();
+            assert!(n > 0 && plan["kind"].as_str().is_some_and(|k| !k.is_empty()), "{plan}");
+            for _ in 0..200 { pf_runtime_step(rt, 0.25, 20.0); }
+            assert_eq!(pf_runtime_go_plan(rt, out.as_mut_ptr(), out.len()), -2, "the end of the journey");
             pf_runtime_free(rt);
             std::fs::remove_dir_all(&dir).ok();
         }
