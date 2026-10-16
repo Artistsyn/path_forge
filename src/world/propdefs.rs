@@ -30,6 +30,18 @@ pub struct ResolvedProp {
     /// Which way it faces, and how deep it is behind its front (PropDef::facing, depth).
     pub facing: crate::scene::Facing,
     pub depth: f32,
+    /// Its other faces (PropDef::faces), each twice when mirrored.
+    pub faces: Vec<Face>,
+    /// The height its faces' metres are measured against: its shape's own height (or, for
+    /// images, `height`). A prop `h` metres tall scales them by `h / natural`.
+    pub natural: f32,
+}
+
+/// A face of a prop, ready to draw: its picture and its top left, top right and bottom left
+/// corners in the prop's space (x across its front, y up, z back).
+pub struct Face {
+    pub sprite: Arc<Sprite>,
+    pub corners: [[f32; 3]; 3],
 }
 
 #[derive(Default)]
@@ -155,7 +167,7 @@ impl PropDefs {
     /// says why; a definition whose images cannot be read draws its `kind` instead.
     pub fn resolve(&mut self, scene: &Scene, base: Option<&Path>, layer: &PropLayer, sprites: &mut SpriteCache) -> (Option<ResolvedProp>, Option<String>) {
         let builtin = |kind: PropKind, tint: Rgb| ResolvedProp {
-            sprites: Vec::new(), kind, tint, height: kind.height_m(), hanging: kind.hangs(), glow: kind.glow(), light: None, smoke: None, facing: crate::scene::Facing::Camera, depth: 0.0,
+            sprites: Vec::new(), kind, tint, height: kind.height_m(), hanging: kind.hangs(), glow: kind.glow(), light: None, smoke: None, facing: crate::scene::Facing::Camera, depth: 0.0, faces: Vec::new(), natural: kind.height_m(),
             pixelated: false, flip_x: false, from_files: false,
         };
         let here = base.map(Path::to_path_buf).unwrap_or_default();
@@ -198,11 +210,30 @@ impl PropDefs {
             }
         } else if !d.shape.is_empty() {
             match sprites.shape(&d.shape) {
-                Some((s, h)) => { r.sprites = vec![s]; r.height = h; }
+                Some((s, h)) => { r.sprites = vec![s]; r.height = h; r.natural = h; }
                 None => warn = Some(format!("prop def '{}': its shape covers nothing above the ground", layer.def)),
             }
         }
         if d.height > 0.0 { r.height = d.height; }
+        // (A drawn shape keeps its own height; anything else measures its faces by its height.)
+        if d.sprite.is_set() || d.shape.is_empty() || r.sprites.is_empty() { r.natural = r.height; }
+        r.natural = r.natural.max(1e-3);
+        let dist = |a: [f32; 3], b: [f32; 3]| ((a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2) + (a[2] - b[2]).powi(2)).sqrt();
+        for f in &d.faces {
+            let [tl, tr, bl] = f.corners;
+            let sprite = if !f.image.trim().is_empty() {
+                sprites.file_at(&join(Some(&dir), &f.image), false)
+            } else {
+                sprites.face(&f.shape, dist(tl, tr), dist(tl, bl))
+            };
+            let Some(sprite) = sprite else {
+                warn.get_or_insert_with(|| format!("prop def '{}': a face has no picture (no shape, or an image that cannot be read); it is left out", layer.def));
+                continue;
+            };
+            let m = |c: [f32; 3]| [-c[0], c[1], c[2]];
+            if f.mirror { r.faces.push(Face { sprite: sprite.clone(), corners: [m(tl), m(tr), m(bl)] }); }
+            r.faces.push(Face { sprite, corners: f.corners });
+        }
         (Some(r), warn)
     }
 }
@@ -237,7 +268,10 @@ mod tests {
                 t.props = vec![layer(&format!("@{kit}#{name}"))];
                 assert!(def_warnings(&t, None).is_empty(), "@{kit}#{name}: {:?}", def_warnings(&t, None));
                 let (r, _) = PropDefs::default().resolve(&t, None, &t.props[0], &mut SpriteCache::default());
-                assert_eq!(r.unwrap().sprites.len(), 1, "@{kit}#{name} draws its shape");
+                let r = r.unwrap();
+                assert_eq!(r.sprites.len(), 1, "@{kit}#{name} draws its shape");
+                // Every face has its picture; a mirrored one comes twice.
+                assert_eq!(r.faces.len(), d.faces.iter().map(|f| 1 + f.mirror as usize).sum::<usize>(), "@{kit}#{name}");
             }
         }
     }

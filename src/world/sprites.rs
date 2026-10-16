@@ -1876,6 +1876,35 @@ pub fn paint_shape(parts: &[ShapePart]) -> Option<(Sprite, f32)> {
     Some((sprite, top))
 }
 
+/// The picture of a prop's face (`PropFace::shape`): its parts painted over `width` by `height`
+/// metres, `x` from the left edge and `y` up from the bottom edge.
+pub fn paint_face(parts: &[ShapePart], width: f32, height: f32) -> Option<Sprite> {
+    if !(width > 1e-3 && height > 1e-3) || parts.is_empty() { return None; }
+    let ppm = (128.0 / width.max(height)).clamp(4.0, 400.0);
+    let (w, h) = (((width * ppm).round() as usize).max(2), ((height * ppm).round() as usize).max(2));
+    // (Stretched a hair so the picture fills its pixels exactly.)
+    let (kx, ky) = (w as f32 / width, h as f32 / height);
+    let at = |q: [f32; 2]| [q[0] * kx, (height - q[1]) * ky];
+    let paint = |c: &mut Canvas, p: &ShapePart, col: [f32; 3], shade: f32| {
+        let draw = |c: &mut Canvas| match &p.shape {
+            Shape::Ellipse { center, radius } => { let q = at(*center); c.ellipse(q[0], q[1], radius[0].abs() * kx, radius[1].abs() * ky, col, shade) }
+            Shape::Rect { min, max } => { let (a, b) = (at(*min), at(*max)); c.rect(a[0], a[1], b[0], b[1], col, shade) }
+            Shape::Poly { points } => { let pts: Vec<[f32; 2]> = points.iter().map(|q| at(*q)).collect(); if pts.len() >= 3 { c.poly(&pts, col, shade) } }
+            Shape::Line { from, to, width } => c.line(at(*from), at(*to), width.abs() * ky, col),
+        };
+        if p.cut { c.cut(draw) } else { draw(c) }
+    };
+    let mut c = Canvas::new(w, h);
+    for p in parts { paint(&mut c, p, rgb_lin(p.color), p.shade.clamp(0.0, 1.0)); }
+    let mut sprite = c.finish();
+    if parts.iter().any(|p| p.glow > 0.0 && !p.cut) {
+        let mut g = Canvas::new(w, h);
+        for p in parts { let k = p.glow.max(0.0); paint(&mut g, p, [k, k, k], 0.0); }
+        sprite.glow = Some(Arc::new(g.finish()));
+    }
+    Some(sprite)
+}
+
 /// Sprites by key: procedural variants and loaded image files.
 #[derive(Default)]
 pub struct SpriteCache {
@@ -1975,6 +2004,13 @@ pub fn set_piece(&mut self, kind: SetPieceKind, tint: Rgb, accent: Rgb, ow: f32,
         if self.glowing.len() > 64 { self.glowing.clear(); }
         self.glowing.insert(key, (base, s.clone()));
         Some(s)
+    }
+
+    /// A prop face's picture (`paint_face`), kept by its parts and size.
+    pub fn face(&mut self, parts: &[ShapePart], width: f32, height: f32) -> Option<Arc<Sprite>> {
+        let key = format!("{width}x{height}:{}", serde_json::to_string(parts).unwrap_or_default());
+        if self.shapes.len() > 128 { self.shapes.clear(); }
+        self.shapes.entry(key).or_insert_with(|| paint_face(parts, width, height).map(|s| (Arc::new(s), height))).clone().map(|(s, _)| s)
     }
 
     pub fn shape(&mut self, parts: &[ShapePart]) -> Option<(Arc<Sprite>, f32)> {

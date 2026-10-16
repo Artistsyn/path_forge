@@ -2864,13 +2864,42 @@ pub struct PropDef {
     /// deep (from the edges of its picture), so seen at an angle it reads as a solid block; 0 is a
     /// flat front.
     pub depth: f32,
+    /// Facing the path: the rest of it, as flat faces with pictures of their own (a cottage's side
+    /// walls and the slopes of its roof, a chimney's sides), drawn in place of plain end walls.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub faces: Vec<PropFace>,
+}
+
+/// A face of a prop besides its front (`PropDef::faces`): a flat picture standing in the prop's
+/// own space, in metres at scale 1 (the units of its `shape`): `x` across its front, `y` up from
+/// the ground and `z` back from its front, away from the path.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
+pub struct PropFace {
+    /// Seen from the side it faces: its picture's top left, top right and bottom left corners
+    /// (`[x, y, z]`; the fourth corner follows). A roof's slope runs from its ridge down to its eave.
+    pub corners: [[f32; 3]; 3],
+    /// Its picture: parts painted in metres, `x` from its left edge and `y` up from its bottom
+    /// edge, as wide and tall as the face.
+    pub shape: Vec<ShapePart>,
+    /// Or an image stretched over it (relative to the file the definition is in).
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub image: String,
+    /// Drawn twice: as given and mirrored across the middle of the front (`x` to `-x`), for the
+    /// two sides of something symmetric.
+    pub mirror: bool,
+}
+impl Default for PropFace {
+    fn default() -> Self {
+        Self { corners: [[1.0, 1.0, 0.0], [1.0, 1.0, 1.0], [1.0, 0.0, 0.0]], shape: Vec::new(), image: String::new(), mirror: false }
+    }
 }
 impl Default for PropDef {
     fn default() -> Self {
         Self {
             description: String::new(), sprite: SpriteRef::default(), shape: Vec::new(), kind: PropKind::Rock, tint: None,
             height: 0.0, anchor: Anchor::Ground, glow: 0.0, glow_from: 0.0, light: PropLight::default(), trim: true, smoke: PropSmoke::default(),
-            facing: Facing::Camera, depth: 0.0,
+            facing: Facing::Camera, depth: 0.0, faces: Vec::new(),
         }
     }
 }

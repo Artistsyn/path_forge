@@ -123,11 +123,131 @@ def woodpile():
 
 settlement = {"name": "Settlement", "description": "A village by the road, drawn from shapes: cottages with lit windows and smoking chimneys, a well, a market stall, picket fences, hay bales, a cart and a woodpile. Use as \"@settlement#<name>\".",
               "props": {"cottage": cottage(), "well": well(), "market_stall": market_stall(), "picket_fence": picket_fence(), "haybale": haybale(), "cart": cart(), "woodpile": woodpile()}}
-# Buildings and long things stand along the street, their fronts to it, once the camera turns;
-# round things face the camera from any side. Depth makes the ends of a block walls.
-for name, depth in [("cottage", 4.5), ("market_stall", 1.6), ("picket_fence", 0.0), ("cart", 1.2), ("woodpile", 0.9)]:
-    settlement["props"][name]["facing"] = "PathWhenTurned"
+
+# ── Faces: what a prop looks like from the side and above, once it stands along the street ──
+# Corners are in the prop's space (x across its front, y up, z back from the path): the
+# picture's top left, top right and bottom left as seen from the side it faces. Pictures are
+# painted in metres from their bottom left corner.
+def face(tl, tr, bl, shape, mirror=False):
+    f = {"corners": [tl, tr, bl], "shape": shape}
+    if mirror: f["mirror"] = True
+    return f
+def size(tl, tr, bl): return math.dist(tl, tr), math.dist(tl, bl)
+
+COTTAGE_DEPTH = 6.5
+def cottage_faces():
+    D = COTTAGE_DEPTH
+    # The long side walls under the eaves: stone plinth, plastered timber frame, two lit windows.
+    wall = [rect(0, 0, D, 0.45, STONE, 0.6)]
+    for x in [0.5 + 1.1 * i for i in range(6)]: wall.append(line([x, 0.05], [x + 0.25, 0.4], 0.05, MORTAR))
+    wall.append(rect(0, 0.45, D, 2.85, PLASTER, 0.45))
+    posts = [0.08, D / 3, 2 * D / 3, D - 0.08]
+    for x in posts: wall.append(line([x, 0.45], [x, 2.85], 0.16, TIMBER))
+    for y in [0.45, 1.65, 2.85]: wall.append(line([0, y], [D, y], 0.16, TIMBER))
+    wall += [line([posts[1], 0.5], [posts[0] + 0.6, 1.6], 0.12, TIMBER), line([posts[2], 0.5], [posts[3] - 0.6, 1.6], 0.12, TIMBER)]
+    for cx in [D / 2 - 0.0]:
+        wall.append(rect(cx - 0.42, 1.05, cx + 0.42, 2.2, TIMBER, 0.3))
+        wall.append(rect(cx - 0.34, 1.13, cx + 0.34, 2.12, WARM, 0.0, glow=2.4))
+        wall += [line([cx, 1.13], [cx, 2.12], 0.05, TIMBER), line([cx - 0.34, 1.62], [cx + 0.34, 1.62], 0.05, TIMBER)]
+        wall.append(rect(cx - 0.48, 0.98, cx + 0.48, 1.06, WOOD_DARK, 0.3))
+    for cx in [D / 6, 5 * D / 6]:
+        wall.append(rect(cx - 0.36, 1.2, cx + 0.36, 2.15, TIMBER, 0.3))
+        wall.append(rect(cx - 0.28, 1.28, cx + 0.28, 2.07, WARM, 0.0, glow=2.2))
+        wall.append(line([cx - 0.28, 1.68], [cx + 0.28, 1.68], 0.05, TIMBER))
+    # In the shade of the eaves.
+    wall.append(rect(0, 2.85, D, 3.15, mix(ROOF_DARK, [0, 0, 0], 0.4), 0.2))
+    # The roof's slope, ridge to eave: courses of tiles, the ridge capped, a dark drip edge.
+    run, rise = 3.05, 5.08 - 2.72
+    L = math.hypot(run, rise)
+    roof = [rect(0, 0, D, L, ROOF, 0.4)]
+    y, k = 0.12, 0
+    while y < L - 0.2:
+        roof.append(rect(0, y, D, y + 0.06, ROOF_DARK, 0.2))
+        for i in range(int(D / 0.45) + 1):
+            x = i * 0.45 + (0.22 if k % 2 else 0.0)
+            if x < D: roof.append(line([x, y + 0.06], [x, y + 0.3], 0.03, mix(ROOF, ROOF_DARK, 0.6)))
+        y, k = y + 0.3, k + 1
+    for (mx, my, r) in [(0.9, 0.5, 0.35), (4.2, 0.9, 0.5), (5.6, 0.3, 0.3), (2.6, 1.6, 0.28)]:
+        roof.append(ell(mx, my, r, r * 0.45, [92, 104, 60], 0.3))
+    roof += [rect(0, L - 0.14, D, L, ROOF_DARK, 0.5), rect(0, 0, D, 0.08, mix(ROOF_DARK, [0, 0, 0], 0.3), 0.2)]
+    # The chimney's sides, back and flue (its front is in the front picture).
+    CH = [138, 82, 62]
+    def bricks(w, h):
+        b = [rect(0, 0, w, h, CH, 0.5)]
+        for j in range(int(h / 0.22)): b.append(line([0, 0.22 * (j + 1)], [w, 0.22 * (j + 1)], 0.025, [96, 60, 48]))
+        return b + [rect(0, h - 0.12, w, h, [100, 62, 48], 0.5)]
+    cz, top, low = 0.6, 5.55, 3.6
+    chimney = [
+        face([1.75, top, 0], [1.75, top, cz], [1.75, low, 0], bricks(cz, top - low)),
+        face([1.15, top, cz], [1.15, top, 0], [1.15, low, cz], bricks(cz, top - low)),
+        face([1.75, top, cz], [1.15, top, cz], [1.75, low, cz], bricks(0.6, top - low)),
+        face([1.15, top, cz], [1.75, top, cz], [1.15, top, 0], [rect(0, 0, 0.6, cz, [100, 62, 48], 0.5), rect(0.14, 0.14, 0.46, cz - 0.14, [26, 20, 18], 0.0)]),
+    ]
+    return [face([2.45, 3.15, 0], [2.45, 3.15, D], [2.45, 0, 0], wall, mirror=True),
+            face([0, 5.08, 0], [0, 5.08, D], [run, 2.72, 0], roof, mirror=True)] + chimney
+
+def stall_faces():
+    D = 1.6
+    cols = [[196, 44, 44], [236, 228, 210]]
+    side = [rect(D - 0.14, 0, D - 0.02, 2.95, WOOD_DARK, 0.6), rect(0, 0.1, 0.6, 1.0, mix(WOOD, [0, 0, 0], 0.35), 0.3), rect(0, 0.82, 0.62, 1.0, WOOD, 0.5)]
+    for i in range(4):
+        a, b = D * i / 4, D * (i + 1) / 4
+        ya, yb = 2.65 + 0.3 * a / D, 2.65 + 0.3 * b / D
+        side.append(poly([(a, ya), (b, yb), (b, yb - 0.12), (a, ya - (0.5 if i == 0 else 0.12))], cols[i % 2], 0.5))
+    W, H = 3.3, math.hypot(0.3, D)
+    awning = []
+    for i in range(8): awning.append(rect(W * i / 8, 0, W * (i + 1) / 8, H, cols[i % 2], 0.45))
+    awning.append(rect(0, 0, W, 0.05, mix(cols[0], [0, 0, 0], 0.4), 0.2))
+    goods = [rect(0, 0, 3.0, 0.6, WOOD, 0.5)]
+    for i in range(9): goods.append(ell(0.25 + i * 0.13, 0.15 + (i % 3) * 0.13, 0.07, 0.07, [190, 40, 34], 0.8))
+    for i in range(7): goods.append(ell(1.35 + i * 0.13, 0.15 + (i % 3) * 0.13, 0.07, 0.07, [236, 140, 34], 0.8))
+    goods += [ell(2.3, 0.3, 0.16, 0.1, [200, 150, 90], 0.8), ell(2.65, 0.25, 0.16, 0.1, [190, 140, 84], 0.8)]
+    return [face([1.45, 2.95, 0], [1.45, 2.95, D], [1.45, 0, 0], side, mirror=True),
+            face([-1.65, 2.95, D], [1.65, 2.95, D], [-1.65, 2.65, 0], awning),
+            face([-1.5, 1.0, 0.6], [1.5, 1.0, 0.6], [-1.5, 1.0, 0], goods)]
+
+def cart_faces():
+    D = 1.2
+    end = [rect(0, 0, D, 0.6, WOOD, 0.5)] + [line([0, y], [D, y], 0.04, WOOD_DARK) for y in [0.15, 0.3, 0.45]]
+    hay = [rect(0, 0, 2.0, D, mix(WOOD_DARK, [0, 0, 0], 0.2), 0.2)]
+    for i in range(5):
+        for j in range(3): hay.append(ell(0.2 + i * 0.4, 0.2 + j * 0.4, 0.26, 0.22, [214, 176, 92], 0.6))
+    wheel = [ell(0.5, 0.5, 0.5, 0.5, [60, 44, 30], 0.4), ell(0.5, 0.5, 0.42, 0.42, [0, 0, 0], 0.0, cut=True)]
+    for k in range(8):
+        a = math.pi * k / 4
+        wheel.append(line([0.5, 0.5], [0.5 + 0.44 * math.cos(a), 0.5 + 0.44 * math.sin(a)], 0.04, [70, 52, 36]))
+    wheel.append(ell(0.5, 0.5, 0.07, 0.07, [50, 46, 42], 0.6))
+    return [face([0.9, 1.15, 0], [0.9, 1.15, D], [0.9, 0.55, 0], end),
+            face([-1.1, 1.15, D], [-1.1, 1.15, 0], [-1.1, 0.55, D], end),
+            face([-1.1, 1.15, D], [0.9, 1.15, D], [-1.1, 1.15, 0], hay),
+            face([0.25, 1.0, D], [-0.75, 1.0, D], [0.25, 0.0, D], wheel)]
+
+def woodpile_faces():
+    D = 0.9
+    end, bark = [196, 160, 112], [86, 62, 44]
+    side = [rect(0, 0, D, 1.0, mix(bark, [0, 0, 0], 0.4), 0.2)]
+    for row in range(4):
+        y = 0.13 + row * 0.24
+        side.append(rect(0, y - 0.11, D, y + 0.11, bark, 0.7))
+        side.append(line([0, y + 0.02], [D, y + 0.04], 0.015, mix(bark, [0, 0, 0], 0.3)))
+        side.append(ell(0.02, y, 0.04, 0.11, end, 0.5))
+    top = [rect(0, 0, 2.0, D, mix(bark, [0, 0, 0], 0.4), 0.2)]
+    for i in range(6):
+        x = 0.15 + i * 0.34
+        top.append(rect(x - 0.14, 0, x + 0.14, D, bark, 0.7))
+        top.append(line([x - 0.03, 0.05], [x + 0.02, D - 0.05], 0.015, mix(bark, [0, 0, 0], 0.3)))
+    return [face([1.0, 1.0, 0], [1.0, 1.0, D], [1.0, 0, 0], side, mirror=True),
+            face([-1.0, 1.0, D], [1.0, 1.0, D], [-1.0, 1.0, 0], top)]
+
+# Buildings and long things stand along the street, their fronts to it, as in a real street:
+# seen down the path, their side walls and roofs show; round things face the camera from any
+# side. Their faces are the rest of them, seen from the side and above. (The fence keeps facing
+# the camera until it turns: fences[] draws joined fences along the path.)
+for name, depth, faces in [("cottage", COTTAGE_DEPTH, cottage_faces()), ("market_stall", 1.6, stall_faces()), ("picket_fence", 0.0, []),
+                           ("cart", 1.2, cart_faces()), ("woodpile", 0.9, woodpile_faces())]:
+    settlement["props"][name]["facing"] = "Path" if faces else "PathWhenTurned"
     if depth > 0: settlement["props"][name]["depth"] = depth
+    if faces: settlement["props"][name]["faces"] = faces
 
 # ── Waterside ─────────────────────────────────────────────────────────────
 def rowboat():

@@ -221,9 +221,21 @@ which look alike from every side. `Path` stands it along the path like a buildin
 an angle it is seen obliquely and from the side squarely; `PathWhenTurned` faces the camera while it
 looks down the path and the path once `yaw` turns it, so a scene looks as it always has head-on and
 its buildings line the street from any angle. With `depth` (metres behind the front) the picture's
-ends are drawn as side walls that deep, so a cottage seen from an angle reads as a solid block, not
-a card. Set both on a prop definition, or per layer (`props.*.facing`, `props.*.depth`) over it.
-The settlement kit's buildings, stalls, carts, woodpiles and fences do this already. To look down
+ends are drawn as plain side walls that deep, so a building seen from an angle reads as a solid
+block, not a card. Set both on a prop definition, or per layer (`props.*.facing`, `props.*.depth`)
+over it.
+
+**Faces.** For the rest of a building as it really looks, a definition lists its `faces`: flat
+pictures standing in the prop's own space (metres at scale 1, `x` across its front, `y` up, `z`
+back from the path), each placed by its picture's top left, top right and bottom left `corners`
+as seen from the side it faces, and painted from `shape` parts (metres from its bottom left
+corner) or an `image`. `mirror: true` draws it again on the other side (`x` to `-x`). A cottage's
+faces are its long side walls with their windows, the two slopes of its roof running back from
+the gable and its chimney's sides; they replace the plain end walls. The settlement kit's
+cottage, market stall, cart and woodpile have them and face the path (`Path`), so even looking
+straight down a village street you see their side walls and roofs in perspective, as in a real
+street. A layer with `facing: PathWhenTurned` brings back the flat front that faces the camera
+until the camera turns. To look down
 on a scene, raise `eye_height` and move `horizon` up: verticals stay vertical.
 
 ### Camera moves

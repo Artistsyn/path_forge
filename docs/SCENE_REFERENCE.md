@@ -1022,6 +1022,20 @@ parts. Lives in `scene.prop_defs` or in a kit (a folder holding kit.json and its
 | `smoke` | [PropSmoke](#propsmoke) | (see the type) | Smoke rising from it: a chimney, a campfire, a smouldering ruin. |
 | `facing` | [Facing](#facing) | `"Camera"` | Which way its picture faces (see `Facing`): the camera (a tree, a rock: the same from every side), or the path (a building's front, a fence, a stall), seen at an angle when the camera is turned. |
 | `depth` | number | `0.0` | Facing the path: how deep it is behind its front, metres. Its ends are drawn as walls that deep (from the edges of its picture), so seen at an angle it reads as a solid block; 0 is a flat front. |
+| `faces` | list of [PropFace](#propface) |  | Facing the path: the rest of it, as flat faces with pictures of their own (a cottage's side walls and the slopes of its roof, a chimney's sides), drawn in place of plain end walls. |
+
+### PropFace
+
+A face of a prop besides its front (`PropDef::faces`): a flat picture standing in the prop's
+own space, in metres at scale 1 (the units of its `shape`): `x` across its front, `y` up from
+the ground and `z` back from its front, away from the path.
+
+| Field | Type | Default | Meaning |
+|---|---|---|---|
+| `corners` | number × 3 × 3 | `[[1.0,1.0,0.0],[1.0,1.0,1.0],[1.0,0.0,0.0]]` | Seen from the side it faces: its picture's top left, top right and bottom left corners (`[x, y, z]`; the fourth corner follows). A roof's slope runs from its ridge down to its eave. |
+| `shape` | list of [ShapePart](#shapepart) | `[]` | Its picture: parts painted in metres, `x` from its left edge and `y` up from its bottom edge, as wide and tall as the face. |
+| `image` | string |  | Or an image stretched over it (relative to the file the definition is in). |
+| `mirror` | boolean | `false` | Drawn twice: as given and mirrored across the middle of the front (`x` to `-x`), for the two sides of something symmetric. |
 
 ### PropKind
 

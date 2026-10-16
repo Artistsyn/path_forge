@@ -356,9 +356,11 @@ choose the details unless the plan's warnings say to.
 - **Angle / side-scroller:** `camera.yaw` (-90..90 deg) and `camera.side` (m sideways): yaw ~28 with
   side -1 looks along the path diagonally; yaw -90 with side 5 on an 854x480 canvas is an endless
   side-scroller (near side cut away past `camera.cutaway`; presets Village Side Scroll, Village Corner).
-  Give buildings and other fronts `facing: PathWhenTurned` (or `Path`) and a `depth` in metres, on the
-  prop def or the layer, so they stand along the street with side walls when turned (settlement kit
-  props already do); trees and rocks keep `Camera`.
+  Give buildings and other fronts `facing: Path` (or `PathWhenTurned`, flat to the camera until it
+  turns) and a `depth`, or better `faces` (side walls, roof slopes: pictures placed by three
+  `corners` in the prop's x/y/z metres, `mirror` for both sides), so they stand along the street as
+  solid buildings from any angle. Settlement kit cottages, stalls, carts and woodpiles already do;
+  trees and rocks keep `Camera`.
 - **Camera and lens:** `camera.moves` (`bob`/`stride`/`sway` step with the walk, `pan`/`pans` and
   `tilt`/`tilts` slow looks, `dolly`/`dolly_focus`/`dollies` a dolly zoom: all whole cycles a
   loop; `fly_in` seconds of coming down from `fly_height` at the start, only in the runtime or

@@ -246,11 +246,12 @@ struct Billboard {
     panel: Option<Panel>,
 }
 
-/// A card standing in the world: its picture spans `width` metres along `u_dir` (a level unit
-/// direction, x and d) from its middle at `world`, and faces `normal`. `strip` draws only one
-/// column of the picture (u) stretched across it: the end walls of a prop with depth.
+/// A card standing in the world (x, y, d): its picture's top left corner is at `tl`, and its
+/// width and height run along `across` and `down`, so any flat face (a wall, a roof's slope). It
+/// is lit as a face turned to the camera. `strip` draws only one column of the picture (u)
+/// stretched across it: the plain end walls of a prop with depth.
 #[derive(Clone, Copy, Debug)]
-struct Panel { u_dir: [f32; 3], normal: [f32; 3], width: f32, strip: Option<f32> }
+struct Panel { tl: [f32; 3], across: [f32; 3], down: [f32; 3], strip: Option<f32> }
 
 /// The wind in a card's picture: the base and trunk stay where they are while the rest shifts by
 /// a field of waves running downwind. Lengths are shares of the card's width (`v`, of its
@@ -2328,6 +2329,10 @@ impl WorldRenderer {
                             _ if floating => p.float + (hf(seed ^ 0xF1, ikey) * 2.0 - 1.0) * p.float_var.max(0.0) - 0.5 * height,
                             _ => -p.sink.clamp(0.0, 0.9) * height,
                         };
+                        // Standing along the path, its front to it (a building), not turned to the camera.
+                        let facing = p.facing.unwrap_or(look.facing);
+                        let stands = sign != 0.0 && ring.is_none() && !floating && !hanging
+                            && (facing == Facing::Path || (facing == Facing::PathWhenTurned && ctx.view.turned));
                         let mut own_light = None;
                         // An image whose mask marks a glowing part lights what is round it, from there.
                         if let (None, Some(lm), true) = (light, sprite.lamp, d <= 60.0) {
@@ -2357,8 +2362,11 @@ impl WorldRenderer {
                         }
                         if let Some(sm) = &look.smoke {
                             let flipped = if look.from_files { look.flip_x } else { variant & 0x100 != 0 };
-                            let sx = if flipped { -sm.at[0] } else { sm.at[0] } * sc;
-                            ctx.smokes.push(([x + sx, base + sm.at[1] * sc, d], sm.clone(), hash(seed ^ 0x5E0, ikey) as u32));
+                            let k = height / look.natural;
+                            let sx = if flipped { -sm.at[0] } else { sm.at[0] } * k;
+                            // (Standing along the path, its front runs along the path.)
+                            let at = if stands { [x, base + sm.at[1] * k, d - sign * sx] } else { [x + sx, base + sm.at[1] * k, d] };
+                            ctx.smokes.push((at, sm.clone(), hash(seed ^ 0x5E0, ikey) as u32));
                         }
                         let z = ctx.view.to_cam(x, base, d)[2];
                         let mut sway = if hanging { 0.0 } else { ctx.wx.sway_at(hf(seed ^ 0x3C, ikey) * TAU) * weather::sway_factor(look.kind) * height };
@@ -2377,25 +2385,39 @@ impl WorldRenderer {
                         }
                         let wind = if hanging || look.from_files { CardWind::default() } else { ctx.wx.card_wind(look.kind, hf(seed ^ 0x3D, ikey) * TAU, sprite.aspect) };
                         let flip = if look.from_files { look.flip_x } else { variant & 0x100 != 0 };
-                        // Standing along the path, its front to it (a building), not turned to the camera.
-                        let facing = p.facing.unwrap_or(look.facing);
-                        let stands = sign != 0.0 && ring.is_none() && !floating && !hanging
-                            && (facing == Facing::Path || (facing == Facing::PathWhenTurned && ctx.view.turned));
-                        let panel = stands.then(|| Panel { u_dir: [0.0, 0.0, -sign], normal: [-sign, 0.0, 0.0], width: height * sprite.aspect, strip: None });
+                        let wide = height * sprite.aspect;
+                        let panel = stands.then(|| Panel { tl: [x, base + height, d + sign * 0.5 * wide], across: [0.0, 0.0, -sign * wide], down: [0.0, -height, 0.0], strip: None });
                         let shadow = if p.shadow && !hanging && !floating { p.shadow_opacity.clamp(0.0, 1.0) } else { 0.0 };
                         let source = PICK_PROPS | li as u16;
-                        // With depth, its ends are walls that deep, drawn from the edges of its picture.
-                        let depth = p.depth.unwrap_or(look.depth).max(0.0);
-                        if let Some(pn) = panel.filter(|_| depth > 0.01) {
-                            for (end, strip) in [(-1.0f32, 0.012f32), (1.0, 0.988)] {
-                                let ed = d + end * pn.u_dir[2] * 0.5 * pn.width;
-                                let (ex, ez) = (x + sign * 0.5 * depth, ctx.view.to_cam(x + sign * 0.5 * depth, base, ed)[2]);
-                                let strip = if flip { 1.0 - strip } else { strip };
-                                bills.push(Billboard {
-                                    z: ez, world: [ex, base, ed], height, sprite: sprite.clone(), sway: 0.0, tint, wind: CardWind::default(), flip: false,
-                                    nearest: look.pixelated, id: id::PROP, emissive: look.glow, shadow: 0.0, own_light, source, realm: ctx.realm,
-                                    panel: Some(Panel { u_dir: [sign, 0.0, 0.0], normal: [0.0, 0.0, end * pn.u_dir[2]], width: depth, strip: Some(strip) }),
-                                });
+                        let face = |sprite: Arc<Sprite>, tl: [f32; 3], across: [f32; 3], down: [f32; 3], strip: Option<f32>| {
+                            let mid = [tl[0] + 0.5 * (across[0] + down[0]), tl[1] + 0.5 * (across[1] + down[1]), tl[2] + 0.5 * (across[2] + down[2])];
+                            let len = |a: [f32; 3]| (a[0] * a[0] + a[1] * a[1] + a[2] * a[2]).sqrt();
+                            Billboard {
+                                z: ctx.view.to_cam(mid[0], mid[1], mid[2])[2], world: mid, height: len(down), sprite, sway: 0.0, tint, wind: CardWind::default(), flip: false,
+                                nearest: look.pixelated, id: id::PROP, emissive: look.glow, shadow: 0.0, own_light, source, realm: ctx.realm,
+                                panel: Some(Panel { tl, across, down, strip }),
+                            }
+                        };
+                        // The rest of it: its own faces, placed from its space (x across its front, y up,
+                        // z back from the path) into the world, mirrored with it.
+                        if stands && !look.faces.is_empty() {
+                            let k = height / look.natural;
+                            let fx = if flip { -1.0 } else { 1.0 };
+                            let at = |c: [f32; 3]| [x + sign * c[2] * k, base + c[1] * k, d - sign * fx * c[0] * k];
+                            for f in &look.faces {
+                                let [tl, tr, bl] = f.corners.map(at);
+                                let sub = |a: [f32; 3], b: [f32; 3]| [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
+                                bills.push(face(f.sprite.clone(), tl, sub(tr, tl), sub(bl, tl), None));
+                            }
+                        } else if let Some(pn) = panel {
+                            // Or with depth, its ends are walls that deep, drawn from the edges of its picture.
+                            let depth = p.depth.unwrap_or(look.depth).max(0.0);
+                            if depth > 0.01 {
+                                for (end, strip) in [(0.0f32, 0.012f32), (1.0, 0.988)] {
+                                    let strip = if flip { 1.0 - strip } else { strip };
+                                    let tl = [pn.tl[0], pn.tl[1], pn.tl[2] + end * pn.across[2]];
+                                    bills.push(face(sprite.clone(), tl, [sign * depth, 0.0, 0.0], pn.down, Some(strip)));
+                                }
                             }
                         }
                         let (sway, wind) = if panel.is_some() { (0.0, CardWind::default()) } else { (sway, wind) };
@@ -5044,11 +5066,10 @@ impl<'a> Card<'a> {
     fn panel(ctx: &Ctx, b: &'a Billboard, pn: Panel, crisp: bool) -> Option<Card<'a>> {
         let v = &ctx.view;
         let (w, h) = (v.width, v.height);
-        let [x, y, d] = b.world;
-        let half = 0.5 * pn.width;
-        let (ux, ud) = (pn.u_dir[0] * half, pn.u_dir[2] * half);
-        let top = y + b.height;
-        let corners = [v.to_cam(x - ux, top, d - ud), v.to_cam(x + ux, top, d + ud), v.to_cam(x - ux, y, d - ud), v.to_cam(x + ux, y, d + ud)];
+        let (t, a, dn) = (pn.tl, pn.across, pn.down);
+        let cam = |p: [f32; 3]| v.to_cam(p[0], p[1], p[2]);
+        let corners = [cam(t), cam([t[0] + a[0], t[1] + a[1], t[2] + a[2]]), cam([t[0] + dn[0], t[1] + dn[1], t[2] + dn[2]]),
+            cam([t[0] + a[0] + dn[0], t[1] + a[1] + dn[1], t[2] + a[2] + dn[2]])];
         if corners.iter().all(|c| c[2] < NEAR) { return None; }
         let c0 = corners[0];
         let cu = [corners[1][0] - c0[0], corners[1][1] - c0[1], corners[1][2] - c0[2]];
@@ -5062,12 +5083,19 @@ impl<'a> Card<'a> {
             ((a.floor() as i64).max(0), (bb.ceil() as i64).min(w as i64 - 1), (c.floor() as i64).max(0), (e.ceil() as i64).min(h as i64 - 1))
         } else { (0, w as i64 - 1, 0, h as i64 - 1) };
         if x0 > x1 || y0 > y1 { return None; }
-        let mid = v.to_cam(x, y + 0.5 * b.height, d);
+        let [mx, my, md] = [t[0] + 0.5 * (a[0] + dn[0]), t[1] + 0.5 * (a[1] + dn[1]), t[2] + 0.5 * (a[2] + dn[2])];
+        let mid = v.to_cam(mx, my, md);
         let z = mid[2].max(NEAR);
         let hp = v.px_per_m(z) * b.height;
         if hp < 0.5 { return None; }
-        // Lit as a face turned the way it faces.
-        let light = ctx.light_except(x, y + b.height * 0.5, d, Some(pn.normal), 0, weather::cloud_shade(ctx, x, d), b.own_light);
+        // Lit as a face turned the way it faces, toward the camera (the underside of an eave in
+        // shade, seen from below).
+        let n = [a[1] * dn[2] - a[2] * dn[1], a[2] * dn[0] - a[0] * dn[2], a[0] * dn[1] - a[1] * dn[0]];
+        let nl = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt().max(1e-9);
+        let nc = v.rot_dir(n);
+        let k = if nc[0] * mid[0] + nc[1] * mid[1] + nc[2] * mid[2] > 0.0 { -1.0 / nl } else { 1.0 / nl };
+        let normal = [n[0] * k, n[1] * k, n[2] * k];
+        let light = ctx.light_except(mx, my, md, Some(normal), 0, weather::cloud_shade(ctx, mx, md), b.own_light);
         let ps = ctx.wx.prop_snow;
         let snow = (ps > 0.05 && b.id == id::PROP && b.emissive < 0.3).then(|| {
             let cap = (v.px_per_m(z) * 0.06 * ps).max(1.0) / hp;
@@ -6902,5 +6930,26 @@ mod tests {
         // Looking down the path changes nothing: the view is the one it always was.
         let d = View::new(&preset("Village Evening"), 96, 96);
         assert!(!d.turned && d.to_cam(1.0, 2.0, 7.0)[2] == 7.0);
+    }
+
+    #[test]
+    fn a_building_facing_the_path_shows_its_side_walls_and_roof_down_the_street() {
+        let mut s = preset("Village Evening");
+        s.props.retain(|p| p.def == "@settlement#cottage");
+        let kit = crate::world::propdefs::PropDefs::default().kit(std::path::Path::new("@settlement")).unwrap();
+        let cottage = kit.props["cottage"].clone();
+        assert_eq!(cottage.facing, Facing::Path);
+        assert!(cottage.faces.len() >= 4);
+        let mut flat = s.clone();
+        flat.prop_defs.insert("flat".into(), PropDef { faces: Vec::new(), depth: 0.0, ..cottage });
+        for p in &mut flat.props { p.def = "flat".into(); }
+        let mut r = WorldRenderer::default();
+        let o = |t: f32| RenderOptions { size: Some((120, 200)), time: Some(t), ..RenderOptions::default() };
+        let (a, b) = (r.render(&s, 3.0, &o(1.0)).rgba, r.render(&flat, 3.0, &o(1.0)).rgba);
+        // Its side walls and roof stand where a flat front shows the ground and sky past it.
+        let changed = a.chunks(4).zip(b.chunks(4)).filter(|(x, y)| x.iter().zip(y.iter()).any(|(p, q)| p.abs_diff(*q) > 24)).count();
+        assert!(changed > 400, "only {changed} pixels show the rest of the building");
+        let (len, secs) = (s.motion.loop_length, s.motion.loop_seconds());
+        assert_eq!(r.render(&s, 0.0, &o(0.0)).rgba, r.render(&s, len, &o(secs)).rgba, "the loop must close");
     }
 }
