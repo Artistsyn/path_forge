@@ -2482,7 +2482,7 @@ impl WorldRenderer {
                             let len = |a: [f32; 3]| (a[0] * a[0] + a[1] * a[1] + a[2] * a[2]).sqrt();
                             Billboard {
                                 z: ctx.view.to_cam(mid[0], mid[1], mid[2])[2], world: mid, height: len(down), sprite, sway: 0.0, tint, wind: CardWind::default(), flip: false,
-                                nearest: look.pixelated, id: id::PROP, emissive: look.glow, shadow: 0.0, own_light, source, realm: ctx.realm,
+                                nearest: look.pixelated, id: id::PROP, emissive: look.glow, shadow, own_light, source, realm: ctx.realm,
                                 panel: Some(Panel { tl, across, down, strip }), tube: None,
                             }
                         };
@@ -3585,13 +3585,21 @@ fn gpu_geom_input(ctx: &Ctx, prepared: &[raster::Prepared], bills: &[Billboard],
     let mut cboxes = Vec::with_capacity(list.len());
     let casters: Vec<CasterIn> = list.iter().map(|c| {
         let b = c.b;
-        let mut f = [0.0f32; 24];
-        (f[0], f[1], f[2], f[3], f[4], f[5], f[6]) = (b.world[0], b.world[2], c.rx, c.rd, c.half_w, b.shadow, b.height);
+        let mut f = [0.0f32; 40];
+        (f[0], f[1], f[2], f[3], f[4], f[5], f[6]) = (c.foot[0], c.foot[1], c.axis[0], c.axis[1], c.ra, b.shadow, c.rb);
         f[7] = f32::from_bits(b.flip as u32);
         let (mut x0, mut y0, mut x1, mut y1) = (i64::MAX, i64::MAX, i64::MIN, i64::MIN);
         let mut grow = |r: (usize, usize, usize, usize)| { x0 = x0.min(r.0 as i64); y0 = y0.min(r.1 as i64); x1 = x1.max(r.2 as i64); y1 = y1.max(r.3 as i64); };
         if let Some(r) = c.contact { f[8] = bits(1); (f[9], f[10], f[11], f[12]) = (bits(r.0), bits(r.1), bits(r.2), bits(r.3)); grow(r); }
-        if let (Some(_), Some((r, scale))) = (sun, c.sun) { f[13] = bits(1); (f[14], f[15], f[16], f[17], f[18]) = (bits(r.0), bits(r.1), bits(r.2), bits(r.3), scale); grow(r); }
+        if let (Some(_), Some(r)) = (sun, c.sun) { f[13] = bits(1); (f[14], f[15], f[16], f[17]) = (bits(r.0), bits(r.1), bits(r.2), bits(r.3)); grow(r); }
+        f[18] = b.panel.and_then(|p| p.strip).unwrap_or(-1.0);
+        // (19..21: the sprite level, filled in by Frame::geometry.)
+        f[22..25].copy_from_slice(&c.c0);
+        f[25..28].copy_from_slice(&c.across);
+        f[28..31].copy_from_slice(&c.down);
+        (f[31], f[32]) = (c.ia, c.idn);
+        f[33..36].copy_from_slice(&c.n);
+        f[36] = c.nl;
         cboxes.push(if x0 <= x1 { (x0, y0, x1, y1) } else { (1, 1, 0, 0) });
         CasterIn { c: CasterGpu { f }, lod: b.sprite.lod(192.0), sprite: b.sprite.clone() }
     }).collect();
@@ -4296,38 +4304,87 @@ fn reflect_pass(ctx: &Ctx, gbuf: &[GPixel], refl: &[Refl], under: Option<&[[f32;
 
 // ── Shadows ────────────────────────────────────────────────────────────────
 
-/// A billboard's two shadow footprints on screen, worked out once: the contact ellipse, and the
-/// sun shadow (with the sun's slant: scale and tip).
-struct Caster<'b> { b: &'b Billboard, half_w: f32, rx: f32, rd: f32, contact: Option<(usize, usize, usize, usize)>, sun: Option<((usize, usize, usize, usize), f32)> }
+/// A billboard's two shadows, worked out once: the contact shadow (a soft ellipse on the ground
+/// at its foot, `axis` along its width) and the sun's (the flat picture it is drawn as, at the
+/// angle it stands: `c0` its top left corner, `across` and `down` its edges, `n` its normal),
+/// each with the pixels it can fall on.
+struct Caster<'b> {
+    b: &'b Billboard,
+    foot: [f32; 2], axis: [f32; 2], ra: f32, rb: f32, contact: Option<(usize, usize, usize, usize)>,
+    c0: [f32; 3], across: [f32; 3], down: [f32; 3], ia: f32, idn: f32, n: [f32; 3], nl: f32,
+    sun: Option<(usize, usize, usize, usize)>,
+}
 
-/// The sun's direction when it casts shadows here, and every caster of world `ctx`.
+/// The sun's direction when it casts shadows here (a low sun's shadows held to six heights
+/// long), and every caster of world `ctx`.
 fn shadow_casters<'b>(ctx: &Ctx, bills: &'b [Billboard]) -> (Option<[f32; 3]>, Vec<Caster<'b>>) {
     let v = &ctx.view;
     let (w, h) = (v.width, v.height);
-    let sun = ctx.sky_lights.first().map(|s| s.dir).filter(|d| d[1] > 0.05 && !ctx.scene.ceiling.enabled);
-    let casters: Vec<Caster> = bills.iter().filter(|b| b.shadow > 0.0 && b.realm == ctx.realm).map(|b| {
+    let sun = ctx.sky_lights.first().map(|s| s.dir).filter(|d| d[1] > 0.05 && !ctx.scene.ceiling.enabled).map(|l| {
+        let lh = (l[0] * l[0] + l[2] * l[2]).sqrt();
+        let k = if lh > 6.0 * l[1] { 6.0 * l[1] / lh } else { 1.0 };
+        [l[0] * k, l[1], l[2] * k]
+    });
+    let cross = |a: [f32; 3], b: [f32; 3]| [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
+    let casters: Vec<Caster> = bills.iter().filter(|b| b.shadow > 0.0 && b.realm == ctx.realm && b.tube.is_none()).filter_map(|b| {
         let [bx, _by, bd] = b.world;
-        let half_w = b.height * b.sprite.aspect * 0.5;
-        // Contact darkening: a soft ellipse on the ground under every prop.
-        let (rx, rd) = (half_w * 0.85, half_w * 0.55);
-        let mut bbox = BBox::new();
-        for (dx, dd) in [(-rx, -rd), (rx, -rd), (rx, rd), (-rx, rd)] {
-            bbox.add(v.world_to_px(bx + dx, 0.0, (bd + dd).max(NEAR)));
-        }
-        let contact = bbox.clip(w, h);
-        // Sun shadow: the sprite's silhouette projected along the sun onto the ground.
-        let sun = sun.filter(|l| l[2].abs() >= 0.05).and_then(|l| {
-            let len = (b.height / l[1]).min(b.height * 6.0);
-            let tip = [-l[0] / l[1] * b.height, -l[2] / l[1] * b.height];
-            let scale = len / (b.height / l[1]);
-            let tip = [tip[0] * scale, tip[1] * scale];
-            let mut bbox = BBox::new();
-            for (cx, cd) in [(-half_w, 0.0), (half_w, 0.0), (half_w + tip[0], tip[1]), (-half_w + tip[0], tip[1])] {
-                bbox.add(v.world_to_px(bx + cx, 0.0, (bd + cd).max(NEAR)));
+        // The picture as it stands: a panel where it is; a card turned to the camera is a thing
+        // alike from every side (a tree, a rock), so its shadow is cast as if turned to the sun,
+        // as a round thing's is, wherever the camera stands.
+        let (c0, across, down) = match b.panel {
+            Some(pn) => (pn.tl, pn.across, pn.down),
+            None => {
+                let half_w = b.height * b.sprite.aspect * 0.5;
+                let r = match sun {
+                    Some(l) if l[0] * l[0] + l[2] * l[2] > 1e-6 => { let k = (l[0] * l[0] + l[2] * l[2]).sqrt(); [l[2] / k, 0.0, -l[0] / k] }
+                    _ => { let r = v.unrot_dir([1.0, 0.0, 0.0]); [r[0], 0.0, r[2]] }
+                };
+                ([bx - r[0] * half_w, b.height, bd - r[2] * half_w], [2.0 * half_w * r[0], 0.0, 2.0 * half_w * r[2]], [0.0, -b.height, 0.0])
             }
-            bbox.clip(w, h).map(|r| (r, scale))
+        };
+        let (aa, dd) = (dot3(across, across), dot3(down, down));
+        if aa < 1e-8 || dd < 1e-8 { return None; }
+        let n = cross(across, down);
+        let width = aa.sqrt();
+        // Contact darkening: under a card, or along the foot of a panel that stands on the ground.
+        let bottom = [c0[0] + down[0], c0[1] + down[1], c0[2] + down[2]];
+        let grounded = bottom[1].min(c0[1] + down[1] + across[1]) < 0.3;
+        let (foot, axis, ra, rb) = match b.panel {
+            None => {
+                let r = v.unrot_dir([1.0, 0.0, 0.0]);
+                let k = (r[0] * r[0] + r[2] * r[2]).sqrt().max(1e-6);
+                let half_w = 0.5 * width;
+                ([bx, bd], [r[0] / k, r[2] / k], half_w * 0.85, half_w * 0.55)
+            }
+            Some(_) => {
+                let hk = (across[0] * across[0] + across[2] * across[2]).sqrt().max(1e-6);
+                ([bottom[0] + 0.5 * across[0], bottom[2] + 0.5 * across[2]], [across[0] / hk, across[2] / hk], 0.5 * hk + 0.2, (0.275 * hk).min(0.6))
+            }
+        };
+        let mut bbox = BBox::new();
+        let mut whole = false;
+        if grounded {
+            for (sa, sb) in [(-1.0f32, -1.0f32), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)] {
+                let (x, d) = (foot[0] + axis[0] * ra * sa - axis[1] * rb * sb, foot[1] + axis[1] * ra * sa + axis[0] * rb * sb);
+                match v.world_to_px(x, 0.0, d) { Some(p) => bbox.add(Some(p)), None => whole = true }
+            }
+        }
+        let contact = if !grounded { None } else if whole { Some((0, 0, w - 1, h - 1)) } else { bbox.clip(w, h) };
+        // Sun shadow: the picture projected along the sun onto the ground.
+        let sun_box = sun.and_then(|l| {
+            let nl = dot3(n, l);
+            if nl.abs() < 1e-6 * (aa * dd).sqrt() { return None; }
+            let mut bbox = BBox::new();
+            let mut whole = false;
+            for c in [c0, [c0[0] + across[0], c0[1] + across[1], c0[2] + across[2]], bottom, [bottom[0] + across[0], bottom[1] + across[1], bottom[2] + across[2]]] {
+                let t = c[1].max(0.0) / l[1];
+                for (x, d) in [(c[0], c[2]), (c[0] - l[0] * t, c[2] - l[2] * t)] {
+                    match v.world_to_px(x, 0.0, d) { Some(p) => bbox.add(Some(p)), None => whole = true }
+                }
+            }
+            if whole { Some((0, (v.horizon_px.max(0.0) as usize).min(h - 1), w - 1, h - 1)) } else { bbox.clip(w, h) }
         });
-        Caster { b, half_w, rx, rd, contact, sun }
+        Some(Caster { b, foot, axis, ra, rb, contact, c0, across, down, ia: 1.0 / aa, idn: 1.0 / dd, n, nl: sun.map_or(0.0, |l| dot3(n, l)), sun: sun_box })
     }).collect();
     (sun, casters)
 }
@@ -4341,37 +4398,40 @@ fn prop_shadows(ctx: &Ctx, bills: &[Billboard], gbuf: &[GPixel], sun_mask: &mut 
     sun_mask.par_chunks_mut(w * BAND).zip(ao_mask.par_chunks_mut(w * BAND)).enumerate().for_each(|(k, (sm, am))| {
         let (r0, r1) = (k * BAND, k * BAND + sm.len() / w - 1);
         for c in &casters {
-            let (b, [bx, _, bd]) = (c.b, c.b.world);
+            let b = c.b;
             if let Some((x0, y0, x1, y1)) = c.contact.filter(|r| r.3 >= r0 && r.1 <= r1) {
                 for y in y0.max(r0)..=y1.min(r1) {
                     for x in x0..=x1 {
                         let i = y * w + x;
                         let g = &gbuf[i];
                         if g.id != id::GROUND { continue; }
-                        let (nx, nd) = ((g.x - bx) / c.rx, (g.d - bd) / c.rd);
-                        let r2 = nx * nx + nd * nd;
+                        let (dx, dd) = (g.x - c.foot[0], g.d - c.foot[1]);
+                        let (na, nb) = ((dx * c.axis[0] + dd * c.axis[1]) / c.ra, (dd * c.axis[0] - dx * c.axis[1]) / c.rb);
+                        let r2 = na * na + nb * nb;
                         if r2 < 1.0 { am[i - r0 * w] *= 1.0 - 0.5 * b.shadow * (1.0 - r2); }
                     }
                 }
             }
-            let (Some(l), Some(((x0, y0, x1, y1), scale))) = (sun, c.sun) else { continue };
+            let (Some(l), Some((x0, y0, x1, y1))) = (sun, c.sun) else { continue };
             if y1 < r0 || y0 > r1 { continue; }
-            let half_w = c.half_w;
+            let strip = b.panel.and_then(|p| p.strip);
             for y in y0.max(r0)..=y1.min(r1) {
                 for x in x0..=x1 {
                     let i = y * w + x;
                     let g = &gbuf[i];
                     if g.id != id::GROUND { continue; }
-                    // Height on the billboard whose shadow lands here, then the sideways position.
-                    let hgt = (bd - g.d) * l[1] / l[2] / scale;
-                    if hgt < 0.0 || hgt > b.height { continue; }
-                    let off = g.x - bx + hgt * l[0] / l[1] * scale;
-                    if off.abs() > half_w { continue; }
-                    let mut u = off / (2.0 * half_w) + 0.5;
-                    if b.flip { u = 1.0 - u; }
-                    let mut a = b.sprite.sample(u, 1.0 - hgt / b.height, 192.0, false)[3];
+                    // Toward the sun from this bit of ground: where the ray meets the picture's plane.
+                    // (The ground is at height 0 in path space: hills are the camera's.)
+                    let rel = [c.c0[0] - g.x, c.c0[1], c.c0[2] - g.d];
+                    let t = dot3(c.n, rel) / c.nl;
+                    if t <= 0.0 { continue; }
+                    let q = [g.x + l[0] * t - c.c0[0], l[1] * t - c.c0[1], g.d + l[2] * t - c.c0[2]];
+                    let (mut u, vv) = (dot3(q, c.across) * c.ia, dot3(q, c.down) * c.idn);
+                    if !(0.0..1.0).contains(&u) || !(0.0..1.0).contains(&vv) { continue; }
+                    if let Some(s) = strip { u = s; } else if b.flip { u = 1.0 - u; }
+                    let mut a = b.sprite.sample(u, vv, 192.0, false)[3];
                     // A painted mask says which parts are solid: a flame or a pane of glass casts nothing.
-                    if b.sprite.casts { if let Some(g) = &b.sprite.glow { a *= g.sample(u, 1.0 - hgt / b.height, 192.0, false)[1]; } }
+                    if b.sprite.casts { if let Some(gl) = &b.sprite.glow { a *= gl.sample(u, vv, 192.0, false)[1]; } }
                     if a > 0.01 { let m = &mut sm[i - r0 * w]; *m = m.min(1.0 - b.shadow * a.min(1.0)); }
                 }
             }
@@ -7154,5 +7214,41 @@ mod tests {
         let e = TubeCard { a: [0.0, 0.0, 5.0], u: [0.0, 0.0, 1.0], len: 2.0, ..t };
         let (z, _, c) = tube_at(&e, 50.5, 50.5).expect("its end");
         assert!((z - 5.0).abs() < 1e-4 && c[0] > 0.4, "the near end, end grain: {z} {c:?}");
+    }
+
+    #[test]
+    fn shadows_fall_away_from_the_sun_from_any_angle() {
+        // One tree beside a straight path (on the far side from a side view's camera, whose own
+        // side is cut away), a low sun to the right and behind it, no fog.
+        let mut s = preset("Forest Path");
+        s.path.bend = 0.0;
+        s.light.fog.distance = 500.0;
+        s.weather = Default::default();
+        s.props = vec![PropLayer { side: Side::Left, lateral: 2.0, spacing: 48.0, offset: 14.0, jitter: 0.0, density: 1.0, scale: 1.0, scale_var: 0.0, ..PropLayer::default() }];
+        s.sky.sun.pos = [0.78, 0.55];
+        s.motion.loop_length = 48.0;
+        let mut r = WorldRenderer::default();
+        // (Looking down the path the tree is 14 m ahead; seen from the side, the walk is level with it.)
+        for (yaw, side, (w, h), at) in [(0.0, 0.0, (120usize, 214usize), 0.0f32), (-90.0, 6.0, (214, 120), 14.0)] {
+            let mut t = s.clone();
+            (t.camera.yaw, t.camera.side) = (yaw, side);
+            let o = RenderOptions { size: Some((w as u32, h as u32)), time: Some(0.0), ..RenderOptions::default() };
+            let with = r.render(&t, at, &o).rgba;
+            let mut off = t.clone();
+            off.props[0].shadow = false;
+            let without = r.render(&off, at, &o).rgba;
+            // Where the shadow fell: pixels darker with it than without.
+            let (mut n, mut sx) = (0usize, 0.0f64);
+            for y in 0..h { for x in 0..w {
+                let i = (y * w + x) * 4;
+                let (a, b) = (with[i] as i32 + with[i + 1] as i32 + with[i + 2] as i32, without[i] as i32 + without[i + 1] as i32 + without[i + 2] as i32);
+                if b - a > 12 { n += 1; sx += x as f64; }
+            }}
+            assert!(n > 20, "yaw {yaw}: the tree casts a shadow ({n} pixels)");
+            // The sun is on the right of the picture: the shadow falls to the left of the tree's foot.
+            let v = View::new(&t, w, h);
+            let foot = v.world_to_px(-(v.path_half_width(14.0 - at) + 2.0), 0.0, 14.0 - at).unwrap();
+            assert!(sx / (n as f64) < foot[0] as f64, "yaw {yaw}: the shadow lies left of the tree at {foot:?}, away from the sun");
+        }
     }
 }

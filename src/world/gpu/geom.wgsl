@@ -11,9 +11,11 @@
 // (a-b, b-c, c-a) its (ex, ey, s_opp).
 struct Tri { f: array<f32, 36> }
 
-// A shadow caster (render::prop_shadows' Caster): bx, bd, rx, rd, half_w, shadow, height, flip;
-// contact box on (bits), x0, y0, x1, y1; sun box on, x0, y0, x1, y1, scale; sprite level off, w, h.
-struct Caster { f: array<f32, 24> }
+// A shadow caster (render::prop_shadows' Caster): foot x, d, width axis x, d, ra, shadow, rb,
+// flip; contact box on (bits), x0, y0, x1, y1; sun box on, x0, y0, x1, y1; strip (or below 0);
+// sprite level off, w, h; then the picture's plane: c0 (3), across (3), down (3), 1/|across|^2,
+// 1/|down|^2, normal (3), normal . sun.
+struct Caster { f: array<f32, 40> }
 
 struct Geom {
     tile_cols: u32, cast_bins: u32, sun_on: u32, n_lights: u32,
@@ -189,6 +191,8 @@ fn sprite_alpha(off: u32, w: u32, h: u32, u: f32, v: f32) -> f32 {
 }
 
 fn cf(c: u32, k: u32) -> f32 { return casters[c].f[k]; }
+// render::dot3, its products rounded one by one as the CPU rounds them.
+fn dot3g(a: vec3<f32>, b: vec3<f32>) -> f32 { return rnd(rnd(rnd(a.x * b.x) + rnd(a.y * b.y)) + rnd(a.z * b.z)); }
 fn cu(c: u32, k: u32) -> u32 { return bitcast<u32>(casters[c].f[k]); }
 
 @compute @workgroup_size(8, 8)
@@ -206,21 +210,28 @@ fn shadow_main(@builtin(global_invocation_id) gid: vec3<u32>) {
     if id == ID_GROUND {
         for (var q = bins[b + tile]; q < bins[b + tile + 1u]; q++) {
             let c = bins[b + ntiles + 1u + q];
-            let bx = cf(c, 0u); let bd = cf(c, 1u); let shadow = cf(c, 5u);
+            let shadow = cf(c, 5u);
             if cu(c, 8u) != 0u && x >= cu(c, 9u) && x <= cu(c, 11u) && y >= cu(c, 10u) && y <= cu(c, 12u) {
-                let nx = div(g.x - bx, cf(c, 2u)); let nd = div(g.d - bd, cf(c, 3u));
-                let r2 = rnd(nx * nx) + rnd(nd * nd);
+                let dx = g.x - cf(c, 0u); let dd = g.d - cf(c, 1u);
+                let ax = cf(c, 2u); let ad = cf(c, 3u);
+                let na = div(rnd(dx * ax) + rnd(dd * ad), cf(c, 4u));
+                let nb = div(rnd(dd * ax) - rnd(dx * ad), cf(c, 6u));
+                let r2 = rnd(na * na) + rnd(nb * nb);
                 if r2 < 1.0 { ao = rnd(ao * rnd(1.0 - rnd(rnd(0.5 * shadow) * (1.0 - r2)))); }
             }
             if G.sun_on != 0u && cu(c, 13u) != 0u && x >= cu(c, 14u) && x <= cu(c, 16u) && y >= cu(c, 15u) && y <= cu(c, 17u) {
-                let scale = cf(c, 18u); let height = cf(c, 6u); let half_w = cf(c, 4u);
-                let hgt = div(div(rnd((bd - g.d) * G.sun_y), G.sun_z), scale);
-                if hgt < 0.0 || hgt > height { continue; }
-                let off = (g.x - bx) + rnd(div(rnd(hgt * G.sun_x), G.sun_y) * scale);
-                if abs(off) > half_w { continue; }
-                var u = div(off, 2.0 * half_w) + 0.5;
-                if cu(c, 7u) != 0u { u = 1.0 - u; }
-                let a = sprite_alpha(cu(c, 19u), cu(c, 20u), cu(c, 21u), u, 1.0 - div(hgt, height));
+                // Toward the sun from this bit of ground: where the ray meets the picture's plane.
+                let c0 = vec3<f32>(cf(c, 22u), cf(c, 23u), cf(c, 24u));
+                let nrm = vec3<f32>(cf(c, 33u), cf(c, 34u), cf(c, 35u));
+                let t = div(dot3g(nrm, vec3<f32>(c0.x - g.x, c0.y, c0.z - g.d)), cf(c, 36u));
+                if t <= 0.0 { continue; }
+                let q = vec3<f32>(rnd(g.x + rnd(G.sun_x * t)) - c0.x, rnd(G.sun_y * t) - c0.y, rnd(g.d + rnd(G.sun_z * t)) - c0.z);
+                var u = rnd(dot3g(q, vec3<f32>(cf(c, 25u), cf(c, 26u), cf(c, 27u))) * cf(c, 31u));
+                let vv = rnd(dot3g(q, vec3<f32>(cf(c, 28u), cf(c, 29u), cf(c, 30u))) * cf(c, 32u));
+                if !(u >= 0.0 && u < 1.0) || !(vv >= 0.0 && vv < 1.0) { continue; }
+                let strip = cf(c, 18u);
+                if strip >= 0.0 { u = strip; } else if cu(c, 7u) != 0u { u = 1.0 - u; }
+                let a = sprite_alpha(cu(c, 19u), cu(c, 20u), cu(c, 21u), u, vv);
                 if a > 0.01 { sun = min(sun, 1.0 - rnd(shadow * min(a, 1.0))); }
             }
         }

@@ -343,8 +343,9 @@ impl TriGpu {
 /// A billboard's shadow footprints (render::prop_shadows), as geom.wgsl's `Caster` reads it; the
 /// sprite level's place in the sprite store is filled in by `Frame::geometry`.
 #[repr(C)]
-#[derive(Clone, Copy, Default, bytemuck::Pod, bytemuck::Zeroable)]
-pub(crate) struct CasterGpu { pub f: [f32; 24] }
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+pub(crate) struct CasterGpu { pub f: [f32; 40] }
+impl Default for CasterGpu { fn default() -> Self { CasterGpu { f: [0.0; 40] } } }
 pub(crate) struct CasterIn { pub c: CasterGpu, pub sprite: Arc<super::sprites::Sprite>, pub lod: usize }
 
 /// geom.wgsl's `Geom`.
