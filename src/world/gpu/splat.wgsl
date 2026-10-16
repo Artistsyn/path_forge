@@ -85,19 +85,30 @@ fn splat_main(@builtin(global_invocation_id) gid: vec3<u32>) {
                 let dd = div(sqrt(sq(fx + 0.5 - sx) + sq(fy + 0.5 - sy)), r);
                 if dd < 1.0 { c += f3(s, 3u) * (6.0 * (1.0 - dd) * (1.0 - dd) * s.f[6]); }
             }
-            case 3u: { // flame body
+            case 3u: { // flame body (render::splat::flame_at)
                 let sx = s.f[0]; let cy = s.f[1]; let rx = s.f[2]; let ry = s.f[3];
-                if x < i32(sx - rx) || x > i32(sx + rx) || y < i32(cy - ry) || y > i32(cy + ry) { continue; }
+                let bx = 1.4 * rx;
+                if x < i32(sx - bx) || x > i32(sx + bx) || y < i32(cy - ry) || y > i32(cy + ry) { continue; }
                 if g.depth < z - 0.1 { continue; }
                 let dx = div(fx + 0.5 - sx, rx); let dy = div(fy + 0.5 - cy, ry);
-                let taper = 1.0 + rnd(max(-dy, 0.0) * 0.8);
-                let dd = sqrt(sq(dx * taper) + sq(dy));
-                if dd >= 1.0 { continue; }
-                var col: vec3<f32>; var a: f32;
-                if dd < 0.35 { col = mix3(f3(s, 4u), f3(s, 7u), div(dd, 0.35)); a = 1.0; }
-                else if dd < 0.7 { col = mix3(f3(s, 7u), f3(s, 10u), div(dd - 0.35, 0.35)); a = 0.85; }
-                else { col = mix3(f3(s, 10u), f3(s, 13u), div(dd - 0.7, 0.3)); a = 0.85 * (1.0 - div(dd - 0.7, 0.3)); }
-                c += col * (a * 2.2 * (1.0 + 1.6 * (1.0 - dd) * (1.0 - dd)) * s.f[16]);
+                let hh = (1.0 - dy) * 0.5;
+                if hh < 0.0 || hh >= 1.0 { continue; }
+                let p0 = s.f[17]; let p1 = s.f[18];
+                let sway = hh * hh * (0.28 * sin(p0 + 3.0 * hh) + 0.12 * sin(p1 + 7.0 * hh));
+                let width = sqrt(1.0 - hh) * (0.75 + 0.6 * hh) / 0.9 * sqrt(min(div(hh, 0.16), 1.0));
+                var q = div(abs(dx - sway), max(width, 1e-3));
+                if hh > 0.5 { q += (hh - 0.5) * 1.1 * (0.5 + 0.5 * sin(p1 * 1.3 + dx * 6.0 + hh * 9.0)); }
+                if q >= 1.0 { continue; }
+                let a = min(div(1.0 - q, 0.3), 1.0);
+                let t = (1.0 - q) * (1.0 - 0.55 * hh);
+                var col: vec3<f32>;
+                if t > 0.62 { col = f3(s, 4u); }
+                else if t > 0.42 { col = mix3(f3(s, 7u), f3(s, 4u), div(t - 0.42, 0.2)); }
+                else if t > 0.22 { col = mix3(f3(s, 10u), f3(s, 7u), div(t - 0.22, 0.2)); }
+                else { col = mix3(f3(s, 13u), f3(s, 10u), div(t, 0.22)); }
+                let blue = max(1.0 - div(hh, 0.12), 0.0) * clamp(div(q - 0.3, 0.4), 0.0, 1.0);
+                col = mix3(col, vec3<f32>(0.1, 0.2, 0.8), 0.3 * blue);
+                c += col * (a * 2.2 * (1.0 + 1.6 * t * t) * s.f[16]);
             }
             case 4u: { // wisp
                 if x < fi(s, 4u) || x > fi(s, 5u) || y < fi(s, 6u) || y > fi(s, 7u) { continue; }

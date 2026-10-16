@@ -281,6 +281,11 @@ struct Flame {
     colors: Option<[Rgb; 4]>,
     glow: [f32; 3],
     flicker: f32,
+    /// Where its two wavers are (radians), each a whole number of times round per loop.
+    phase: [f32; 2],
+    /// Embers rising from it (torches, braziers, campfires), and how its ember stream is seeded.
+    embers: u8,
+    seed: u32,
     realm: u8,
 }
 
@@ -1827,6 +1832,8 @@ impl WorldRenderer {
             if let Some(l) = lamp { flame_frac = l.v; }
             let body_h0 = if lamp.is_some() && body_h0 <= 0.0 { 0.6 } else { body_h0 };
             let flick_m1 = cycles(2.3, loop_seconds);
+            // How fast a flame's body sways and its tongues lick.
+            let (sway_m, lick_m) = (cycles(1.7, loop_seconds), cycles(3.1, loop_seconds));
             let flick_m2 = cycles(5.1, loop_seconds);
             let seed = f.seed.wrapping_add(fi as u32 * 7919);
             // Where they stand: every `spacing`, or on the railing posts of each bridge in view.
@@ -1957,7 +1964,9 @@ impl WorldRenderer {
                             // Glass, paper and caps that are lit from inside show it.
                             let emissive = match f.kind {
                                 FixtureKind::Crystal => 1.2, FixtureKind::Glowshroom => 1.0, FixtureKind::Beacon => 0.05 + flicker.min(1.3),
-                                FixtureKind::StreetLamp | FixtureKind::PaperLantern => 0.9, FixtureKind::Campfire => 0.3, _ => 0.0,
+                                // (Street lamps, lanterns, torches, braziers and campfires glow where
+                                // their paintings' glow maps say: their panes, coals and embers.)
+                                FixtureKind::PaperLantern => 0.9, _ => 0.0,
                             };
                             bills.push(Billboard {
                                 z, world: [x, base, d], height: body_h, sprite: sprite.clone(),
@@ -1977,14 +1986,17 @@ impl WorldRenderer {
                         } else { cs }
                     });
                     let glow_f = scale3(glow, f.intensity.max(0.0));
+                    let phase = [TAU * sway_m * ctx.tphase + ph, TAU * lick_m * ctx.tphase + ph * 1.7];
+                    let fseed = hash(seed ^ 0xE3, skey) as u32;
+                    let embers = match f.kind { FixtureKind::Torch | FixtureKind::GreenFire => 3, FixtureKind::Brazier => 5, FixtureKind::Campfire => 7, _ => 0 };
                     if f.kind == FixtureKind::Chandelier && body_w > 0.0 {
                         // A flame on every candle round the ring.
                         for [u, v] in super::sprites::chandelier_flames() {
-                            flames.push(Flame { halo_only: false, world: [x + u * body_w, flame_y + v * body_h, d], size: flame_size, colors, glow: scale3(glow_f, 0.45), flicker, realm: ctx.realm });
+                            flames.push(Flame { halo_only: false, world: [x + u * body_w, flame_y + v * body_h, d], size: flame_size, colors, glow: scale3(glow_f, 0.45), flicker, phase: [phase[0] + 7.0 * u, phase[1] + 5.0 * v], embers: 0, seed: fseed, realm: ctx.realm });
                         }
                         continue;
                     }
-                    flames.push(Flame { halo_only: lamp.is_some(), world: [x + lamp_dx, flame_y, d], size: flame_size, colors, glow: glow_f, flicker, realm: ctx.realm });
+                    flames.push(Flame { halo_only: lamp.is_some(), world: [x + lamp_dx, flame_y, d], size: flame_size, colors, glow: glow_f, flicker, phase, embers, seed: fseed, realm: ctx.realm });
                 } }
             }
         }
@@ -4717,7 +4729,21 @@ fn draw_flame(ctx: &Ctx, f: &Flame, out: &mut Vec<Splat>) {
     let lin = cols.map(rgb_lin);
     let (rx, ry) = (fh * 0.55, fh * 1.25);
     let cy = sy - ry * 0.55;
-    out.push(Splat { z: c[2], gate: None, shape: Shape::Body { sx, cy, rx, ry, lin, fade } });
+    out.push(Splat { z: c[2], gate: None, shape: Shape::Body { sx, cy, rx, ry, lin, fade, ph: f.phase } });
+    // Embers lifting off it and fading as they rise, each round a whole number of times a loop.
+    let loop_seconds = ctx.scene.motion.loop_seconds();
+    for i in 0..f.embers as i64 {
+        let s = f.seed;
+        let cyc = cycles(0.45 + 0.5 * hf(s ^ 0xE5, i), loop_seconds);
+        let p = (cyc * ctx.tphase + hf(s ^ 0xE6, i)).rem_euclid(1.0);
+        let wob = (TAU * (2.0 * p + hf(s ^ 0xE7, i))).sin();
+        let ex = sx + fh * ((hf(s ^ 0xE8, i) - 0.5) * 0.7 + 0.35 * wob * p);
+        let ey = sy - fh * (0.9 + 4.5 * p);
+        let k = (1.0 - p) * (1.0 - p);
+        if k < 0.02 { continue; }
+        let r = (fh * 0.045).max(0.55);
+        out.push(Splat { z: c[2] - 0.01, gate: None, shape: Shape::Dot { sx: ex, sy: ey, r, col: scale3(lin[1], 3.0 * fade), alpha: 0.9 * k } });
+    }
 }
 
 fn draw_tufts(ctx: &Ctx, out: &mut Vec<Splat>) {
@@ -5933,5 +5959,19 @@ mod tests {
         s.sky.moon.relief = 0.0;
         let c = r.render(&s, 0.0, &o).rgba;
         assert!(b != c, "the craters' relief catches the light");
+    }
+
+    #[test]
+    fn a_flame_is_hottest_low_in_its_middle_and_licks_at_its_tip() {
+        let lin = [[1.0, 1.0, 0.9], [1.0, 0.8, 0.3], [1.0, 0.4, 0.1], [0.6, 0.1, 0.02]];
+        let at = |dx: f32, dy: f32, ph: [f32; 2]| splat::flame_at(dx, dy, ph, &lin);
+        let core = at(0.0, 0.4, [0.0, 0.0]).unwrap();
+        let edge = at(0.55, 0.4, [0.0, 0.0]).unwrap();
+        assert!(core.1 > edge.1 * 1.5 && core.0[2] > edge.0[2], "white-hot middle, redder edges");
+        assert!(at(0.95, 0.4, [0.0, 0.0]).is_none() && at(0.0, 1.05, [0.0, 0.0]).is_none(), "nothing outside it");
+        // Its tip moves as it wavers; its base hardly does.
+        let row = |dy: f32, p: f32| (0..64).map(|k| -1.0 + 2.0 * k as f32 / 63.0).map(|x| at(x, dy, [p, 1.3 * p]).map_or(0.0, |c| c.1)).collect::<Vec<f32>>();
+        let moved = |dy: f32| row(dy, 0.0).iter().zip(row(dy, 2.0)).map(|(a, b)| (a - b).abs()).sum::<f32>();
+        assert!(moved(-0.6) > 3.0 * moved(0.7), "the tip sways ({}) more than the base ({})", moved(-0.6), moved(0.7));
     }
 }

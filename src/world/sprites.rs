@@ -252,6 +252,13 @@ pub const MASK_GLOW: f32 = 1.5;
 fn mul(c: [f32; 3], k: f32) -> [f32; 3] { [c[0] * k, c[1] * k, c[2] * k] }
 fn mix(a: [f32; 3], b: [f32; 3], t: f32) -> [f32; 3] { [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t] }
 
+/// A painting with the glow map painted alongside it (the same shapes, glowing ones in light, the
+/// rest in black over them).
+fn with_glow(mut s: Sprite, g: Canvas) -> Sprite {
+    s.glow = Some(Arc::new(g.finish()));
+    s
+}
+
 impl Canvas {
     fn new(w: usize, h: usize) -> Canvas { Canvas { w: w * SS, h: h * SS, k: SS as f32, px: vec![[0.0; 4]; w * h * SS * SS], erase: false } }
 
@@ -1278,7 +1285,14 @@ pub fn paint_fixture(kind: FixtureKind) -> Option<Sprite> {
             c.rod([35.0, 46.0], [38.0, 20.0], 18.0, 15.0, cloth);
             for (i, y) in [42.0f32, 36.0, 30.0, 24.0].into_iter().enumerate() { c.line([27.0 + i as f32 * 0.5, y + 2.0], [46.0, y - 3.0], 1.4, mul(cloth, 2.4)); }
             c.stain(37.0, 20.0, 9.0, 5.0, 0.0, [0.9, 0.35, 0.05], 0.7);
-            Some(c.finish())
+            // A pitch torch's burning head glows with embers; a magic one burns clean.
+            if kind != FixtureKind::Torch { return Some(c.finish()); }
+            for (x, y, rx) in [(31.0, 23.0, 2.6), (40.0, 22.0, 3.0), (36.0, 26.0, 2.2), (44.0, 25.0, 1.8)] { c.dab(x, y, rx, 1.2, 0.3, [1.0, 0.45, 0.1]); }
+            // The burning top of the head glows.
+            let mut g = Canvas::new(64, 160);
+            g.ellipse(37.0, 21.0, 9.0, 4.5, [1.3; 3], 0.0);
+            for (x, y, rx) in [(31.0, 23.0, 2.6), (40.0, 22.0, 3.0), (36.0, 26.0, 2.2), (44.0, 25.0, 1.8)] { g.dab(x, y, rx, 1.2, 0.3, [1.5; 3]); }
+            Some(with_glow(c.finish(), g))
         }
         FixtureKind::Lantern => {
             // A glazed lantern hung by a ring from a scrolled wall bracket.
@@ -1298,7 +1312,12 @@ pub fn paint_fixture(kind: FixtureKind) -> Option<Sprite> {
             for (x0, x1) in [(44.0, 48.0), (84.0, 80.0), (64.5, 64.0)] { c.rod([x0, 82.0], [x1, 140.0], 3.0, 3.0, plate); }
             c.rect(44.0, 139.0, 84.0, 147.0, plate, 0.7);
             c.poly(&[[52.0, 147.0], [76.0, 147.0], [68.0, 156.0], [60.0, 156.0]], plate, 0.8);
-            Some(c.finish())
+            // The panes glow with the flame inside, brightest round it; the frame stays dark.
+            let mut g = Canvas::new(96, 200);
+            g.poly(&[[44.0, 82.0], [84.0, 82.0], [80.0, 140.0], [48.0, 140.0]], [0.7; 3], 0.0);
+            g.haze(64.0, 112.0, 16.0, 26.0, 0.0, [1.6; 3], 0.9);
+            for (x0, x1) in [(44.0, 48.0), (84.0, 80.0), (64.5, 64.0)] { g.rod([x0, 82.0], [x1, 140.0], 3.0, 3.0, [0.0; 3]); }
+            Some(with_glow(c.finish(), g))
         }
         FixtureKind::Candle => {
             // A fat tallow candle on an iron pricket dish, wax run down its sides.
@@ -1318,24 +1337,71 @@ pub fn paint_fixture(kind: FixtureKind) -> Option<Sprite> {
             Some(c.finish())
         }
         FixtureKind::Brazier => {
-            // An iron fire bowl on three legs braced by a ring, coals heaped in it.
+            // A forged iron fire basket on three scrolled legs: straps round a deep bowl, the
+            // coals glowing red between them and heaped over the rim, cracked with fire.
             let mut c = Canvas::new(128, 160);
-            let plate = [0.07, 0.065, 0.06];
-            c.rod([64.0, 160.0], [64.0, 70.0], 5.0, 5.0, mul(plate, 0.7));
-            c.ellipse(64.0, 122.0, 26.0, 5.0, plate, 0.8);
-            c.cut(|c| c.ellipse(64.0, 121.0, 22.0, 3.0, [0.0; 3], 0.0));
-            c.rod([26.0, 160.0], [56.0, 70.0], 6.5, 5.5, plate);
-            c.rod([102.0, 160.0], [72.0, 70.0], 6.5, 5.5, plate);
-            for x in [26.0, 102.0] { c.ellipse(x, 158.0, 6.0, 3.0, plate, 0.8); }
-            // The bowl: the lower half of a round, its rim towards us, embers inside.
-            c.ellipse(64.0, 34.0, 58.0, 44.0, mul(plate, 1.2), 1.0);
-            c.cut(|c| c.rect(0.0, 0.0, 128.0, 34.0, [0.0; 3], 0.0));
-            c.ellipse(64.0, 34.0, 60.0, 10.0, mul(plate, 1.7), 0.8);
-            c.ellipse(64.0, 34.0, 53.0, 7.0, [0.25, 0.06, 0.02], 0.3);
-            for _ in 0..1 { for (x, y, rx) in [(40.0, 33.0, 12.0), (62.0, 31.0, 14.0), (84.0, 33.0, 12.0), (52.0, 35.0, 9.0), (74.0, 35.5, 9.0)] { c.ellipse(x, y, rx, 4.2, [0.95, 0.3, 0.05], 0.7); } }
-            c.stain(64.0, 31.0, 34.0, 4.0, 0.0, [1.0, 0.8, 0.3], 0.7);
-            for i in 0..7 { let x = 14.0 + 16.6 * i as f32; c.ellipse(x, 40.0 + 3.0 * (1.0 - ((x - 64.0) / 50.0).powi(2)), 1.8, 1.8, mul(plate, 2.4), 0.9); }
-            Some(c.finish())
+            let mut g = Canvas::new(128, 160);
+            let iron = [0.06, 0.055, 0.05];
+            let black = [0.0; 3];
+            // The back leg, then the two splayed ones, each ending in a curled foot.
+            c.rod([64.0, 86.0], [64.0, 152.0], 4.5, 4.0, mul(iron, 0.6));
+            for s in [-1.0f32, 1.0] {
+                let p = |x: f32, y: f32| [64.0 + s * x, y];
+                c.rod(p(24.0, 80.0), p(34.0, 118.0), 6.5, 5.5, iron);
+                c.rod(p(34.0, 118.0), p(46.0, 150.0), 5.5, 5.0, iron);
+                let f = p(50.0, 151.0);
+                c.ellipse(f[0], f[1], 6.0, 5.0, iron, 0.6);
+                c.cut(|c| c.ellipse(f[0] + s * 0.8, f[1] - 0.5, 2.6, 2.2, black, 0.0));
+            }
+            // A brace ring between the legs.
+            c.ellipse(64.0, 122.0, 32.0, 5.5, iron, 0.6);
+            c.cut(|c| c.ellipse(64.0, 121.0, 28.0, 3.2, black, 0.0));
+            // The bowl's hot inside, seen between the straps.
+            for cv in [&mut c, &mut g] {
+                cv.ellipse(64.0, 40.0, 54.0, 48.0, [1.0; 3], 0.0);
+                cv.cut(|c| c.rect(0.0, 0.0, 128.0, 40.0, black, 0.0));
+            }
+            c.ellipse(64.0, 40.0, 54.0, 48.0, [0.42, 0.07, 0.02], 0.0);
+            c.cut(|c| c.rect(0.0, 0.0, 128.0, 40.0, black, 0.0));
+            c.stain(64.0, 46.0, 46.0, 22.0, 0.0, [1.0, 0.42, 0.08], 0.85);
+            c.stain(64.0, 44.0, 30.0, 10.0, 0.0, [1.0, 0.75, 0.3], 0.6);
+            g.ellipse(64.0, 40.0, 54.0, 48.0, [0.5; 3], 0.0);
+            g.cut(|c| c.rect(0.0, 0.0, 128.0, 40.0, black, 0.0));
+            g.stain(64.0, 46.0, 46.0, 22.0, 0.0, [1.6; 3], 1.0);
+            // Straps converging under the bowl, and two bands round it.
+            for i in 0..7 {
+                let t = (i as f32 - 3.0) / 3.4;
+                let (a, b) = ([64.0 + 54.0 * t, 40.0], [64.0 + 14.0 * t, 86.0]);
+                c.rod(a, b, 5.5, 4.5, iron);
+                g.rod(a, b, 5.5, 4.5, black);
+            }
+            for (rx, ry, y, w) in [(47.0, 25.0, 40.0, 4.0), (24.0, 4.0, 82.0, 5.0)] {
+                for j in 0..14 {
+                    let (a0, a1) = (PI * j as f32 / 14.0, PI * (j + 1) as f32 / 14.0);
+                    let (p0, p1) = ([64.0 + rx * a0.cos(), y + ry * a0.sin()], [64.0 + rx * a1.cos(), y + ry * a1.sin()]);
+                    c.rod(p0, p1, w, w, mul(iron, 1.2));
+                    g.rod(p0, p1, w, w, black);
+                }
+            }
+            // The coals heaped above the rim: dark lumps, cracked with fire.
+            let coal = [0.05, 0.04, 0.035];
+            for (x, y, rx, ry) in [(34.0, 37.0, 13.0, 7.0), (52.0, 33.0, 14.0, 8.0), (72.0, 32.0, 15.0, 8.0), (92.0, 36.0, 13.0, 7.0), (62.0, 38.0, 12.0, 5.0), (44.0, 39.0, 10.0, 4.0), (82.0, 39.0, 10.0, 4.0)] {
+                c.ellipse(x, y, rx, ry, coal, 0.8);
+                g.ellipse(x, y, rx, ry, black, 0.0);
+            }
+            for (x, y, rx, ry, a) in [(40.0, 35.0, 7.0, 1.4, 0.3), (55.0, 31.0, 8.0, 1.6, -0.2), (70.0, 30.0, 6.0, 1.3, 0.5), (86.0, 34.0, 7.0, 1.4, -0.4), (63.0, 36.5, 9.0, 1.5, 0.1), (48.0, 38.0, 5.0, 1.2, 0.0), (78.0, 37.0, 6.0, 1.3, 0.2)] {
+                c.dab(x, y, rx, ry, a, [1.0, 0.5, 0.12]);
+                g.dab(x, y, rx, ry, a, [1.8; 3]);
+            }
+            // The rim's near half over the coals' foot, riveted.
+            for j in 0..16 {
+                let (a0, a1) = (PI * j as f32 / 16.0, PI * (j + 1) as f32 / 16.0);
+                let (p0, p1) = ([64.0 + 57.0 * a0.cos(), 40.0 + 8.0 * a0.sin()], [64.0 + 57.0 * a1.cos(), 40.0 + 8.0 * a1.sin()]);
+                c.rod(p0, p1, 6.0, 6.0, mul(iron, 1.6));
+                g.rod(p0, p1, 6.0, 6.0, black);
+            }
+            for j in 1..8 { let a = PI * j as f32 / 8.0; c.ellipse(64.0 + 57.0 * a.cos(), 40.0 + 8.0 * a.sin(), 1.6, 1.6, mul(iron, 3.0), 0.9); }
+            Some(with_glow(c.finish(), g))
         }
         FixtureKind::Crystal => Some(paint_prop(PropKind::Crystal, [140, 210, 255], 3)),
         FixtureKind::Firefly => None,
@@ -1353,7 +1419,13 @@ pub fn paint_fixture(kind: FixtureKind) -> Option<Sprite> {
             c.rect(13.0, 91.0, 43.0, 98.0, iron, 0.7);
             c.poly(&[[18.0, 98.0], [38.0, 98.0], [33.0, 112.0], [23.0, 112.0]], iron, 0.8);
             c.rect(22.0, 112.0, 34.0, 120.0, iron, 0.7);
-            Some(c.finish())
+            // A mantle burning bright inside the panes; the frame and roof stay iron.
+            c.ellipse(28.0, 62.0, 5.0, 8.0, [1.0, 0.95, 0.85], 0.0);
+            let mut g = Canvas::new(56, 120);
+            g.poly(&[[10.0, 34.0], [46.0, 34.0], [40.0, 92.0], [16.0, 92.0]], [0.8; 3], 0.0);
+            g.haze(28.0, 62.0, 13.0, 22.0, 0.0, [1.8; 3], 0.9);
+            for (x0, x1) in [(10.0, 16.0), (46.0, 40.0), (29.0, 28.5)] { g.rod([x0, 34.0], [x1, 92.0], 3.0, 3.0, [0.0; 3]); }
+            Some(with_glow(c.finish(), g))
         }
         FixtureKind::PaperLantern => {
             // A round paper lantern on its string: ribs showing through the paper, a tassel beneath.
@@ -1382,8 +1454,16 @@ pub fn paint_fixture(kind: FixtureKind) -> Option<Sprite> {
             c.ellipse(64.0, 34.0, 20.0, 7.0, [1.0, 0.32, 0.05], 0.2);
             c.ellipse(64.0, 33.0, 10.0, 3.5, [1.0, 0.7, 0.2], 0.0);
             c.limb([64.0, 52.0], [66.0, 10.0], 11.0, 8.0, mul(log, 0.85), 4.1);
-            for (x, y, rx, ry) in [(12.0, 50.0, 12.0, 9.0), (38.0, 53.0, 13.0, 7.0), (66.0, 54.0, 12.0, 6.0), (92.0, 53.0, 13.0, 7.0), (116.0, 50.0, 12.0, 9.0)] { c.ellipse(x, y, rx, ry, stone, 0.9); }
-            Some(c.finish())
+            // Embers glowing in the logs' lap and along their charred undersides.
+            for (x, y, rx, a) in [(50.0, 36.0, 5.0, 0.4), (78.0, 35.0, 5.0, -0.4), (64.0, 40.0, 7.0, 0.0), (40.0, 41.0, 4.0, 0.3), (88.0, 41.0, 4.0, -0.3)] { c.dab(x, y, rx, 1.6, a, [1.0, 0.5, 0.12]); }
+            let mut g = Canvas::new(128, 60);
+            g.ellipse(64.0, 34.0, 20.0, 7.0, [1.5; 3], 0.0);
+            g.limb([18.0, 46.0], [92.0, 16.0], 13.0, 10.0, [0.0; 3], 1.0);
+            g.limb([110.0, 46.0], [38.0, 14.0], 13.0, 10.0, [0.0; 3], 2.3);
+            g.limb([64.0, 52.0], [66.0, 10.0], 11.0, 8.0, [0.0; 3], 4.1);
+            for (x, y, rx, a) in [(50.0, 36.0, 5.0, 0.4), (78.0, 35.0, 5.0, -0.4), (64.0, 40.0, 7.0, 0.0), (40.0, 41.0, 4.0, 0.3), (88.0, 41.0, 4.0, -0.3)] { g.dab(x, y, rx, 1.6, a, [1.6; 3]); }
+            for (x, y, rx, ry) in [(12.0, 50.0, 12.0, 9.0), (38.0, 53.0, 13.0, 7.0), (66.0, 54.0, 12.0, 6.0), (92.0, 53.0, 13.0, 7.0), (116.0, 50.0, 12.0, 9.0)] { c.ellipse(x, y, rx, ry, stone, 0.9); g.ellipse(x, y, rx, ry, [0.0; 3], 0.0); }
+            Some(with_glow(c.finish(), g))
         }
         FixtureKind::Glowshroom => {
             // Three caps of different ages on pale stems, spotted, lit from within.
@@ -1487,7 +1567,7 @@ pub fn fixture_body(kind: FixtureKind) -> (f32, f32) {
         FixtureKind::Torch | FixtureKind::GreenFire | FixtureKind::Magic | FixtureKind::IceWisp => (0.65, 0.12),
         FixtureKind::Lantern => (0.8, 0.55),
         FixtureKind::Candle => (0.3, 0.2),
-        FixtureKind::Brazier => (1.0, 0.16),
+        FixtureKind::Brazier => (1.0, 0.17),
         FixtureKind::Crystal => (0.9, 0.3),
         FixtureKind::Firefly => (0.0, 0.0),
         FixtureKind::StreetLamp => (0.62, 0.52),
