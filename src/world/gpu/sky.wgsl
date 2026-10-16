@@ -39,7 +39,9 @@ struct Sky {
     w_center: f32, w_focal: f32, w_split: f32, w_near: f32, w_keep0: f32, w_keep1: f32, sp_star_var: f32, ss_prims: u32,
     // A sunset's glow (render::clouds::Glow::rec, at ss_prims).
     // The realistic sky and the objects (render::space::SpaceK::pack, at sx_prims).
-    ss_on: u32, sx_prims: u32, pad8: u32, pad9: u32,
+    ss_on: u32, sx_prims: u32, m_seed: u32, m_relief: f32,
+    // render::moon_gain
+    m_gain: f32, pad10: u32, pad11: u32, pad12: u32,
 }
 
 @group(0) @binding(1) var<uniform> S: Sky;
@@ -70,10 +72,22 @@ fn sky_weight(x: u32) -> f32 {
 const MARIA = array<vec4<f32>, 11>(
     vec4<f32>(-0.55, -0.05, 0.33, 0.52), vec4<f32>(-0.2, -0.45, 0.32, 0.28), vec4<f32>(0.27, -0.4, 0.2, 0.2), vec4<f32>(0.42, -0.1, 0.24, 0.22), vec4<f32>(0.78, -0.28, 0.09, 0.12), vec4<f32>(0.68, 0.1, 0.12, 0.18), vec4<f32>(0.48, 0.27, 0.1, 0.1), vec4<f32>(-0.2, 0.36, 0.24, 0.2), vec4<f32>(-0.5, 0.4, 0.11, 0.11), vec4<f32>(0.0, -0.8, 0.45, 0.06), vec4<f32>(0.06, -0.22, 0.1, 0.1));
 const RAY_CRATERS = array<vec4<f32>, 4>(vec4<f32>(-0.12, 0.69, 0.5, 0.22), vec4<f32>(-0.33, -0.15, 0.2, 0.16), vec4<f32>(-0.6, -0.13, 0.13, 0.13), vec4<f32>(-0.68, -0.39, 0.08, 0.2));
-// render::moon_albedo
-fn moon_albedo(n: vec3<f32>, px: f32) -> f32 {
+// render::crater_profile: (albedo factor, slope outwards per radius).
+fn crater_profile(d: f32, e: f32, peak: f32) -> vec2<f32> {
+    let fl = 1.0 - smoothstep_r(0.78 - e, 0.82 + e, d);
+    let rim = smoothstep_r(0.72 - e, 0.92, d) * (1.0 - smoothstep_r(1.0, 1.2 + e, d));
+    let alb = 1.0 + 0.07 * rim - 0.09 * fl;
+    let qr = (d - 1.0) / 0.17;
+    var slope = select(0.0, 0.7 * d, d < 1.0);
+    slope += 0.13 * (-2.0 * qr / 0.17) * exp(-qr * qr);
+    let qp = d / 0.16;
+    slope += peak * 0.12 * (-2.0 * qp / 0.16) * exp(-qp * qp);
+    return vec2<f32>(alb, slope);
+}
+// render::moon_surface: (brightness, sunlight with the relief).
+fn moon_surface(n: vec3<f32>, px: f32) -> vec2<f32> {
     let x = n.x; let y = n.y; let z = n.z;
-    let warp = 0.5 * (value_noise(x * 5.0 + 1.7, y * 5.0 + 3.9) - 0.5) + 0.22 * (value_noise(x * 11.0 + 8.0, y * 11.0 + 2.0) - 0.5);
+    let warp = 0.7 * (value_noise(x * 5.0 + 1.7, y * 5.0 + 3.9) - 0.5) + 0.3 * (value_noise(x * 11.0 + 8.0, y * 11.0 + 2.0) - 0.5) + 0.12 * (value_noise(x * 23.0 + 4.0, y * 23.0 + 6.0) - 0.5);
     var sea = 0.0;
     for (var k = 0; k < 11; k++) {
         let m = MARIA[k];
@@ -82,7 +96,8 @@ fn moon_albedo(n: vec3<f32>, px: f32) -> f32 {
         let soft = max(px / min(m.z, m.w), 0.08);
         sea = max(sea, 1.0 - smoothstep_r(0.82 - soft, 1.0 + soft, d));
     }
-    var a = (1.0 - 0.5 * sea) * (0.93 + 0.14 * value_noise(x * 6.5 + 2.0, y * 6.5 + 5.0));
+    sea *= 0.8 + 0.3 * value_noise(x * 9.0 + 5.0, y * 9.0 + 1.0);
+    var a = (1.0 - 0.5 * sea) * (0.9 + 0.2 * value_noise(x * 6.5 + 2.0, y * 6.5 + 5.0)) * (1.0 + 0.06 * (1.0 - sea) * (value_noise(x * 14.0 + 3.0, y * 14.0 + 7.0) - 0.5));
     let pits = 1.0 - smoothstep_r(0.02, 0.07, px);
     for (var k = 0; k < 4; k++) {
         let rc = RAY_CRATERS[k];
@@ -95,18 +110,47 @@ fn moon_albedo(n: vec3<f32>, px: f32) -> f32 {
         let spot = exp(-sp * sp);
         a += rc.w * (0.75 * streak * exp(-dist / rc.z) * (1.0 - exp(-dist / (0.1 * rc.z + px))) + spot);
     }
+    var gx = 0.0; var gy = 0.0;
     for (var k = 0; k < 22; k++) {
         let c = S.craters[k];
         if c.w <= 0.0 { continue; }
-        let d = sqrt((x - c.x) * (x - c.x) + (y - c.y) * (y - c.y) + (z - c.z) * (z - c.z)) / c.w;
-        if d > 1.4 { continue; }
-        let e = max(px / c.w, 0.06);
-        let fl = 1.0 - smoothstep_r(0.78 - e, 0.82 + e, d);
-        let rim = smoothstep_r(0.72 - e, 0.92, d) * (1.0 - smoothstep_r(1.0, 1.2 + e, d));
-        a *= 1.0 + pits * (0.1 * rim - 0.12 * fl);
+        let vx = x - c.x; let vy = y - c.y;
+        let d = sqrt(vx * vx + vy * vy + (z - c.z) * (z - c.z)) / c.w;
+        if d > 1.5 { continue; }
+        let pr = crater_profile(d, max(px / c.w, 0.06), smoothstep_r(0.08, 0.16, c.w));
+        a *= 1.0 + pits * (pr.x - 1.0);
+        let kk = pr.y * (1.0 - smoothstep_r(0.25, 0.6, px / c.w));
+        let dl = max(sqrt(vx * vx + vy * vy), 1e-4);
+        gx += kk * vx / dl;
+        gy += kk * vy / dl;
+    }
+    let s = S.m_seed * 0x9E37u;
+    for (var j = 0; j < 2; j++) {
+        let cell = select(0.055, 0.12, j == 0);
+        let k = select(0x3C0u, 0x3B0u, j == 0) + s;
+        let ix = i32(floor(div(x, cell))); let iy = i32(floor(div(y, cell)));
+        if cell_hash(ix, iy, k) >= 0.3 * (1.0 - 0.7 * sea) { continue; }
+        let h = cell_hash(ix, iy, k + 3u);
+        let rad = cell * (0.08 + 0.3 * h * h);
+        let cx = (f32(ix) + 0.3 + 0.4 * cell_hash(ix, iy, k + 1u)) * cell;
+        let cy = (f32(iy) + 0.3 + 0.4 * cell_hash(ix, iy, k + 2u)) * cell;
+        let vx = x - cx; let vy = y - cy;
+        let dl = sqrt(vx * vx + vy * vy);
+        let d = dl / rad;
+        if d > 1.5 { continue; }
+        let pr = crater_profile(d, max(px / rad, 0.06), 0.0);
+        let fine = 1.0 - smoothstep_r(0.012, 0.035, px);
+        a *= 1.0 + fine * (pr.x - 1.0);
+        let kk = pr.y * (1.0 - smoothstep_r(0.25, 0.6, px / rad));
+        gx += kk * vx / max(dl, 1e-4);
+        gy += kk * vy / max(dl, 1e-4);
     }
     let grain = (1.0 - smoothstep_r(0.03, 0.08, px)) * (value_noise(x * 24.0 + 9.0, y * 24.0) - 0.5);
-    return a * (1.0 + 0.16 * grain);
+    a *= 1.0 + 0.16 * grain;
+    let r = 0.28 * S.m_relief;
+    let nx = x - r * gx; let ny = y - r * gy;
+    let l = max(sqrt(nx * nx + ny * ny + z * z), 1e-5);
+    return vec2<f32>(a, (nx * S.m_sx + z * S.m_sy) / l);
 }
 // render::moon_halo (MOON_HALO 5).
 fn moon_halo(d: f32) -> f32 {
@@ -1120,13 +1164,15 @@ fn sky_main(@builtin(global_invocation_id) gid: vec3<u32>) {
                 let nz = sqrt(max(1.0 - dd * dd, 0.0));
                 let edge = clamp(1.5 / max(r, 1.0), 0.01, 0.2);
                 let mu0 = dx * S.m_sx + nz * S.m_sy;
-                let lit = smoothstep_r(-edge, edge, mu0);
-                var crater = min(2.0 * max(mu0, 0.0) / max(max(mu0, 0.0) + nz, 1e-3), 1.35);
-                if S.m_craters != 0u { crater *= moon_albedo(vec3<f32>(dx, dy, nz), 1.0 / max(r, 1.0)); }
+                var surf = vec2<f32>(1.0, mu0);
+                if S.m_craters != 0u { surf = moon_surface(vec3<f32>(dx, dy, nz), 1.0 / max(r, 1.0)); }
+                let mu = surf.y;
+                let lit = smoothstep_r(-edge, edge, mu);
+                let crater = min(2.0 * max(mu, 0.0) / max(max(mu, 0.0) + nz, 1e-3), 1.0) * surf.x;
                 // render::MOON_GAIN
-                if lit > 0.0 { c = mix3(c, mc * (1.35 * crater), clamp(S.m_op * lit, 0.0, 1.0)); }
+                if lit > 0.0 { c = mix3(c, mc * (S.m_gain * crater), clamp(S.m_op * lit, 0.0, 1.0)); }
                 c += mc * (0.012 * S.m_op * (1.0 - lit));
-                c += mc * (S.m_litf * moon_halo(1.2 * max(-mu0, 0.0)));
+                c += mc * (S.m_litf * moon_halo(1.2 * max(-mu0, 0.0)) * (1.0 - 0.15 * lit));
             } else if dd * r < gr {
                 c += mc * (S.m_litf * moon_halo(dd - 1.0 + 1.2 * max(-dx / dd * S.m_sx, 0.0)));
             }

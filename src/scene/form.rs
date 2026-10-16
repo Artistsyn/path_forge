@@ -23,7 +23,7 @@ pub const META: &[Meta] = &[
     m("verge.tuft_density", 0.0, 4.0, "×"), m("verge.tuft_height", 0.02, 1.5, " m"),
     m("walls.gap", 0.0, 20.0, " m"), m("walls.height", 0.0, 20.0, " m"), m("walls.base_shadow", 0.0, 1.0, ""),
     m("ceiling.height", 1.0, 20.0, " m"),
-    m("*.radius", 0.0, 0.4, ""), m("*.intensity", 0.0, 5.0, "×"), m("sky.moon.phase", -1.0, 1.0, ""), m("sky.moon.opacity", 0.0, 1.0, ""),
+    m("*.radius", 0.0, 0.4, ""), m("*.intensity", 0.0, 5.0, "×"), m("sky.moon.phase", -1.0, 1.0, ""), m("sky.moon.opacity", 0.0, 1.0, ""), m("sky.moon.relief", 0.0, 2.0, ""), m("sky.moon.seed", 0.0, 9999.0, ""),
     m("sky.stars.count", 0.0, 1000.0, ""), m("sky.stars.size", 0.2, 4.0, "×"), m("sky.stars.twinkle", 0.0, 1.0, ""),
     m("sky.clouds.count", 0.0, 60.0, ""), m("sky.clouds.cover", 0.0, 1.0, ""), m("sky.clouds.shade", 0.0, 1.0, ""), m("sky.cloud_layers.*.cover", 0.0, 1.0, ""), m("sky.cloud_layers.*.shade", 0.0, 1.0, ""), m("sky.cloud_layers.*.drift", 0.0, 5.0, "×"), m("sky.cloud_layers.*.scale", 0.2, 4.0, "×"), m("sky.cloud_layers.*.opacity", 0.0, 1.0, ""), m("sky.cloud_layers.*.variation", 0.0, 1.0, ""), m("sky.clouds.drift", 0.0, 5.0, "×"), m("sky.clouds.scale", 0.2, 4.0, "×"), m("sky.clouds.opacity", 0.0, 1.0, ""), a("sky.clouds.variation", 0.0, 1.0, ""),
     m("sky.clouds.patches", 0.0, 1.0, ""), m("sky.cloud_layers.*.patches", 0.0, 1.0, ""),

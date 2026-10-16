@@ -95,7 +95,7 @@ pub fn from_v2(o: &PathForgeSettings, name: &str) -> Scene {
                 enabled: o.sky.moon_enabled, pos: o.sky.moon_pos, radius: o.sky.moon_radius, color: o.sky.moon_color,
                 emits_light: o.sky.moon_emits_light, intensity: 0.35,
             },
-            phase: o.sky.moon_phase, opacity: o.sky.moon_alpha.clamp(0.0, 1.0), craters: o.sky.moon_texture_enabled,
+            phase: o.sky.moon_phase, opacity: o.sky.moon_alpha.clamp(0.0, 1.0), craters: o.sky.moon_texture_enabled, ..Moon::default()
         },
         stars: Stars { enabled: o.sky.stars_enabled, count: o.sky.stars_count, size: o.sky.stars_size / 1.4, twinkle: o.sky.stars_twinkle, seed: o.sky.stars_seed },
         clouds: Clouds {

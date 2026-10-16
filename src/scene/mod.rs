@@ -1003,13 +1003,19 @@ pub struct Moon {
     /// -1 waning .. 0 full .. 1 waxing.
     pub phase: f32,
     pub opacity: f32,
+    /// Its seas, craters (with raised rims, bowls and central peaks, catching the sunlight past
+    /// the line between day and night) and the rays of its young craters.
     pub craters: bool,
+    /// How deep the craters look: 0 flat markings .. 1 natural .. 2 rugged.
+    pub relief: f32,
+    /// Which craters: each seed scatters a different field of them.
+    pub seed: u32,
 }
 impl Default for Moon {
     fn default() -> Self {
         Self {
             body: SkyBody { pos: [0.25, 0.3], radius: 0.06, color: [222, 230, 255], intensity: 0.35, ..SkyBody::default() },
-            phase: 0.0, opacity: 0.9, craters: true,
+            phase: 0.0, opacity: 0.9, craters: true, relief: 1.0, seed: 0,
         }
     }
 }

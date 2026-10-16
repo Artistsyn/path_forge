@@ -186,7 +186,7 @@ pub(super) fn space_k(ctx: &Ctx) -> Option<SpaceK> {
 }
 
 /// `looks::hash2` with a salt: several independent numbers per cell.
-fn cell_hash(x: i32, y: i32, k: u32) -> f32 {
+pub(super) fn cell_hash(x: i32, y: i32, k: u32) -> f32 {
     let mut h = (x as u32).wrapping_mul(0x8da6_b343) ^ (y as u32).wrapping_mul(0xd816_3841) ^ k.wrapping_mul(0x9e37_79b9);
     h ^= h >> 15;
     h = h.wrapping_mul(0x2c1b_3c6d);

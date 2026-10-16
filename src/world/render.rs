@@ -3453,12 +3453,7 @@ fn gpu_sky(ctx: &Ctx, draw: bool, strike: Option<(&Strike, [f32; 3])>, bank: Opt
     // (`ox` is only where the cloud layers hang from, so it slides with the sky.)
     let sdx = v.sky_dx();
     (p.hy, p.ox, p.oy, p.fw, p.fhy, p.tile_cols) = (hy, ox + sdx, oy, fw, fhy, w.div_ceil(16) as u32);
-    for k in 0..22i64 {
-        let (u, vv) = (hf(0x3A1, k) * 1.8 - 0.9, hf(0x3A2, k) * 1.8 - 0.9);
-        p.craters[k as usize] = if u * u + vv * vv > 0.85 { [0.0, 0.0, 0.0, -1.0] } else {
-            [u, vv, (1.0 - u * u - vv * vv).sqrt(), 0.04 + 0.16 * hf(0x3A3, k).powi(3)]
-        };
-    }
+    p.craters = moon_craters(sky.moon.seed);
     let mut prims: Vec<f32> = Vec::new();
     let mut bins: Vec<u32> = Vec::new();
     if draw {
@@ -3528,6 +3523,7 @@ fn gpu_sky(ctx: &Ctx, draw: bool, strike: Option<(&Strike, [f32; 3])>, bank: Opt
             p.m_litf = 0.5 * (1.0 + angle.cos());
             p.m_op = m.opacity;
             p.m_craters = m.craters as u32;
+            (p.m_seed, p.m_relief, p.m_gain) = (m.seed, m.relief.clamp(0.0, 3.0), moon_gain(sky));
         }
         if let Some(cs) = cloud_list(ctx) {
             if !cs.blobs.is_empty() {
@@ -4245,23 +4241,58 @@ fn cloud_list(ctx: &Ctx) -> Option<CloudSet> {
     Some(CloudSet { col, sun_at, opacity: cl.opacity, blobs })
 }
 
-/// Brightness of the moon's surface at a point `n` of its sphere (unit radius, z toward the
-/// viewer): soft dark maria, round craters with darker floors and brighter rims, and fine
-/// mottling. Fixed to the moon, so the same at every phase. Craters are placed and measured on
-/// the sphere, so the ones near the limb come out foreshortened; every edge is at least a pixel
-/// wide (`px`, disc units per pixel), so a small moon blurs instead of turning blocky.
-fn moon_albedo(n: [f32; 3], px: f32) -> f32 {
+/// The moon's large craters for a seed: (x, y, z) on the near hemisphere and a radius (0 for
+/// none), many small and a few large. The sky pass gets the same list.
+pub(super) fn moon_craters(seed: u32) -> [[f32; 4]; 22] {
+    let mut out = [[0.0f32; 4]; 22];
+    let s = seed.wrapping_mul(0x9E37_79B9);
+    for (k, c) in out.iter_mut().enumerate() {
+        let k = k as i64;
+        let (u, v) = (hf(0x3A1 ^ s, k) * 1.8 - 0.9, hf(0x3A2 ^ s, k) * 1.8 - 0.9);
+        *c = if u * u + v * v > 0.85 { [0.0, 0.0, 0.0, -1.0] } else { [u, v, (1.0 - u * u - v * v).sqrt(), 0.04 + 0.16 * hf(0x3A3 ^ s, k).powi(3)] };
+    }
+    out
+}
+
+/// One crater's look at distance `d` (in its radii) from its centre: (albedo factor, slope of
+/// its height outwards, per radius). A bowl with a darker floor, a raised bright rim, a blanket
+/// of ejecta round it, and (the large ones) a central peak. `e` softens edges to a pixel, `peak`
+/// 0..1 how much of a central peak it has.
+fn crater_profile(d: f32, e: f32, peak: f32) -> (f32, f32) {
+    let floor = 1.0 - smoothstep(0.78 - e, 0.82 + e, d);
+    let rim = smoothstep(0.72 - e, 0.92, d) * (1.0 - smoothstep(1.0, 1.2 + e, d));
+    let alb = 1.0 + 0.07 * rim - 0.09 * floor;
+    // Height: -0.35 (1 - d^2) inside, a rim ridge at 1, the peak at the middle.
+    let qr = (d - 1.0) / 0.17;
+    let mut slope = if d < 1.0 { 0.7 * d } else { 0.0 };
+    slope += 0.13 * (-2.0 * qr / 0.17) * (-qr * qr).exp();
+    let qp = d / 0.16;
+    slope += peak * 0.12 * (-2.0 * qp / 0.16) * (-qp * qp).exp();
+    (alb, slope)
+}
+
+/// The moon's surface at a point `n` of its sphere (unit radius, z toward the viewer, y down):
+/// its brightness, and how much the sun (`sun`, its x and z) lights it there with the craters'
+/// relief (`relief` 0 flat .. 2 rugged). Soft dark maria, the rays of young craters, `seed`'s
+/// field of large craters (`big`, from `moon_craters`) and two finer scales of small ones (fewer
+/// on the smooth seas), and fine mottling. Fixed to the moon, so the same at every phase; every
+/// edge is at least a pixel wide (`px`, disc units per pixel), so a small moon blurs instead of
+/// turning blocky, and relief finer than a pixel fades out.
+fn moon_surface(n: [f32; 3], px: f32, sun: [f32; 2], big: &[[f32; 4]; 22], seed: u32, relief: f32) -> (f32, f32) {
     use super::looks::value_noise as vn;
     let [x, y, z] = n;
     // The seas, where they lie on the near side, their shores broken up.
-    let warp = 0.5 * (vn(x * 5.0 + 1.7, y * 5.0 + 3.9) - 0.5) + 0.22 * (vn(x * 11.0 + 8.0, y * 11.0 + 2.0) - 0.5);
+    let warp = 0.7 * (vn(x * 5.0 + 1.7, y * 5.0 + 3.9) - 0.5) + 0.3 * (vn(x * 11.0 + 8.0, y * 11.0 + 2.0) - 0.5) + 0.12 * (vn(x * 23.0 + 4.0, y * 23.0 + 6.0) - 0.5);
     let mut sea = 0.0f32;
     for m in MARIA {
         let d = (((x - m[0]) / m[2]).powi(2) + ((y - m[1]) / m[3]).powi(2)).sqrt() + warp;
         let soft = (px / m[2].min(m[3])).max(0.08);
         sea = sea.max(1.0 - smoothstep(0.82 - soft, 1.0 + soft, d));
     }
-    let mut a = (1.0 - 0.5 * sea) * (0.93 + 0.14 * vn(x * 6.5 + 2.0, y * 6.5 + 5.0));
+    // The seas' own darker and lighter lava flows.
+    sea *= 0.8 + 0.3 * vn(x * 9.0 + 5.0, y * 9.0 + 1.0);
+    // Highlands bright and rough, seas dark and smooth.
+    let mut a = (1.0 - 0.5 * sea) * (0.9 + 0.2 * vn(x * 6.5 + 2.0, y * 6.5 + 5.0)) * (1.0 + 0.06 * (1.0 - sea) * (vn(x * 14.0 + 3.0, y * 14.0 + 7.0) - 0.5));
     // Small craters only show on a moon big enough to hold them.
     let pits = 1.0 - smoothstep(0.02, 0.07, px);
     // Young craters and the bright rays thrown out from them.
@@ -4274,22 +4305,49 @@ fn moon_albedo(n: [f32; 3], px: f32) -> f32 {
         let spot = (-(dist / (0.09 * rc[2] + px)).powi(2)).exp();
         a += rc[3] * (0.75 * streak * (-dist / rc[2]).exp() * (1.0 - (-dist / (0.1 * rc[2] + px)).exp()) + spot);
     }
-    for k in 0..22 {
-        // A centre on the near hemisphere, and a radius: many small, a few large.
-        let (u, v) = (hf(0x3A1, k) * 1.8 - 0.9, hf(0x3A2, k) * 1.8 - 0.9);
-        if u * u + v * v > 0.85 { continue; }
-        let w = (1.0 - u * u - v * v).sqrt();
-        let rad = 0.04 + 0.16 * hf(0x3A3, k).powi(3);
-        let d = ((x - u).powi(2) + (y - v).powi(2) + (z - w).powi(2)).sqrt() / rad;
-        if d > 1.4 { continue; }
-        let e = (px / rad).max(0.06);
-        let floor = 1.0 - smoothstep(0.78 - e, 0.82 + e, d);
-        let rim = smoothstep(0.72 - e, 0.92, d) * (1.0 - smoothstep(1.0, 1.2 + e, d));
-        a *= 1.0 + pits * (0.1 * rim - 0.12 * floor);
+    let (mut gx, mut gy) = (0.0f32, 0.0f32);
+    for c in big {
+        if c[3] <= 0.0 { continue; }
+        let (vx, vy) = (x - c[0], y - c[1]);
+        let d = (vx * vx + vy * vy + (z - c[2]) * (z - c[2])).sqrt() / c[3];
+        if d > 1.5 { continue; }
+        let (alb, sl) = crater_profile(d, (px / c[3]).max(0.06), smoothstep(0.08, 0.16, c[3]));
+        a *= 1.0 + pits * (alb - 1.0);
+        // Relief only where the crater spans a few pixels.
+        let k = sl * (1.0 - smoothstep(0.25, 0.6, px / c[3]));
+        let dl = (vx * vx + vy * vy).sqrt().max(1e-4);
+        gx += k * vx / dl;
+        gy += k * vy / dl;
+    }
+    // Two finer scales of small craters, one to a cell at most, fewer on the seas.
+    let s = seed.wrapping_mul(0x9E37);
+    for (cell, salt) in [(0.12f32, 0x3B0u32), (0.055, 0x3C0)] {
+        let (ix, iy) = ((x / cell).floor() as i32, (y / cell).floor() as i32);
+        let k = salt.wrapping_add(s);
+        if space::cell_hash(ix, iy, k) >= 0.3 * (1.0 - 0.7 * sea) { continue; }
+        let h = space::cell_hash(ix, iy, k.wrapping_add(3));
+        let rad = cell * (0.08 + 0.3 * h * h);
+        let cx = (ix as f32 + 0.3 + 0.4 * space::cell_hash(ix, iy, k.wrapping_add(1))) * cell;
+        let cy = (iy as f32 + 0.3 + 0.4 * space::cell_hash(ix, iy, k.wrapping_add(2))) * cell;
+        let (vx, vy) = (x - cx, y - cy);
+        let dl = (vx * vx + vy * vy).sqrt();
+        let d = dl / rad;
+        if d > 1.5 { continue; }
+        let (alb, sl) = crater_profile(d, (px / rad).max(0.06), 0.0);
+        let fine = 1.0 - smoothstep(0.012, 0.035, px);
+        a *= 1.0 + fine * (alb - 1.0);
+        let kk = sl * (1.0 - smoothstep(0.25, 0.6, px / rad));
+        gx += kk * vx / dl.max(1e-4);
+        gy += kk * vy / dl.max(1e-4);
     }
     // Fine mottling, faded out where it would be smaller than a pixel.
     let grain = (1.0 - smoothstep(0.03, 0.08, px)) * (vn(x * 24.0 + 9.0, y * 24.0) - 0.5);
-    a * (1.0 + 0.16 * grain)
+    a *= 1.0 + 0.16 * grain;
+    // The surface tilted by the slopes, lit by the sun.
+    let r = 0.28 * relief;
+    let (nx, ny, nz) = (x - r * gx, y - r * gy, z);
+    let l = (nx * nx + ny * ny + nz * nz).sqrt().max(1e-5);
+    (a, (nx * sun[0] + nz * sun[1]) / l)
 }
 
 /// The moon's seas as it faces the Earth: (x, y, half width, half height) on its disc, north up
@@ -4304,6 +4362,16 @@ pub(super) const RAY_CRATERS: [[f32; 4]; 4] = [[-0.12, 0.69, 0.5, 0.22], [-0.33,
 
 /// How bright the moon's lit surface is against its colour (it is bright enough to glow a little).
 pub(super) const MOON_GAIN: f32 = 1.35;
+
+/// How bright the moon's lit face is against the sky behind it (`top` and `horizon` at its height
+/// `pos_y`): a day moon as bright as ever (`MOON_GAIN`); against a night sky less, as a camera
+/// would expose for it, so its seas and craters show instead of a white disc.
+pub(super) fn moon_gain(sky: &crate::scene::Sky) -> f32 {
+    let t = sky.moon.body.pos[1].clamp(0.0, 1.0);
+    let c = mix3(rgb_lin(sky.top), rgb_lin(sky.horizon), t);
+    let l = 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2];
+    0.8 + (MOON_GAIN - 0.8) * smoothstep(0.02, 0.25, l)
+}
 /// How bright the sun's disc is against its colour: far past white, so the lens blooms it and its
 /// edge is lost in its own glare.
 pub(super) const SUN_GAIN: f32 = 12.0;
@@ -4396,6 +4464,8 @@ fn draw_sky_bodies(ctx: &Ctx, gbuf: &[GPixel], hdr: &mut [[f32; 3]]) {
         let angle = ph.abs() * std::f32::consts::PI;
         let sun = [if ph < 0.0 { -angle.sin() } else { angle.sin() }, angle.cos()];
         let lit_fraction = 0.5 * (1.0 + angle.cos());
+        let big = moon_craters(m.seed);
+        let gain = moon_gain(sky);
         for y in (cy - gr) as i64..=(cy + gr) as i64 { for x in (cx - gr) as i64..=(cx + gr) as i64 {
             let (dx, dy) = ((x as f32 + 0.5 - cx) / r, (y as f32 + 0.5 - cy) / r);
             let dd = (dx * dx + dy * dy).sqrt();
@@ -4404,20 +4474,24 @@ fn draw_sky_bodies(ctx: &Ctx, gbuf: &[GPixel], hdr: &mut [[f32; 3]]) {
                 // About a pixel of soft terminator.
                 let edge = (1.5 / r.max(1.0)).clamp(0.01, 0.2);
                 let mu0 = dx * sun[0] + nz * sun[1];
-                let lit = smoothstep(-edge, edge, mu0);
+                // The craters' relief catches the light: rims lit past the line between day and
+                // night, the far walls of the bowls in shadow.
+                let (alb, mu) = if m.craters { moon_surface([dx, dy, nz], 1.0 / r.max(1.0), sun, &big, m.seed, m.relief.clamp(0.0, 3.0)) } else { (1.0, mu0) };
+                let lit = smoothstep(-edge, edge, mu);
                 // Dusty ground sends light back the way it came: a full moon is evenly bright to
                 // its edge, and a part moon is brightest at its sunward limb.
-                let shade = (2.0 * mu0.max(0.0) / (mu0.max(0.0) + nz).max(1e-3)).min(1.35);
-                let crater = shade * if m.craters { moon_albedo([dx, dy, nz], 1.0 / r.max(1.0)) } else { 1.0 };
+                let shade = (2.0 * mu.max(0.0) / (mu.max(0.0) + nz).max(1e-3)).min(1.0);
+                let crater = shade * alb;
                 // Sunlit surface over the sky. The unlit side reflects almost nothing: what shows
                 // there is the sky in front of it (the stars behind are hidden above), plus faint
                 // earthshine, which only reads against a dark sky.
-                if lit > 0.0 { add(hdr, x, y, scale3(c, MOON_GAIN * crater), m.opacity * lit, false); }
+                if lit > 0.0 { add(hdr, x, y, scale3(c, gain * crater), m.opacity * lit, false); }
                 add(hdr, x, y, c, 0.012 * m.opacity * (1.0 - lit), true);
                 // The halo is scattered in the air in front of the moon, so it lies over the dark
                 // side too (without it, the dark side read as a disc darker than the sky round it).
                 // It glows round the lit part only: further into the dark side there is less.
-                add(hdr, x, y, c, lit_fraction * moon_halo(1.2 * (-mu0).max(0.0)), true);
+                // Over the lit face it would only wash out the seas.
+                add(hdr, x, y, c, lit_fraction * moon_halo(1.2 * (-mu0).max(0.0)) * (1.0 - 0.15 * lit), true);
             } else if dd * r < gr {
                 add(hdr, x, y, c, lit_fraction * moon_halo(dd - 1.0 + 1.2 * (-dx / dd * sun[0]).max(0.0)), true);
             }
@@ -5840,5 +5914,24 @@ mod tests {
         assert_eq!(r.render(&s, 0.0, &o(0.0)).rgba, r.render(&s, len, &o(secs)).rgba, "the loop must close");
         let (a, b) = (r.render(&s, 3.0, &o(secs * 0.1)), r.render(&s, 3.0, &o(secs * 0.4)));
         assert!(a.rgba != b.rgba, "the hour should move with the loop");
+    }
+
+    #[test]
+    fn the_moons_seed_and_relief_change_its_face() {
+        let mut s = preset("Desert Canyon");
+        s.sky.sun.enabled = false;
+        s.sky.clouds.enabled = false;
+        (s.sky.top, s.sky.horizon) = ([4, 6, 14], [10, 14, 26]);
+        s.sky.moon.body = crate::scene::SkyBody { enabled: true, pos: [0.5, 0.4], radius: 0.25, ..s.sky.moon.body };
+        s.sky.moon.phase = 0.45;
+        let o = RenderOptions { size: Some((120, 214)), time: Some(0.0), ..RenderOptions::default() };
+        let mut r = WorldRenderer::default();
+        let a = r.render(&s, 0.0, &o).rgba;
+        s.sky.moon.seed = 9;
+        let b = r.render(&s, 0.0, &o).rgba;
+        assert!(a != b, "another seed scatters other craters");
+        s.sky.moon.relief = 0.0;
+        let c = r.render(&s, 0.0, &o).rgba;
+        assert!(b != c, "the craters' relief catches the light");
     }
 }

@@ -191,7 +191,8 @@ pub(crate) struct SkyParams {
     pub mode: u32, pub w_fork: u32, pub w_base: f32,
     pub w_center: f32, pub w_focal: f32, pub w_split: f32, pub w_near: f32, pub w_keep: [f32; 2], pub sp_star_var: f32, pub ss_prims: u32,
     /// A sunset's glow (render::clouds::Glow::rec, at ss_prims).
-    pub ss_on: u32, pub sx_prims: u32, pub pad: [u32; 2],
+    pub ss_on: u32, pub sx_prims: u32, pub m_seed: u32, pub m_relief: f32,
+    pub m_gain: f32, pub pad: [u32; 3],
 }
 
 /// The sky pass's input: parameters, primitives (stars, blobs, bolt segments; 6 floats each) and

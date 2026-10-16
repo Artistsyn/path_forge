@@ -648,7 +648,9 @@ Where mist lies.
 | `body` | [SkyBody](#skybody) | (see the type) |  |
 | `phase` | number | `0.0` | -1 waning .. 0 full .. 1 waxing. |
 | `opacity` | number | `0.9` |  |
-| `craters` | boolean | `true` |  |
+| `craters` | boolean | `true` | Its seas, craters (with raised rims, bowls and central peaks, catching the sunlight past the line between day and night) and the rays of its young craters. |
+| `relief` | number | `1.0` | How deep the craters look: 0 flat markings .. 1 natural .. 2 rugged. |
+| `seed` | integer | `0` | Which craters: each seed scatters a different field of them. |
 
 ### Motion
 
