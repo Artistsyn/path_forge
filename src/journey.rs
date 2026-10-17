@@ -46,24 +46,37 @@ impl<'a> Place<'a> {
 pub struct Camera {
     pub view: View,
     pub beyond: Option<(f32, View)>,
+    /// Metres the camera stands behind the walker (a swing's third-person view; 0 at the walker's
+    /// eyes). Distances ahead are the walker's.
+    pub back: f32,
 }
 
 impl Camera {
     /// The camera `distance` metres along `scene`'s loop, for a `width` x `height` frame.
     pub fn plain(scene: &Scene, distance: f32, width: u32, height: u32) -> Camera {
-        Camera { view: View::new(scene, width.max(2) as usize, height.max(2) as usize).at(distance.rem_euclid(scene.motion.loop_length.max(1.0))), beyond: None }
+        Camera { view: View::new(scene, width.max(2) as usize, height.max(2) as usize).at(distance.rem_euclid(scene.motion.loop_length.max(1.0))), beyond: None, back: 0.0 }
     }
-    /// Where a point `x` metres right of the path centre, `y` up and `d` ahead appears (pixels from
-    /// the top left); None behind the camera.
+    /// The camera partway through a swing, the walker `distance` metres along `scene`'s loop.
+    pub fn swinging(scene: &Scene, pose: &crate::scene::SwingPose, distance: f32, width: u32, height: u32) -> Camera {
+        let v = View::posed(scene, &pose.camera, width.max(2) as usize, height.max(2) as usize, pose.turning);
+        Camera { view: v.at((distance - pose.back).rem_euclid(scene.motion.loop_length.max(1.0))), beyond: None, back: pose.back }
+    }
+    /// Where a point `x` metres right of the path centre, `y` up and `d` ahead of the walker
+    /// appears (pixels from the top left); None behind the camera.
     pub fn project(&self, x: f32, y: f32, d: f32) -> Option<[f32; 2]> {
+        let d = d + self.back;
         match self.beyond { Some((zb, b)) if d >= zb => b.world_to_px(x, y, d), _ => self.view.world_to_px(x, y, d) }
     }
-    /// How far ahead the ground on screen row `row` is (None above the horizon).
+    /// How far ahead of the walker the ground on screen row `row` is (None above the horizon).
     pub fn ground_distance(&self, row: f32) -> Option<f32> {
         let d = self.view.ground_distance(row);
-        match (self.beyond, d) { (Some((zb, b)), Some(d)) if d >= zb => b.ground_distance(row).map(|e| e.max(zb)), _ => d }
+        let d = match (self.beyond, d) { (Some((zb, b)), Some(d)) if d >= zb => b.ground_distance(row).map(|e| e.max(zb)), _ => d };
+        d.map(|d| d - self.back)
     }
 }
+
+/// Where a crossing walk is (`CrossWalk::phase`).
+enum Phase { Out(crate::scene::SwingPose), Cross, In(Option<crate::scene::SwingPose>) }
 
 /// Walking through a crossing from one world into the next.
 #[derive(Clone, Debug)]
@@ -82,35 +95,79 @@ impl CrossWalk {
         CrossWalk { crossing, start_a, end_b }
     }
 
-    /// Metres from start to end.
-    pub fn length(&self) -> f32 { self.crossing.approach + self.crossing.overshoot }
+    /// Metres from start to end: swinging out of the first scene's view, the crossing, swinging
+    /// into the second's.
+    pub fn length(&self) -> f32 { self.crossing.swing_out + self.cross_length() + self.crossing.swing_in }
+
+    /// Metres of the crossing itself, looking down the path.
+    fn cross_length(&self) -> f32 { self.crossing.approach + self.crossing.overshoot }
 
     /// At `travel` metres since the start: the boundary's distance ahead of the camera, and the
     /// camera's place along each world.
     pub fn at(&self, travel: f32) -> (f32, f32, f32) {
         // Measured from the end, so the last frame lands exactly on `end_b`.
-        (self.crossing.approach - travel, self.start_a + travel, self.end_b + (travel - self.length()))
+        (self.crossing.swing_out + self.crossing.approach - travel, self.start_a + travel, self.end_b + (travel - self.length()))
     }
 
     /// How far the next world has emerged (0 at the start: the frame is the first world's own) and
     /// how far the frame has settled into the second world alone (1 at the end).
     pub fn fades(&self, travel: f32) -> (f32, f32) {
         let fade_in = (self.crossing.approach * 0.3).clamp(1.0, 8.0);
-        let len = self.length();
-        (smooth(0.0, fade_in, travel), smooth(len - 1.0, len, travel))
+        let (t, len) = (travel - self.crossing.swing_out, self.cross_length());
+        (smooth(0.0, fade_in, t), smooth(len - 1.0, len, t))
+    }
+
+    /// Where the walk is at `travel` metres: swinging out of the first scene's view (`a`), crossing
+    /// looking down the path, or swinging into the second's (`b`, walking at its pace; None once
+    /// it has come round, or with no swing past the crossing).
+    fn phase(&self, a: &Scene, b: &Scene, travel: f32) -> Phase {
+        use crate::scene::SwingView;
+        let c = &self.crossing;
+        let sw = &c.swing;
+        let into = travel - c.swing_out - self.cross_length();
+        if travel < c.swing_out {
+            // (No hold on the way out: it turns as the walk goes on.)
+            let u = (travel / c.swing_out).clamp(0.0, 1.0);
+            let ahead = SwingView { yaw: 0.0, side: 0.0, ..SwingView::of(&a.camera) };
+            Phase::Out(sw.between(&SwingView::of(&a.camera), &ahead, &a.camera, u))
+        } else if c.swing_in > 0.0 && into >= 0.0 {
+            let t = into / b.motion.speed.max(0.01) - sw.hold.max(0.0);
+            let u = (t / sw.seconds.max(1e-3)).clamp(0.0, 1.0);
+            let ahead = SwingView { yaw: 0.0, side: 0.0, ..SwingView::of(&b.camera) };
+            Phase::In((u < 1.0).then(|| sw.between(&ahead, &SwingView::of(&b.camera), &b.camera, u)))
+        } else { Phase::Cross }
     }
 
     /// The camera at `travel` metres, for a `width` x `height` frame.
     pub fn camera(&self, a: &Scene, b: &Scene, travel: f32, width: u32, height: u32) -> Camera {
         let (zb, sa, sb) = self.at(travel);
-        let pa = Camera::plain(a, sa, width, height).view;
-        let pb = Camera::plain(b, sb, width, height).view;
-        if zb <= 0.0 { Camera { view: pb, beyond: None } } else { Camera { view: pa, beyond: Some((zb, pb)) } }
+        match self.phase(a, b, travel) {
+            Phase::Out(p) => return Camera::swinging(a, &p, sa, width, height),
+            Phase::In(Some(p)) => return Camera::swinging(b, &p, sb, width, height),
+            Phase::In(None) => return Camera::plain(b, sb, width, height),
+            Phase::Cross => {}
+        }
+        // Crossing, both looking down the path (when either scene looks from an angle).
+        let ahead = |s: &Scene, turned: bool| if turned { crate::scene::transition::looking_ahead(s) } else { s.clone() };
+        let (a2, b2) = (ahead(a, self.crossing.swing_out > 0.0), ahead(b, self.crossing.swing_in > 0.0));
+        let pa = Camera::plain(&a2, sa, width, height).view;
+        let pb = Camera::plain(&b2, sb, width, height).view;
+        if zb <= 0.0 { Camera { view: pb, beyond: None, back: 0.0 } } else { Camera { view: pa, beyond: Some((zb, pb)), back: 0.0 } }
     }
 
     /// The frame at `travel` metres, with each world's clock.
     pub fn frame(&self, r: &mut WorldRenderer, a: Place, b: Place, travel: f32, time_a: f32, time_b: f32, opts: &RenderOptions) -> Image {
         let (zb, sa, sb) = self.at(travel);
+        match self.phase(a.scene, b.scene, travel) {
+            Phase::Out(p) => return a.alone(r, sa, time_a, &RenderOptions { swing: Some(p), ..opts.clone() }),
+            Phase::In(Some(p)) => return b.alone(r, sb, time_b, &RenderOptions { swing: Some(p), ..opts.clone() }),
+            Phase::In(None) => return b.alone(r, sb, time_b, opts),
+            Phase::Cross => {}
+        }
+        // Crossing, both looking down the path (when either scene looks from an angle).
+        let (a2, b2);
+        let a = if self.crossing.swing_out > 0.0 { a2 = crate::scene::transition::looking_ahead(a.scene); Place { scene: &a2, ..a } } else { a };
+        let b = if self.crossing.swing_in > 0.0 { b2 = crate::scene::transition::looking_ahead(b.scene); Place { scene: &b2, ..b } } else { b };
         let (emerge, settle) = self.fades(travel);
         if emerge <= 0.0 { return a.alone(r, sa, time_a, opts); }
         if settle >= 1.0 { return b.alone(r, sb, time_b, opts); }

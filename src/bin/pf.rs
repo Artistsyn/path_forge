@@ -23,7 +23,7 @@
 //! Exporting
 //!   pf export  (--preset NAME | --scene FILE) -o FOLDER [--formats gif,webp,apng,png,sheet,depth,layers]
 //!              [--quality 0..100] [--frames N] [--name STEM] [--lossy 0..1] [--dither on|off]
-//!              [--clip loop | encounter [--slow M] [--start FRAME]
+//!              [--clip loop | intro | encounter [--slow M] [--start FRAME]
 //!                     | transition (--to-preset NAME | --to-scene FILE) [--approach M] [--entries N]
 //!                     | fork (--left-preset NAME | --left-scene FILE) (--right-preset NAME | --right-scene FILE)]
 //!
@@ -34,6 +34,8 @@
 //!   pf transition (--preset NAME | --scene FILE) (--left-preset NAME | --left-scene FILE) (--right-preset NAME | --right-scene FILE)
 //!              [--take left|right] [--angle DEG] [--approach M] [--frames 12] [--cols 6] [--scale 0.3] [-o sheet.png]
 //!   pf journey --file J.journey.json [--out FOLDER [--formats webp,...] [--entries N]]
+//!   pf splice  --clips intro.webp,loop.webp*3,transition.webp,next.webp*2 -o all.webp [--once] [--quality 0..100] [--fps 24]
+//!              join exported clips (gif, webp, png frame folders; `*N` plays one N times) into one gif or webp
 //!
 //! Projects and the skill
 //!   pf project --new FOLDER [--preset NAME]                      scenes/ assets/ kits/ exports/ and a first scene
@@ -153,7 +155,7 @@ fn parse_args() -> Result<Args, String> {
 }
 
 fn usage() -> String {
-    "usage: pf <presets|dump|render|sheet|gallery|styles|kit|schema|seam|bench|animcheck|animsheet|gifdiff|export|transition|journey|project|assets|pack|skill|parity|share|unshare> [--preset NAME | --scene FILE] [options]  (see src/bin/pf.rs)".into()
+    "usage: pf <presets|dump|render|sheet|gallery|styles|kit|schema|seam|bench|animcheck|animsheet|gifdiff|export|splice|transition|journey|project|assets|pack|skill|parity|share|unshare> [--preset NAME | --scene FILE] [options]  (see src/bin/pf.rs)".into()
 }
 
 fn norm(s: &str) -> String { s.to_lowercase().replace([' ', '_', '-'], "") }
@@ -341,7 +343,9 @@ fn parity_gpu(args: &Args) -> Result<(), String> {
     let mut cpu = Renderers::new(false);
     let mut gpu = Renderers::new(false);
     gpu.world.set_gpu(Some(world_gpu()?));
-    let times: Vec<f32> = match args.opts.get("t") { Some(t) => vec![t.parse().map_err(|_| "--t: a number")?], None => vec![0.0, 0.37] };
+    // --intro: frames of the camera's flight in or swing in (from the start of play).
+    (cpu.intro, gpu.intro) = (args.opts.contains_key("intro"), args.opts.contains_key("intro"));
+    let times: Vec<f32> = match args.opts.get("t") { Some(t) => t.split(',').map(|t| t.trim().parse().map_err(|_| "--t: numbers, comma-separated".to_string())).collect::<Result<_, _>>()?, None => vec![0.0, 0.37] };
     println!("{:<16} {:>5} {:>8} {:>7} {:>5}  {}", "scene", "t", "mean", "p99.9", "max", "verdict");
     let mut failed = 0;
     for (name, item) in items(args)? {
@@ -724,7 +728,8 @@ fn cmd_export(args: &Args) -> Result<(), String> {
             let (r, rd) = side("right-scene", "right-preset")?;
             path_forge::export::export_fork(&scene, (&l, ld), (&r, rd), &job, &Default::default(), |_| {}, &cancel)?
         }
-        other => return Err(format!("--clip {other}: expected loop, encounter, transition or fork")),
+        "intro" => path_forge::export::export_intro(&scene, &job, |_| {}, &cancel)?,
+        other => return Err(format!("--clip {other}: expected loop, intro, encounter, transition or fork")),
     };
     println!("{name}: {} frames at {:.1} fps ({:.2} s loop, {:.3} m per frame) in {} ms", report.frames, report.fps, report.loop_seconds, report.metres_per_frame, report.elapsed_ms);
     for f in &report.files {
@@ -732,6 +737,26 @@ fn cmd_export(args: &Args) -> Result<(), String> {
         println!("  {} ({size})", f.display());
     }
     for n in &report.notes { println!("  note: {n}"); }
+    Ok(())
+}
+
+/// `pf splice --clips A,B*3,C -o out.webp`: join clips into one animation, and say how each join
+/// steps next to the clips' own steps.
+fn cmd_splice(args: &Args) -> Result<(), String> {
+    use path_forge::splice::{splice, Clip, SpliceOptions};
+    let list = args.opts.get("clips").ok_or("splice needs --clips A,B*3,C (gif, webp, or png frame folders; *N plays one N times)")?;
+    let clips = list.split(',').filter(|c| !c.trim().is_empty()).map(Clip::parse).collect::<Result<Vec<_>, _>>()?;
+    let out = args.opts.get("o").or(args.opts.get("out")).ok_or("splice needs -o FILE.gif|FILE.webp")?;
+    let o = SpliceOptions {
+        looping: !args.opts.contains_key("once"),
+        webp_quality: args.opts.get("quality").map(|q| q.parse()).transpose().map_err(|_| "--quality: a number 0..100")?,
+        folder_fps: args.opts.get("fps").map(|f| f.parse()).transpose().map_err(|_| "--fps: a number")?.unwrap_or(24.0),
+    };
+    let r = splice(&clips, std::path::Path::new(out), &o)?;
+    let kb = std::fs::metadata(&r.file).map(|m| m.len() / 1024).unwrap_or(0);
+    println!("{}: {} frames, {:.2} s, {}x{} ({kb} KB){}", r.file.display(), r.frames, r.seconds, r.width, r.height, if o.looping { "" } else { ", plays once" });
+    for j in &r.joins { println!("  join {} -> {}: step {:.1} (clips step {:.1})", j.from, j.to, j.step, j.usual); }
+    for w in &r.warnings { println!("  warning: {w}"); }
     Ok(())
 }
 
@@ -962,6 +987,7 @@ fn main() -> ExitCode {
         "bench" => cmd_bench(&args),
         "gallery" => cmd_gallery(&args),
         "export" => cmd_export(&args),
+        "splice" => cmd_splice(&args),
 "gifdiff" => cmd_gifdiff(&args),
 "animcheck" => cmd_animcheck(&args),
 "styles" => cmd_styles(&args),

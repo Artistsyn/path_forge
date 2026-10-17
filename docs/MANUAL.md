@@ -214,6 +214,27 @@ props, lights, weather), the loop still closes, and the GPU draws the same frame
   ceiling, fences, lights and props on the camera's side are cut away beyond `camera.cutaway`
   metres past the path's edge, so the walking lane stays in view. Raise `eye_height` and lower
   `horizon` to see more of the lane.
+- **Where the sun stands**: by default the sky keeps its place in the picture whichever way the
+  camera looks (the sun where `sky.sun.pos` puts it), and its light and shadows turn with the
+  camera. Turn on `camera.world_sky` and the sky keeps its place in the world instead: `pos` is
+  where the sun and moon stand seen down the path, and turned to the side the view swings away
+  from them, the clouds and stars with them, so a sun ahead of the walk lies off to one side of a
+  side-scroller, its light and shadows coming from where it is. Two scenes of one place, one down
+  the path and one from the side, then share one sun.
+- **A swing in** (`camera.moves.swing_in`): played once at the start, like the flight in, the
+  camera comes round from another view into the scene's own: from behind the walker (`from`:
+  `yaw`, `side`, `back` metres behind, `eye_height`, `horizon`, `zoom`) round to a side-scroller's
+  view, or the other way. It takes `seconds` after a `hold`, eased (`Smooth`, `Out` for a reveal,
+  `In`, `Linear`), with an `overshoot` like a crane's if you like. With `orbit` the camera circles
+  the spot on the path both views look at, so that spot (where a game's hero stands) stays in the
+  middle of the frame; without, it moves straight across. As it comes round to the side the near
+  side of the world (props, lamps, fences, the wall and ceiling) dissolves out of its way in an
+  ordered pattern, before the camera reaches it, the path's bends straighten and buildings that
+  face the path once turned come round to it; going the other way all of that comes back once
+  the camera has passed. `bars` puts letterbox bars over the top and bottom that slide away as it
+  ends. With `camera.world_sky` the sun and the sky sweep across as the camera turns. The game's
+  runtime reports the seconds left (`intro_left` in its state) so it can hold the player's
+  controls until the swing has landed, and places things on screen by the swinging camera.
 
 **Props from an angle.** A prop's `facing` says which way its picture faces. `Camera` (the
 default, and every built-in kind) keeps it turned to the camera: right for trees, rocks and lamps,
@@ -266,7 +287,8 @@ times a loop, so loops still close, except the flight in, which plays once.
 | `pan`, `pans` | Looking slowly to the side and back: degrees (negative looks left first), and how many times a loop. The sky turns with the rest. |
 | `tilt`, `tilts` | Looking slowly up and down. |
 | `dolly`, `dolly_focus`, `dollies` | A dolly zoom: the camera draws back `dolly` metres while zooming in, so what stands `dolly_focus` metres ahead keeps its size while the background swells and shrinks round it (negative pushes in and zooms out). |
-| `fly_in`, `fly_height` | The flight in: over `fly_in` seconds the camera comes down from `fly_height` metres, looking down, to the walker's eyes. It plays at the start of the live runtime (`restart_intro` plays it again) and with `pf render --intro` / `pf sheet --intro`; loops and exports leave it out. Best under an open sky. |
+| `fly_in`, `fly_height` | The flight in: over `fly_in` seconds the camera comes down from `fly_height` metres, looking down, to the walker's eyes. It plays at the start of the live runtime (`restart_intro` plays it again) and with `pf render --intro` / `pf sheet --intro`; loops leave it out, `pf export --clip intro` writes it as a clip of its own. Best under an open sky. |
+| `swing_in` | The swing in: the camera comes round from another view (`from`) into the scene's own, once at the start (see Camera angles). Played like the flight in; `pf export --clip intro` writes it as a clip that ends where the loop begins. |
 
 `post.focus` is depth of field: with `mode: Depth` what stands `distance` metres ahead is sharp
 and nearer and further things blur (the far distance and sky the most), up to `blur` (the widest
@@ -355,7 +377,7 @@ falling. Each is off until `enabled`. Field by field, see
 | Fog banks | `weather.fog_banks` | Thick stretches of fog the camera walks into and out of. |
 | Wildlife | `wildlife` | `birds`: flocks in V formation crossing the sky, wings flapping (`flocks`, `count`, `size`, `height`, `flap`, `crossing` seconds; not at night). `bats`: flitting low over the path at dusk (`dusk_only`) or all night. `fish`: leaping from the water beside the path and splashing back with a ring (`spacing`, `lateral` range, `leaps` a loop). Deer, stags, rabbits and herons stand in the kit `@wildlife`. |
 | Waterfalls | `waterfalls[]` | Streams pouring over a rock face beside the path, the water drawn pixel by pixel: a dark glassy tongue over the lip, then a curtain of fine white threads that speed up as they fall (patterns carried down in falling time, so they stretch lower down), translucent where thin and fraying at the edges, with a splash crown, churn and a drifting plume of spray at the foot: `side`, `lateral`, `spacing`, `offset`, `height` and `width` in metres, `water` and `rock` colours, foam and `spray` at the foot and a `rainbow` in it when the sun is out (Waterfall Glen). |
-| Fences | `fences[]` | Fences along the path, built post to post as solid pieces that follow its edge and bends (not cards), so they join up from any angle: `style` Picket (pickets on two rails, painted `color`), Rails (posts and three bare wooden rails, in the bridge deck's wood) or Boards (close boards under a capping rail); `side`, `lateral` metres out from the path's edge, `height`, `post_spacing`. Runs are `length` metres long every `spacing` metres: as long as the spacing it is one fence without a break, shorter leaves gaps for gates (Village Evening puts one in front of each cottage). Painted fences of a scene share the first one's colour. |
+| Fences | `fences[]` | Fences along the path, built post to post as solid pieces that follow its edge and bends (not cards), so they join up from any angle: `style` Picket (pickets on two rails, painted `color`), Rails (posts and three bare wooden rails, in the bridge deck's wood) or Boards (close boards under a capping rail); `side`, `lateral` metres out from the path's edge, `height`, `post_spacing`. Runs are `length` metres long every `spacing` metres: as long as the spacing it is one fence without a break, shorter leaves gaps for gates (Village Evening puts one in front of each cottage). Painted fences of a scene share the first one's colour. Each casts the sun's shadow on the ground, post by post and picket by picket, from any camera angle (`shadow`, `shadow_opacity`). |
 
 **Cost.** Falling rain and snow, splashes, mist and most effects cost little. Wet ground and puddles
 cost what any glossy floor costs: the reflections roughly double a frame's render time (Dark
@@ -556,6 +578,29 @@ back into the walk. Every junction matches exactly. `<name>_encounter.json` says
 each one: wait for the loop frame given as `start_frame`, play `stop` once, repeat `idle` until the
 fight ends, then play `go` and continue the loop from the frame it names.
 
+**Intro clips.** A scene with a swing in or flight in (`camera.moves.swing_in`, `fly_in`) exports
+its intro as a clip of its own that ends where the loop begins:
+
+```bash
+pf export --scene village.json -o exports --formats webp --clip intro
+```
+
+Play `<name>_intro` once, then the loop from its frame 0.
+
+**Splicing clips into one file.** To share a sequence, or play it where clips cannot be
+sequenced, join exported clips one after another (`*N` plays a clip N times):
+
+```bash
+pf splice --clips exports/village_intro.webp,exports/village.webp*2 -o village_intro.webp
+pf splice --clips forest.webp,forest_to_village.webp,village.webp*3 -o journey.gif --once
+```
+
+It reads gif, webp and folders of png frames (`--formats png`), writes a gif or a webp
+(`--quality` for webp, `--once` to play once instead of looping), and prints the colour step
+across each join next to the clips' own steps, warning where a join jumps (clips that were not
+exported to follow each other). GIFs joined into a gif keep their palettes and pixels exactly.
+MCP `pf_splice` does the same.
+
 ## 9. Transitions
 
 A transition walks from one scene into another in a single unbroken shot. Both worlds are drawn
@@ -581,6 +626,14 @@ Every value set to `Auto` or 0 in the `Transition` settings is decided by the pl
 override it: `threshold` (Open, Doorway, CaveMouth, Gate, Portal), `approach_m`, `blend_m`,
 `facade` and `facade_height`, `light_spill`, `adaptation`, `camera_blend_m`, `style`, and `marker`
 (an Archway, RuinedArch, Gate, Banners or Portal structure at the boundary).
+
+**Between views.** When the two scenes look from different angles (a side-scroller and a view
+down the path), the camera swings: out of the first scene's view to look down the path before the
+boundary, across it, and round into the second scene's view after it, circling the walker and
+dissolving the near side of the world out of its way as an intro's swing does. `swing` sets how
+(`seconds` each way, 0 = 2.5; `hold`, `ease`, `overshoot`, `orbit`, `bars`); negative seconds
+crossfade the views at the end instead. Give both scenes one canvas: the frame cannot change
+shape partway through.
 [SCENE_REFERENCE.md](SCENE_REFERENCE.md#transition) lists them all.
 
 **In the studio:** Edit > Transition / fork…, then "Transition into a scene".
@@ -716,7 +769,9 @@ let s = rt.state();                 // scene, stop, progress, choose_within, spe
 rt.set_hour(Some(19.5));            // dusk on every scene with an open sky
 rt.set_day_length(600.0);           // or let a day pass every 10 minutes of step time
 if rt.day().is_some_and(|d| d.daylight < 0.2) { /* night: spawn the bats */ }
-rt.restart_intro();                 // fly in again (camera.moves.fly_in), as at the start
+rt.restart_intro();                 // fly in / swing in again (camera.moves), as at the start
+if rt.state().intro_left.is_some() { /* hold the player's controls until the camera lands */ }
+rt.swing_to(SwingView { yaw: -90.0, side: 6.0, ..rt.view_now() }, Swing::default())?; // round to the side
 ```
 
 | Method | Purpose |
@@ -728,7 +783,8 @@ rt.restart_intro();                 // fly in again (camera.moves.fly_in), as at
 | `transition_to(scene, dir, transition)`, `fork(left, right, fork)` | Start a transition or fork to any scene at run time. |
 | `choose(branch)` | Take a branch of the fork ahead. Returns false when there is none or it is too late. |
 | `finish()` | Jump to the end of what is under way. |
-| `state()` | Where the walk stands: `scene`, `distance`, `time`, `stop`, `progress` (0..1 through a transition), `choose_within` (metres left to choose), `speed`, `end`. |
+| `state()` | Where the walk stands: `scene`, `distance`, `time`, `stop`, `progress` (0..1 through a transition), `choose_within` (metres left to choose), `speed`, `end`, `intro_left` and `swing_left` (seconds left of the intro or a swing). |
+| `swing_to(view, swing)`, `swing(spec)`, `view_now()` | Swing the camera from where it is (even partway through another swing) to another view (`yaw`, `side`, `eye_height`, `horizon`, `zoom`), the way `swing` says; the view stays once it lands. `swing` takes a name (`home`: the scene's own camera; `ahead`; `side`; `side_left`) or JSON as the C function does. The camera's view now. C `pf_runtime_swing_to` and `pf_runtime_view` (interface 3). |
 | `set_hour(Some(h))`, `set_hour(None)` | Set the hour of the day (0..24) on every scene drawn (transitions and forks too), turning `sky.day_night` on with the scene's own settings; None gives each scene its own hour back. |
 | `set_day_length(seconds)`, `hour()` | Let a day pass every `seconds` of `step` time (0 holds the hour); the hour now. |
 | `day()` | Where the day stands: `hour`, `altitude` (sun height, -1..1), `is_day`, `daylight` (0 night .. 1 day), `phase` ("night", "dawn", "day", "dusk"); None without an open sky. Also in `state().day`. |
@@ -818,7 +874,7 @@ look at it, and export it:
 | `pf_save_preset` | Keep a scene as a preset of your own. |
 | `pf_new_scene`, `pf_get_scene`, `pf_edit_scene` | Create, read and edit scene files (merge patches and pointer edits, validated, atomic, with a revision check). |
 | `pf_render`, `pf_contact_sheet`, `pf_compare`, `pf_analyze`, `pf_check_loop`, `pf_camera` | Look at and measure a scene. |
-| `pf_export` | Export (§6). |
+| `pf_export`, `pf_splice` | Export (§6); join exported clips into one animation (§8). |
 | `pf_kit`, `pf_import_sprite`, `pf_pack`, `pf_remix` | Kits, sprites, packing, variations. |
 | `pf_transition`, `pf_journey` | Plan and preview transitions and forks; read, write, preview and export journeys. |
 

@@ -63,9 +63,12 @@ pub struct RenderOptions {
     pub time: Option<f32>,
     /// Also return which part of the scene each pixel shows (see `Pick`), for clicking to select.
     pub pick: bool,
-    /// Seconds since play began, for the camera's flight in (`camera.moves.fly_in`); None plays
-    /// no flight (a loop, which must close).
+    /// Seconds since play began, for the camera's flight in and swing in (`camera.moves.fly_in`,
+    /// `swing_in`); None plays neither (a loop, which must close).
     pub intro: Option<f32>,
+    /// The camera partway through a swing a game or a transition is making, in place of the
+    /// scene's own (and of a swing in).
+    pub swing: Option<crate::scene::SwingPose>,
 }
 
 /// Which part of the scene each pixel of a frame shows, at the frame's render resolution (the
@@ -246,6 +249,9 @@ struct Billboard {
     panel: Option<Panel>,
     /// Or a cylinder (`PropDef::tubes`): drawn true, ray by ray.
     tube: Option<Tube>,
+    /// How far it has dissolved (0..1), as a swinging camera cuts its side of the world away: a
+    /// share of its pixels left out, in an ordered pattern (`dissolved`).
+    fade: f32,
 }
 
 /// A cylinder standing in the world (`PropDef::tubes`): its axis from `a` to `b` (x, y, d), `r`
@@ -740,12 +746,11 @@ impl<'a> Ctx<'a> {
 
     /// Whether something standing `x` metres from the middle of the path is on the camera's side
     /// of the cut a side view makes (`camera.cutaway` past the path's edge), and so left out.
-    fn cut_away(&self, x: f32) -> bool {
-        let c = &self.scene.camera;
-        if !c.side_view() { return false; }
-        let near = if self.view.cam_x != 0.0 { self.view.cam_x.signum() } else { -self.view.yaw_s.signum() };
-        x * near > self.view.half_width + c.cutaway.max(0.0)
-    }
+    fn cut_away(&self, x: f32) -> bool { self.view.near_fade(x) >= 1.0 }
+
+    /// How far something at `x` has dissolved while a swinging camera cuts its side away (0 when
+    /// it has not, or is gone altogether: see `cut_away`).
+    fn fading(&self, x: f32) -> f32 { let k = self.view.near_fade(x); if k < 1.0 { k } else { 0.0 } }
 
     fn wall_top(&self) -> f32 {
         let w = &self.scene.walls;
@@ -1005,7 +1010,10 @@ impl WorldRenderer {
     /// Render the scene `distance` metres along the path.
     pub fn render(&mut self, scene: &Scene, distance: f32, opts: &RenderOptions) -> Image {
         let w = WorldIn { scene, distance, time: opts.time, base_dir: opts.base_dir.clone() };
-        self.render_worlds(std::slice::from_ref(&w), None, opts)
+        let ws = std::slice::from_ref(&w);
+        let mut img = self.render_worlds(ws, None, opts);
+        if let Some(s) = swing_now(ws, opts) { letterbox(&mut img, s.bars); }
+        img
     }
 
     /// One frame of a transition or a fork: every world drawn together in one picture, each in its
@@ -1014,7 +1022,9 @@ impl WorldRenderer {
     pub fn render_layout(&mut self, worlds: &[WorldIn], layout: Layout, opts: &RenderOptions) -> Image {
         let need = match layout { Layout::Cross { .. } => 2, Layout::Fork { .. } => 3 };
         assert!(worlds.len() >= need, "a {} frame needs {need} worlds", if need == 2 { "crossing" } else { "fork" });
-        self.render_worlds(&worlds[..need], Some(layout), opts)
+        let mut img = self.render_worlds(&worlds[..need], Some(layout), opts);
+        if let Some(s) = swing_now(&worlds[..need], opts) { letterbox(&mut img, s.bars); }
+        img
     }
 
     fn plan(worlds: &[WorldIn], layout: Option<Layout>) -> Plan {
@@ -1086,15 +1096,15 @@ impl WorldRenderer {
             moves.pose(w0.distance, len, loop_phase(w0), opts.intro, w0.scene.camera.eye_height, w0.scene.camera.horizon)
         });
         let pan_max = moves.pan_max();
+        // The swing in: the camera coming round into the scene's own view (one world to walk).
+        let swing = swing_now(worlds, opts);
+        let back = pose.map_or(0.0, |p| p.back) + swing.as_ref().map_or(0.0, |s| s.back);
         let backed: Vec<WorldIn>;
-        let worlds = match pose {
-            Some(p) if p.back != 0.0 && worlds.len() == 1 => {
-                let time = Some(worlds[0].time.unwrap_or_else(|| worlds[0].distance / worlds[0].scene.motion.speed.max(0.01)));
-                backed = vec![WorldIn { distance: worlds[0].distance - p.back, time, ..worlds[0].clone() }];
-                &backed[..]
-            }
-            _ => worlds,
-        };
+        let worlds = if back != 0.0 && worlds.len() == 1 {
+            let time = Some(worlds[0].time.unwrap_or_else(|| worlds[0].distance / worlds[0].scene.motion.speed.max(0.01)));
+            backed = vec![WorldIn { distance: worlds[0].distance - back, time, ..worlds[0].clone() }];
+            &backed[..]
+        } else { worlds };
         let mut prof = Prof::new(self.profile);
         let mut plan = Self::plan(worlds, layout);
         let n = plan.shear.len();
@@ -1105,8 +1115,11 @@ impl WorldRenderer {
         let px = look.style.pixel_size.clamp(1, 16) as usize;
         let (w, h) = (out_w.div_ceil(px).max(2), out_h.div_ceil(px).max(2));
 
-        // The camera: the first world's, becoming the next world's as it crosses.
-        let mut cam = View::new(worlds[0].scene, w, h);
+        // The camera: the first world's (or where a swing has it), becoming the next world's as it crosses.
+        let mut cam = match &swing {
+            Some(s) => View::posed(worlds[0].scene, &s.camera, w, h, s.turning),
+            None => View::new(worlds[0].scene, w, h),
+        };
         if plan.next > 0 {
             let vn = View::new(worlds[plan.next].scene, w, h);
             let t = plan.cam_t;
@@ -1287,14 +1300,28 @@ impl WorldRenderer {
             let ls = strikes[r].0;
             let base = worlds[r].base_dir.clone();
             let o = RenderOptions { base_dir: base, ..opts.clone() };
+            let first = bills.len();
             if layers.fixtures {
                 self.collect_fixtures(&mut ctxs[r], ls, &o, &mut bills, &mut flames);
             }
             if layers.props {
                 self.collect_props(&mut ctxs[r], &o, &mut bills);
+                let pieces = bills.len();
                 self.collect_set_pieces(&mut ctxs[r], &o, &mut bills);
+                // A swinging camera dissolves what spans the path.
+                let k = ctxs[r].view.side_k;
+                for b in &mut bills[pieces..] { b.fade = k; }
                 self.collect_waterfalls(&mut ctxs[r], &mut bills);
                 self.collect_companions(&mut ctxs[r], &o, &mut bills);
+            }
+            // And what stands on its own side of the path, with the light it gives.
+            if ctxs[r].view.side_k > 0.0 && ctxs[r].view.side_k < 1.0 {
+                for b in &mut bills[first..] {
+                    b.fade = b.fade.max(ctxs[r].fading(b.world[0]));
+                    b.shadow *= 1.0 - b.fade;
+                    // (A lamp's light fades where it is made: `collect_fixtures`.)
+                    if let (Some(l), true, false) = (b.own_light, b.fade > 0.0, b.id == id::FIXTURE) { let c = &mut ctxs[r].lights[l]; c.color = scale3(c.color, 1.0 - b.fade); }
+                }
             }
         }
         // A structure standing in the threshold.
@@ -1313,7 +1340,7 @@ impl WorldRenderer {
                 }
                 let z = ctxs[0].view.to_cam(0.0, 0.0, zb)[2];
                 bills.push(Billboard {
-                    z: z - 0.05, world: [0.0, 0.0, zb - 0.05], height, sprite, flip: false, nearest: false, id: id::PROP,
+                    fade: 0.0, z: z - 0.05, world: [0.0, 0.0, zb - 0.05], height, sprite, flip: false, nearest: false, id: id::PROP,
                     emissive: if kind == SetPieceKind::Portal { 0.9 } else { 0.0 }, shadow: 0.6, own_light: None, source: 0, realm: 0, panel: None, tube: None, sway: 0.0, tint: [1.0; 3], wind: CardWind::default(),
                 });
             }
@@ -1807,12 +1834,9 @@ impl WorldRenderer {
         for (body, gain) in [(&scene.sky.sun, 1.8 * sun_through), (&scene.sky.moon.body, 0.6 * sun_through.sqrt())] {
             if scene.sky.enabled && body.enabled && body.emits_light {
                 // As the camera turns with the path, the light comes from that much further round.
-                // (A turned camera sees the sky where it always does: the light turns with it.)
-                let yaw = if view.turned { view.yaw_s.atan2(view.yaw_c) } else { 0.0 };
-                let az = (body.pos[0] - 0.5) * 2.4 - view.turn_tan().atan() + yaw;
-                let el = (1.0 - body.pos[1].clamp(0.0, 1.0)) * 1.15 + 0.08;
-                let dir = [az.sin() * el.cos(), el.sin(), az.cos() * el.cos()];
-                sky_lights.push(DirLight { dir, color: scale3(rgb_lin(body.color), gain * body.intensity.max(0.0)) });
+                // (A turned camera sees the sky where it always does, the light turning with it,
+                // unless the sky stays in the world: see `sky_light_dir`.)
+                sky_lights.push(DirLight { dir: sky_light_dir(&view, body.pos), color: scale3(rgb_lin(body.color), gain * body.intensity.max(0.0)) });
             }
         }
         // Lightning lights the world from above, out where the bolt is: tops and the ground catch it,
@@ -2096,7 +2120,8 @@ impl WorldRenderer {
                     } else {
                         1.0 + steady * f.flicker * (0.12 * (TAU * flick_m1 * ctx.tphase + ph).sin() + 0.06 * (TAU * flick_m2 * ctx.tphase + ph * 2.3).sin())
                     };
-                    let mut glow = scale3(mul3(lamp.map_or(rgb_lin(f.kind.glow()), |l| l.color), hue), bright);
+                    // (Dimming as a swinging camera dissolves its side of the world.)
+                    let mut glow = scale3(mul3(lamp.map_or(rgb_lin(f.kind.glow()), |l| l.color), hue), bright * (1.0 - ctx.fading(x)));
                     if let Some(t) = tint { glow = mul3(glow, t); }
                     // (Its own lamp does not light its post: that is in the lamp's shadow, and reads dark against the glow.)
                     // Where the glow sits across an image of your own (mirrored on the right-hand wall).
@@ -2150,7 +2175,7 @@ impl WorldRenderer {
                                 FixtureKind::PaperLantern => 0.9, _ => 0.0,
                             };
                             bills.push(Billboard {
-                                z, world: [x, base, d], height: body_h, sprite: sprite.clone(),
+                                fade: 0.0, z, world: [x, base, d], height: body_h, sprite: sprite.clone(),
                                 flip: sign > 0.0 && (matches!(f.mount, Mount::Wall) || on_pole), nearest: f.sprite.pixelated,
                                 id: id::FIXTURE, emissive, shadow: 0.0, own_light: None, source: PICK_FIXTURES | fi as u16, realm: ctx.realm, panel: None, tube: None, sway: 0.0,
                                 // A neon sign's tubes take its colour, and stutter with it.
@@ -2232,7 +2257,7 @@ impl WorldRenderer {
                     let base = -0.05;
                     let z = ctx.view.to_cam(x, base, d + 0.3)[2];
                     bills.push(Billboard {
-                        z, world: [x, base, d + 0.3], height: h * 1.25, sprite, sway: 0.0, tint: [1.0; 3], wind: CardWind::default(),
+                        fade: 0.0, z, world: [x, base, d + 0.3], height: h * 1.25, sprite, sway: 0.0, tint: [1.0; 3], wind: CardWind::default(),
                         flip: sign > 0.0, nearest: false, id: id::PROP, emissive: 0.0, shadow: 0.0, own_light: None, source: 0, realm: ctx.realm, panel: None, tube: None,
                     });
                     ctx.falls.push(([x, h * 1.05, d], wf.width, wi));
@@ -2249,8 +2274,9 @@ impl WorldRenderer {
         for (li, p) in scene.set_pieces.iter().enumerate().filter(|(_, p)| p.enabled) {
             let sp = snap_to_loop(p.spacing.max(1.0), ctx.loop_len);
             let n = (ctx.loop_len / sp).round() as i64;
-            // (Seen from the side, a piece spanning the path would stand between the camera and it.)
-            if scene.camera.side_view() { continue; }
+            // (Seen from the side, a piece spanning the path would stand between the camera and it:
+            // a camera swinging round dissolves it as it goes.)
+            if ctx.view.side_k >= 1.0 { continue; }
             // Portals light the path a little before they come into view.
             let (lo, hi) = ctx.span(-6.0, far);
             let k_lo = ((ctx.scroll + lo - p.offset) / sp).ceil() as i64;
@@ -2290,7 +2316,7 @@ impl WorldRenderer {
                 // Banners stir in the wind; arches and gates stand firm.
                 let sway = if p.kind == SetPieceKind::Banners { ctx.wx.sway_at(hf(seed ^ 0x5E8, k.rem_euclid(n)) * TAU) * 0.05 * height } else { 0.0 };
                 bills.push(Billboard {
-                    z, world: [0.0, 0.0, d], height, sprite, flip: false, nearest: p.sprite.pixelated, id: id::PROP,
+                    fade: 0.0, z, world: [0.0, 0.0, d], height, sprite, flip: false, nearest: p.sprite.pixelated, id: id::PROP,
                     emissive: if p.kind == SetPieceKind::Portal { 0.9 } else { 0.0 },
                     shadow: p.shadow.clamp(0.0, 1.0), own_light: None, source: PICK_SET_PIECES | li as u16, realm: ctx.realm, panel: None, tube: None, sway, tint: [1.0; 3], wind: CardWind::default() });
             }
@@ -2333,7 +2359,7 @@ impl WorldRenderer {
             }
             let z = ctx.view.to_cam(x, base, d)[2];
             bills.push(Billboard {
-                z, world: [x, base, d], height, sprite, flip: c.sprite.flip_x, nearest: c.sprite.pixelated, id: id::PROP,
+                fade: 0.0, z, world: [x, base, d], height, sprite, flip: c.sprite.flip_x, nearest: c.sprite.pixelated, id: id::PROP,
                 emissive: 0.0, shadow: 0.0, own_light, source: PICK_COMPANIONS | ci as u16, realm: ctx.realm, panel: None, tube: None, sway: 0.0, tint: [1.0; 3], wind: CardWind::default(),
             });
         }
@@ -2421,6 +2447,15 @@ impl WorldRenderer {
                         let facing = p.facing.unwrap_or(look.facing);
                         let stands = sign != 0.0 && ring.is_none() && !floating && !hanging
                             && (facing == Facing::Path || (facing == Facing::PathWhenTurned && ctx.view.turned));
+                        // Facing the path once the camera turns: while it swings round (`View::face_k`)
+                        // the prop comes round with it about its foot, from facing the camera to
+                        // facing the path. `spin` turns an offset (x, d) from its foot that way.
+                        let (rc, rs) = if stands && facing == Facing::PathWhenTurned && ctx.view.face_k < 1.0 {
+                            let (np, nc) = ([-sign, 0.0], [-ctx.view.yaw_s, -ctx.view.yaw_c]);
+                            let a = (np[0] * nc[1] - np[1] * nc[0]).atan2(np[0] * nc[0] + np[1] * nc[1]) * (1.0 - ctx.view.face_k);
+                            (a.cos(), a.sin())
+                        } else { (1.0, 0.0) };
+                        let spin = |dx: f32, dd: f32| [dx * rc - dd * rs, dx * rs + dd * rc];
                         let mut own_light = None;
                         // An image whose mask marks a glowing part lights what is round it, from there.
                         if let (None, Some(lm), true) = (light, sprite.lamp, d <= 60.0) {
@@ -2453,7 +2488,7 @@ impl WorldRenderer {
                             let k = height / look.natural;
                             let sx = if flipped { -sm.at[0] } else { sm.at[0] } * k;
                             // (Standing along the path, its front runs along the path.)
-                            let at = if stands { [x + sign * sm.back.max(0.0) * k, base + sm.at[1] * k, d - sign * sx] } else { [x + sx, base + sm.at[1] * k, d] };
+                            let at = if stands { let o = spin(sign * sm.back.max(0.0) * k, -sign * sx); [x + o[0], base + sm.at[1] * k, d + o[1]] } else { [x + sx, base + sm.at[1] * k, d] };
                             ctx.smokes.push((at, sm.clone(), hash(seed ^ 0x5E0, ikey) as u32));
                         }
                         let z = ctx.view.to_cam(x, base, d)[2];
@@ -2474,15 +2509,18 @@ impl WorldRenderer {
                         let wind = if hanging || look.from_files { CardWind::default() } else { ctx.wx.card_wind(look.kind, hf(seed ^ 0x3D, ikey) * TAU, sprite.aspect) };
                         let flip = if look.from_files { look.flip_x } else { variant & 0x100 != 0 };
                         let wide = height * sprite.aspect;
-                        let panel = stands.then(|| Panel { tl: [x, base + height, d + sign * 0.5 * wide], across: [0.0, 0.0, -sign * wide], down: [0.0, -height, 0.0], strip: None });
+                        let panel = stands.then(|| {
+                            let (o, a) = (spin(0.0, sign * 0.5 * wide), spin(0.0, -sign * wide));
+                            Panel { tl: [x + o[0], base + height, d + o[1]], across: [a[0], 0.0, a[1]], down: [0.0, -height, 0.0], strip: None }
+                        });
                         let shadow = if p.shadow && !hanging && !floating { p.shadow_opacity.clamp(0.0, 1.0) } else { 0.0 };
                         let source = PICK_PROPS | li as u16;
                         let face = |sprite: Arc<Sprite>, tl: [f32; 3], across: [f32; 3], down: [f32; 3], strip: Option<f32>| {
                             let mid = [tl[0] + 0.5 * (across[0] + down[0]), tl[1] + 0.5 * (across[1] + down[1]), tl[2] + 0.5 * (across[2] + down[2])];
                             let len = |a: [f32; 3]| (a[0] * a[0] + a[1] * a[1] + a[2] * a[2]).sqrt();
                             Billboard {
-                                z: ctx.view.to_cam(mid[0], mid[1], mid[2])[2], world: mid, height: len(down), sprite, sway: 0.0, tint, wind: CardWind::default(), flip: false,
-                                nearest: look.pixelated, id: id::PROP, emissive: look.glow, shadow: 0.0, own_light, source, realm: ctx.realm,
+                                fade: 0.0, z: ctx.view.to_cam(mid[0], mid[1], mid[2])[2], world: mid, height: len(down), sprite, sway: 0.0, tint, wind: CardWind::default(), flip: false,
+                                nearest: look.pixelated, id: id::PROP, emissive: look.glow, shadow, own_light, source, realm: ctx.realm,
                                 panel: Some(Panel { tl, across, down, strip }), tube: None,
                             }
                         };
@@ -2491,7 +2529,7 @@ impl WorldRenderer {
                         if stands && !look.faces.is_empty() {
                             let k = height / look.natural;
                             let fx = if flip { -1.0 } else { 1.0 };
-                            let at = |c: [f32; 3]| [x + sign * c[2] * k, base + c[1] * k, d - sign * fx * c[0] * k];
+                            let at = |c: [f32; 3]| { let o = spin(sign * c[2] * k, -sign * fx * c[0] * k); [x + o[0], base + c[1] * k, d + o[1]] };
                             for f in &look.faces {
                                 let [tl, tr, bl] = f.corners.map(at);
                                 let sub = |a: [f32; 3], b: [f32; 3]| [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
@@ -2501,12 +2539,12 @@ impl WorldRenderer {
                         if stands && !look.tubes.is_empty() {
                             let k = height / look.natural;
                             let fx = if flip { -1.0 } else { 1.0 };
-                            let at = |c: [f32; 3]| [x + sign * c[2] * k, base + c[1] * k, d - sign * fx * c[0] * k];
+                            let at = |c: [f32; 3]| { let o = spin(sign * c[2] * k, -sign * fx * c[0] * k); [x + o[0], base + c[1] * k, d + o[1]] };
                             for &(f, t, rad, bark, end) in &look.tubes {
                                 let (a, b) = (at(f), at(t));
                                 let mid = [0.5 * (a[0] + b[0]), 0.5 * (a[1] + b[1]), 0.5 * (a[2] + b[2])];
                                 bills.push(Billboard {
-                                    z: ctx.view.to_cam(mid[0], mid[1], mid[2])[2], world: mid, height: 2.0 * rad * k, sprite: sprite.clone(), sway: 0.0, tint,
+                                    fade: 0.0, z: ctx.view.to_cam(mid[0], mid[1], mid[2])[2], world: mid, height: 2.0 * rad * k, sprite: sprite.clone(), sway: 0.0, tint,
                                     wind: CardWind::default(), flip: false, nearest: false, id: id::PROP, emissive: 0.0, shadow: 0.0, own_light, source, realm: ctx.realm,
                                     panel: None, tube: Some(Tube { a, b, r: rad * k, bark, end }),
                                 });
@@ -2518,14 +2556,15 @@ impl WorldRenderer {
                             if depth > 0.01 {
                                 for (end, strip) in [(0.0f32, 0.012f32), (1.0, 0.988)] {
                                     let strip = if flip { 1.0 - strip } else { strip };
-                                    let tl = [pn.tl[0], pn.tl[1], pn.tl[2] + end * pn.across[2]];
-                                    bills.push(face(sprite.clone(), tl, [sign * depth, 0.0, 0.0], pn.down, Some(strip)));
+                                    let tl = [pn.tl[0] + end * pn.across[0], pn.tl[1], pn.tl[2] + end * pn.across[2]];
+                                    let back = spin(sign * depth, 0.0);
+                                    bills.push(face(sprite.clone(), tl, [back[0], 0.0, back[1]], pn.down, Some(strip)));
                                 }
                             }
                         }
                         let (sway, wind) = if panel.is_some() { (0.0, CardWind::default()) } else { (sway, wind) };
                         bills.push(Billboard {
-                            z, world: [x, base, d], height, sprite, sway, tint, wind, flip,
+                            fade: 0.0, z, world: [x, base, d], height, sprite, sway, tint, wind, flip,
                             nearest: look.pixelated, id: id::PROP, emissive: look.glow,
                             shadow, own_light, source, realm: ctx.realm, panel, tube: None });
                     }
@@ -2609,7 +2648,7 @@ fn ship_parts(c: &crate::scene::Companion) -> Vec<crate::scene::ShapePart> {
 fn post_billboard(ctx: &Ctx, sprite: &Arc<Sprite>, x: f32, top: f32, d: f32, size: f32) -> Billboard {
     let z = ctx.view.to_cam(x, 0.0, d)[2];
     Billboard {
-        z: z + 0.001, world: [x, 0.0, d], height: top, sprite: sprite.clone(), flip: false, nearest: false,
+        fade: 0.0, z: z + 0.001, world: [x, 0.0, d], height: top, sprite: sprite.clone(), flip: false, nearest: false,
         id: id::FIXTURE, emissive: 0.0, shadow: 0.35 * size.min(1.0), own_light: None, source: 0, realm: ctx.realm, panel: None, tube: None, sway: 0.0, tint: [1.0; 3], wind: CardWind::default(),
     }
 }
@@ -2871,8 +2910,9 @@ fn build_geometry(ctx: &Ctx, layers: &Layers) -> Vec<Tri> {
         if walls { ctx.wall_x(d) } else if s.verge.enabled { if v.turned { ctx.x_reach } else { wide(d) } } else { v.path_half_width(d) + s.path.edge_noise.abs() }
     };
     // A side view cuts away what stands between the camera and the path: the wall and the ceiling.
-    let side = s.camera.side_view();
-    let near_side = if v.cam_x != 0.0 { v.cam_x.signum() } else { -v.yaw_s.signum() };
+    // (A camera swinging round dissolves them first: see `raster::dissolved`.)
+    let side = v.side_k >= 1.0;
+    let near_side = v.near;
     let mut tris = Vec::with_capacity(ds.len() * 8);
     if layers.ground {
         for &d in &risers {
@@ -2984,6 +3024,34 @@ fn build_geometry(ctx: &Ctx, layers: &Layers) -> Vec<Tri> {
 }
 
 // ── Shading ────────────────────────────────────────────────────────────────
+
+/// The camera partway through a swing this frame: one a game or transition is making, or the
+/// first world's swing in while the intro plays (one world to walk).
+fn swing_now(worlds: &[WorldIn], opts: &RenderOptions) -> Option<crate::scene::SwingPose> {
+    if let Some(s) = &opts.swing { return Some(s.clone()); }
+    let c = &worlds[0].scene.camera;
+    opts.intro.filter(|_| worlds.len() == 1).and_then(|t| c.moves.swing_in.pose(c, t))
+}
+
+/// Black bars over the top and bottom of a frame, `share` of its height each.
+fn letterbox(img: &mut Image, share: f32) {
+    let n = (share.clamp(0.0, 0.5) * img.height as f32).round() as usize;
+    if n == 0 { return; }
+    let w = img.width;
+    for y in (0..n).chain(img.height.saturating_sub(n)..img.height) {
+        for p in img.rgba[y * w * 4..(y + 1) * w * 4].chunks_exact_mut(4) { p[..3].fill(0); }
+    }
+}
+
+/// Where the light of a sun or moon at `pos` in the picture comes from, in the world: the
+/// picture is 2.4 radians of sky across, and the sky turns with the camera (less what it slides
+/// back across the frame when it stays in the world, `View::sky_turn`).
+fn sky_light_dir(view: &View, pos: [f32; 2]) -> [f32; 3] {
+    let yaw = if view.turned { view.yaw_s.atan2(view.yaw_c) } else { 0.0 };
+    let az = (pos[0] + view.sky_turn - 0.5) * 2.4 - view.turn_tan().atan() + yaw;
+    let el = (1.0 - pos[1].clamp(0.0, 1.0)) * 1.15 + 0.08;
+    [az.sin() * el.cos(), el.sin(), az.cos() * el.cos()]
+}
 
 /// The paint of a scene's fences (the first painted one's colour), linear.
 pub(crate) fn fence_paint(s: &Scene) -> [f32; 3] {
@@ -3584,21 +3652,38 @@ fn gpu_geom_input(ctx: &Ctx, prepared: &[raster::Prepared], bills: &[Billboard],
     let bits = |v: usize| f32::from_bits(v as u32);
     let mut cboxes = Vec::with_capacity(list.len());
     let casters: Vec<CasterIn> = list.iter().map(|c| {
-        let b = c.b;
-        let mut f = [0.0f32; 24];
-        (f[0], f[1], f[2], f[3], f[4], f[5], f[6]) = (b.world[0], b.world[2], c.rx, c.rd, c.half_w, b.shadow, b.height);
-        f[7] = f32::from_bits(b.flip as u32);
+        let mut f = [0.0f32; 40];
+        (f[0], f[1], f[2], f[3], f[4], f[5], f[6]) = (c.foot[0], c.foot[1], c.axis[0], c.axis[1], c.ra, c.shadow, c.rb);
         let (mut x0, mut y0, mut x1, mut y1) = (i64::MAX, i64::MAX, i64::MIN, i64::MIN);
         let mut grow = |r: (usize, usize, usize, usize)| { x0 = x0.min(r.0 as i64); y0 = y0.min(r.1 as i64); x1 = x1.max(r.2 as i64); y1 = y1.max(r.3 as i64); };
         if let Some(r) = c.contact { f[8] = bits(1); (f[9], f[10], f[11], f[12]) = (bits(r.0), bits(r.1), bits(r.2), bits(r.3)); grow(r); }
-        if let (Some(_), Some((r, scale))) = (sun, c.sun) { f[13] = bits(1); (f[14], f[15], f[16], f[17], f[18]) = (bits(r.0), bits(r.1), bits(r.2), bits(r.3), scale); grow(r); }
+        if let (Some(_), Some(r)) = (sun, c.sun) { f[13] = bits(1); (f[14], f[15], f[16], f[17]) = (bits(r.0), bits(r.1), bits(r.2), bits(r.3)); grow(r); }
+        // (19..21: the sprite level, filled in by Frame::geometry; a fence's shape instead.)
+        let sprite = match &c.pic {
+            Pic::Sprite(b) => {
+                f[7] = f32::from_bits(b.flip as u32);
+                f[18] = b.panel.and_then(|p| p.strip).unwrap_or(-1.0);
+                Some((b.sprite.clone(), b.sprite.lod(192.0)))
+            }
+            Pic::Fence(fc) => {
+                f[18] = -1.0;
+                (f[19], f[20], f[21], f[37], f[38]) = (f32::from_bits(fc.bits()), fc.len, fc.ht, f32::from_bits(1), fc.pw);
+                None
+            }
+        };
+        f[22..25].copy_from_slice(&c.c0);
+        f[25..28].copy_from_slice(&c.across);
+        f[28..31].copy_from_slice(&c.down);
+        (f[31], f[32]) = (c.ia, c.idn);
+        f[33..36].copy_from_slice(&c.n);
+        f[36] = c.nl;
         cboxes.push(if x0 <= x1 { (x0, y0, x1, y1) } else { (1, 1, 0, 0) });
-        CasterIn { c: CasterGpu { f }, lod: b.sprite.lod(192.0), sprite: b.sprite.clone() }
+        CasterIn { c: CasterGpu { f }, sprite }
     }).collect();
     let cast_bins = bin_tiles(w, h, &cboxes);
     let clouds = weather::cloud_params(ctx);
     let lamps = (ctx.lights.len() >= 4).then(|| ctx.lights.iter().map(|l| [l.pos[0], l.pos[1], l.pos[2], l.radius, l.color[0], l.color[1], l.color[2], 0.0]).collect());
-    super::gpu::GeomIn { tris, tri_bins, small, casters, cast_bins, sun, clouds, lamps }
+    super::gpu::GeomIn { tris, tri_bins, small, casters, cast_bins, sun, clouds, lamps, fade: raster::Dissolve::of(&ctx.view) }
 }
 
 /// What a world adds to the GPU's parameters in a frame of several: the boundary its view joins
@@ -4296,39 +4381,198 @@ fn reflect_pass(ctx: &Ctx, gbuf: &[GPixel], refl: &[Refl], under: Option<&[[f32;
 
 // ── Shadows ────────────────────────────────────────────────────────────────
 
-/// A billboard's two shadow footprints on screen, worked out once: the contact ellipse, and the
-/// sun shadow (with the sun's slant: scale and tip).
-struct Caster<'b> { b: &'b Billboard, half_w: f32, rx: f32, rd: f32, contact: Option<(usize, usize, usize, usize)>, sun: Option<((usize, usize, usize, usize), f32)> }
+/// A billboard's two shadows, worked out once: the contact shadow (a soft ellipse on the ground
+/// at its foot, `axis` along its width) and the sun's (the flat picture it is drawn as, at the
+/// angle it stands: `c0` its top left corner, `across` and `down` its edges, `n` its normal),
+/// each with the pixels it can fall on. A run of fence is one too: a flat picture along its line,
+/// its posts, rails and pickets worked out where the sun's ray meets it.
+struct Caster<'b> {
+    pic: Pic<'b>, shadow: f32,
+    foot: [f32; 2], axis: [f32; 2], ra: f32, rb: f32, contact: Option<(usize, usize, usize, usize)>,
+    c0: [f32; 3], across: [f32; 3], down: [f32; 3], ia: f32, idn: f32, n: [f32; 3], nl: f32,
+    sun: Option<(usize, usize, usize, usize)>,
+}
 
-/// The sun's direction when it casts shadows here, and every caster of world `ctx`.
+/// What a caster's shadow is the shape of.
+enum Pic<'b> { Sprite(&'b Billboard), Fence(FenceCut) }
+
+/// One run of fence as its shadow sees it: from `-pw/2` to `len + pw/2` along its line (u 0..1)
+/// and from `ht + 0.06` down to the ground (v 0..1), the parts `fences` builds it from.
+#[derive(Clone, Copy)]
+struct FenceCut { style: u32, len: f32, ht: f32, posts: u32, n: u32, pw: f32 }
+
+impl FenceCut {
+    fn top(&self) -> f32 { self.ht + 0.06 }
+
+    /// Its packed shape for the GPU (f[19..22] and f[37..39] of a caster).
+    fn bits(&self) -> u32 { self.style | (self.posts.min(1023) << 2) | (self.n.min(65535) << 12) }
+
+    /// How much of it stands at (u, v), averaged over a box `fu` x `fv` wide.
+    fn alpha(&self, u: f32, v: f32, fu: f32, fv: f32) -> f32 {
+        let span = self.len + self.pw;
+        let (s, y) = (u * span - 0.5 * self.pw, (1.0 - v) * self.top());
+        let (hs, hy) = (0.5 * fu * span, 0.5 * fv * self.top());
+        let ht = self.ht;
+        // Posts at each end and between, as tall as the fence and a little more.
+        let post = fence_comb(s, hs, self.len / self.posts.max(1) as f32, self.pw, 0.0, -0.5 * self.pw, self.len + 0.5 * self.pw) * fence_box(0.0, ht + 0.06, y, hy);
+        let along = fence_box(0.0, self.len, s, hs);
+        let (upright, across) = match self.style {
+            // Pickets with a narrower point on top, on two rails.
+            0 => {
+                let p = self.len / self.n.max(1) as f32;
+                let body = fence_comb(s, hs, p, 0.074, 0.5 * p, 0.0, self.len) * fence_box(0.04, ht - 0.05, y, hy);
+                let tip = fence_comb(s, hs, p, 0.036, 0.5 * p, 0.0, self.len) * fence_box(ht - 0.05, ht, y, hy);
+                (body + tip, along * (fence_box(0.22 * ht, 0.22 * ht + 0.07, y, hy) + fence_box(0.72 * ht, 0.72 * ht + 0.07, y, hy)))
+            }
+            // Three rails.
+            1 => (0.0, along * (fence_box(0.28 * ht - 0.09, 0.28 * ht, y, hy) + fence_box(0.6 * ht - 0.09, 0.6 * ht, y, hy) + fence_box(0.9 * ht - 0.09, 0.9 * ht, y, hy))),
+            // Boards, capped.
+            _ => (0.0, along * fence_box(0.02, ht + 0.02, y, hy)),
+        };
+        let up = 1.0 - (1.0 - post.min(1.0)) * (1.0 - upright.min(1.0));
+        1.0 - (1.0 - up) * (1.0 - across.min(1.0))
+    }
+}
+
+/// How much of [x - h, x + h] lies in [lo, hi] (whether x does, for h near 0).
+fn fence_box(lo: f32, hi: f32, x: f32, h: f32) -> f32 {
+    if h < 1e-5 { return (x >= lo && x < hi) as u32 as f32; }
+    ((x + h).min(hi) - (x - h).max(lo)).max(0.0) / (2.0 * h)
+}
+
+/// How much of [x - h, x + h] (within [lo, hi]) is covered by bars `w` wide every `p`, one
+/// centred on `c`.
+fn fence_comb(x: f32, h: f32, p: f32, w: f32, c: f32, lo: f32, hi: f32) -> f32 {
+    // Covered length from `c - p/2` to x.
+    let cum = |x: f32| {
+        let r = x - c + 0.5 * p;
+        let k = (r / p).floor();
+        k * w + (r - k * p - 0.5 * (p - w)).clamp(0.0, w)
+    };
+    if h < 1e-5 {
+        if x < lo || x >= hi { return 0.0; }
+        let r = (x - c + 0.5 * p).rem_euclid(p);
+        return (r >= 0.5 * (p - w) && r < 0.5 * (p + w)) as u32 as f32;
+    }
+    let (a, b) = ((x - h).max(lo), (x + h).min(hi));
+    if b <= a { return 0.0; }
+    (cum(b) - cum(a)) / (2.0 * h)
+}
+
+/// The sun's direction when it casts shadows here (a low sun's shadows held to six heights
+/// long), and every caster of world `ctx`.
 fn shadow_casters<'b>(ctx: &Ctx, bills: &'b [Billboard]) -> (Option<[f32; 3]>, Vec<Caster<'b>>) {
     let v = &ctx.view;
     let (w, h) = (v.width, v.height);
-    let sun = ctx.sky_lights.first().map(|s| s.dir).filter(|d| d[1] > 0.05 && !ctx.scene.ceiling.enabled);
-    let casters: Vec<Caster> = bills.iter().filter(|b| b.shadow > 0.0 && b.realm == ctx.realm).map(|b| {
-        let [bx, _by, bd] = b.world;
-        let half_w = b.height * b.sprite.aspect * 0.5;
-        // Contact darkening: a soft ellipse on the ground under every prop.
-        let (rx, rd) = (half_w * 0.85, half_w * 0.55);
+    let sun = ctx.sky_lights.first().map(|s| s.dir).filter(|d| d[1] > 0.05 && !ctx.scene.ceiling.enabled).map(|l| {
+        let lh = (l[0] * l[0] + l[2] * l[2]).sqrt();
+        let k = if lh > 6.0 * l[1] { 6.0 * l[1] / lh } else { 1.0 };
+        [l[0] * k, l[1], l[2] * k]
+    });
+    let cross = |a: [f32; 3], b: [f32; 3]| [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
+    // The pixels a caster's shadows can fall on: around its foot, and its picture projected along
+    // the sun onto the ground.
+    let reach = |c0: [f32; 3], across: [f32; 3], down: [f32; 3], n: [f32; 3], (foot, axis, ra, rb): ([f32; 2], [f32; 2], f32, f32), grounded: bool| {
+        let (aa, dd) = (dot3(across, across), dot3(down, down));
+        let bottom = [c0[0] + down[0], c0[1] + down[1], c0[2] + down[2]];
         let mut bbox = BBox::new();
-        for (dx, dd) in [(-rx, -rd), (rx, -rd), (rx, rd), (-rx, rd)] {
-            bbox.add(v.world_to_px(bx + dx, 0.0, (bd + dd).max(NEAR)));
-        }
-        let contact = bbox.clip(w, h);
-        // Sun shadow: the sprite's silhouette projected along the sun onto the ground.
-        let sun = sun.filter(|l| l[2].abs() >= 0.05).and_then(|l| {
-            let len = (b.height / l[1]).min(b.height * 6.0);
-            let tip = [-l[0] / l[1] * b.height, -l[2] / l[1] * b.height];
-            let scale = len / (b.height / l[1]);
-            let tip = [tip[0] * scale, tip[1] * scale];
-            let mut bbox = BBox::new();
-            for (cx, cd) in [(-half_w, 0.0), (half_w, 0.0), (half_w + tip[0], tip[1]), (-half_w + tip[0], tip[1])] {
-                bbox.add(v.world_to_px(bx + cx, 0.0, (bd + cd).max(NEAR)));
+        let mut whole = false;
+        if grounded {
+            for (sa, sb) in [(-1.0f32, -1.0f32), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)] {
+                let (x, d) = (foot[0] + axis[0] * ra * sa - axis[1] * rb * sb, foot[1] + axis[1] * ra * sa + axis[0] * rb * sb);
+                match v.world_to_px(x, 0.0, d) { Some(p) => bbox.add(Some(p)), None => whole = true }
             }
-            bbox.clip(w, h).map(|r| (r, scale))
+        }
+        let contact = if !grounded { None } else if whole { Some((0, 0, w - 1, h - 1)) } else { bbox.clip(w, h) };
+        let sun_box = sun.and_then(|l| {
+            let nl = dot3(n, l);
+            if nl.abs() < 1e-6 * (aa * dd).sqrt() { return None; }
+            let mut bbox = BBox::new();
+            let mut whole = false;
+            for c in [c0, [c0[0] + across[0], c0[1] + across[1], c0[2] + across[2]], bottom, [bottom[0] + across[0], bottom[1] + across[1], bottom[2] + across[2]]] {
+                let t = c[1].max(0.0) / l[1];
+                for (x, d) in [(c[0], c[2]), (c[0] - l[0] * t, c[2] - l[2] * t)] {
+                    match v.world_to_px(x, 0.0, d) { Some(p) => bbox.add(Some(p)), None => whole = true }
+                }
+            }
+            if whole { Some((0, (v.horizon_px.max(0.0) as usize).min(h - 1), w - 1, h - 1)) } else { bbox.clip(w, h) }
         });
-        Caster { b, half_w, rx, rd, contact, sun }
+        (contact, sun_box)
+    };
+    let mut casters: Vec<Caster> = bills.iter().filter(|b| b.shadow > 0.0 && b.realm == ctx.realm && b.tube.is_none()).filter_map(|b| {
+        let [bx, _by, bd] = b.world;
+        // The picture as it stands: a panel where it is; a card turned to the camera is a thing
+        // alike from every side (a tree, a rock), so its shadow is cast as if turned to the sun,
+        // as a round thing's is, wherever the camera stands.
+        let (c0, across, down) = match b.panel {
+            Some(pn) => (pn.tl, pn.across, pn.down),
+            None => {
+                let half_w = b.height * b.sprite.aspect * 0.5;
+                let r = match sun {
+                    Some(l) if l[0] * l[0] + l[2] * l[2] > 1e-6 => { let k = (l[0] * l[0] + l[2] * l[2]).sqrt(); [l[2] / k, 0.0, -l[0] / k] }
+                    _ => { let r = v.unrot_dir([1.0, 0.0, 0.0]); [r[0], 0.0, r[2]] }
+                };
+                ([bx - r[0] * half_w, b.height, bd - r[2] * half_w], [2.0 * half_w * r[0], 0.0, 2.0 * half_w * r[2]], [0.0, -b.height, 0.0])
+            }
+        };
+        let (aa, dd) = (dot3(across, across), dot3(down, down));
+        if aa < 1e-8 || dd < 1e-8 { return None; }
+        let n = cross(across, down);
+        let width = aa.sqrt();
+        // Contact darkening: under a card, or along the foot of a panel that stands on the ground.
+        let bottom = [c0[0] + down[0], c0[1] + down[1], c0[2] + down[2]];
+        let grounded = bottom[1].min(c0[1] + down[1] + across[1]) < 0.3;
+        let (foot, axis, ra, rb) = match b.panel {
+            None => {
+                let r = v.unrot_dir([1.0, 0.0, 0.0]);
+                let k = (r[0] * r[0] + r[2] * r[2]).sqrt().max(1e-6);
+                let half_w = 0.5 * width;
+                ([bx, bd], [r[0] / k, r[2] / k], half_w * 0.85, half_w * 0.55)
+            }
+            Some(_) => {
+                let hk = (across[0] * across[0] + across[2] * across[2]).sqrt().max(1e-6);
+                ([bottom[0] + 0.5 * across[0], bottom[2] + 0.5 * across[2]], [across[0] / hk, across[2] / hk], 0.5 * hk + 0.2, (0.275 * hk).min(0.6))
+            }
+        };
+        let (contact, sun_box) = reach(c0, across, down, n, (foot, axis, ra, rb), grounded);
+        Some(Caster { pic: Pic::Sprite(b), shadow: b.shadow, foot, axis, ra, rb, contact, c0, across, down, ia: 1.0 / aa, idn: 1.0 / dd, n, nl: sun.map_or(0.0, |l| dot3(n, l)), sun: sun_box })
     }).collect();
+    // Fences: each run on each side, as `fences` builds them. Runs just out of sight still cast
+    // onto the ground in sight.
+    {
+        let margin = 8.0;
+        let far = (if v.turned { ctx.d_hi } else { ctx.far.min(120.0) }) + margin;
+        let near = (if v.turned { ctx.d_lo } else { NEAR }) - margin;
+        for f in ctx.scene.fences.iter().filter(|f| f.enabled && f.height > 0.0 && f.shadow && f.shadow_opacity > 0.0) {
+            let sp = snap_to_loop(f.spacing.max(1.0), ctx.loop_len);
+            let len = f.length.clamp(0.5, sp);
+            let posts = ((len / f.post_spacing.max(0.5)).round() as u32).max(1);
+            let style = match f.style { FenceStyle::Picket => 0, FenceStyle::Rails => 1, FenceStyle::Boards => 2 };
+            let pw = if style == 1 { 0.12 } else { 0.09 };
+            let cut = FenceCut { style, len, ht: f.height, posts, n: (len / 0.14).round().max(1.0) as u32, pw };
+            let top = cut.top();
+            let k_lo = ((ctx.scroll + near - len - f.offset) / sp).floor() as i64;
+            let k_hi = ((ctx.scroll + far - f.offset) / sp).ceil() as i64;
+            for k in k_lo..=k_hi {
+                let a = k as f32 * sp + f.offset - ctx.scroll;
+                let b = a + len;
+                if b < near || a > far || ctx.on_bridge(0.5 * (a + b)) { continue; }
+                for sign in f.side.signs().iter().copied() {
+                    if ctx.cut_away(sign * (v.half_width + f.lateral)) { continue; }
+                    let (a0, b0) = (a - 0.5 * pw, b + 0.5 * pw);
+                    let (xa, xb) = (sign * (v.path_half_width(a0) + f.lateral), sign * (v.path_half_width(b0) + f.lateral));
+                    let (c0, across, down) = ([xa, top, a0], [xb - xa, 0.0, b0 - a0], [0.0, -top, 0.0]);
+                    let (aa, dd) = (dot3(across, across), dot3(down, down));
+                    let n = cross(across, down);
+                    let hk = aa.sqrt();
+                    let fa = ([0.5 * (xa + xb), 0.5 * (a0 + b0)], [across[0] / hk, across[2] / hk], 0.5 * hk, 0.3);
+                    let (contact, sun_box) = reach(c0, across, down, n, fa, true);
+                    let (foot, axis, ra, rb) = fa;
+                    casters.push(Caster { pic: Pic::Fence(cut), shadow: f.shadow_opacity.min(1.0), foot, axis, ra, rb, contact, c0, across, down, ia: 1.0 / aa, idn: 1.0 / dd, n, nl: sun.map_or(0.0, |l| dot3(n, l)), sun: sun_box });
+                }
+            }
+        }
+    }
     (sun, casters)
 }
 
@@ -4341,42 +4585,76 @@ fn prop_shadows(ctx: &Ctx, bills: &[Billboard], gbuf: &[GPixel], sun_mask: &mut 
     sun_mask.par_chunks_mut(w * BAND).zip(ao_mask.par_chunks_mut(w * BAND)).enumerate().for_each(|(k, (sm, am))| {
         let (r0, r1) = (k * BAND, k * BAND + sm.len() / w - 1);
         for c in &casters {
-            let (b, [bx, _, bd]) = (c.b, c.b.world);
             if let Some((x0, y0, x1, y1)) = c.contact.filter(|r| r.3 >= r0 && r.1 <= r1) {
                 for y in y0.max(r0)..=y1.min(r1) {
                     for x in x0..=x1 {
                         let i = y * w + x;
                         let g = &gbuf[i];
                         if g.id != id::GROUND { continue; }
-                        let (nx, nd) = ((g.x - bx) / c.rx, (g.d - bd) / c.rd);
-                        let r2 = nx * nx + nd * nd;
-                        if r2 < 1.0 { am[i - r0 * w] *= 1.0 - 0.5 * b.shadow * (1.0 - r2); }
+                        let (dx, dd) = (g.x - c.foot[0], g.d - c.foot[1]);
+                        let (na, nb) = ((dx * c.axis[0] + dd * c.axis[1]) / c.ra, (dd * c.axis[0] - dx * c.axis[1]) / c.rb);
+                        // Under a prop a soft oval; along a fence's foot a soft strip.
+                        let r2 = match c.pic { Pic::Fence(_) if na.abs() <= 1.0 => nb * nb, Pic::Fence(_) => 1.0, _ => na * na + nb * nb };
+                        if r2 < 1.0 { am[i - r0 * w] *= 1.0 - 0.5 * c.shadow * (1.0 - r2); }
                     }
                 }
             }
-            let (Some(l), Some(((x0, y0, x1, y1), scale))) = (sun, c.sun) else { continue };
+            let (Some(l), Some((x0, y0, x1, y1))) = (sun, c.sun) else { continue };
             if y1 < r0 || y0 > r1 { continue; }
-            let half_w = c.half_w;
+            // Toward the sun from a bit of ground: where the ray meets the picture's plane, as (u, v)
+            // on it. (The ground is at height 0 in path space: hills are the camera's.)
+            let on_pic = |gx: f32, gd: f32| {
+                let rel = [c.c0[0] - gx, c.c0[1], c.c0[2] - gd];
+                let t = dot3(c.n, rel) / c.nl;
+                let q = [gx + l[0] * t - c.c0[0], l[1] * t - c.c0[1], gd + l[2] * t - c.c0[2]];
+                (t, dot3(q, c.across) * c.ia, dot3(q, c.down) * c.idn)
+            };
             for y in y0.max(r0)..=y1.min(r1) {
                 for x in x0..=x1 {
                     let i = y * w + x;
                     let g = &gbuf[i];
                     if g.id != id::GROUND { continue; }
-                    // Height on the billboard whose shadow lands here, then the sideways position.
-                    let hgt = (bd - g.d) * l[1] / l[2] / scale;
-                    if hgt < 0.0 || hgt > b.height { continue; }
-                    let off = g.x - bx + hgt * l[0] / l[1] * scale;
-                    if off.abs() > half_w { continue; }
-                    let mut u = off / (2.0 * half_w) + 0.5;
-                    if b.flip { u = 1.0 - u; }
-                    let mut a = b.sprite.sample(u, 1.0 - hgt / b.height, 192.0, false)[3];
-                    // A painted mask says which parts are solid: a flame or a pane of glass casts nothing.
-                    if b.sprite.casts { if let Some(g) = &b.sprite.glow { a *= g.sample(u, 1.0 - hgt / b.height, 192.0, false)[1]; } }
-                    if a > 0.01 { let m = &mut sm[i - r0 * w]; *m = m.min(1.0 - b.shadow * a.min(1.0)); }
+                    let (t, mut u, vv) = on_pic(g.x, g.d);
+                    if t <= 0.0 { continue; }
+                    if !(0.0..1.0).contains(&u) || !(0.0..1.0).contains(&vv) { continue; }
+                    let a = match &c.pic {
+                        Pic::Sprite(b) => {
+                            if let Some(s) = b.panel.and_then(|p| p.strip) { u = s; } else if b.flip { u = 1.0 - u; }
+                            let mut a = b.sprite.sample(u, vv, 192.0, false)[3];
+                            // A painted mask says which parts are solid: a flame or a pane of glass casts nothing.
+                            if b.sprite.casts { if let Some(gl) = &b.sprite.glow { a *= gl.sample(u, vv, 192.0, false)[1]; } }
+                            a
+                        }
+                        Pic::Fence(fc) => {
+                            // Averaged over the ground this pixel covers, so pickets far off do not shimmer.
+                            let (fu, fv) = ground_step(gbuf, w, x, y).map_or((0.0, 0.0), |((ax, ad), (bx, bd))| {
+                                let (_, ua, va) = on_pic(g.x + ax, g.d + ad);
+                                let (_, ub, vb) = on_pic(g.x + bx, g.d + bd);
+                                ((ua - u).abs() + (ub - u).abs(), (va - vv).abs() + (vb - vv).abs())
+                            });
+                            fc.alpha(u, vv, fu.min(1.0), fv.min(1.0))
+                        }
+                    };
+                    if a > 0.01 { let m = &mut sm[i - r0 * w]; *m = m.min(1.0 - c.shadow * a.min(1.0)); }
                 }
             }
         }
     });
+}
+
+/// How far the ground moves (x, d) from pixel (x, y) to the next pixel across and the next down,
+/// from neighbours that are ground too (the one before where the one after is not).
+fn ground_step(gbuf: &[GPixel], w: usize, x: usize, y: usize) -> Option<((f32, f32), (f32, f32))> {
+    let h = gbuf.len() / w;
+    let i = y * w + x;
+    let g = &gbuf[i];
+    let step = |j: Option<usize>, k: Option<usize>| {
+        let pick = |j: usize, s: f32| { let o = &gbuf[j]; (o.id == id::GROUND).then(|| (s * (o.x - g.x), s * (o.d - g.d))) };
+        j.and_then(|j| pick(j, 1.0)).or_else(|| k.and_then(|k| pick(k, -1.0)))
+    };
+    let across = step((x + 1 < w).then(|| i + 1), (x > 0).then(|| i - 1))?;
+    let down = step((y + 1 < h).then(|| i + w), (y > 0).then(|| i - w))?;
+    Some((across, down))
 }
 
 struct BBox { x0: f32, y0: f32, x1: f32, y1: f32, any: bool }
@@ -5286,6 +5564,7 @@ impl<'a> Card<'a> {
             w_amp: b.wind.amp, w_v: b.wind.v, w_lean: b.wind.lean, w_t1: b.wind.t1, w_t2: b.wind.t2,
             w_c0: b.wind.c0, w_c1: b.wind.c1, w_trunk: b.wind.trunk, w_foot: b.wind.foot, w_kv: b.wind.kv,
             pan: self.pan.is_some() as u32, ph: self.pan.map_or([0.0; 9], |p| p.0), pq: self.pan.map_or([0.0; 3], |p| p.1), strip: self.pan.map_or(-1.0, |p| p.2),
+            fade: b.fade,
             ..Default::default()
         };
         let mut card = card;
@@ -5312,6 +5591,7 @@ impl<'a> Card<'a> {
             for py in ya..=yb {
                 let fy = py as f32 + 0.5;
                 for px in self.x0..=self.x1 {
+                    if raster::dissolved(px, py, b.fade) { continue; }
                     let i = (py - row0 as i64) as usize * w + px as usize;
                     let Some((z, a, lit)) = tube_at(t, px as f32 + 0.5, fy) else { continue };
                     if z < NEAR || z >= gbuf[i].depth { continue; }
@@ -5329,6 +5609,7 @@ impl<'a> Card<'a> {
             for py in ya..=yb {
                 let fy = py as f32 + 0.5;
                 for px in self.x0..=self.x1 {
+                    if raster::dissolved(px, py, b.fade) { continue; }
                     let i = (py - row0 as i64) as usize * w + px as usize;
                     let fx = px as f32 + 0.5;
                     let iz = q[0] * fx + q[1] * fy + q[2];
@@ -5364,6 +5645,7 @@ impl<'a> Card<'a> {
             let vv = (py as f32 + 0.5 - self.sy_top) / self.hp;
             if !(0.0..1.0).contains(&vv) { continue; }
             for px in self.x0..=self.x1 {
+                if raster::dissolved(px, py, b.fade) { continue; }
                 let i = (py - row0 as i64) as usize * w + px as usize;
                 if self.z >= gbuf[i].depth { continue; }
                 let mut u = (px as f32 + 0.5 - (self.sx - self.wp * 0.5) - bend(vv)) / self.wp;
@@ -7154,5 +7436,207 @@ mod tests {
         let e = TubeCard { a: [0.0, 0.0, 5.0], u: [0.0, 0.0, 1.0], len: 2.0, ..t };
         let (z, _, c) = tube_at(&e, 50.5, 50.5).expect("its end");
         assert!((z - 5.0).abs() < 1e-4 && c[0] > 0.4, "the near end, end grain: {z} {c:?}");
+    }
+
+    #[test]
+    fn shadows_fall_away_from_the_sun_from_any_angle() {
+        // One tree beside a straight path (on the far side from a side view's camera, whose own
+        // side is cut away), a low sun to the right and behind it, no fog.
+        let mut s = preset("Forest Path");
+        s.path.bend = 0.0;
+        s.light.fog.distance = 500.0;
+        s.weather = Default::default();
+        s.props = vec![PropLayer { side: Side::Left, lateral: 2.0, spacing: 48.0, offset: 14.0, jitter: 0.0, density: 1.0, scale: 1.0, scale_var: 0.0, ..PropLayer::default() }];
+        s.sky.sun.pos = [0.78, 0.55];
+        s.motion.loop_length = 48.0;
+        let mut r = WorldRenderer::default();
+        // (Looking down the path the tree is 14 m ahead; seen from the side, the walk is level with it.)
+        for (yaw, side, (w, h), at) in [(0.0, 0.0, (120usize, 214usize), 0.0f32), (-90.0, 6.0, (214, 120), 14.0)] {
+            let mut t = s.clone();
+            (t.camera.yaw, t.camera.side) = (yaw, side);
+            let o = RenderOptions { size: Some((w as u32, h as u32)), time: Some(0.0), ..RenderOptions::default() };
+            let with = r.render(&t, at, &o).rgba;
+            let mut off = t.clone();
+            off.props[0].shadow = false;
+            let without = r.render(&off, at, &o).rgba;
+            // Where the shadow fell: pixels darker with it than without.
+            let (mut n, mut sx) = (0usize, 0.0f64);
+            for y in 0..h { for x in 0..w {
+                let i = (y * w + x) * 4;
+                let (a, b) = (with[i] as i32 + with[i + 1] as i32 + with[i + 2] as i32, without[i] as i32 + without[i + 1] as i32 + without[i + 2] as i32);
+                if b - a > 12 { n += 1; sx += x as f64; }
+            }}
+            assert!(n > 20, "yaw {yaw}: the tree casts a shadow ({n} pixels)");
+            // The sun is on the right of the picture: the shadow falls to the left of the tree's foot.
+            let v = View::new(&t, w, h);
+            let foot = v.world_to_px(-(v.path_half_width(14.0 - at) + 2.0), 0.0, 14.0 - at).unwrap();
+            assert!(sx / (n as f64) < foot[0] as f64, "yaw {yaw}: the shadow lies left of the tree at {foot:?}, away from the sun");
+        }
+    }
+
+    #[test]
+    fn a_world_sky_stays_put_as_the_camera_turns() {
+        // Seen down the path, then turned to look across it: with the sky in the world the sun
+        // shines from the same way and the whole sky slides across the picture; with it on the
+        // camera it stays in the picture and its light turns with the camera.
+        // (A straight path: a winding one turns the camera down the path, not across it.)
+        let mut s = preset("Village Evening");
+        s.path.winding.enabled = false;
+        s.sky.day_night.enabled = false;
+        s.sky.sun.pos = [0.7, 0.4];
+        let ahead = sky_light_dir(&View::new(&s, 480, 270), s.sky.sun.pos);
+        for yaw in [-90.0f32, -40.0, 25.0, 90.0] {
+            let mut t = s.clone();
+            (t.camera.yaw, t.camera.side, t.camera.world_sky) = (yaw, 6.0 * yaw.signum(), true);
+            let v = View::new(&t, 480, 270);
+            let dir = sky_light_dir(&v, t.sky.sun.pos);
+            assert!((0..3).all(|k| (dir[k] - ahead[k]).abs() < 1e-4), "yaw {yaw}: the sun shines from where it stands ({dir:?} vs {ahead:?})");
+            assert!((v.sky_dx() + yaw.to_radians() / 2.4 * 480.0).abs() < 1e-2, "yaw {yaw}: and the sky slides across the picture ({})", v.sky_dx());
+            t.camera.world_sky = false;
+            let v = View::new(&t, 480, 270);
+            assert_eq!(v.sky_dx(), 0.0);
+            let turned = sky_light_dir(&v, t.sky.sun.pos);
+            assert!((turned[0] - ahead[0]).abs() > 0.1 || (turned[2] - ahead[2]).abs() > 0.1, "yaw {yaw}: on the camera, the light turns with it");
+        }
+    }
+
+    #[test]
+    fn a_swing_comes_round_into_the_scenes_own_view() {
+        use crate::scene::{Swing, SwingView};
+        // From behind the walker round to a side-scroller's view (the camera 5 m to the right
+        // looking left across the path).
+        let mut s = preset("Village Side Scroll");
+        s.camera.moves.swing_in = Swing { seconds: 3.0, hold: 0.5, from: SwingView { back: 5.0, ..SwingView::default() }, ..Swing::default() };
+        let sw = &s.camera.moves.swing_in;
+        assert_eq!(sw.length(), 3.5);
+        let at = |t: f32| sw.pose(&s.camera, t);
+        // Held on the first view, then coming round, then the scene's own camera.
+        let a = at(0.2).unwrap();
+        assert_eq!((a.camera.yaw, a.camera.side, a.back), (0.0, 0.0, 5.0));
+        assert_eq!((a.turning.side_k, a.turning.straight, a.turning.face_k), (0.0, 0.0, 0.0));
+        assert!(at(3.5).is_none() && Swing::default().pose(&s.camera, 0.0).is_none());
+        let end = sw.between(&sw.from, &SwingView::of(&s.camera), &s.camera, 1.0);
+        assert!((end.camera.yaw - s.camera.yaw).abs() < 1e-3 && (end.camera.side - s.camera.side).abs() < 1e-3 && end.back.abs() < 1e-3);
+        assert_eq!((end.turning.side_k, end.turning.straight, end.turning.face_k), (1.0, 1.0, 1.0));
+        // Round the walker: all the way it looks at the spot on the path both views look at, 5 m
+        // away; the near side is gone before the camera is halfway round.
+        let mut last = 0.0f32;
+        for k in 1..20 {
+            let p = at(0.5 + 3.0 * k as f32 / 20.0).unwrap();
+            let (yaw, x, d) = (p.camera.yaw.to_radians(), p.camera.side, -p.back);
+            assert!((x + 5.0 * yaw.sin()).abs() < 1e-3 && (d + 5.0 * yaw.cos()).abs() < 1e-3, "{k}: on the circle, looking at its middle");
+            assert!(p.camera.yaw <= last + 1e-4, "{k}: turning one way");
+            last = p.camera.yaw;
+            if p.camera.yaw > -45.0 && p.camera.yaw < -40.0 { assert!(p.turning.side_k > 0.9, "{k}: the near side gone by halfway"); }
+        }
+        // Straight across instead: from one place to the other.
+        let straight = Swing { orbit: false, ..sw.clone() }.between(&sw.from, &SwingView::of(&s.camera), &s.camera, 0.5);
+        assert!((straight.camera.side - 2.5).abs() < 1e-3 && (straight.back - 2.5).abs() < 1e-3);
+    }
+
+    #[test]
+    fn a_swing_ends_on_the_scene_itself_and_draws_alike_on_both_sides_of_the_turn() {
+        use crate::scene::Swing;
+        let mut s = preset("Village Side Scroll");
+        s.camera.moves.swing_in = Swing { seconds: 2.0, hold: 0.0, bars: 0.1, ..Swing::default() };
+        let mut r = WorldRenderer::default();
+        let o = |intro: Option<f32>| RenderOptions { size: Some((160, 90)), time: Some(1.0), intro, ..RenderOptions::default() };
+        // Once over, the scene as it always is; before, the camera elsewhere and the bars on.
+        assert_eq!(r.render(&s, 5.0, &o(Some(2.5))).rgba, r.render(&s, 5.0, &o(None)).rgba);
+        let mid = r.render(&s, 5.0, &o(Some(0.8)));
+        assert_ne!(mid.rgba, r.render(&s, 5.0, &o(None)).rgba);
+        let row = |img: &Image, y: usize| img.rgba[y * 160 * 4..(y + 1) * 160 * 4].chunks_exact(4).all(|p| p[..3] == [0, 0, 0]);
+        assert!(row(&mid, 0) && row(&mid, 89) && !row(&mid, 45), "letterbox bars over the top and bottom");
+    }
+
+    #[test]
+    fn a_transition_swings_out_of_one_view_crosses_and_swings_into_the_next() {
+        use crate::journey::{CrossWalk, Place};
+        use crate::scene::transition::{plan, Transition};
+        // Down the forest path, then into the village seen from the side.
+        let mut a = preset("Forest Path");
+        a.canvas = preset("Village Side Scroll").canvas;
+        let b = preset("Village Side Scroll");
+        let c = plan(&a, &b, &Transition::default());
+        assert_eq!(c.swing_out, 0.0, "the forest looks down the path already");
+        assert!((c.swing_in - 2.5 * b.motion.speed).abs() < 1e-3, "{}", c.swing_in);
+        assert!(c.notes.iter().any(|n| n.contains("swings round")), "{:?}", c.notes);
+        let w = CrossWalk::new(c.clone(), 0.0, 0.0);
+        let mut r = WorldRenderer::default();
+        let o = RenderOptions { size: Some((160, 90)), ..RenderOptions::default() };
+        let (pa, pb) = (Place { scene: &a, dir: None }, Place { scene: &b, dir: None });
+        let at = |r: &mut WorldRenderer, travel: f32| w.frame(r, pa, pb, travel, 1.0, 1.0, &o).rgba;
+        let len = w.length();
+        // It ends on the village's own side view; just before, it is still coming round.
+        let end = r.render(&b, w.at(len).2, &RenderOptions { time: Some(1.0), ..o.clone() }).rgba;
+        assert!(at(&mut r, len) == end);
+        assert!(at(&mut r, len - 0.5 * c.swing_in) != end);
+        // Where the crossing hands over to the swing, nothing jumps: the camera looks down the
+        // village's path either way.
+        let edge = len - c.swing_in;
+        let (x, y) = (at(&mut r, edge - 1e-3), at(&mut r, edge + 1e-3));
+        let diff = x.iter().zip(&y).map(|(p, q)| p.abs_diff(*q) as f64).sum::<f64>() / x.len() as f64;
+        assert!(diff < 1.0, "a jump at the handover ({diff})");
+        // The other way round: out of the side view first.
+        let back = plan(&b, &a, &Transition::default());
+        assert!(back.swing_out > 0.0 && back.swing_in == 0.0);
+        // And with the swing turned off, the views crossfade as before.
+        let off = plan(&a, &b, &Transition { swing: crate::scene::Swing { seconds: -1.0, ..Default::default() }, ..Transition::default() });
+        assert_eq!((off.swing_out, off.swing_in), (0.0, 0.0));
+    }
+
+    #[test]
+    fn a_dissolve_leaves_out_its_share_of_pixels_evenly() {
+        for k in [0.0f32, 0.1, 0.25, 0.5, 0.8, 1.0] {
+            let gone = (0..4).flat_map(|y| (0..4).map(move |x| (x, y))).filter(|&(x, y)| raster::dissolved(x, y, k)).count();
+            assert_eq!(gone, (16.0 * k).round() as usize, "{k}");
+            // Every 4 x 4 block alike, wherever it is.
+            assert!((0..4).all(|y| (0..4).all(|x| raster::dissolved(x, y, k) == raster::dissolved(x + 8, y + 12, k))));
+        }
+    }
+
+    #[test]
+    fn fences_cast_shadows_away_from_the_sun() {
+        // Picket fences along both sides of a straight path, a low sun to the right and ahead, and
+        // no ambient light, so only the sun's shadows show (not the soft darkening at their feet).
+        let mut s = preset("Forest Path");
+        s.path.bend = 0.0;
+        s.light.fog.distance = 500.0;
+        s.light.ambient = 0.0;
+        s.weather = Default::default();
+        s.props.clear();
+        s.fences = vec![Fence { side: Side::Both, lateral: 1.3, spacing: 16.0, length: 16.0, ..Fence::default() }];
+        s.sky.day_night.enabled = false;
+        s.sky.sun.pos = [0.85, 0.8];
+        s.motion.loop_length = 48.0;
+        let mut r = WorldRenderer::default();
+        // (From the side the camera's own side of the path is cut away: only the far fence stands.)
+        for (yaw, side, (w, h), signs) in [(0.0, 0.0, (240usize, 427usize), &[-1.0f32, 1.0][..]), (-90.0, 6.0, (427, 240), &[-1.0][..])] {
+            let mut t = s.clone();
+            (t.camera.yaw, t.camera.side) = (yaw, side);
+            let v = View::new(&t, w, h);
+            let o = RenderOptions { size: Some((w as u32, h as u32)), time: Some(0.0), ..RenderOptions::default() };
+            let with = r.render(&t, 0.0, &o).rgba;
+            let mut off = t.clone();
+            off.fences[0].shadow = false;
+            let without = r.render(&off, 0.0, &o).rgba;
+            // Where each fence's foot runs on screen.
+            let lines: Vec<Vec<[f32; 2]>> = signs.iter().map(|&k| (1..400).filter_map(|j| { let d = j as f32 * 0.25; v.world_to_px(k * (v.path_half_width(d) + 1.3), 0.0, d) }).collect()).collect();
+            // Darker with its shadow than without, and which side of the nearest foot it lies:
+            // looking down the path, left of it (away from the sun) or right; from the side, below
+            // it (toward the camera, away from the sun beyond) or above.
+            let (mut away, mut toward) = (0usize, 0usize);
+            for y in 0..h { for x in 0..w {
+                let i = (y * w + x) * 4;
+                let (a, b) = (with[i] as i32 + with[i + 1] as i32 + with[i + 2] as i32, without[i] as i32 + without[i + 1] as i32 + without[i + 2] as i32);
+                if b - a <= 12 { continue; }
+                let (px, py) = (x as f32, y as f32);
+                let at = |l: &Vec<[f32; 2]>| l.iter().copied().min_by(|p, q| if yaw == 0.0 { (p[1] - py).abs().total_cmp(&(q[1] - py).abs()) } else { (p[0] - px).abs().total_cmp(&(q[0] - px).abs()) });
+                let Some(f) = lines.iter().filter_map(at).min_by(|p, q| (p[0] - px).abs().total_cmp(&(q[0] - px).abs())) else { continue };
+                if if yaw == 0.0 { px < f[0] } else { py > f[1] } { away += 1 } else { toward += 1 }
+            }}
+            assert!(away > 40, "yaw {yaw}: the fences cast shadows ({away} pixels away from the sun)");
+            assert!(away > 4 * toward, "yaw {yaw}: their shadows fall away from the sun ({away} away, {toward} toward)");
+        }
     }
 }

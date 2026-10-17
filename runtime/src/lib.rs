@@ -28,8 +28,9 @@ fn guard<T>(fallback: T, f: impl FnOnce() -> T) -> T { catch_unwind(AssertUnwind
 
 /// The version of this C interface, raised whenever a function is added or changes, so a program
 /// that loads the library at run time (an editor's preview) can tell what it offers. Version 2
-/// added `pf_runtime_open_place`, `pf_runtime_go_plan` and `pf_journey_outline`.
-pub const PF_ABI_VERSION: u32 = 2;
+/// added `pf_runtime_open_place`, `pf_runtime_go_plan` and `pf_journey_outline`; version 3
+/// `pf_runtime_swing_to` and `pf_runtime_view`.
+pub const PF_ABI_VERSION: u32 = 3;
 
 #[no_mangle]
 pub extern "C" fn pf_abi_version() -> u32 { PF_ABI_VERSION }
@@ -256,8 +257,8 @@ pub unsafe extern "C" fn pf_runtime_go_plan(rt: *mut Runtime, out: *mut c_char, 
     }
 }
 
-/// Where the walk stands, as JSON {scene, distance, time, stop, progress, choose_within, day} written
-/// into `out`. Returns the length written, or -1.
+/// Where the walk stands, as JSON {scene, distance, time, stop, progress, choose_within, day,
+/// intro_left, swing_left} written into `out`. Returns the length written, or -1.
 #[no_mangle]
 pub unsafe extern "C" fn pf_runtime_state(rt: *const Runtime, out: *mut c_char, out_len: usize) -> i32 {
     let Some(r) = rt.as_ref() else { return -1 };
@@ -282,6 +283,27 @@ pub unsafe extern "C" fn pf_runtime_restart_intro(rt: *mut Runtime) -> i32 {
     let Some(r) = rt.as_mut() else { return -1 };
     r.restart_intro();
     0
+}
+
+/// Swing the camera from where it is now to another view: a name (home, ahead, side, side_left) or
+/// JSON, every field optional: {"view": a name, "yaw","side","eye_height","horizon","zoom"} the
+/// view (missing ones stay as the named view or the camera has them), {"seconds","hold","ease",
+/// "overshoot","orbit","bars"} how (as camera.moves.swing_in; 0 seconds is 2.5). The view stays
+/// once it lands (`Runtime::swing`). 0 when it has begun, -1 for a null handle, -2
+/// with the reason in `err` (bad JSON, or a transition under way).
+#[no_mangle]
+pub unsafe extern "C" fn pf_runtime_swing_to(rt: *mut Runtime, json: *const c_char, err: *mut c_char, err_len: usize) -> i32 {
+    let Some(r) = rt.as_mut() else { return -1 };
+    let res = guard(Err("panic".to_string()), || r.swing(text(json).ok_or("json is null or not UTF-8")?));
+    match res { Ok(()) => 0, Err(e) => { write_err(err, err_len, &e); -2 } }
+}
+
+/// The camera's view now, as JSON {"yaw","side","back","eye_height","horizon","zoom"} (where a
+/// swing or the intro has it; `back` metres behind the walker). Returns its length, or -1.
+#[no_mangle]
+pub unsafe extern "C" fn pf_runtime_view(rt: *const Runtime, out: *mut c_char, out_len: usize) -> i32 {
+    let Some(r) = rt.as_ref() else { return -1 };
+    write_json(out, out_len, &serde_json::to_string(&r.view_now()).unwrap_or_default())
 }
 
 /// Let the days pass: one day every `seconds` of pf_runtime_step time (0 holds the hour).
@@ -348,6 +370,39 @@ mod tests {
             assert_eq!(pf_runtime_choose(rt, 1), 0, "no fork ahead");
             pf_runtime_free(rt);
             std::fs::remove_dir_all(&dir).ok();
+        }
+    }
+
+    #[test]
+    fn a_game_swings_the_camera_through_the_c_interface() {
+        unsafe {
+            let mut err = [0 as c_char; 256];
+            let preset = CString::new("preset:Village Side Scroll").unwrap();
+            let rt = pf_runtime_open_place(preset.as_ptr(), std::ptr::null(), err.as_mut_ptr(), err.len());
+            assert!(!rt.is_null());
+            let to = CString::new(r#"{"yaw": 0, "side": 0, "seconds": 1.0, "ease": "Out"}"#).unwrap();
+            assert_eq!(pf_runtime_swing_to(rt, to.as_ptr(), err.as_mut_ptr(), err.len()), 0, "{:?}", CStr::from_ptr(err.as_ptr()));
+            let mut out = [0 as c_char; 512];
+            pf_runtime_state(rt, out.as_mut_ptr(), out.len());
+            assert!(CStr::from_ptr(out.as_ptr()).to_str().unwrap().contains("\"swing_left\":1"), "{:?}", CStr::from_ptr(out.as_ptr()));
+            pf_runtime_step(rt, 0.5, 0.0);
+            assert!(pf_runtime_view(rt, out.as_mut_ptr(), out.len()) > 0);
+            let v: serde_json::Value = serde_json::from_str(CStr::from_ptr(out.as_ptr()).to_str().unwrap()).unwrap();
+            let yaw = v["yaw"].as_f64().unwrap();
+            assert!(yaw > -90.0 && yaw < 0.0, "partway round: {v}");
+            pf_runtime_step(rt, 0.6, 0.0);
+            pf_runtime_view(rt, out.as_mut_ptr(), out.len());
+            let v: serde_json::Value = serde_json::from_str(CStr::from_ptr(out.as_ptr()).to_str().unwrap()).unwrap();
+            assert_eq!((v["yaw"].as_f64(), v["side"].as_f64()), (Some(0.0), Some(0.0)), "landed and stays");
+            let home = CString::new("home").unwrap();
+            assert_eq!(pf_runtime_swing_to(rt, home.as_ptr(), err.as_mut_ptr(), err.len()), 0);
+            pf_runtime_step(rt, 3.0, 0.0);
+            pf_runtime_view(rt, out.as_mut_ptr(), out.len());
+            let v: serde_json::Value = serde_json::from_str(CStr::from_ptr(out.as_ptr()).to_str().unwrap()).unwrap();
+            assert_eq!(v["yaw"].as_f64(), Some(-90.0), "back to the scene's own view");
+            let bad = CString::new("{nope").unwrap();
+            assert_eq!(pf_runtime_swing_to(rt, bad.as_ptr(), err.as_mut_ptr(), err.len()), -2);
+            pf_runtime_free(rt);
         }
     }
 

@@ -45,6 +45,21 @@ pub struct Runtime {
     day_seconds: f32,
     /// Seconds since play began (not wrapped by the loop), for the camera's flight in.
     played: f32,
+    /// A swing the game started (`swing_to`) under way.
+    swinging: Option<Swinging>,
+    /// The camera the current scene came with, for swinging back to (`swing("home")`).
+    home: scene::Camera,
+}
+
+/// The camera swinging from one view to another at the game's asking: how, from where, to what
+/// camera, and seconds since it began.
+struct Swinging { style: scene::Swing, from: scene::SwingView, to: scene::Camera, t: f32 }
+
+impl Swinging {
+    fn pose(&self) -> Option<scene::SwingPose> {
+        let u = (self.t - self.style.hold.max(0.0)) / self.style.seconds.max(1e-3);
+        (self.t < self.style.length()).then(|| self.style.between(&self.from, &scene::SwingView::of(&self.to), &self.to, u))
+    }
 }
 
 /// A scene the walk is heading into.
@@ -62,7 +77,7 @@ enum Active {
 pub struct Planned { pub kind: String, pub notes: Vec<String>, pub warnings: Vec<String> }
 
 /// Where the walk stands, for the game.
-#[derive(Clone, Debug, PartialEq, serde::Serialize)]
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize)]
 pub struct WalkState {
     /// The scene the camera is in (the one it left, until a transition ends).
     pub scene: String,
@@ -80,12 +95,18 @@ pub struct WalkState {
     pub end: bool,
     /// The day and night, when the scene has one or the game sets the hour (`set_hour`).
     pub day: Option<scene::DayState>,
+    /// Seconds left of the intro (the camera's flight in, its swing in) while it plays: a game
+    /// holds the player's controls until it ends.
+    pub intro_left: Option<f32>,
+    /// Seconds left of a swing the game started (`swing_to`), while it plays.
+    pub swing_left: Option<f32>,
 }
 
 impl Runtime {
     /// A scene whose files (sprites, kits, grades) are named relative to `base_dir`.
     pub fn new(scene: Scene, base_dir: Option<PathBuf>) -> Runtime {
-        Runtime { scene, base_dir, renderer: WorldRenderer::default(), rgba: Vec::new(), distance: 0.0, time: 0.0, active: None, journey: None, day_seconds: 0.0, played: 0.0 }
+        let home = scene.camera.clone();
+        Runtime { scene, base_dir, renderer: WorldRenderer::default(), rgba: Vec::new(), distance: 0.0, time: 0.0, active: None, journey: None, day_seconds: 0.0, played: 0.0, swinging: None, home }
     }
 
     /// Draw frames on the GPU, on a device the game hands over (with wgpu 25, the same one it
@@ -132,7 +153,7 @@ impl Runtime {
 
     /// Change the scene (another biome, a tweak); caches that depend on it are rebuilt as needed.
     /// This cuts; `transition_to` walks.
-    pub fn set_scene(&mut self, scene: Scene) { self.scene = scene; self.active = None; }
+    pub fn set_scene(&mut self, scene: Scene) { self.home = scene.camera.clone(); self.scene = scene; self.active = None; self.swinging = None; }
 
     /// `set_scene` for a scene whose files are named relative to `dir`.
     pub fn set_scene_in(&mut self, scene: Scene, dir: Option<PathBuf>) { self.set_scene(scene); self.base_dir = dir; }
@@ -202,6 +223,10 @@ impl Runtime {
         }
         let ds = (speed * dt).max(0.0);
         self.played += dt.max(0.0);
+        if let Some(sw) = &mut self.swinging {
+            sw.t += dt.max(0.0);
+            if sw.t >= sw.style.length() { self.scene.camera = sw.to.clone(); self.swinging = None; }
+        }
         self.time = (self.time + dt).rem_euclid(self.loop_seconds().max(1e-3));
         self.distance += ds;
         let done = match &mut self.active {
@@ -228,19 +253,82 @@ impl Runtime {
             None => return,
         };
         self.scene = next.scene;
+        self.home = self.scene.camera.clone();
         self.base_dir = next.dir;
         self.distance = distance.rem_euclid(self.loop_length());
         self.time = clock;
         if let (Some((_, _, at)), Some(stop)) = (self.journey.as_mut(), next.stop) { *at = stop; }
     }
 
-    /// Play the camera's flight in (`camera.moves.fly_in`) again from the top, as at the start.
-    pub fn restart_intro(&mut self) { self.played = 0.0; }
+    /// Play the camera's flight in and swing in (`camera.moves.fly_in`, `swing_in`) again from the
+    /// top, as at the start.
+    pub fn restart_intro(&mut self) { self.played = 0.0; self.swinging = None; }
 
-    /// Seconds into the flight in, while it is playing.
+    /// Swing the camera from where it is now (partway through another swing or the intro, even)
+    /// to view `to` (its `back` is not used: the walk's camera stands at the walker), the way
+    /// `style` says (its `from` is not used; 0 seconds is 2.5). The view stays once it lands:
+    /// the scene's camera becomes it. Not while a transition is under way.
+    pub fn swing_to(&mut self, to: scene::SwingView, style: scene::Swing) -> Result<(), String> {
+        if self.active.is_some() { return Err("a transition is under way: swing once it has ended".into()); }
+        let from = self.view_now();
+        let mut style = style;
+        if style.seconds <= 0.0 { style.seconds = 2.5; }
+        let c = &self.scene.camera;
+        let to = scene::Camera { yaw: to.yaw.clamp(-90.0, 90.0), side: to.side, eye_height: to.eye_height, horizon: to.horizon, zoom: to.zoom, ..c.clone() };
+        // (Any intro still playing ends here: the swing takes the camera on from where it is.)
+        let m = &c.moves;
+        self.played = self.played.max(m.fly_in.max(0.0).max(m.swing_in.length()));
+        self.swinging = Some(Swinging { style, from, to, t: 0.0 });
+        Ok(())
+    }
+
+    /// `swing_to` as a game names it: a view by name (`home`: the camera the scene came with;
+    /// `ahead`: looking down the path; `side` / `side_left`: a side-scroller's view from the right
+    /// / left of the path), or JSON {"view": a name, "yaw", "side", "eye_height", "horizon",
+    /// "zoom", "seconds", "hold", "ease", "overshoot", "orbit", "bars"}, every field optional (the
+    /// view's fields override the named view's, or the camera's as it is; no hold unless given).
+    pub fn swing(&mut self, spec: &str) -> Result<(), String> {
+        let spec = spec.trim();
+        let v: serde_json::Value = if spec.starts_with('{') { serde_json::from_str(spec).map_err(|e| format!("swing: {e}"))? } else { serde_json::json!({ "view": spec }) };
+        let mut style: scene::Swing = serde_json::from_value(v.clone()).map_err(|e| format!("swing: {e}"))?;
+        if v.get("hold").is_none() { style.hold = 0.0; }
+        let now = scene::SwingView::of(&self.scene.camera);
+        let mut to = match v.get("view").and_then(|n| n.as_str()) {
+            None => now,
+            Some("home") => scene::SwingView::of(&self.home),
+            Some("ahead") => scene::SwingView { yaw: 0.0, side: 0.0, ..now },
+            Some("side") => scene::SwingView { yaw: -90.0, side: 6.0, ..now },
+            Some("side_left") => scene::SwingView { yaw: 90.0, side: -6.0, ..now },
+            Some(o) => return Err(format!("swing: no view `{o}` (home, ahead, side, side_left)")),
+        };
+        let f = |k: &str, d: f32| v.get(k).and_then(|x| x.as_f64()).map_or(d, |x| x as f32);
+        (to.yaw, to.side, to.eye_height, to.horizon, to.zoom) = (f("yaw", to.yaw), f("side", to.side), f("eye_height", to.eye_height), f("horizon", to.horizon), f("zoom", to.zoom));
+        self.swing_to(to, style)
+    }
+
+    /// The camera's view now: the scene's own, or where a swing has it.
+    pub fn view_now(&self) -> scene::SwingView {
+        let pose = self.swinging.as_ref().and_then(Swinging::pose).or_else(|| self.intro().and_then(|t| self.scene.camera.moves.swing_in.pose(&self.scene.camera, t)));
+        match pose {
+            Some(p) => scene::SwingView { back: p.back, ..scene::SwingView::of(&p.camera) },
+            None => scene::SwingView::of(&self.scene.camera),
+        }
+    }
+
+    /// Seconds left of a swing the game started, while it plays.
+    pub fn swing_left(&self) -> Option<f32> { self.swinging.as_ref().map(|s| s.style.length() - s.t) }
+
+    /// Seconds into the intro (the flight in, the swing in), while it is playing.
     fn intro(&self) -> Option<f32> {
-        let f = self.scene.camera.moves.fly_in;
+        let m = &self.scene.camera.moves;
+        let f = m.fly_in.max(0.0).max(m.swing_in.length());
         (f > 0.0 && self.played < f).then_some(self.played)
+    }
+
+    /// Seconds left of the intro while it plays (a game holds the player's controls until it ends).
+    pub fn intro_left(&self) -> Option<f32> {
+        let m = &self.scene.camera.moves;
+        self.intro().filter(|_| self.active.is_none()).map(|t| m.fly_in.max(0.0).max(m.swing_in.length()) - t)
     }
 
     /// The current frame of the runtime's own walk, `width` x `height` RGBA8.
@@ -249,7 +337,8 @@ impl Runtime {
         let a = Place { scene: &self.scene, dir: self.base_dir.as_deref() };
         let img = match &self.active {
             None => {
-                let o = RenderOptions { base_dir: self.base_dir.clone(), time: Some(self.time), intro: self.intro(), ..opts };
+                let swing = self.swinging.as_ref().and_then(Swinging::pose);
+                let o = RenderOptions { base_dir: self.base_dir.clone(), time: Some(self.time), intro: self.intro(), swing, ..opts };
                 self.renderer.render(&self.scene, self.distance, &o)
             }
             Some(Active::Cross { next, walk, travel, clock }) => {
@@ -299,6 +388,8 @@ impl Runtime {
 
     /// End a transition under way at once (cut to the next scene).
     pub fn finish(&mut self) {
+        // A swing the game started lands at once.
+        if let Some(sw) = self.swinging.take() { self.scene.camera = sw.to; }
         let end = match &self.active {
             Some(Active::Cross { walk, .. }) => Some(walk.at(walk.length()).2),
             Some(Active::Fork { walk, .. }) => { let (_, _, sb, _) = walk.at(walk.length()); Some(match walk.branch(walk.length()) { Some((Branch::Right, _)) => sb[1], _ => sb[0] }) }
@@ -370,7 +461,7 @@ impl Runtime {
             Some(Active::Fork { walk, travel, .. }) => (Some((travel / walk.length()).min(1.0)), walk.chosen.is_none().then(|| (walk.decide_by() - travel).max(0.0))),
         };
         let end = self.active.is_none() && self.journey.as_ref().is_some_and(|(j, _, at)| j.stops.get(at).is_some_and(|s| matches!(s.next, Next::End)));
-        WalkState { scene: self.scene.name.clone(), distance: self.distance, time: self.time, stop: self.journey.as_ref().map(|j| j.2.clone()), progress, choose_within, speed: self.scene.motion.speed, end, day: self.day() }
+        WalkState { scene: self.scene.name.clone(), distance: self.distance, time: self.time, stop: self.journey.as_ref().map(|j| j.2.clone()), progress, choose_within, speed: self.scene.motion.speed, end, day: self.day(), intro_left: self.intro_left(), swing_left: self.swing_left() }
     }
 
     /// The camera of the runtime's own walk now, for a `width` x `height` frame. In a transition,
@@ -378,7 +469,10 @@ impl Runtime {
     pub fn camera_now(&self, width: u32, height: u32) -> Camera {
         match &self.active {
             Some(Active::Cross { next, walk, travel, .. }) => walk.camera(&self.scene, &next.scene, *travel, width, height),
-            _ => Camera::plain(&self.scene, self.distance, width, height),
+            _ => match self.swinging.as_ref().and_then(Swinging::pose).or_else(|| self.intro().and_then(|t| self.scene.camera.moves.swing_in.pose(&self.scene.camera, t))) {
+                Some(p) => Camera::swinging(&self.scene, &p, self.distance, width, height),
+                None => Camera::plain(&self.scene, self.distance, width, height),
+            },
         }
     }
 
@@ -447,6 +541,55 @@ mod tests {
         assert!(landed == WorldRenderer::default().render(r.scene(), r.state().distance, &opts).rgba, "landed, it is the walk's own camera");
         r.restart_intro();
         assert!(r.frame(60, 107).to_vec() != landed, "and it can fly in again");
+    }
+
+    #[test]
+    fn the_swing_in_tells_the_game_when_it_ends_and_where_the_walker_is() {
+        let mut r = rt("Village Side Scroll");
+        let mut s = r.scene().clone();
+        s.camera.moves.swing_in = scene::Swing { seconds: 2.0, hold: 0.5, ..scene::Swing::default() };
+        // (A straight path, so the walker's spot is in the middle of the frame looking down it.)
+        s.path.winding.enabled = false;
+        r.set_scene(s);
+        assert_eq!(r.state().intro_left, Some(2.5));
+        // Behind the walker at first: the walker's spot in the middle of the frame, ahead.
+        let (w, h) = (160, 90);
+        let at = r.project_now(0.0, 0.0, 0.0, w, h).expect("the walker is in view");
+        assert!((at[0] - 80.0).abs() < 1.0, "{at:?}");
+        r.step(1.5, 0.0);
+        assert_eq!(r.state().intro_left, Some(1.0));
+        let mid = r.project_now(0.0, 0.0, 0.0, w, h).expect("still in view, coming round");
+        assert!((mid[0] - 80.0).abs() < 1.0, "{mid:?}");
+        r.step(1.0, 0.0);
+        assert_eq!(r.state().intro_left, None, "over: the game takes the controls");
+        let opts = RenderOptions { size: Some((w, h)), time: Some(r.state().time), ..RenderOptions::default() };
+        assert!(r.frame(w, h).to_vec() == WorldRenderer::default().render(r.scene(), r.state().distance, &opts).rgba, "and it is the scene's own camera");
+    }
+
+    #[test]
+    fn a_game_swings_the_camera_to_another_view_and_back() {
+        let mut r = rt("Village Side Scroll");
+        let side = r.scene().camera.clone();
+        let (w, h) = (160, 90);
+        let before = r.frame(w, h).to_vec();
+        // Round to look down the path, over two seconds.
+        let ahead = scene::SwingView { yaw: 0.0, side: 0.0, eye_height: 1.7, horizon: 0.4, zoom: 1.0, back: 0.0 };
+        r.swing_to(ahead, scene::Swing { seconds: 2.0, hold: 0.0, ..scene::Swing::default() }).unwrap();
+        assert_eq!(r.state().swing_left, Some(2.0));
+        assert!(r.frame(w, h).to_vec() == before, "it starts where the camera was");
+        r.step(1.0, 0.0);
+        let mid = r.view_now();
+        assert!(mid.yaw > side.yaw && mid.yaw < 0.0, "partway round ({})", mid.yaw);
+        r.step(1.0, 0.0);
+        assert_eq!(r.state().swing_left, None);
+        assert_eq!((r.scene().camera.yaw, r.scene().camera.side, r.scene().camera.horizon), (0.0, 0.0, 0.4), "it stays on the new view");
+        // And back, interrupted halfway by another swing: it carries on from where it is.
+        r.swing_to(scene::SwingView::of(&side), scene::Swing::default()).unwrap();
+        r.step(1.25, 0.0);
+        let half = r.view_now();
+        r.swing_to(ahead, scene::Swing { seconds: 1.0, hold: 0.0, ..scene::Swing::default() }).unwrap();
+        let from = r.view_now();
+        assert!((from.yaw - half.yaw).abs() < 1e-3 && (from.side - half.side).abs() < 1e-3, "no jump: {from:?} vs {half:?}");
     }
 
     #[test]

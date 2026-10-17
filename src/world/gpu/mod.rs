@@ -275,6 +275,8 @@ pub(crate) struct CardGpu {
     /// the camera's 1 / focal length and centre.
     pub tube: u32, pub ta: [f32; 3], pub tu: [f32; 3], pub tlen: f32, pub trad: f32,
     pub tbark: [f32; 3], pub tend: [f32; 3], pub cube: [f32; 18], pub tkf: f32, pub tcx: f32, pub tcy: f32,
+    /// How far it has dissolved (`render::Billboard::fade`).
+    pub fade: f32,
 }
 
 /// A card and the sprite levels it samples (chosen on the CPU, as `Sprite::sample` would).
@@ -343,9 +345,11 @@ impl TriGpu {
 /// A billboard's shadow footprints (render::prop_shadows), as geom.wgsl's `Caster` reads it; the
 /// sprite level's place in the sprite store is filled in by `Frame::geometry`.
 #[repr(C)]
-#[derive(Clone, Copy, Default, bytemuck::Pod, bytemuck::Zeroable)]
-pub(crate) struct CasterGpu { pub f: [f32; 24] }
-pub(crate) struct CasterIn { pub c: CasterGpu, pub sprite: Arc<super::sprites::Sprite>, pub lod: usize }
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+pub(crate) struct CasterGpu { pub f: [f32; 40] }
+impl Default for CasterGpu { fn default() -> Self { CasterGpu { f: [0.0; 40] } } }
+/// A caster and its picture's sprite and level (None: a fence, its shape in the caster).
+pub(crate) struct CasterIn { pub c: CasterGpu, pub sprite: Option<(Arc<super::sprites::Sprite>, usize)> }
 
 /// geom.wgsl's `Geom`.
 #[repr(C)]
@@ -354,7 +358,8 @@ pub(crate) struct GeomParams {
     pub tile_cols: u32, pub cast_bins: u32, pub sun_on: u32, pub n_lights: u32,
     pub sun: [f32; 3], pub clouds: f32,
     pub cloud_travel: f32, pub cloud_seed: u32, pub tiles_on: u32, pub cap: u32,
-    pub small_off: u32, pub n_small: u32, pub pad: [u32; 2],
+    pub small_off: u32, pub n_small: u32, pub fade_k: f32, pub fade_near: f32,
+    pub fade_cut: f32, pub pad: [u32; 3],
 }
 
 /// What the geometry pass draws: the triangles and their per-tile lists, the shadow casters and
@@ -367,6 +372,8 @@ pub(crate) struct GeomIn {
     pub casters: Vec<CasterIn>, pub cast_bins: Vec<u32>,
     pub sun: Option<[f32; 3]>, pub clouds: Option<(f32, f32, u32)>,
     pub lamps: Option<Vec<[f32; 8]>>,
+    /// What a swinging camera is dissolving (`raster::Dissolve`).
+    pub fade: super::raster::Dissolve,
 }
 
 /// Download targets: any of the frame's buffers, fetched in one wait.
@@ -1000,8 +1007,10 @@ impl<'g> Frame<'g> {
             let mut st = g.cards.store.lock().unwrap();
             for c in &gi.casters {
                 let mut cd = c.c;
-                let (w, h, off) = st.level(&c.sprite, c.lod);
-                (cd.f[19], cd.f[20], cd.f[21]) = (f32::from_bits(off), f32::from_bits(w), f32::from_bits(h));
+                if let Some((sp, lod)) = &c.sprite {
+                    let (w, h, off) = st.level(sp, *lod);
+                    (cd.f[19], cd.f[20], cd.f[21]) = (f32::from_bits(off), f32::from_bits(w), f32::from_bits(h));
+                }
                 cs.push(cd);
             }
             self.sprite_texels(&mut st)
@@ -1021,6 +1030,7 @@ impl<'g> Frame<'g> {
         let mut p = GeomParams { tile_cols: tc, cast_bins: cast_off, n_lights: cap, cap, tiles_on: gi.lamps.is_some() as u32, small_off, n_small: gi.small.len() as u32, ..Default::default() };
         if let Some(l) = gi.sun { (p.sun_on, p.sun) = (1, l); }
         if let Some((k, t, seed)) = gi.clouds { (p.clouds, p.cloud_travel, p.cloud_seed) = (k, t, seed); }
+        (p.fade_k, p.fade_near, p.fade_cut) = (gi.fade.k, gi.fade.near, gi.fade.cut);
         self.submit();
         g.ctx.queue.write_buffer(&g.geom.params, 0, bytemuck::bytes_of(&p));
         let tb = g.upload(&g.geom.tris, "triangles", bytemuck::cast_slice(&tris));
@@ -1580,7 +1590,8 @@ mod tests {
         // A uniform block's size is a multiple of 16; the WGSL struct has the same fields.
         assert_eq!(std::mem::size_of::<WorldParams>() % 16, 0);
         assert_eq!(std::mem::size_of::<WorldParams>(), 4 * 296);
-        assert_eq!(std::mem::size_of::<CardGpu>(), 4 * 103);
+        assert_eq!(std::mem::size_of::<CardGpu>(), 4 * 104);
+        assert_eq!(std::mem::size_of::<GeomParams>(), 80);
         assert_eq!(std::mem::size_of::<SplatGpu>(), 4 * 24);
         assert_eq!(std::mem::size_of::<AirParams>(), 80);
         assert_eq!(std::mem::size_of::<ShaftParams>(), 64);

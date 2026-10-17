@@ -281,7 +281,16 @@ Clips beyond the plain loop (`clip`):
 
 - `"encounter"`: stop / idle / go clips that join the loop exactly, for halting to fight
   (`slow_m` braking distance, `start_frame` where the stop begins).
+- `"intro"`: the swing in or flight in played once, ending where the loop begins: the game plays
+  it, then the loop from frame 0.
+
+To hand over one file (a trailer, a share, a sequence for a player that cannot chain clips):
+`pf_splice {"clips": ["exports/v_intro.webp", "exports/v.webp*2"], "out": "exports/v_all.webp"}`
+joins exported clips in order and reports each join's step (a warning means the clips were not
+exported to follow each other).
 - `"transition"` and `"fork"`: see section 7b. Design those with pf_transition, not pf_export.
+  Between a scene looking down the path and a side-scroller the camera swings out of one view and
+  into the other (`transition.swing`); give both scenes one canvas.
 
 Always hand the game the metadata `<name>.json`. It gives `metres_per_frame` (to follow a
 character, show frame `floor(distance / metres_per_frame) mod frames`; on a timer, advance at
@@ -366,8 +375,13 @@ choose the details unless the plan's warnings say to.
   `tubes` (`from`, `to`, `radius`, `color`, `end`, `mirror`), real cylinders with sawn ends.
 - **Camera and lens:** `camera.moves` (`bob`/`stride`/`sway` step with the walk, `pan`/`pans` and
   `tilt`/`tilts` slow looks, `dolly`/`dolly_focus`/`dollies` a dolly zoom: all whole cycles a
-  loop; `fly_in` seconds of coming down from `fly_height` at the start, only in the runtime or
-  `pf render --intro`). `post.focus` (`mode` Depth with `distance`, or TiltShift with `band` and
+  loop; `fly_in` seconds of coming down from `fly_height` at the start, and `swing_in`: the
+  camera coming round from another view (`from`: `yaw`, `side`, `back` metres behind the walker,
+  `eye_height`, `horizon`, `zoom`) into the scene's own over `seconds`, circling the walker
+  (`orbit`), the near side dissolving out of its way, with `ease`, `overshoot` and letterbox
+  `bars`; both only in the runtime, `pf render --intro`, pf_render `intro` seconds, or exported
+  with pf_export clip "intro"). `camera.world_sky` keeps the sun and sky put in the world as the
+  camera turns. `post.focus` (`mode` Depth with `distance`, or TiltShift with `band` and
   `band_width`; `blur` ~0.01) for depth of field or a miniature look (preset Miniature Village).
 - **Day and night:** `sky.day_night` (`hour`, `days_per_loop` for a whole day each loop, `real_time`
   for the phone's clock, `sunrise`/`sunset`, `sun_height`, `sun_path`, `sunset_style`, `keep_look`,

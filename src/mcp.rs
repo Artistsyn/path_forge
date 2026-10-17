@@ -174,6 +174,7 @@ pub fn tools() -> Vec<Value> {
             with_source(json!({"properties": {
                 "t": {"type": "number", "description": "Position in the loop, 0..1 (default 0)."},
                 "distance": {"type": "number", "description": "Position in metres instead of t."},
+                "intro": {"type": "number", "description": "Seconds into the intro (camera.moves.swing_in / fly_in): the frame as it plays."},
                 "scale": scale.clone(), "hide": hide.clone()
             }})), true),
         tool("pf_contact_sheet", "Contact sheet", "Several frames spread evenly across the loop in one image: shows how props, lights and particles move and repeat.",
@@ -203,7 +204,7 @@ pub fn tools() -> Vec<Value> {
             with_source(json!({"properties": {
                 "out_dir": {"type": "string", "description": "Output folder (relative paths resolve under the PathForge home folder). Default: exports/."},
                 "formats": {"type": "array", "items": {"type": "string", "enum": ["gif", "webp", "apng", "png", "sheet", "depth", "layers"]}, "description": "Default [\"gif\"]. webp is far smaller than gif at full colour. depth: 16-bit depth PNG per frame, so the game can hide enemies behind props exactly. layers: RGBA PNG frames per depth band (near/mid/far), to draw characters between them."},
-                "clip": {"type": "string", "enum": ["loop", "encounter", "transition"], "description": "transition: a one-shot walk from this scene into another (to_path or to_preset): the new world appears down the road and sweeps toward the camera; starts on this loop's frame 0 and ends on the other loop's frame 0. loop (default): the endless walk. encounter: a stop for a fight in three parts - <name>_stop (eases to a halt), <name>_idle (stands still while flames and particles keep moving; loop it for the fight), <name>_go (eases back and hands over to the loop exactly) - plus <name>_encounter.json with playback rules."},
+                "clip": {"type": "string", "enum": ["loop", "intro", "encounter", "transition"], "description": "intro: the camera's swing in or flight in (camera.moves.swing_in / fly_in) played once, as <name>_intro, ending where the loop begins: play it, then the loop from frame 0. transition: a one-shot walk from this scene into another (to_path or to_preset): the new world appears down the road and sweeps toward the camera; starts on this loop's frame 0 and ends on the other loop's frame 0. loop (default): the endless walk. encounter: a stop for a fight in three parts - <name>_stop (eases to a halt), <name>_idle (stands still while flames and particles keep moving; loop it for the fight), <name>_go (eases back and hands over to the loop exactly) - plus <name>_encounter.json with playback rules."},
                 "to_path": {"type": "string", "description": "transition: the scene file to walk into."},
                 "to_preset": {"type": "string", "description": "transition: the preset to walk into."},
                 "approach_m": {"type": "number", "description": "transition: how far ahead the new world first appears (default 30 m)."},
@@ -264,6 +265,14 @@ pub fn tools() -> Vec<Value> {
                 "overwrite": {"type": "boolean"},
                 "scale": {"type": "number", "description": "Size of each image (default 0.3)."}
             }})), false),
+        tool("pf_splice", "Splice clips", "Join exported clips one after another into one animated gif or webp: an intro, a few loops, a transition and the next scene's loops, to share or to play where clips cannot be sequenced. PathForge's clips are made to join (an intro ends where its loop begins, a transition starts on one loop's frame 0 and ends where the next begins); the reply gives the colour step across each join next to the clips' own steps, and warns where a join jumps. GIFs joined into a gif keep their palettes and pixels exactly.",
+            json!({"type": "object", "properties": {
+                "clips": {"type": "array", "items": {"type": "string"}, "description": "In play order: .gif, .webp, or a folder of .png frames; \"loop.webp*3\" plays one three times. Relative paths resolve under the PathForge home folder."},
+                "out": {"type": "string", "description": "The file to write, .gif or .webp."},
+                "once": {"type": "boolean", "description": "Play once instead of looping forever (default false)."},
+                "webp_quality": {"type": "number", "description": "0..100, 100 lossless (default 90)."},
+                "fps": {"type": "number", "description": "Frame rate for png folders with no export metadata beside them (default 24)."}
+            }, "required": ["clips", "out"]}), false),
         tool("pf_transition", "Plan and preview a transition or fork", "Walk from this scene (path/preset/scene) into another and see it: the plan PathForge makes from the two scenes (what stands at the boundary: an open blend, a doorway, a cave mouth, a gate or a portal; how far ahead it shows; light through the opening; the eye's adaptation) with notes on why and warnings on what will not look right, plus a contact sheet of the walk. Give to_path or to_preset for a transition, or left_* and right_* for a fork where the player chooses (take: which branch the preview takes). Adjust with `transition` (Transition fields, e.g. {\"threshold\": \"CaveMouth\", \"approach_m\": 30}) or `fork` (ForkChoice fields). With `export` ({formats, out_dir, name, entries}) also writes the clips: a transition (entries > 1 writes clips starting at evenly spaced loop frames, so a game need not wait for frame 0), or a fork's approach plus one clip per branch, each with a .json saying how to play it.",
             with_source(json!({"properties": {
                 "to_path": {"type": "string"}, "to_preset": {"type": "string"},
@@ -508,21 +517,24 @@ impl Server {
     fn opts(&self, l: &Loaded, scale: f32, layers: Layers, stats: bool) -> RenderOptions {
         let (w, h) = (l.scene.canvas.width.max(16), l.scene.canvas.height.max(16));
         let size = if scale < 0.999 { Some((((w as f32 * scale).round() as u32).max(16), ((h as f32 * scale).round() as u32).max(16))) } else { None };
-        RenderOptions { size, base_dir: Some(self.base_of(l)), layers, palette: None, stats, depth: false, time: None, pick: false, intro: None }
+        RenderOptions { size, base_dir: Some(self.base_of(l)), layers, palette: None, stats, depth: false, time: None, pick: false, intro: None, swing: None }
     }
 
     /// Render at `scale` of the canvas. Pixel styles render at full size and are box-scaled down so
     /// their art pixels survive; everything else renders directly at the preview size (faster).
-    fn preview(&mut self, l: &Loaded, distance: f32, scale: f32, layers: Layers) -> Image {
+    fn preview(&mut self, l: &Loaded, distance: f32, scale: f32, layers: Layers) -> Image { self.preview_at(l, distance, scale, layers, None) }
+
+    /// `preview`, `intro` seconds into the scene's intro.
+    fn preview_at(&mut self, l: &Loaded, distance: f32, scale: f32, layers: Layers, intro: Option<f32>) -> Image {
         let pixel_style = l.scene.style.pixel_size > 1;
         if pixel_style {
-            let img = self.renderer.render(&l.scene, distance, &self.opts(l, 1.0, layers, true));
+            let img = self.renderer.render(&l.scene, distance, &RenderOptions { intro, ..self.opts(l, 1.0, layers, true) });
             let stats = img.stats.clone();
             let mut small = review::downscale(&img, scale);
             small.stats = stats;
             small
         } else {
-            self.renderer.render(&l.scene, distance, &self.opts(l, scale, layers, true))
+            self.renderer.render(&l.scene, distance, &RenderOptions { intro, ..self.opts(l, scale, layers, true) })
         }
     }
 
@@ -549,6 +561,7 @@ impl Server {
             "pf_check_loop" => self.check_loop(args),
             "pf_camera" => self.camera(args),
             "pf_export" => self.export(args),
+            "pf_splice" => self.splice(args),
             "pf_kit" => self.kit(args),
             "pf_pack" => self.pack(args),
             "pf_remix" => self.remix(args),
@@ -741,10 +754,13 @@ impl Server {
         let len = l.scene.motion.loop_length.max(1.0);
         let d = num(args, "distance").map(|d| d as f32).unwrap_or_else(|| num(args, "t").unwrap_or(0.0) as f32 * len);
         let t0 = Instant::now();
-        let img = self.preview(&l, d, num(args, "scale").unwrap_or(0.5) as f32, hidden_layers(args)?);
+        let intro = num(args, "intro").map(|t| t.max(0.0) as f32);
+        let img = self.preview_at(&l, d, num(args, "scale").unwrap_or(0.5) as f32, hidden_layers(args)?, intro);
         let ms = t0.elapsed().as_secs_f64() * 1000.0;
+        let m = &l.scene.camera.moves;
         Ok(Reply::json(&json!({
             "source": l.label, "distance_m": round2(d), "t": round3(d / len), "size": [img.width, img.height],
+            "intro_s": intro, "intro_length_s": m.fly_in.max(0.0).max(m.swing_in.length()),
             "render_ms": (ms * 10.0).round() / 10.0, "frame": clean(&img.stats),
         })).with_image(&img))
     }
@@ -1260,6 +1276,18 @@ impl Server {
         })))
     }
 
+    fn splice(&mut self, args: &Value) -> ToolResult {
+        use crate::splice::{splice, Clip, SpliceOptions};
+        let clips = args.get("clips").and_then(|v| v.as_array()).ok_or("clips: a list of files")?
+            .iter().map(|c| c.as_str().ok_or("clips: strings".to_string()).and_then(Clip::parse).map(|c| Clip { path: self.resolve(&c.path.to_string_lossy()), ..c }))
+            .collect::<Result<Vec<_>, _>>()?;
+        let out = self.resolve(string(args, "out").ok_or("out: the .gif or .webp to write")?);
+        let o = SpliceOptions { looping: !flag(args, "once", false), webp_quality: num(args, "webp_quality").map(|q| q as f32), folder_fps: num(args, "fps").unwrap_or(24.0) as f32 };
+        let r = splice(&clips, &out, &o)?;
+        let kb = std::fs::metadata(&r.file).map(|m| m.len() / 1024).unwrap_or(0);
+        Ok(Reply::json(&json!({"report": r, "kb": kb})))
+    }
+
     fn export(&mut self, args: &Value) -> ToolResult {
         let l = self.load(args)?;
         let formats = match args.get("formats").and_then(|v| v.as_array()) {
@@ -1283,6 +1311,7 @@ impl Server {
         let cancel = AtomicBool::new(false);
         let report = match string(args, "clip").unwrap_or("loop") {
             "loop" => export::export(&l.scene, &job, |_| {}, &cancel)?,
+            "intro" => export::export_intro(&l.scene, &job, |_| {}, &cancel)?,
             "encounter" => {
                 let e = export::Encounter { slow_m: num(args, "slow_m").unwrap_or(3.0) as f32, start_frame: int(args, "start_frame").unwrap_or(0).max(0) as u32 };
                 export::export_encounter(&l.scene, &job, &e, |_| {}, &cancel)?
@@ -1297,7 +1326,7 @@ impl Server {
                 let b_dir = to.file.as_ref().and_then(|f| f.parent().map(Path::to_path_buf));
                 export::export_transition(&l.scene, &to.scene, b_dir, &job, &tr, |_| {}, &cancel)?
             }
-            other => return Err(format!("unknown clip '{other}' (loop, encounter, transition)")),
+            other => return Err(format!("unknown clip '{other}' (loop, intro, encounter, transition)")),
         };
         let sizes: Vec<Value> = report.files.iter().map(|f| {
             let bytes = std::fs::metadata(f).map(|m| if m.is_dir() { dir_size(f) } else { m.len() }).unwrap_or(0);
@@ -1578,7 +1607,7 @@ mod tests {
 
     #[test]
     fn read_only_tools_are_marked_and_writers_are_not() {
-        let writers = ["pf_new_scene", "pf_edit_scene", "pf_export", "pf_kit", "pf_import_sprite", "pf_pack", "pf_remix", "pf_transition", "pf_journey", "pf_save_preset"];
+        let writers = ["pf_new_scene", "pf_edit_scene", "pf_export", "pf_splice", "pf_kit", "pf_import_sprite", "pf_pack", "pf_remix", "pf_transition", "pf_journey", "pf_save_preset"];
         for t in tools() {
             let name = t["name"].as_str().unwrap();
             let ro = t["annotations"]["readOnlyHint"].as_bool().unwrap();

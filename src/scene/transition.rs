@@ -41,12 +41,19 @@ pub struct Transition {
     /// threshold asks for it (a gate, a portal).
     pub marker: Marker,
     pub seed: u32,
+    /// When the scenes look from different angles (`camera.yaw`, `camera.side`: a side-scroller
+    /// and a view down the path), the camera swings: out of the first scene's view to look down
+    /// the path before the boundary, and round into the second's after it. `seconds` each way
+    /// (0 = auto, 2.5), with its `hold`, `ease`, `overshoot`, `orbit` and `bars` (`from` is not
+    /// used: the views are the scenes'). Negative seconds: no swing, the views crossfade at the end.
+    pub swing: Swing,
 }
 impl Default for Transition {
     fn default() -> Self {
         Transition {
             threshold: Threshold::Auto, approach_m: 0.0, overshoot_m: 1.0, blend_m: 0.0, facade: None, facade_height: 0.0,
             light_spill: 1.0, adaptation: 1.0, camera_blend_m: 4.0, style: StyleFrom::Auto, marker: Marker::Auto, seed: 7,
+            swing: Swing { hold: 0.0, ..Swing::default() },
         }
     }
 }
@@ -119,6 +126,12 @@ pub struct Crossing {
     pub marker: Option<SetPieceKind>,
     pub sky: SkyRule,
     pub seed: u32,
+    /// The camera's swings (see `Transition::swing`): metres walked swinging out of the first
+    /// scene's view before the crossing and into the second's after it (0: none), and how.
+    pub swing_out: f32,
+    pub swing_in: f32,
+    #[serde(skip)]
+    pub swing: Swing,
     /// What was chosen and why, in plain words.
     pub notes: Vec<String>,
     /// Things that will not look right, with what to change.
@@ -258,6 +271,28 @@ pub fn plan(a: &Scene, b: &Scene, t: &Transition) -> Crossing {
         notes.push(format!("The camera changes over {:.0} m either side of the boundary (eye height, horizon, zoom).", t.camera_blend_m.max(0.5)));
     }
 
+    // Scenes looking from different angles: the camera swings out of one view and into the other,
+    // crossing the boundary looking down the path.
+    let (ta, tb) = (a.camera.turned(), b.camera.turned());
+    let mut swing = t.swing.clone();
+    let (mut swing_out, mut swing_in) = (0.0, 0.0);
+    if (ta || tb) && swing.seconds >= 0.0 {
+        if swing.seconds == 0.0 { swing.seconds = 2.5; }
+        let each = swing.length();
+        if ta { swing_out = each * a.motion.speed.max(0.01); }
+        if tb { swing_in = each * b.motion.speed.max(0.01); }
+        notes.push(match (ta, tb) {
+            (true, true) => format!("Both scenes look from an angle: the camera swings out of {an}'s view to look down the path ({:.1} s), crosses, and swings round into {bn}'s ({:.1} s).", each, each),
+            (true, false) => format!("{an} looks from an angle: the camera swings out of its view to look down the path ({each:.1} s) before the boundary."),
+            _ => format!("{bn} looks from an angle: past the boundary the camera swings round into its view ({each:.1} s)."),
+        });
+        if a.canvas.width != b.canvas.width || a.canvas.height != b.canvas.height {
+            warnings.push(format!("{an} is {}x{} and {bn} {}x{}: a camera swinging between them keeps one frame (an exported transition uses {bn}'s). Give both scenes one canvas.", a.canvas.width, a.canvas.height, b.canvas.width, b.canvas.height));
+        }
+    } else if ta != tb || (ta && (a.camera.yaw != b.camera.yaw || a.camera.side != b.camera.side)) {
+        notes.push("The scenes look from different angles: the views crossfade at the end (give the transition a swing to have the camera come round instead).".into());
+    }
+
     // The walk must carry on past the boundary until the camera and the sky are wholly the second
     // world's, so a clip ends exactly on its loop.
     let camera_blend = t.camera_blend_m.max(0.5);
@@ -265,8 +300,16 @@ pub fn plan(a: &Scene, b: &Scene, t: &Transition) -> Crossing {
     let overshoot = t.overshoot_m.max(settle);
     Crossing {
         threshold, approach, overshoot, blend, taper, arch, rim, facade, spill, adaptation,
-        camera_blend, style, marker, sky, seed: t.seed, notes, warnings,
+        camera_blend, style, marker, sky, seed: t.seed, swing_out, swing_in, swing, notes, warnings,
     }
+}
+
+/// A scene seen looking straight down the path (its camera's height, horizon and zoom kept): how a
+/// transition between scenes looking from different angles crosses the boundary.
+pub fn looking_ahead(s: &Scene) -> Scene {
+    let mut t = s.clone();
+    (t.camera.yaw, t.camera.side) = (0.0, 0.0);
+    t
 }
 
 /// A fork in the path where the player chooses: the path splits into a left and a right branch,

@@ -104,15 +104,25 @@ pub struct Camera {
     /// In a side view, how far from the camera's side of the path things are left out, metres
     /// past the path's edge (props, lights, walls): the cut through the near side of the world.
     pub cutaway: f32,
+    /// Whether the sky keeps its place in the world as the camera turns (`yaw`): the sun and
+    /// moon stand where `sky.sun.pos` puts them seen down the path, and turned to the side the
+    /// view swings away from them, the clouds and stars with them, so a sun ahead of the walk is
+    /// off to one side of a side-scroller, its light and shadows still coming from where it is
+    /// (and a swinging camera sweeps across the sky). Off: the sky keeps its place in the picture
+    /// whichever way the camera looks, and its light turns with it.
+    pub world_sky: bool,
 }
 impl Default for Camera {
-    fn default() -> Self { Self { eye_height: 1.6, horizon: 0.22, zoom: 1.0, lens_curve: 0.0, moves: CameraMoves::default(), yaw: 0.0, side: 0.0, cutaway: 0.4 } }
+    fn default() -> Self { Self { eye_height: 1.6, horizon: 0.22, zoom: 1.0, lens_curve: 0.0, moves: CameraMoves::default(), yaw: 0.0, side: 0.0, cutaway: 0.4, world_sky: false } }
 }
 
 impl Camera {
     /// Whether the camera looks far enough to the side that the near side of the world is cut
     /// away and the path straightened (a side view).
     pub fn side_view(&self) -> bool { self.yaw.abs() >= 60.0 }
+
+    /// Whether it looks anywhere but straight down the middle of the path.
+    pub fn turned(&self) -> bool { self.yaw.clamp(-90.0, 90.0) != 0.0 || self.side != 0.0 }
 }
 
 /// Camera moves on top of the walk. Each repeats a whole number of times a loop, so the loop
@@ -146,12 +156,144 @@ pub struct CameraMoves {
     pub fly_in: f32,
     /// How high it starts, metres.
     pub fly_height: f32,
+    /// The swing in: played once at the start like the flight in, the camera comes round from
+    /// another view (behind the walker, say) into the scene's own (a side-scroller's).
+    pub swing_in: Swing,
 }
 impl Default for CameraMoves {
     fn default() -> Self {
-        CameraMoves { bob: 0.0, stride: 0.75, sway: 0.0, pan: 0.0, pans: 1, tilt: 0.0, tilts: 1, dolly: 0.0, dolly_focus: 8.0, dollies: 1, fly_in: 0.0, fly_height: 18.0 }
+        CameraMoves { bob: 0.0, stride: 0.75, sway: 0.0, pan: 0.0, pans: 1, tilt: 0.0, tilts: 1, dolly: 0.0, dolly_focus: 8.0, dollies: 1, fly_in: 0.0, fly_height: 18.0, swing_in: Swing::default() }
     }
 }
+
+/// A camera swing: once, the camera comes round from one view to another, for an intro into a
+/// scene (`CameraMoves::swing_in`) or a game's change of view. Circling the spot on the path both
+/// views look at (`orbit`), that spot stays in the middle of the frame as the camera comes round,
+/// the near side of the world dissolves out of its way, the path straightens and buildings turn
+/// to face it, as a side view has them; with `camera.world_sky` the sun and sky sweep across.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
+pub struct Swing {
+    /// Seconds it takes to come round (0: no swing).
+    pub seconds: f32,
+    /// Seconds it holds the first view before it moves.
+    pub hold: f32,
+    /// The view it comes from (it ends on the scene's own camera).
+    pub from: SwingView,
+    pub ease: SwingEase,
+    /// How far past the end it swings before settling back, a share of the turn (0 none, up to
+    /// 0.3): a crane's or a handheld camera's overshoot.
+    pub overshoot: f32,
+    /// Circling the spot on the path both views look at (true), or moving straight across from
+    /// one place to the other, turning as it goes (false).
+    pub orbit: bool,
+    /// Letterbox bars over the top and bottom of the frame at the start, a share of its height
+    /// each (0 none, up to 0.25), sliding away as the swing ends: the game starts.
+    pub bars: f32,
+}
+impl Default for Swing {
+    fn default() -> Self { Swing { seconds: 0.0, hold: 0.5, from: SwingView::default(), ease: SwingEase::Smooth, overshoot: 0.0, orbit: true, bars: 0.0 } }
+}
+
+/// Where a swing's camera starts: as `Camera` has it, and `back` metres behind the walker (a
+/// third-person view; 0 at the walker's eyes).
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
+pub struct SwingView {
+    pub yaw: f32,
+    pub side: f32,
+    pub back: f32,
+    pub eye_height: f32,
+    pub horizon: f32,
+    pub zoom: f32,
+}
+impl Default for SwingView {
+    fn default() -> Self { SwingView { yaw: 0.0, side: 0.0, back: 5.0, eye_height: 2.2, horizon: 0.4, zoom: 1.0 } }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub enum SwingEase {
+    /// Gathering speed and settling gently.
+    #[default]
+    Smooth,
+    /// Off at once, settling slowly: a reveal.
+    Out,
+    /// Easing off the first view, arriving briskly.
+    In,
+    Linear,
+}
+
+/// The camera partway through a swing: the camera, how far behind the walker it stands, how far
+/// the turn has gone in what it changes besides the angle, and the letterbox bars.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SwingPose { pub camera: Camera, pub back: f32, pub turning: crate::world::view::Turning, pub bars: f32 }
+
+impl SwingView {
+    /// A camera's view as a swing's start or end.
+    pub fn of(c: &Camera) -> SwingView { SwingView { yaw: c.yaw, side: c.side, back: 0.0, eye_height: c.eye_height, horizon: c.horizon, zoom: c.zoom } }
+    fn camera(&self, like: &Camera) -> Camera { Camera { yaw: self.yaw, side: self.side, eye_height: self.eye_height, horizon: self.horizon, zoom: self.zoom, ..like.clone() } }
+}
+
+impl Swing {
+    /// Seconds from its start to its end, the hold included (0 for none).
+    pub fn length(&self) -> f32 { if self.seconds > 0.0 { self.hold.max(0.0) + self.seconds } else { 0.0 } }
+
+    /// The camera `t` seconds in, swinging from `from` to `to` (None once it has ended, or when
+    /// there is no swing).
+    pub fn pose(&self, to: &Camera, t: f32) -> Option<SwingPose> {
+        if self.seconds <= 0.0 || t >= self.length() { return None; }
+        Some(self.between(&self.from, &SwingView::of(to), to, ((t - self.hold.max(0.0)) / self.seconds).clamp(0.0, 1.0)))
+    }
+
+    /// The camera `u` (0..1) of the way from view `a` to view `b`, the rest of it like `like`.
+    pub fn between(&self, a: &SwingView, b: &SwingView, like: &Camera, u: f32) -> SwingPose {
+        let u = u.clamp(0.0, 1.0);
+        let e = match self.ease {
+            SwingEase::Smooth => u * u * u * (u * (u * 6.0 - 15.0) + 10.0),
+            SwingEase::Out => 1.0 - (1.0 - u).powi(3),
+            SwingEase::In => u * u * u,
+            SwingEase::Linear => u,
+        };
+        // The overshoot: past the end and back, on the angle and the place (a back-out curve).
+        let c = 17.0 * self.overshoot.clamp(0.0, 0.3);
+        let eo = if c > 0.0 { 1.0 + (c + 1.0) * (e - 1.0).powi(3) + c * (e - 1.0).powi(2) } else { e };
+        let lerp = |p: f32, q: f32, k: f32| p + (q - p) * k;
+        let (ta, tb) = (a.yaw.clamp(-90.0, 90.0).to_radians(), b.yaw.clamp(-90.0, 90.0).to_radians());
+        let (pa, pb) = ([a.side, -a.back], [b.side, -b.back]);
+        // The spot both look at: where one of them looks across the middle of the path.
+        let hit = |t: f32, p: [f32; 2]| (t.sin().abs() > 0.3).then(|| -p[0] / t.sin()).filter(|&k| k > 0.0).map(|k| [p[0] + k * t.sin(), p[1] + k * t.cos()]);
+        let pivot = hit(tb, pb).or_else(|| hit(ta, pa)).filter(|_| self.orbit);
+        let yaw = lerp(ta, tb, eo);
+        let at = match pivot {
+            Some(c) => {
+                let polar = |p: [f32; 2], t: f32| {
+                    let v = [p[0] - c[0], p[1] - c[1]];
+                    let r = (v[0] * v[0] + v[1] * v[1]).sqrt();
+                    (r, if r > 1e-3 { (-v[0]).atan2(-v[1]) } else { t })
+                };
+                let ((ra, fa), (rb, fb)) = (polar(pa, ta), polar(pb, tb));
+                let (r, f) = (lerp(ra, rb, eo), lerp(fa, fb, eo));
+                [c[0] - r * f.sin(), c[1] - r * f.cos()]
+            }
+            None => [lerp(pa[0], pb[0], eo), lerp(pa[1], pb[1], eo)],
+        };
+        let view = SwingView {
+            yaw: yaw.to_degrees().clamp(-90.0, 90.0), side: at[0], back: -at[1],
+            eye_height: lerp(a.eye_height, b.eye_height, e), horizon: lerp(a.horizon, b.horizon, e), zoom: lerp(a.zoom, b.zoom, e),
+        };
+        // Cutting its side away early, before the camera comes among what stands there; bringing
+        // it back late, once the camera has passed it.
+        let (ca, cb) = (a.camera(like), b.camera(like));
+        let k_of = |c: &Camera| if c.side_view() { 1.0 } else { 0.0 };
+        let (sa, sb) = (k_of(&ca), k_of(&cb));
+        let side_k = if sb >= sa { lerp(sa, sb, smooth01(0.03, 0.35, e)) } else { lerp(sa, sb, smooth01(0.65, 0.97, e)) };
+        let face = |c: &Camera| if c.turned() { 1.0 } else { 0.0 };
+        let turning = crate::world::view::Turning { side_k, straight: lerp(sa, sb, e), face_k: lerp(face(&ca), face(&cb), e) };
+        SwingPose { camera: view.camera(like), back: view.back, turning, bars: self.bars.clamp(0.0, 0.25) * (1.0 - smooth01(0.6, 1.0, u)) }
+    }
+}
+
+fn smooth01(a: f32, b: f32, x: f32) -> f32 { let t = ((x - a) / (b - a)).clamp(0.0, 1.0); t * t * (3.0 - 2.0 * t) }
 
 /// The camera at one moment of its moves: what to add to the scene's camera.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -1788,10 +1930,6 @@ impl DayNight {
 
 fn smooth(e0: f32, e1: f32, x: f32) -> f32 { let t = ((x - e0) / (e1 - e0)).clamp(0.0, 1.0); t * t * (3.0 - 2.0 * t) }
 
-/// A waterfall beside the path (`scene.waterfalls`): a rock face with water pouring down it in
-/// streaks, foam and spray boiling up at its foot, and (with the sun out) a little rainbow in the
-/// spray. It repeats every `spacing` metres, like a set piece; its water falls a whole number of
-/// times a loop.
 /// A fence beside the path, built post to post as solid pieces that run along its edge and bend
 /// with it, so it reads as one fence from any angle.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -1814,10 +1952,15 @@ pub struct Fence {
     pub offset: f32,
     /// Metres between posts.
     pub post_spacing: f32,
+    /// Whether it casts the sun's shadow on the ground, post by post and picket by picket, with a
+    /// soft darkening along its foot.
+    pub shadow: bool,
+    /// How dark that shadow is (0..1), as a prop's.
+    pub shadow_opacity: f32,
 }
 impl Default for Fence {
     fn default() -> Self {
-        Fence { enabled: true, style: FenceStyle::Picket, side: Side::Both, lateral: 1.2, height: 0.9, color: [236, 232, 220], spacing: 24.0, length: 20.0, offset: 0.0, post_spacing: 2.0 }
+        Fence { enabled: true, style: FenceStyle::Picket, side: Side::Both, lateral: 1.2, height: 0.9, color: [236, 232, 220], spacing: 24.0, length: 20.0, offset: 0.0, post_spacing: 2.0, shadow: true, shadow_opacity: 0.6 }
     }
 }
 
@@ -1832,6 +1975,10 @@ pub enum FenceStyle {
     Boards,
 }
 
+/// A waterfall beside the path (`scene.waterfalls`): a rock face with water pouring down it in
+/// streaks, foam and spray boiling up at its foot, and (with the sun out) a little rainbow in the
+/// spray. It repeats every `spacing` metres, like a set piece; its water falls a whole number of
+/// times a loop.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(default)]
 pub struct Waterfall {

@@ -62,10 +62,14 @@ int pf_runtime_go(PfRuntime *rt, char *err, size_t err_len);
  * the JSON's full length (call again with a larger buffer if it did not fit), -1 for a null
  * handle, or -2 with the reason in out. */
 int pf_runtime_go_plan(PfRuntime *rt, char *out, size_t out_len);
-/* Where the walk stands, as JSON: {"scene","distance","time","stop","progress","choose_within","day"}.
- * choose_within is non-null while a fork waits for a choice (metres left). Returns length or -1. */
+/* Where the walk stands, as JSON: {"scene","distance","time","stop","progress","choose_within","day","intro_left","swing_left"}.
+ * choose_within is non-null while a fork waits for a choice (metres left); intro_left is the
+ * seconds left of the intro (the camera's flight in or swing in) while it plays, so the game can
+ * hold the player's controls until it lands; swing_left the same for a pf_runtime_swing_to swing.
+ * Returns length or -1. */
 int pf_runtime_state(const PfRuntime *rt, char *out, size_t out_len);
-/* Where a point d metres ahead appears now (as pf_runtime_project, for the walk). */
+/* Where a point d metres ahead of the walker appears now (as pf_runtime_project, for the walk;
+ * while a swing has the camera standing behind the walker, d is still the walker's). */
 int pf_runtime_project_now(const PfRuntime *rt, float x, float y, float d, uint32_t width, uint32_t height, float *out_xy);
 
 /* ── Day and night ──────────────────────────────────────────────────────────
@@ -75,9 +79,22 @@ int pf_runtime_project_now(const PfRuntime *rt, float x, float y, float d, uint3
 /* Set the hour (0..24: 6 sunrise, 12 noon, 18 sunset, 0 midnight) on every scene drawn, turning
  * its day and night on; a negative hour gives each scene back its own. */
 int pf_runtime_set_hour(PfRuntime *rt, float hour);
-/* Play the camera's flight in (camera.moves.fly_in) again from the top: the camera comes down
- * from above over the next fly_in seconds of pf_runtime_step (it plays once at the start). */
+/* Play the intro again from the top: the camera's flight in (camera.moves.fly_in: it comes down
+ * from above) and swing in (camera.moves.swing_in: it comes round from another view into the
+ * scene's own) over the next seconds of pf_runtime_step (it plays once at the start). */
 int pf_runtime_restart_intro(PfRuntime *rt);
+/* Swing the camera from where it is now to another view (interface 3): a view's name ("home":
+ * the camera the scene came with; "ahead": down the path; "side", "side_left": a side-scroller's
+ * view from the right or left), or JSON, every field optional: {"view": a name, "yaw","side",
+ * "eye_height","horizon","zoom"} the view (missing ones stay as the named view or the camera has
+ * them) and {"seconds","hold","ease","overshoot","orbit","bars"} how (as camera.moves.swing_in;
+ * 0 seconds is 2.5), e.g. "side", or {"view":"ahead","seconds":3,"ease":"Out"}. It circles the walker, dissolving the near side of the world out
+ * of its way, over the next seconds of pf_runtime_step; the view stays once it lands
+ * (pf_runtime_state's swing_left counts down). 0 begun, -1 null handle, -2 with the reason in err. */
+int pf_runtime_swing_to(PfRuntime *rt, const char *json, char *err, size_t err_len);
+/* The camera's view now (interface 3), JSON {"yaw","side","back","eye_height","horizon","zoom"}:
+ * where a swing or the intro has it (back: metres behind the walker). Returns length or -1. */
+int pf_runtime_view(const PfRuntime *rt, char *out, size_t out_len);
 /* Let the days pass: one day every `seconds` of pf_runtime_step time (0 holds the hour). */
 int pf_runtime_set_day_length(PfRuntime *rt, float seconds);
 /* The day now: writes the hour and the daylight (0 night .. 1 day; either may be NULL) and
@@ -88,7 +105,8 @@ int pf_runtime_day(const PfRuntime *rt, float *hour, float *daylight);
 /* ── For programs that load this library at run time ────────────────────────
  * An editor's preview, say, which must build whether or not PathForge is installed. */
 
-/* The version of this interface (2 added the three functions below and pf_runtime_go_plan). */
+/* The version of this interface (2 added the three functions below and pf_runtime_go_plan; 3
+ * pf_runtime_swing_to and pf_runtime_view). */
 uint32_t pf_abi_version(void);
 /* Open a place as a journey stop names one: a scene file (relative to base_dir, which may be
  * NULL) or a built-in preset as "preset:Name". NULL on failure, with the reason in err. */

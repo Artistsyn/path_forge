@@ -70,7 +70,30 @@ pub struct View {
     pub cam_x: f32,
     #[serde(skip)]
     pub turned: bool,
+    /// How far the camera's own side of the world is cut away for a side view (0 none, 1 gone:
+    /// see `near_fade`), which side that is (-1 left, 1 right), and the cut's distance past the
+    /// path's edge (`camera.cutaway`). A side view has 1, other views 0; a camera swinging round
+    /// (`CameraMoves::swing_in`) dissolves the near side between them.
+    #[serde(skip)]
+    pub side_k: f32,
+    #[serde(skip)]
+    pub near: f32,
+    #[serde(skip)]
+    pub cutaway: f32,
+    /// How far props that face the path once the camera turns (`Facing::PathWhenTurned`) have
+    /// come round from facing the camera (0) to facing the path (1).
+    #[serde(skip)]
+    pub face_k: f32,
+    /// The sky staying put in the world as the camera turns (`camera.world_sky`): how far it
+    /// slides across the frame, in frame widths.
+    #[serde(skip)]
+    pub sky_turn: f32,
 }
+
+/// How far a camera's turn has gone in what it changes besides the angle (see `View::posed`):
+/// the near side cut away, the path straightened, and buildings come round to face the path.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Turning { pub side_k: f32, pub straight: f32, pub face_k: f32 }
 
 /// Where one world gives way to the next, as the camera sees it this frame. Path width and ground
 /// height are one continuous function across it, so both worlds' geometry meets at the boundary.
@@ -184,24 +207,45 @@ fn winding(scene: &Scene) -> [[f32; 4]; 4] {
 }
 
 impl View {
-    pub fn new(scene: &Scene, width: usize, height: usize) -> View {
+    pub fn new(scene: &Scene, width: usize, height: usize) -> View { View::with_camera(scene, &scene.camera, width, height) }
+
+    /// The view of `scene` through `cam` in place of its own camera (a camera move between views).
+    pub fn with_camera(scene: &Scene, cam: &crate::scene::Camera, width: usize, height: usize) -> View {
+        let side = if cam.side_view() { 1.0 } else { 0.0 };
+        View::posed(scene, cam, width, height, Turning { side_k: side, straight: side, face_k: if cam.turned() { 1.0 } else { 0.0 } })
+    }
+
+    /// `with_camera` with the cut, the straightening and the turn of buildings as given.
+    pub fn posed(scene: &Scene, cam: &crate::scene::Camera, width: usize, height: usize, k: Turning) -> View {
         let h = height.max(2) as f32;
-        let horizon_px = (scene.camera.horizon.clamp(0.02, 0.98) * h).round();
-        let zoom = scene.camera.zoom.clamp(0.1, 8.0);
+        let horizon_px = (cam.horizon.clamp(0.02, 0.98) * h).round();
+        let zoom = cam.zoom.clamp(0.1, 8.0);
         let focal_px = (h - horizon_px).max(1.0) * zoom;
-        let eye_height = scene.camera.eye_height.clamp(0.05, 50.0);
-        let yaw = scene.camera.yaw.clamp(-90.0, 90.0).to_radians();
-        let turned = yaw != 0.0 || scene.camera.side != 0.0;
+        let eye_height = cam.eye_height.clamp(0.05, 50.0);
+        let yaw = cam.yaw.clamp(-90.0, 90.0).to_radians();
+        let turned = cam.turned();
         // A side view straightens the path: its bends would swing it toward and away from the camera.
-        let straight = scene.camera.side_view();
+        let keep = 1.0 - k.straight.clamp(0.0, 1.0);
+        let mut wind = winding(scene);
+        for w in wind.iter_mut() { w[0] *= keep; }
+        let cam_x = if turned { cam.side.clamp(-200.0, 200.0) } else { 0.0 };
         View {
             width, height, horizon_px, center_px: width as f32 * 0.5, focal_px, eye_height,
-            bend: if straight { 0.0 } else { scene.path.bend.clamp(-2.0, 2.0) }, wind: if straight { [[0.0; 4]; 4] } else { winding(scene) }, hill: scene.path.hill.clamp(-2.0, 2.0),
+            bend: scene.path.bend.clamp(-2.0, 2.0) * keep, wind, hill: scene.path.hill.clamp(-2.0, 2.0),
             half_width: scene.path.half_width.clamp(0.05, 50.0), flare: scene.path.flare.clamp(0.0, 0.95),
-            near_ground: eye_height * zoom, lens_curve: scene.camera.lens_curve.clamp(-1.0, 1.0),
+            near_ground: eye_height * zoom, lens_curve: cam.lens_curve.clamp(-1.0, 1.0),
             stairs: StairProfile::new(&scene.path.stairs, scene.motion.loop_length), scroll: 0.0, top: 0, left: 0, split: None, shear: None, pan_px: 0.0, pan_max: 0.0,
-            yaw_c: yaw.cos(), yaw_s: yaw.sin(), cam_x: if turned { scene.camera.side.clamp(-200.0, 200.0) } else { 0.0 }, turned,
+            yaw_c: yaw.cos(), yaw_s: yaw.sin(), cam_x, turned,
+            side_k: k.side_k.clamp(0.0, 1.0), near: if cam_x != 0.0 { cam_x.signum() } else if yaw != 0.0 { -yaw.signum() } else { 1.0 },
+            cutaway: cam.cutaway.max(0.0), face_k: k.face_k.clamp(0.0, 1.0),
+            sky_turn: if cam.world_sky { -yaw / 2.4 } else { 0.0 },
         }
+    }
+
+    /// How far something standing `x` metres from the middle of the path has dissolved because it
+    /// is on the camera's side of a side view's cut (0 not at all, 1 gone).
+    pub fn near_fade(&self, x: f32) -> f32 {
+        if self.side_k <= 0.0 || x * self.near <= self.half_width + self.cutaway { 0.0 } else { self.side_k }
     }
 
     /// The view from `scroll` metres along the loop (only stairs depend on it).
@@ -263,11 +307,11 @@ impl View {
     /// How far sideways the sky stands from where the scene puts it, pixels. The sky is
     /// infinitely far, so as the camera turns with the path all of it slides across the frame
     /// together, the way the far end of the path does.
-    pub fn sky_dx(&self) -> f32 { -self.focal_px * self.turn_tan() + self.pan_px }
+    pub fn sky_dx(&self) -> f32 { -self.focal_px * self.turn_tan() + self.pan_px + self.sky_turn * (self.width - 2 * self.left) as f32 }
 
     /// The furthest the sky slides either way over the loop, pixels (0 when the camera never turns).
     pub fn sky_swing(&self) -> f32 {
-        self.focal_px * self.wind.iter().map(|&[a, k, _, turn]| (a * turn * k).abs()).sum::<f32>() + self.pan_max
+        self.focal_px * self.wind.iter().map(|&[a, k, _, turn]| (a * turn * k).abs()).sum::<f32>() + self.pan_max + self.sky_turn.abs() * (self.width - 2 * self.left) as f32
     }
 
     /// The winding's waves as they stand now (the phase at the camera in place of the loop's
