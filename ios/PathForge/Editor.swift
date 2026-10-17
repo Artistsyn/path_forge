@@ -19,6 +19,10 @@ final class EditorModel: ObservableObject {
     @Published var notice: String?
     /// The canvas size being chosen, before Apply (nil: the scene's own).
     @Published var stagedCanvas: (Int, Int)?
+    /// The canvas's width keeps to its height (as `canvasRatio`, width over height, while a size is
+    /// staged) as either is typed.
+    @Published var canvasLocked = false
+    var canvasRatio = 1.0
     /// The phone's screen in pixels, portrait; whether the preview shows the canvas's shape, and
     /// setting it.
     var screen: (Int, Int) = (1170, 2532)
@@ -594,7 +598,26 @@ struct CanvasPanel: View {
         return ((c?["width"] as? NSNumber)?.intValue ?? 480, (c?["height"] as? NSNumber)?.intValue ?? 854)
     }
     private var staged: (Int, Int) { ed.stagedCanvas ?? now }
-    private func stage(_ w: Int, _ h: Int) { ed.stagedCanvas = (w, h) }
+    /// A size picked, turned or swapped: it sets the shape, locked or not.
+    private func stage(_ w: Int, _ h: Int) {
+        ed.canvasRatio = Double(w) / Double(Swift.max(1, h))
+        ed.stagedCanvas = (w, h)
+    }
+    private var ratio: Double { ed.stagedCanvas == nil ? Double(now.0) / Double(Swift.max(1, now.1)) : ed.canvasRatio }
+    /// One side typed; with the ratio locked the other follows.
+    private func typed(_ k: Int, _ x: Int) {
+        let r = ratio
+        var w = staged.0, h = staged.1
+        if k == 0 {
+            w = x
+            if ed.canvasLocked { h = Swift.max(1, Int((Double(x) / r).rounded())) }
+        } else {
+            h = x
+            if ed.canvasLocked { w = Swift.max(1, Int((Double(x) * r).rounded())) }
+        }
+        ed.canvasRatio = r
+        ed.stagedCanvas = (w, h)
+    }
 
     var body: some View {
         let w = staged.0, h = staged.1
@@ -604,15 +627,20 @@ struct CanvasPanel: View {
         VStack(alignment: .leading, spacing: 10) {
             Text("Size (pixels)").font(.headline)
             HStack {
-                NumberEntry(value: Double(w), isInt: true, lo: 16, hi: 8192, width: 84, say: ed.say) { stage(Int($0), staged.1) }
+                NumberEntry(value: Double(w), isInt: true, lo: 16, hi: 8192, width: 84, say: ed.say) { typed(0, Int($0)) }
                 Text("×")
-                NumberEntry(value: Double(h), isInt: true, lo: 16, hi: 8192, width: 84, say: ed.say) { stage(staged.0, Int($0)) }
+                NumberEntry(value: Double(h), isInt: true, lo: 16, hi: 8192, width: 84, say: ed.say) { typed(1, Int($0)) }
                 Spacer()
                 Button("⇄") { stage(h, w) }.buttonStyle(Pill())
+                Button(ed.canvasLocked ? "Locked" : "Lock") {
+                    ed.canvasRatio = ratio
+                    ed.canvasLocked.toggle()
+                    ed.say(ed.canvasLocked ? "The ratio is locked: change one side and the other follows" : "Each side changes on its own")
+                }.buttonStyle(Pill(primary: ed.canvasLocked))
             }
             if let why = why { Text(why).font(.caption).foregroundColor(.red) }
             else {
-                Text(String(format: "%@ · %.1f MP", CanvasPanel.shape(w, h), Double(w * h) / 1e6) + (changed ? "  (now \(nw) × \(nh): press Apply)" : ""))
+                Text(String(format: "%@%@ · %.1f MP", CanvasPanel.shape(w, h), ed.canvasLocked ? " (locked)" : "", Double(w * h) / 1e6) + (changed ? "  (now \(nw) × \(nh): press Apply)" : ""))
                     .font(.caption).foregroundColor(changed ? accent : .secondary)
             }
             ScrollView(.horizontal, showsIndicators: false) {

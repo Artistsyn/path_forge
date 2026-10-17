@@ -786,6 +786,9 @@ final class Editor {
     static final int CANVAS_MIN = 64, CANVAS_MAX = 4096, CANVAS_PIXELS = 4096 * 2160;
     /** The size being chosen, before Apply (null: the scene's own). */
     private int[] staged;
+    /** The canvas's width keeps to its height (as `ratio`, width over height) as either is typed. */
+    private boolean ratioLocked;
+    private double ratio = 1;
 
     private int[] canvasNow() {
         Object w = get(java.util.Arrays.asList("canvas", "width")), h = get(java.util.Arrays.asList("canvas", "height"));
@@ -817,7 +820,7 @@ final class Editor {
      *  used once Apply is pressed; and what the preview shows. */
     private void canvas(LinearLayout into) {
         final int[] now = canvasNow();
-        if (staged == null) staged = now.clone();
+        if (staged == null) { staged = now.clone(); ratio = staged[0] / (double) Math.max(1, staged[1]); }
         TextView title = Ui.label(a, "Size (pixels)");
         into.addView(title);
 
@@ -834,7 +837,7 @@ final class Editor {
             boolean changed = staged[0] != now[0] || staged[1] != now[1];
             if (why != null) { info.setText(why); info.setTextColor(Color.rgb(255, 120, 110)); }
             else {
-                info.setText(String.format(Locale.US, "%s · %.1f MP%s", shape(staged[0], staged[1]), staged[0] * (double) staged[1] / 1e6,
+                info.setText(String.format(Locale.US, "%s%s · %.1f MP%s", shape(staged[0], staged[1]), ratioLocked ? " (locked)" : "", staged[0] * (double) staged[1] / 1e6,
                         changed ? String.format(Locale.US, "  (now %d × %d: press Apply)", now[0], now[1]) : ""));
                 info.setTextColor(changed ? Ui.ACCENT : Ui.DIM);
             }
@@ -845,7 +848,12 @@ final class Editor {
         for (int i = 0; i < 2; i++) {
             final int k = i;
             // Typed in: anything from 16 to 8192 is taken here, and Apply says whether it can be used.
-            fields[i] = numberField(staged[i], true, 16, 8192, x -> { staged[k] = (int) Math.round(x); show.run(); });
+            fields[i] = numberField(staged[i], true, 16, 8192, x -> {
+                staged[k] = (int) Math.round(x);
+                // Locked: the other side follows, keeping the shape.
+                if (ratioLocked) staged[1 - k] = (int) Math.max(1, Math.round(k == 0 ? x / ratio : x * ratio));
+                show.run();
+            });
             size.addView(fields[i], new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
             if (i == 0) {
                 TextView by = new TextView(a);
@@ -855,7 +863,18 @@ final class Editor {
             }
         }
         size.addView(gap());
-        size.addView(Ui.button(a, "⇄", false, v -> { staged = new int[]{staged[1], staged[0]}; show.run(); }));
+        size.addView(Ui.button(a, "⇄", false, v -> { staged = new int[]{staged[1], staged[0]}; ratio = 1 / ratio; show.run(); }));
+        size.addView(gap());
+        TextView lock = Ui.button(a, ratioLocked ? "Locked" : "Lock", ratioLocked, null);
+        lock.setOnClickListener(v -> {
+            ratioLocked = !ratioLocked;
+            ratio = staged[0] / (double) Math.max(1, staged[1]);
+            lock.setText(ratioLocked ? "Locked" : "Lock");
+            Ui.setPrimary(lock, ratioLocked);
+            toast(ratioLocked ? "The ratio is locked: change one side and the other follows" : "Each side changes on its own");
+            show.run();
+        });
+        size.addView(lock);
         into.addView(size);
         into.addView(info);
 
@@ -872,6 +891,8 @@ final class Editor {
             picks.addView(Ui.button(a, names[i], false, v -> {
                 int lo = Math.min(staged[0], staged[1]), hi = Math.max(staged[0], staged[1]);
                 staged = k == 0 ? new int[]{lo, hi} : k == 1 ? new int[]{hi, lo} : fixed[k].clone();
+                // A pick sets the shape, locked or not.
+                ratio = staged[0] / (double) Math.max(1, staged[1]);
                 show.run();
             }));
             picks.addView(gap());
@@ -881,7 +902,7 @@ final class Editor {
 
         LinearLayout act = new LinearLayout(a);
         act.setPadding(0, dp(10), 0, dp(4));
-        revert.setOnClickListener(v -> { staged = canvasNow(); show.run(); });
+        revert.setOnClickListener(v -> { staged = canvasNow(); ratio = staged[0] / (double) Math.max(1, staged[1]); show.run(); });
         apply.setOnClickListener(v -> {
             for (EditText f : fields) f.clearFocus();
             hideKeyboard(v);

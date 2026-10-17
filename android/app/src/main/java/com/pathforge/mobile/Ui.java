@@ -50,14 +50,20 @@ final class Ui {
         b.setGravity(Gravity.CENTER);
         b.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14);
         b.setTypeface(Typeface.DEFAULT_BOLD);
-        b.setTextColor(primary ? Color.rgb(30, 18, 10) : TEXT);
-        b.setBackground(round(primary ? ACCENT : Color.TRANSPARENT, dp(c, 22), Color.argb(110, 255, 255, 255), primary ? 0 : dp(c, 1)));
+        setPrimary(b, primary);
         b.setMinHeight(dp(c, 44));
         b.setPadding(dp(c, 14), dp(c, 10), dp(c, 14), dp(c, 10));
         b.setOnClickListener(on);
         b.setClickable(true);
         b.setFocusable(true);
         return b;
+    }
+
+    /** Fill a button with the accent colour (or outline it again). */
+    static void setPrimary(TextView b, boolean primary) {
+        Context c = b.getContext();
+        b.setTextColor(primary ? Color.rgb(30, 18, 10) : TEXT);
+        b.setBackground(round(primary ? ACCENT : Color.TRANSPARENT, dp(c, 22), Color.argb(110, 255, 255, 255), primary ? 0 : dp(c, 1)));
     }
 
     interface Pick { void at(int i); }
