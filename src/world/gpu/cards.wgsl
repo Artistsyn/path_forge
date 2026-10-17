@@ -13,7 +13,7 @@ struct Card {
     id: u32, realm: u32, wx: f32, wy: f32, wd: f32, source: u32,
     w_amp: f32, w_v: f32, w_lean: f32, w_t1: f32, w_t2: f32, w_c0: f32, w_c1: f32, w_trunk: f32, w_foot: f32, w_kv: f32,
     snow_dust: f32,
-    pan: u32, ph: array<f32, 9>, pq0: f32, pq1: f32, pq2: f32, strip: f32,
+    pan: u32, ph: array<f32, 9>, pq0: f32, pq1: f32, pq2: f32, strip: f32, mp: array<f32, 6>,
     tube: u32, ta0: f32, ta1: f32, ta2: f32, tu0: f32, tu1: f32, tu2: f32, tlen: f32, trad: f32,
     tb0: f32, tb1: f32, tb2: f32, te0: f32, te1: f32, te2: f32, cube: array<f32, 18>, tkf: f32, tcx: f32, tcy: f32,
     fade: f32,
@@ -221,13 +221,21 @@ fn cards_main(@builtin(global_invocation_id) gid: vec3<u32>) {
             let wd = rnd(cd.ph[6] * fx) + rnd(cd.ph[7] * fy) + cd.ph[8];
             if abs(wd) < 1e-12 { continue; }
             var pu = (rnd(cd.ph[0] * fx) + rnd(cd.ph[1] * fy) + cd.ph[2]) / wd;
-            let pv = (rnd(cd.ph[3] * fx) + rnd(cd.ph[4] * fy) + cd.ph[5]) / wd;
+            var pv = (rnd(cd.ph[3] * fx) + rnd(cd.ph[4] * fy) + cd.ph[5]) / wd;
             if !(pu >= 0.0 && pu < 1.0) || !(pv >= 0.0 && pv < 1.0) { continue; }
-            if cd.strip >= 0.0 { pu = cd.strip; } else if cd.flip != 0u { pu = 1.0 - pu; }
+            if cd.strip >= 0.0 { pu = cd.strip; }
+            else if cd.strip < -1.5 {
+                // (render::map_uv.)
+                let mu = cd.mp[0] + rnd(cd.mp[1] * pu) + rnd(cd.mp[2] * pv);
+                pv = cd.mp[3] + rnd(cd.mp[4] * pu) + rnd(cd.mp[5] * pv);
+                pu = mu;
+            }
+            else if cd.flip != 0u { pu = 1.0 - pu; }
             let pn = cd.nearest != 0u;
             let ps = sprite_sample(cd.soff, cd.sw, cd.sh, pu, pv, pn);
             var pa = ps.w;
             if pn { pa = select(0.0, 1.0, ps.w >= 0.5); }
+            if cd.strip < -2.5 { pa = 1.0; }
             if pa < 0.02 { continue; }
             var pglow = cd.emissive;
             if cd.goff != 0xFFFFFFFFu { pglow += sprite_sample(cd.goff, cd.gw, cd.gh, pu, pv, pn).x; }

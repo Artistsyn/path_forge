@@ -2000,11 +2000,28 @@ pub struct Waterfall {
     pub spray: f32,
     /// The rainbow in its spray when the sun is out (0 none).
     pub rainbow: f32,
+    /// Which way its face looks, degrees: 0 back down the path, toward a walker coming, 90 across
+    /// to the path. It stands where it is whichever way the camera looks.
+    pub facing: f32,
+    /// How wide its rock face is, metres (0: as wide as it is tall), and how far the rock runs back
+    /// from it.
+    pub cliff_width: f32,
+    pub cliff_depth: f32,
+    /// A higher shoulder of the mountain behind, this much higher than the fall's rock, with a
+    /// cascade down from it onto the top (0: none).
+    pub ridge: f32,
+    /// The stream running over the top to the lip, where the water comes from.
+    pub stream: bool,
+    /// The pool at its foot, its size as a share of the usual (0: none; it falls on the ground).
+    pub pool: f32,
     pub seed: u32,
 }
 impl Default for Waterfall {
     fn default() -> Self {
-        Waterfall { enabled: true, side: Side::Left, lateral: 3.0, spacing: 60.0, offset: 20.0, height: 7.0, width: 2.2, water: [210, 228, 240], rock: [92, 88, 82], spray: 0.7, rainbow: 0.5, seed: 0 }
+        Waterfall {
+            enabled: true, side: Side::Left, lateral: 3.0, spacing: 60.0, offset: 20.0, height: 7.0, width: 2.2, water: [210, 228, 240], rock: [92, 88, 82], spray: 0.7, rainbow: 0.5,
+            facing: 45.0, cliff_width: 0.0, cliff_depth: 5.0, ridge: 3.0, stream: true, pool: 1.0, seed: 0,
+        }
     }
 }
 
@@ -2354,6 +2371,10 @@ impl SetPieceKind {
     pub fn name(self) -> &'static str {
         match self { SetPieceKind::Archway => "Archway", SetPieceKind::RuinedArch => "Ruined Arch", SetPieceKind::Gate => "Gate", SetPieceKind::Banners => "Banners", SetPieceKind::Portal => "Portal" }
     }
+    /// How deep one usually is along the path, metres (`SetPiece::depth` 0).
+    pub fn depth(self) -> f32 {
+        match self { SetPieceKind::Archway | SetPieceKind::RuinedArch => 0.9, SetPieceKind::Gate => 1.4, SetPieceKind::Banners => 0.12, SetPieceKind::Portal => 0.35 }
+    }
 }
 
 /// A structure spanning the path, repeated along it.
@@ -2370,6 +2391,10 @@ pub struct SetPiece {
     pub width: f32,
     /// Clear height of the opening, metres.
     pub height: f32,
+    /// How deep it is along the path, metres: it is built solid from its picture, so it has sides,
+    /// tops and the underside of its arch seen from any angle. 0 = as deep as its kind usually is
+    /// (an arch 0.9 m, a gate 1.4 m, a portal's ring 0.35 m, banners 0.12 m).
+    pub depth: f32,
     /// Stone or wood colour.
     pub tint: Rgb,
     /// Cloth, trim or glow colour.
@@ -2383,7 +2408,7 @@ pub struct SetPiece {
 impl Default for SetPiece {
     fn default() -> Self {
         SetPiece {
-            enabled: true, kind: SetPieceKind::Archway, spacing: 24.0, offset: 12.0, width: 0.0, height: 3.4,
+            enabled: true, kind: SetPieceKind::Archway, spacing: 24.0, offset: 12.0, width: 0.0, height: 3.4, depth: 0.0,
             tint: [118, 110, 100], accent: [150, 30, 36], shadow: 0.6, sprite: SpriteRef::default(), seed: 0,
         }
     }

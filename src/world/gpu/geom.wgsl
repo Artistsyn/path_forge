@@ -16,7 +16,8 @@ struct Tri { f: array<f32, 36> }
 // sprite level off, w, h; then the picture's plane: c0 (3), across (3), down (3), 1/|across|^2,
 // 1/|down|^2, normal (3), normal . sun. A fence's run (37: 1) has its shape where the sprite
 // level would be: style | posts << 2 | pickets << 12, length, height; and 38: its posts' width.
-struct Caster { f: array<f32, 40> }
+// With strip -2, 40..46 map the face onto part of its picture (render::Panel::map).
+struct Caster { f: array<f32, 48> }
 
 struct Geom {
     tile_cols: u32, cast_bins: u32, sun_on: u32, n_lights: u32,
@@ -337,8 +338,15 @@ fn shadow_main(@builtin(global_invocation_id) gid: vec3<u32>) {
                     a = fence_alpha(c, u, vv, min(fu, 1.0), min(fv, 1.0));
                 } else {
                     let strip = cf(c, 18u);
-                    if strip >= 0.0 { u = strip; } else if cu(c, 7u) != 0u { u = 1.0 - u; }
-                    a = sprite_alpha(cu(c, 19u), cu(c, 20u), cu(c, 21u), u, vv);
+                    var pv = vv;
+                    if strip >= 0.0 { u = strip; }
+                    else if strip < -1.5 {
+                        let mu = cf(c, 40u) + rnd(cf(c, 41u) * u) + rnd(cf(c, 42u) * vv);
+                        pv = cf(c, 43u) + rnd(cf(c, 44u) * u) + rnd(cf(c, 45u) * vv);
+                        u = mu;
+                    }
+                    else if cu(c, 7u) != 0u { u = 1.0 - u; }
+                    a = sprite_alpha(cu(c, 19u), cu(c, 20u), cu(c, 21u), u, pv);
                 }
                 if a > 0.01 { sun = min(sun, 1.0 - rnd(shadow * min(a, 1.0))); }
             }

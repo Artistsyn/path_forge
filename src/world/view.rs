@@ -371,6 +371,16 @@ impl View {
         [self.yaw_c * v[0] - self.yaw_s * v[2], v[1], self.yaw_s * v[0] + self.yaw_c * v[2]]
     }
 
+    /// The ground point (x, d) moved `m` metres toward the camera (away with `m` negative): back
+    /// along the path for a camera looking down it, straight at it for a turned one.
+    #[inline]
+    pub fn toward_camera(&self, x: f32, d: f32, m: f32) -> (f32, f32) {
+        if !self.turned { return (x, d - m); }
+        let (dx, dd) = (self.cam_x - x, -d);
+        let n = (dx * dx + dd * dd).sqrt().max(1e-3);
+        (x + m * dx / n, d + m * dd / n)
+    }
+
     /// How far ahead of the camera (its depth) a point on the ground at (x, d) is: `d` itself for
     /// a camera looking down the path.
     #[inline]

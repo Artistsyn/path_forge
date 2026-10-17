@@ -268,8 +268,9 @@ pub(crate) struct CardGpu {
     /// `render::snow_on_card`'s dust.
     pub snow_dust: f32,
     /// A card standing in the world (`render::Card::pan`): 1 when it is one, its pixel-to-picture
-    /// mapping, its depth plane, and the column an end wall shows (below 0 for none).
-    pub pan: u32, pub ph: [f32; 9], pub pq: [f32; 3], pub strip: f32,
+    /// mapping, its depth plane, and the column an end wall shows (-1 for none; -2 for the part
+    /// of the picture `mp` maps onto it: `render::Panel::map`).
+    pub pan: u32, pub ph: [f32; 9], pub pq: [f32; 3], pub strip: f32, pub mp: [f32; 6],
     /// A cylinder (`render::TubeCard`): 1 when it is one, its axis start, unit direction and
     /// length (camera space), radius, bark and end colours, the light from its six sides, and
     /// the camera's 1 / focal length and centre.
@@ -346,8 +347,8 @@ impl TriGpu {
 /// sprite level's place in the sprite store is filled in by `Frame::geometry`.
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
-pub(crate) struct CasterGpu { pub f: [f32; 40] }
-impl Default for CasterGpu { fn default() -> Self { CasterGpu { f: [0.0; 40] } } }
+pub(crate) struct CasterGpu { pub f: [f32; 48] }
+impl Default for CasterGpu { fn default() -> Self { CasterGpu { f: [0.0; 48] } } }
 /// A caster and its picture's sprite and level (None: a fence, its shape in the caster).
 pub(crate) struct CasterIn { pub c: CasterGpu, pub sprite: Option<(Arc<super::sprites::Sprite>, usize)> }
 
@@ -1590,7 +1591,7 @@ mod tests {
         // A uniform block's size is a multiple of 16; the WGSL struct has the same fields.
         assert_eq!(std::mem::size_of::<WorldParams>() % 16, 0);
         assert_eq!(std::mem::size_of::<WorldParams>(), 4 * 296);
-        assert_eq!(std::mem::size_of::<CardGpu>(), 4 * 104);
+        assert_eq!(std::mem::size_of::<CardGpu>(), 4 * 110);
         assert_eq!(std::mem::size_of::<GeomParams>(), 80);
         assert_eq!(std::mem::size_of::<SplatGpu>(), 4 * 24);
         assert_eq!(std::mem::size_of::<AirParams>(), 80);
