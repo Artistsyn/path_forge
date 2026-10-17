@@ -259,7 +259,7 @@ struct AnimationSheet: View {
     @AppStorage("anim.fps") private var fps = 1
 
     var body: some View {
-        let (cw, ch) = model.canvasPixels()
+        let cw = model.canvasPixels().0, ch = model.canvasPixels().1
         VStack(alignment: .leading, spacing: 10) {
             Text("Save the loop as an animation").font(.title3.bold())
             SectionLabel(text: "Format")

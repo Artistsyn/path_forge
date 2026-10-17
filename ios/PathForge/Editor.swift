@@ -569,6 +569,7 @@ struct CanvasPanel: View {
     @ObservedObject var ed: EditorModel
     /// Smallest and largest side, and most pixels, a canvas may have: what a phone can draw.
     static let minSide = 64, maxSide = 4096, maxPixels = 4096 * 2160
+    static let picks: [(w: Int, h: Int, name: String)] = [(1080, 1080, "Square"), (720, 1280, "720 × 1280"), (1280, 720, "1280 × 720"), (1080, 1920, "1080 × 1920"), (1920, 1080, "1920 × 1080")]
 
     static func problem(_ w: Int, _ h: Int) -> String? {
         if w < minSide || h < minSide { return "Each side needs at least \(minSide) px" }
@@ -596,8 +597,8 @@ struct CanvasPanel: View {
     private func stage(_ w: Int, _ h: Int) { ed.stagedCanvas = (w, h) }
 
     var body: some View {
-        let (w, h) = staged
-        let (nw, nh) = now
+        let w = staged.0, h = staged.1
+        let nw = now.0, nh = now.1
         let changed = w != nw || h != nh
         let why = CanvasPanel.problem(w, h)
         VStack(alignment: .leading, spacing: 10) {
@@ -620,8 +621,9 @@ struct CanvasPanel: View {
                     Button("Portrait") { stage(Swift.min(w, h), Swift.max(w, h)) }.buttonStyle(Pill())
                     Button("Landscape") { stage(Swift.max(w, h), Swift.min(w, h)) }.buttonStyle(Pill())
                     Button("This screen") { stage(ed.screen.0, ed.screen.1) }.buttonStyle(Pill())
-                    ForEach([(1080, 1080, "Square"), (720, 1280, "720 × 1280"), (1280, 720, "1280 × 720"), (1080, 1920, "1080 × 1920"), (1920, 1080, "1920 × 1080")], id: \.2) { p in
-                        Button(p.2) { stage(p.0, p.1) }.buttonStyle(Pill())
+                    ForEach(CanvasPanel.picks.indices, id: \.self) { i in
+                        let p = CanvasPanel.picks[i]
+                        Button(p.name) { stage(p.w, p.h) }.buttonStyle(Pill())
                     }
                 }
             }
