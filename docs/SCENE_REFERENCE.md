@@ -199,6 +199,7 @@ the path crosses on a deck. Walls carry on down into the gap.
 | `water_level` | number | `10.0` | With a Water bottom: how far below the deck the water lies, metres (never deeper than `depth`). |
 | `bottom_color` | integer × 3 | `[150,150,150]` | Colour of water, or of ground far below (multiplied with the verge or path material). |
 | `deck` | [Material](#material) | (see the type) | The deck: planks, stone... |
+| `thickness` | number | `0.4` | How thick the deck is, metres: its edge, seen from beside the path. 0 is a sheet. |
 | `railing` | [Railing](#railing) | `"Posts"` |  |
 | `rail_height` | number | `1.0` | Railing height, metres. |
 | `end_pillars` | boolean | `true` | A taller pillar or newel post where each railing starts and ends. |

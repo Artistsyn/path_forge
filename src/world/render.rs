@@ -2661,6 +2661,8 @@ fn post_billboard(ctx: &Ctx, sprite: &Arc<Sprite>, x: f32, top: f32, d: f32, siz
 #[derive(Clone, Copy, Debug)]
 struct Spans {
     period: f32, len: f32, offset: f32, bottom: BridgeBottom, railing: Railing, rail_h: f32, pillars: bool, floor: f32,
+    /// The deck's thickness (never as deep as the gap).
+    thick: f32,
     /// Lights stand on the railing's posts (a fixture's `bridge_posts`): every bridge then has a
     /// post at each end and `between` more evenly spaced between them, each side.
     posts: bool,
@@ -2720,6 +2722,7 @@ impl Spans {
         Some(Spans {
             period, len: b.length.clamp(0.5, (period - 0.5).max(0.5)), offset: b.offset,
             bottom: b.bottom, railing: b.railing, rail_h: b.rail_height.clamp(0.2, 3.0), pillars: b.end_pillars, floor,
+            thick: b.thickness.clamp(0.0, 2.0).min(0.8 * floor),
             posts: fixtures.iter().any(|f| f.enabled && f.bridge_posts),
             between: fixtures.iter().filter(|f| f.enabled && f.bridge_posts).map(|f| f.posts_between.min(15)).max().unwrap_or(0),
         })
@@ -2941,6 +2944,7 @@ fn build_geometry(ctx: &Ctx, layers: &Layers) -> Vec<Tri> {
                     }
                 }
             }
+            deck_slab(v, b, s0, e, &ds, (if v.turned { lo } else { NEAR }, hi), &mut tris);
             railing(v, b, s0, e, &ds, (if v.turned { lo } else { NEAR }, hi), &mut tris);
         }
     }
@@ -3161,6 +3165,33 @@ fn fences(ctx: &Ctx, ds: &[f32], tris: &mut Vec<Tri>) {
 /// One bridge's railings, both sides. Every part is a box built from the faces the camera can
 /// see (its far end always faces away), so it reads as solid from any bend of the path, and each
 /// face carries its own id, so it is lit with its own normal.
+/// The deck's thickness under its surface over the gap [s0, e]: its edges either side, in the deck's
+/// own material, and (for a turned camera, which can see them) its ends.
+fn deck_slab(v: &View, b: Spans, s0: f32, e: f32, ds: &[f32], (near, far): (f32, f32), tris: &mut Vec<Tri>) {
+    let t = b.thick;
+    let (lo, hi) = (s0.max(near), e.min(far));
+    if t <= 0.0 || hi <= lo { return; }
+    let vert = |x: f32, y: f32, d: f32| Vert { cam: v.to_cam(x, y, d), world: [x, y, d] };
+    let mut cuts: Vec<f32> = ds.iter().copied().filter(|&d| d > lo && d < hi).collect();
+    cuts.push(lo);
+    cuts.push(hi);
+    cuts.sort_by(|p, q| p.partial_cmp(q).unwrap());
+    cuts.dedup_by(|p, q| (*p - *q).abs() < 1e-3);
+    for sign in [-1.0f32, 1.0] {
+        for w in cuts.windows(2) {
+            let (x0, x1) = (sign * v.path_half_width(w[0]), sign * v.path_half_width(w[1]));
+            raster::quad(tris, [vert(x0, -t, w[0]), vert(x1, -t, w[1]), vert(x1, 0.0, w[1]), vert(x0, 0.0, w[0])], id::rail(id::WOOD, id::OUTER));
+        }
+    }
+    if v.turned {
+        for at in [s0, e] {
+            if at < lo || at > hi { continue; }
+            let h = v.path_half_width(at);
+            raster::quad(tris, [vert(-h, -t, at), vert(h, -t, at), vert(h, 0.0, at), vert(-h, 0.0, at)], id::rail(id::WOOD, id::FRONT));
+        }
+    }
+}
+
 fn railing(v: &View, b: Spans, s0: f32, e: f32, ds: &[f32], (near, far): (f32, f32), tris: &mut Vec<Tri>) {
     if b.railing == Railing::None { return; }
     let rh = b.rail_h;
@@ -6917,6 +6948,11 @@ mod tests {
         let v = View::new(&preset("Forest Path"), 90, 160);
         let tris = |fx: &[Fixture]| { let mut t = Vec::new(); railing(&v, Spans::new(&b, 24.0, fx).unwrap(), 2.0, 12.0, &[], (NEAR, 300.0), &mut t); t.len() };
         assert!(tris(&[lamp(2)]) > tris(&[]), "posts between the ends add to the railing");
+        // The deck has its thickness under it, and a sheet none.
+        let slab = |b: &Bridge| { let mut t = Vec::new(); deck_slab(&v, Spans::new(b, 24.0, &[]).unwrap(), 2.0, 12.0, &[], (NEAR, 300.0), &mut t); t };
+        let thick = slab(&b);
+        assert!(!thick.is_empty() && slab(&Bridge { thickness: 0.0, ..b.clone() }).is_empty());
+        assert!(thick.iter().all(|t| t.v.iter().all(|p| p.world[1] <= 1e-4 && p.world[1] >= -0.4 - 1e-4)), "the slab hangs under the deck, as deep as it is thick");
         // In a frame, a light on every post each side of the bridge in view.
         b.end_pillars = false;
         let mut s = preset("Forest Path");
