@@ -2937,12 +2937,10 @@ fn build_geometry(ctx: &Ctx, layers: &Layers) -> Vec<Tri> {
             // (A turned camera sees the near side of the gap too, facing the other way.)
             for (at, show) in [(e, e > NEAR && e < ctx.far), (s0, v.turned)] {
                 if !show || at < lo || at > hi { continue; }
-                let (h, x) = (v.path_half_width(at), ext(at));
-                if x > h + 1e-4 {
-                    for sign in [-1.0f32, 1.0] {
-                        raster::quad(&mut tris, [vert(sign * h, -b.floor, at), vert(sign * x, -b.floor, at), vert(sign * x, 0.0, at), vert(sign * h, 0.0, at)], id::CLIFF);
-                    }
-                }
+                // All the way across, under the deck's end as well as beside it, so no hole shows
+                // under the deck where the ground meets it.
+                let x = ext(at).max(v.path_half_width(at));
+                raster::quad(&mut tris, [vert(-x, -b.floor, at), vert(x, -b.floor, at), vert(x, 0.0, at), vert(-x, 0.0, at)], id::CLIFF);
             }
             deck_slab(v, b, s0, e, &ds, (if v.turned { lo } else { NEAR }, hi), &mut tris);
             railing(v, b, s0, e, &ds, (if v.turned { lo } else { NEAR }, hi), &mut tris);
@@ -3166,7 +3164,7 @@ fn fences(ctx: &Ctx, ds: &[f32], tris: &mut Vec<Tri>) {
 /// see (its far end always faces away), so it reads as solid from any bend of the path, and each
 /// face carries its own id, so it is lit with its own normal.
 /// The deck's thickness under its surface over the gap [s0, e]: its edges either side, in the deck's
-/// own material, and (for a turned camera, which can see them) its ends.
+/// own material. (Its ends are where the gap's end walls are, which run under them.)
 fn deck_slab(v: &View, b: Spans, s0: f32, e: f32, ds: &[f32], (near, far): (f32, f32), tris: &mut Vec<Tri>) {
     let t = b.thick;
     let (lo, hi) = (s0.max(near), e.min(far));
@@ -3181,13 +3179,6 @@ fn deck_slab(v: &View, b: Spans, s0: f32, e: f32, ds: &[f32], (near, far): (f32,
         for w in cuts.windows(2) {
             let (x0, x1) = (sign * v.path_half_width(w[0]), sign * v.path_half_width(w[1]));
             raster::quad(tris, [vert(x0, -t, w[0]), vert(x1, -t, w[1]), vert(x1, 0.0, w[1]), vert(x0, 0.0, w[0])], id::rail(id::WOOD, id::OUTER));
-        }
-    }
-    if v.turned {
-        for at in [s0, e] {
-            if at < lo || at > hi { continue; }
-            let h = v.path_half_width(at);
-            raster::quad(tris, [vert(-h, -t, at), vert(h, -t, at), vert(h, 0.0, at), vert(-h, 0.0, at)], id::rail(id::WOOD, id::FRONT));
         }
     }
 }
@@ -6784,6 +6775,44 @@ mod tests {
         let a = r.render(&s, 0.0, &opts);
         let b = r.render(&s, 24.0, &RenderOptions { time: Some(s.motion.loop_seconds()), ..opts.clone() });
         assert_eq!(a.rgba, b.rgba);
+    }
+
+    /// Where a winding path comes to the end of a bridge, the camera sees round under the deck's
+    /// end: the gap's end wall runs under it, so the bottom never shows past the gap.
+    #[test]
+    fn the_gap_ends_in_a_wall_under_the_deck_too() {
+        let mut s = preset("Village Side Scroll");
+        s.camera.yaw = 0.0;
+        s.camera.side = 0.0;
+        s.camera.zoom = 1.0;
+        s.camera.horizon = 0.4;
+        s.path.bridge = Bridge { enabled: true, spacing: 30.0, length: 10.0, offset: 3.0, depth: 6.0, bottom: BridgeBottom::Water, water_level: 3.0, railing: Railing::Iron, ..Bridge::default() };
+        let (w, h) = (320usize, 180usize);
+        let mut r = WorldRenderer::default();
+        for k in 0..12 {
+            let scroll = k as f32 * 0.5;
+            let ctx = Ctx {
+                scene: &s, view: View::new(&s, w, h).at(scroll), loop_len: 24.0, tphase: 0.0, scroll, far: 320.0, d_lo: 0.0, d_hi: 320.0, x_reach: 0.0,
+                path_tex: r.textures.get(&s.path.material), verge_tex: r.textures.get(&s.verge.material),
+                wall_tex: r.textures.get(&s.walls.material), ceil_tex: r.textures.get(&s.ceiling.material),
+                path_tile: 1.0, verge_tile: 1.0, wall_tile: 1.0, ceil_tile: 1.0,
+                bridge: Spans::new(&s.path.bridge, s.motion.loop_length, &s.fixtures), fork: None, deck_tex: r.textures.get(&s.path.bridge.deck), bottom_tex: r.textures.get(&s.verge.material),
+                deck_tile: 1.0, bottom_tile: 1.0, ambient: [0.0; 3],
+                sky_lights: vec![], lights: vec![], smokes: vec![], wire_pts: vec![], falls: vec![], fog: None, fog_col: [0.0; 3], void_lin: [0.0; 3], realm: 0, bounds: None, facade: None, opening: None, portal: None, front: None, verge_beyond: None, gain: 1.0, wx: weather::Wx::default(), water: None, cover: Vec::new(),
+            };
+            let tris = build_geometry(&ctx, &Layers::default());
+            let mut gbuf = vec![raster::GPixel::EMPTY; w * h];
+            raster::rasterize(&mut gbuf, w, h, &tris, &ctx.view);
+            let past = gbuf.iter().filter(|p| p.id == id::CHASM && !ctx.on_bridge(p.d - 0.05) && !ctx.on_bridge(p.d + 0.05)).count();
+            assert_eq!(past, 0, "the gap's bottom seen past its end at scroll {scroll}");
+            // Nor any hole through to the sky below the ground's far edge.
+            for x in 0..w {
+                let col: Vec<u8> = (0..h).map(|y| gbuf[y * w + x].id).collect();
+                let Some(top) = col.iter().position(|&i| i != id::NONE) else { continue };
+                let holes: Vec<usize> = (top..h).filter(|&y| col[y] == id::NONE).collect();
+                assert!(holes.is_empty(), "a hole in column {x} at scroll {scroll}: rows {holes:?}");
+            }
+        }
     }
 
     #[test]
