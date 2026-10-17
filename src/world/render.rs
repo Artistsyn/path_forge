@@ -2139,7 +2139,9 @@ impl WorldRenderer {
                         });
                     }
                     if f.string_lights.enabled { anchors.push((si, d, [x + lamp_dx, flame_y])); }
-                    if d < NEAR { continue; }
+                    // (A turned camera sees the path behind where it stands too: what is in front of
+                    // the camera is what counts there.)
+                    if if ctx.view.turned { ctx.view.depth_of(x, d) < NEAR } else { d < NEAR } { continue; }
                     // Fixture body, placed so its flame point sits at the flame height.
                     let mut body_w = 0.0;
                     if let Some(sprite) = &body {
@@ -2659,6 +2661,8 @@ fn post_billboard(ctx: &Ctx, sprite: &Arc<Sprite>, x: f32, top: f32, d: f32, siz
 #[derive(Clone, Copy, Debug)]
 struct Spans {
     period: f32, len: f32, offset: f32, bottom: BridgeBottom, railing: Railing, rail_h: f32, pillars: bool, floor: f32,
+    /// The deck's thickness (never as deep as the gap).
+    thick: f32,
     /// Lights stand on the railing's posts (a fixture's `bridge_posts`): every bridge then has a
     /// post at each end and `between` more evenly spaced between them, each side.
     posts: bool,
@@ -2718,6 +2722,7 @@ impl Spans {
         Some(Spans {
             period, len: b.length.clamp(0.5, (period - 0.5).max(0.5)), offset: b.offset,
             bottom: b.bottom, railing: b.railing, rail_h: b.rail_height.clamp(0.2, 3.0), pillars: b.end_pillars, floor,
+            thick: b.thickness.clamp(0.0, 2.0).min(0.8 * floor),
             posts: fixtures.iter().any(|f| f.enabled && f.bridge_posts),
             between: fixtures.iter().filter(|f| f.enabled && f.bridge_posts).map(|f| f.posts_between.min(15)).max().unwrap_or(0),
         })
@@ -2932,13 +2937,12 @@ fn build_geometry(ctx: &Ctx, layers: &Layers) -> Vec<Tri> {
             // (A turned camera sees the near side of the gap too, facing the other way.)
             for (at, show) in [(e, e > NEAR && e < ctx.far), (s0, v.turned)] {
                 if !show || at < lo || at > hi { continue; }
-                let (h, x) = (v.path_half_width(at), ext(at));
-                if x > h + 1e-4 {
-                    for sign in [-1.0f32, 1.0] {
-                        raster::quad(&mut tris, [vert(sign * h, -b.floor, at), vert(sign * x, -b.floor, at), vert(sign * x, 0.0, at), vert(sign * h, 0.0, at)], id::CLIFF);
-                    }
-                }
+                // All the way across, under the deck's end as well as beside it, so no hole shows
+                // under the deck where the ground meets it.
+                let x = ext(at).max(v.path_half_width(at));
+                raster::quad(&mut tris, [vert(-x, -b.floor, at), vert(x, -b.floor, at), vert(x, 0.0, at), vert(-x, 0.0, at)], id::CLIFF);
             }
+            deck_slab(v, b, s0, e, &ds, (if v.turned { lo } else { NEAR }, hi), &mut tris);
             railing(v, b, s0, e, &ds, (if v.turned { lo } else { NEAR }, hi), &mut tris);
         }
     }
@@ -3071,12 +3075,14 @@ fn fences(ctx: &Ctx, ds: &[f32], tris: &mut Vec<Tri>) {
         // A run as long as the spacing joins the next one: one fence with no break.
         let joined = len >= sp - 1e-3;
         let base = |d: f32| v.path_half_width(d) + f.lateral;
-        // A box over [d0, d1] standing `xi`..`xo` metres out from the fence's line.
+        // A box over [d0, d1] standing `xi`..`xo` metres out from the fence's line (both its ends
+        // for a turned camera, as a railing's).
         let block = |tris: &mut Vec<Tri>, sign: f32, d0: f32, d1: f32, xi: f32, xo: f32, y0: f32, y1: f32, m: u8| {
-            if d0 < near || d0 > far { return; }
+            if if v.turned { d1 < near || d0 > far } else { d0 < near || d0 > far } { return; }
             let h = base(0.5 * (d0 + d1));
             let (a, c) = (sign * (h + xi), sign * (h + xo));
             raster::quad(tris, [vert(a, y0, d0), vert(c, y0, d0), vert(c, y1, d0), vert(a, y1, d0)], id::rail(m, id::FRONT));
+            if v.turned { raster::quad(tris, [vert(a, y0, d1), vert(c, y0, d1), vert(c, y1, d1), vert(a, y1, d1)], id::rail(m, id::FRONT)); }
             raster::quad(tris, [vert(a, y0, d0), vert(a, y0, d1), vert(a, y1, d1), vert(a, y1, d0)], id::rail(m, id::INNER));
             raster::quad(tris, [vert(c, y0, d0), vert(c, y0, d1), vert(c, y1, d1), vert(c, y1, d0)], id::rail(m, id::OUTER));
             raster::quad(tris, [vert(a, y1, d0), vert(a, y1, d1), vert(c, y1, d1), vert(c, y1, d0)], id::rail(m, id::TOP));
@@ -3094,6 +3100,10 @@ fn fences(ctx: &Ctx, ds: &[f32], tris: &mut Vec<Tri>) {
             if a >= near {
                 let (i, o) = at(a);
                 raster::quad(tris, [vert(i, y0, a), vert(o, y0, a), vert(o, y1, a), vert(i, y1, a)], id::rail(m, id::FRONT));
+            }
+            if v.turned && b <= far {
+                let (i, o) = at(b);
+                raster::quad(tris, [vert(i, y0, b), vert(o, y0, b), vert(o, y1, b), vert(i, y1, b)], id::rail(m, id::FRONT));
             }
             for w in cuts.windows(2) {
                 let ((i0, o0), (i1, o1), d0, d1) = (at(w[0]), at(w[1]), w[0], w[1]);
@@ -3153,18 +3163,41 @@ fn fences(ctx: &Ctx, ds: &[f32], tris: &mut Vec<Tri>) {
 /// One bridge's railings, both sides. Every part is a box built from the faces the camera can
 /// see (its far end always faces away), so it reads as solid from any bend of the path, and each
 /// face carries its own id, so it is lit with its own normal.
+/// The deck's thickness under its surface over the gap [s0, e]: its edges either side, in the deck's
+/// own material. (Its ends are where the gap's end walls are, which run under them.)
+fn deck_slab(v: &View, b: Spans, s0: f32, e: f32, ds: &[f32], (near, far): (f32, f32), tris: &mut Vec<Tri>) {
+    let t = b.thick;
+    let (lo, hi) = (s0.max(near), e.min(far));
+    if t <= 0.0 || hi <= lo { return; }
+    let vert = |x: f32, y: f32, d: f32| Vert { cam: v.to_cam(x, y, d), world: [x, y, d] };
+    let mut cuts: Vec<f32> = ds.iter().copied().filter(|&d| d > lo && d < hi).collect();
+    cuts.push(lo);
+    cuts.push(hi);
+    cuts.sort_by(|p, q| p.partial_cmp(q).unwrap());
+    cuts.dedup_by(|p, q| (*p - *q).abs() < 1e-3);
+    for sign in [-1.0f32, 1.0] {
+        for w in cuts.windows(2) {
+            let (x0, x1) = (sign * v.path_half_width(w[0]), sign * v.path_half_width(w[1]));
+            raster::quad(tris, [vert(x0, -t, w[0]), vert(x1, -t, w[1]), vert(x1, 0.0, w[1]), vert(x0, 0.0, w[0])], id::rail(id::WOOD, id::OUTER));
+        }
+    }
+}
+
 fn railing(v: &View, b: Spans, s0: f32, e: f32, ds: &[f32], (near, far): (f32, f32), tris: &mut Vec<Tri>) {
     if b.railing == Railing::None { return; }
     let rh = b.rail_h;
     // The railing stands on the deck: its outer face flush with the deck's edge.
     let inset = b.rail_inset();
     let vert = |x: f32, y: f32, d: f32| Vert { cam: v.to_cam(x, y, d), world: [x, y, d] };
-    // A box over [d0, d1] whose sides stand `xi` and `xo` metres out from the deck's edge.
+    // A box over [d0, d1] whose sides stand `xi` and `xo` metres out from the deck's edge. (A
+    // turned camera sees its far end too, beside or behind where it stands: both ends are faces
+    // then, each lit from the side the camera is on.)
     let block = |tris: &mut Vec<Tri>, sign: f32, d0: f32, d1: f32, xi: f32, xo: f32, y0: f32, y1: f32, m: u8| {
-        if d0 < near || d0 > far { return; }
+        if if v.turned { d1 < near || d0 > far } else { d0 < near || d0 > far } { return; }
         let h = v.path_half_width(0.5 * (d0 + d1)) - inset;
         let (a, c) = (sign * (h + xi), sign * (h + xo));
         raster::quad(tris, [vert(a, y0, d0), vert(c, y0, d0), vert(c, y1, d0), vert(a, y1, d0)], id::rail(m, id::FRONT));
+        if v.turned { raster::quad(tris, [vert(a, y0, d1), vert(c, y0, d1), vert(c, y1, d1), vert(a, y1, d1)], id::rail(m, id::FRONT)); }
         raster::quad(tris, [vert(a, y0, d0), vert(a, y0, d1), vert(a, y1, d1), vert(a, y1, d0)], id::rail(m, id::INNER));
         raster::quad(tris, [vert(c, y0, d0), vert(c, y0, d1), vert(c, y1, d1), vert(c, y1, d0)], id::rail(m, id::OUTER));
         raster::quad(tris, [vert(a, y1, d0), vert(a, y1, d1), vert(c, y1, d1), vert(c, y1, d0)], id::rail(m, id::TOP));
@@ -3190,6 +3223,10 @@ fn railing(v: &View, b: Spans, s0: f32, e: f32, ds: &[f32], (near, far): (f32, f
             let (i, o, l, u) = at(a);
             raster::quad(tris, [vert(i, l, a), vert(o, l, a), vert(o, u, a), vert(i, u, a)], id::rail(m, id::FRONT));
         }
+        if v.turned && b <= far {
+            let (i, o, l, u) = at(b);
+            raster::quad(tris, [vert(i, l, b), vert(o, l, b), vert(o, u, b), vert(i, u, b)], id::rail(m, id::FRONT));
+        }
         for w in cuts.windows(2) {
             let ((i0, o0, l0, u0), (i1, o1, l1, u1), d0, d1) = (at(w[0]), at(w[1]), w[0], w[1]);
             raster::quad(tris, [vert(i0, l0, d0), vert(i1, l1, d1), vert(i1, u1, d1), vert(i0, u0, d0)], id::rail(m, id::INNER));
@@ -3197,10 +3234,13 @@ fn railing(v: &View, b: Spans, s0: f32, e: f32, ds: &[f32], (near, far): (f32, f
             raster::quad(tris, [vert(i0, u0, d0), vert(i1, u1, d1), vert(o1, u1, d1), vert(o0, u0, d0)], id::rail(m, id::TOP));
         }
     };
-    // A pillar `w` square, its cap overhanging a little.
+    // A pillar `w` square, its cap overhanging a little; one of stone stands on a plinth as wide
+    // as the cap, so it reads as built from every side.
     let pillar = |tris: &mut Vec<Tri>, sign: f32, d0: f32, w: f32, xi: f32, ht: f32, m: u8| {
-        block(tris, sign, d0, d0 + w, xi, xi + w, 0.0, ht, m);
         let o = (w * 0.12).max(0.02);
+        let foot = if m == id::STONE { (o * 2.5).min(0.3 * ht) } else { 0.0 };
+        if foot > 0.0 { block(tris, sign, d0 - o, d0 + w + o, xi - o, xi + w + o, 0.0, foot, m); }
+        block(tris, sign, d0, d0 + w, xi, xi + w, foot, ht, m);
         block(tris, sign, d0 - o, d0 + w + o, xi - o, xi + w + o, ht, ht + o * 1.6, m);
     };
     // Evenly spaced positions from one end to the other, about `gap` apart.
@@ -3561,7 +3601,10 @@ fn shade_px(ctx: &Ctx, g: &GPixel, gbuf: &[GPixel], i: usize, x: usize, y: usize
             let out = if g.x > 0.0 { 1.0 } else { -1.0 };
             // A little shade where it stands on the deck.
             ao *= 1.0 - 0.3 * (-g.y.max(0.0) / 0.25).exp();
-            (match id::rail_parts(r).1 { id::INNER => [-out, 0.0, 0.0], id::OUTER => [out, 0.0, 0.0], id::TOP => [0.0, 1.0, 0.0], _ => [0.0, 0.0, -1.0] }, 0)
+            // (An end faces the camera: back along the path, or ahead where a turned camera sees
+            // it from behind.)
+            let end = if g.d < 0.0 { 1.0 } else { -1.0 };
+            (match id::rail_parts(r).1 { id::INNER => [-out, 0.0, 0.0], id::OUTER => [out, 0.0, 0.0], id::TOP => [0.0, 1.0, 0.0], _ => [0.0, 0.0, end] }, 0)
         }
         id::FACADE => {
             // The face darkens into the opening's reveal and toward its foot.
@@ -6193,6 +6236,33 @@ mod tests {
         assert!(shot(&even, 0.0).rgba == before.rgba);
     }
 
+    /// A camera turned to look across the path sees the lamps behind where it stands as well as
+    /// those ahead: each draws, with its glow, wherever it is in the frame.
+    #[test]
+    fn a_turned_camera_sees_the_lamps_behind_it() {
+        let mut s = preset("Night Road");
+        s.particles.clear();
+        s.weather = Weather::default();
+        s.camera.yaw = -90.0;
+        s.camera.side = 5.0;
+        let (w, h) = (320usize, 180usize);
+        let shot = |s: &Scene| WorldRenderer::default().render(s, 0.0, &RenderOptions { size: Some((w as u32, h as u32)), time: Some(0.0), ..RenderOptions::default() });
+        let mut dark = s.clone();
+        dark.fixtures.clear();
+        let (lit, unlit) = (shot(&s), shot(&dark));
+        // The brightest the lamps make each third of the frame, above the ground.
+        let thirds: Vec<f32> = (0..3).map(|k| {
+            let mut most = 0.0f32;
+            for y in 0..h / 2 { for x in k * w / 3..(k + 1) * w / 3 {
+                let i = (y * w + x) * 4;
+                let l = |im: &Image| (im.rgba[i] as f32 + im.rgba[i + 1] as f32 + im.rgba[i + 2] as f32) / 3.0;
+                most = most.max(l(&lit) - l(&unlit));
+            } }
+            most
+        }).collect();
+        assert!(thirds.iter().all(|&m| m > 60.0), "the lamps' glow in each third of the frame: {thirds:?}");
+    }
+
     /// Lights told to stand only on bridges, or with a set piece, stand there and nowhere else; every
     /// kind draws, and one that pulses comes round with the loop.
     #[test]
@@ -6707,6 +6777,44 @@ mod tests {
         assert_eq!(a.rgba, b.rgba);
     }
 
+    /// Where a winding path comes to the end of a bridge, the camera sees round under the deck's
+    /// end: the gap's end wall runs under it, so the bottom never shows past the gap.
+    #[test]
+    fn the_gap_ends_in_a_wall_under_the_deck_too() {
+        let mut s = preset("Village Side Scroll");
+        s.camera.yaw = 0.0;
+        s.camera.side = 0.0;
+        s.camera.zoom = 1.0;
+        s.camera.horizon = 0.4;
+        s.path.bridge = Bridge { enabled: true, spacing: 30.0, length: 10.0, offset: 3.0, depth: 6.0, bottom: BridgeBottom::Water, water_level: 3.0, railing: Railing::Iron, ..Bridge::default() };
+        let (w, h) = (320usize, 180usize);
+        let mut r = WorldRenderer::default();
+        for k in 0..12 {
+            let scroll = k as f32 * 0.5;
+            let ctx = Ctx {
+                scene: &s, view: View::new(&s, w, h).at(scroll), loop_len: 24.0, tphase: 0.0, scroll, far: 320.0, d_lo: 0.0, d_hi: 320.0, x_reach: 0.0,
+                path_tex: r.textures.get(&s.path.material), verge_tex: r.textures.get(&s.verge.material),
+                wall_tex: r.textures.get(&s.walls.material), ceil_tex: r.textures.get(&s.ceiling.material),
+                path_tile: 1.0, verge_tile: 1.0, wall_tile: 1.0, ceil_tile: 1.0,
+                bridge: Spans::new(&s.path.bridge, s.motion.loop_length, &s.fixtures), fork: None, deck_tex: r.textures.get(&s.path.bridge.deck), bottom_tex: r.textures.get(&s.verge.material),
+                deck_tile: 1.0, bottom_tile: 1.0, ambient: [0.0; 3],
+                sky_lights: vec![], lights: vec![], smokes: vec![], wire_pts: vec![], falls: vec![], fog: None, fog_col: [0.0; 3], void_lin: [0.0; 3], realm: 0, bounds: None, facade: None, opening: None, portal: None, front: None, verge_beyond: None, gain: 1.0, wx: weather::Wx::default(), water: None, cover: Vec::new(),
+            };
+            let tris = build_geometry(&ctx, &Layers::default());
+            let mut gbuf = vec![raster::GPixel::EMPTY; w * h];
+            raster::rasterize(&mut gbuf, w, h, &tris, &ctx.view);
+            let past = gbuf.iter().filter(|p| p.id == id::CHASM && !ctx.on_bridge(p.d - 0.05) && !ctx.on_bridge(p.d + 0.05)).count();
+            assert_eq!(past, 0, "the gap's bottom seen past its end at scroll {scroll}");
+            // Nor any hole through to the sky below the ground's far edge.
+            for x in 0..w {
+                let col: Vec<u8> = (0..h).map(|y| gbuf[y * w + x].id).collect();
+                let Some(top) = col.iter().position(|&i| i != id::NONE) else { continue };
+                let holes: Vec<usize> = (top..h).filter(|&y| col[y] == id::NONE).collect();
+                assert!(holes.is_empty(), "a hole in column {x} at scroll {scroll}: rows {holes:?}");
+            }
+        }
+    }
+
     #[test]
     fn side_passages_open_the_wall_without_cracks() {
         let base = preset("Stone Dungeon");
@@ -6869,6 +6977,11 @@ mod tests {
         let v = View::new(&preset("Forest Path"), 90, 160);
         let tris = |fx: &[Fixture]| { let mut t = Vec::new(); railing(&v, Spans::new(&b, 24.0, fx).unwrap(), 2.0, 12.0, &[], (NEAR, 300.0), &mut t); t.len() };
         assert!(tris(&[lamp(2)]) > tris(&[]), "posts between the ends add to the railing");
+        // The deck has its thickness under it, and a sheet none.
+        let slab = |b: &Bridge| { let mut t = Vec::new(); deck_slab(&v, Spans::new(b, 24.0, &[]).unwrap(), 2.0, 12.0, &[], (NEAR, 300.0), &mut t); t };
+        let thick = slab(&b);
+        assert!(!thick.is_empty() && slab(&Bridge { thickness: 0.0, ..b.clone() }).is_empty());
+        assert!(thick.iter().all(|t| t.v.iter().all(|p| p.world[1] <= 1e-4 && p.world[1] >= -0.4 - 1e-4)), "the slab hangs under the deck, as deep as it is thick");
         // In a frame, a light on every post each side of the bridge in view.
         b.end_pillars = false;
         let mut s = preset("Forest Path");

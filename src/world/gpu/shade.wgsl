@@ -795,7 +795,7 @@ fn shade_px(g: GPix, i: u32, x: u32, y: u32, own: bool) -> Shaded {
         if face == FACE_INNER { normal = vec3<f32>(-out, 0.0, 0.0); }
         else if face == FACE_OUTER { normal = vec3<f32>(out, 0.0, 0.0); }
         else if face == FACE_TOP { normal = vec3<f32>(0.0, 1.0, 0.0); }
-        else { normal = vec3<f32>(0.0, 0.0, -1.0); }
+        else { normal = vec3<f32>(0.0, 0.0, select(-1.0, 1.0, g.d < 0.0)); }
         skip = 0u;
     } else if id == ID_FACADE {
         // The face darkens into the opening's reveal and toward its foot.

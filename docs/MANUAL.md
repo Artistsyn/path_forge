@@ -193,8 +193,10 @@ water, or a bottomless void. With water, `water_level` sets how far below the de
 | `None` | An open deck. |
 
 `rail_height` sets the height. `end_pillars` (on by default) puts a pillar or newel post with a cap
-at each end of every railing: stone for parapets, balustrades and iron, wood for posts and rope.
-Every railing is built as solid pieces, with faces on all the sides the camera can see. In the
+at each end of every railing: stone for parapets, balustrades and iron, wood for posts and rope;
+a stone pillar stands on a plinth. Every railing is built as solid pieces, with faces on all the
+sides the camera can see (a side view sees the far ends too). `thickness` (0.4 m by default) is the
+deck's depth, its edge showing in the deck's material from beside the path; 0 makes it a sheet. In the
 studio, switching between Iron and Rope also switches `rail_color`, unless you have chosen a colour yourself.
 
 ### Camera angle and side-scrollers

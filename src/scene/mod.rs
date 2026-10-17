@@ -522,6 +522,8 @@ pub struct Bridge {
     pub bottom_color: Rgb,
     /// The deck: planks, stone...
     pub deck: Material,
+    /// How thick the deck is, metres: its edge, seen from beside the path. 0 is a sheet.
+    pub thickness: f32,
     pub railing: Railing,
     /// Railing height, metres.
     pub rail_height: f32,
@@ -536,6 +538,7 @@ impl Default for Bridge {
             enabled: false, spacing: 24.0, length: 8.0, offset: 6.0, depth: 10.0, bottom: BridgeBottom::Ground, bottom_color: [150, 150, 150],
             deck: Material { pattern: Pattern::Planks, base: [104, 78, 54], mortar: [30, 22, 16], noise: 8, damage: 0.15, seed: 0, tile_size: 1.2, rotate: false, brightness: 1.0, ..Material::default() },
             railing: Railing::Posts, rail_height: 1.0, end_pillars: true, rail_color: Railing::Iron.default_color().unwrap(), water_level: 10.0,
+            thickness: 0.4,
         }
     }
 }
