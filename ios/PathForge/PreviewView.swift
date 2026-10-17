@@ -38,10 +38,17 @@ final class PreviewUIView: UIView {
 
     /// While editing: the whole frame, as the phone's screen shows it, fitted into the view.
     func setFit(_ on: Bool) {
-        lock.lock(); fit = on; lock.unlock()
-        layer.contentsGravity = on ? .resizeAspect : .resizeAspectFill
+        lock.lock(); fit = on; let shaped = canvasShape; lock.unlock()
+        layer.contentsGravity = on || shaped ? .resizeAspect : .resizeAspectFill
     }
     private var fit = false
+
+    /// Show the scene's canvas shape (letterboxed) rather than filling the view.
+    func setCanvasShape(_ on: Bool) {
+        lock.lock(); canvasShape = on; let f = fit; lock.unlock()
+        layer.contentsGravity = on || f ? .resizeAspect : .resizeAspectFill
+    }
+    private var canvasShape = true
 
     func setScene(_ json: String) {
         lock.lock(); pendingScene = json; lock.unlock()
@@ -91,6 +98,7 @@ final class PreviewUIView: UIView {
     private func loop() {
         var scene: PathScene?
         var loopLen: Float = 24, loopSecs: Float = 10
+        var canvas = (width: 0, height: 0)
         // Render at a share of the screen's size: in Auto, as much as keeps up (full size on a fast
         // phone); Sharp always draws at full size.
         let scales: [Double] = [1, 0.85, 0.7, 0.55, 0.45, 0.35, 0.28, 0.22, 0.16, 0.1]
@@ -107,7 +115,8 @@ final class PreviewUIView: UIView {
             pendingScene = nil
             reopenWanted = false
             var size = pixelSize
-            if fit {
+            let shaped = canvasShape
+            if fit && !shaped {
                 // The screen's shape, at the view's width.
                 let b = UIScreen.main.nativeBounds
                 size = CGSize(width: size.width, height: size.width * max(b.width, b.height) / min(b.width, b.height))
@@ -119,7 +128,12 @@ final class PreviewUIView: UIView {
                 } else {
                     scene = Gpu.open(json)
                 }
-                if let s = scene { (loopLen, loopSecs) = s.loop }
+                if let s = scene { (loopLen, loopSecs) = s.loop; canvas = s.canvas }
+            }
+            if shaped && canvas.width > 0 && canvas.height > 0 && size.width > 0 && size.height > 0 {
+                // The canvas's shape, fitted into the view.
+                let k = min(size.width / CGFloat(canvas.width), size.height / CGFloat(canvas.height))
+                size = CGSize(width: CGFloat(canvas.width) * k, height: CGFloat(canvas.height) * k)
             }
             let w = Int(size.width), h = Int(size.height)
             guard let s = scene, w > 0, h > 0 else { Thread.sleep(forTimeInterval: 0.05); continue }
@@ -161,6 +175,7 @@ struct PreviewView: UIViewRepresentable {
         v.onStats = { gpu, w, h, fps in model.showStats(gpu: gpu, width: w, height: h, fps: fps) }
         model.preview = v
         v.setSharp(model.sharp)
+        v.setCanvasShape(model.canvasShape)
         v.setScene(model.scene)
         return v
     }

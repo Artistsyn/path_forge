@@ -184,6 +184,10 @@ struct Panel: View {
                     Chips(labels: ["GPU (fast)", "CPU"], selected: model.gpuOn ? 0 : 1) { model.setGpu($0 == 0) }
                     SectionLabel(text: "Preview")
                     Chips(labels: ["Auto (smooth)", "Sharp (full size)"], selected: model.sharp ? 1 : 0) { model.setSharp($0 == 1) }
+                    SectionLabel(text: "Shape")
+                    Chips(labels: ["The canvas's", "The whole screen"], selected: model.canvasShape ? 0 : 1) { model.setCanvasShape($0 == 0) }
+                    Text("The canvas's shape (Edit every setting → Canvas) is what Still, Video and GIF/WebP make. Live Photos always fill the screen.")
+                        .font(.caption).foregroundColor(.secondary)
                     SectionLabel(text: "Wallpaper")
                     Text("iPhone apps can't set the wallpaper themselves. Save it to Photos below, then in Photos tap Share → Use as Wallpaper. A Live Photo moves on the lock screen (iOS 17+).")
                         .font(.caption).foregroundColor(.secondary)
@@ -255,12 +259,13 @@ struct AnimationSheet: View {
     @AppStorage("anim.fps") private var fps = 1
 
     var body: some View {
+        let (cw, ch) = model.canvasPixels()
         VStack(alignment: .leading, spacing: 10) {
             Text("Save the loop as an animation").font(.title3.bold())
             SectionLabel(text: "Format")
             Chips(labels: ["WebP (full colour, small)", "GIF (plays anywhere)"], selected: format) { format = $0 }
             SectionLabel(text: "Size")
-            Chips(labels: ["Small", "Medium", "Large", "Full screen"], selected: size) { size = $0 }
+            Chips(labels: ["Small", "Medium", "Large", model.canvasShape ? "Canvas (\(cw)×\(ch))" : "Full screen"], selected: size) { size = $0 }
             SectionLabel(text: "Frames a second")
             Chips(labels: ["12", "20", "30"], selected: fps) { fps = $0 }
             Text("The whole loop, joining end to start, so it plays forever without a seam. Larger and smoother takes longer and makes a bigger file (GIF most of all). Photos plays GIFs; WebP is smaller and shows every colour.")
@@ -271,8 +276,8 @@ struct AnimationSheet: View {
                 Spacer()
                 Button("Make it") {
                     dismiss()
-                    let width = [360, 540, 720, 100_000][size]
-                    model.saveAnimation(format: format == 0 ? "webp" : "gif", width: width, fps: [12, 20, 30][fps])
+                    let short = [360, 540, 720, 100_000][size]
+                    model.saveAnimation(format: format == 0 ? "webp" : "gif", short: short, fps: [12, 20, 30][fps])
                 }.buttonStyle(Pill(primary: true))
             }
         }

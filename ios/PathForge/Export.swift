@@ -12,9 +12,16 @@ extension AppModel {
 
     /// The screen's size in pixels, portrait, even (as video wants).
     private func screenPixels() -> (Int, Int) {
-        let b = UIScreen.main.nativeBounds
-        let w = Int(min(b.width, b.height)), h = Int(max(b.width, b.height))
+        let (w, h) = AppModel.screenSize()
         return (w & ~1, h & ~1)
+    }
+
+    /// What a Still, video or animation is drawn at: the canvas (with the preview at its shape) or
+    /// the screen, even.
+    private func outputPixels() -> (Int, Int) {
+        guard canvasShape else { return screenPixels() }
+        let (w, h) = canvasPixels()
+        return (max(2, w & ~1), max(2, h & ~1))
     }
 
     private func photos(_ then: @escaping () -> Void) {
@@ -52,7 +59,7 @@ extension AppModel {
     func saveStill() {
         let scene = self.scene
         let now = preview?.now ?? (0, 0)
-        let (w, h) = screenPixels()
+        let (w, h) = outputPixels()
         photos {
             self.run("Drawing it at full size…") { _ in
                 guard let s = Gpu.open(scene) else { throw ExportError(Native.lastError) }
@@ -101,7 +108,7 @@ extension AppModel {
     /// The whole loop as a video that joins end to start.
     func saveVideo() {
         let scene = self.scene
-        let (w, h) = screenPixels()
+        let (w, h) = outputPixels()
         photos {
             self.run("Making a looping video…") { progress in
                 guard let s = Gpu.open(scene) else { throw ExportError(Native.lastError) }
@@ -124,13 +131,15 @@ extension AppModel {
         }
     }
 
-    /// The whole loop as a seamless animated GIF or WebP, `width` wide at the screen's shape,
-    /// offered to share (Save Image, Save to Files, Messages...) once made.
-    func saveAnimation(format: String, width: Int, fps: Int) {
+    /// The whole loop as a seamless animated GIF or WebP at the canvas's (or the screen's) shape,
+    /// its short side `short` pixels (the full size when that is larger), offered to share (Save
+    /// Image, Save to Files, Messages...) once made.
+    func saveAnimation(format: String, short: Int, fps: Int) {
         let scene = self.scene
-        let (sw, sh) = screenPixels()
-        let w = min(width, sw) & ~1
-        let h = Int((Double(w) * Double(sh) / Double(sw)).rounded()) & ~1
+        let (bw, bh) = outputPixels()
+        let k = min(1, Double(short) / Double(min(bw, bh)))
+        let w = max(2, Int((Double(bw) * k).rounded()) & ~1)
+        let h = max(2, Int((Double(bh) * k).rounded()) & ~1)
         let name = look.name.replacingOccurrences(of: "/", with: "_")
         let gpu = gpuOn
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent("export", isDirectory: true)

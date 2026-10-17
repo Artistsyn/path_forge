@@ -47,6 +47,12 @@ final class PreviewView extends SurfaceView implements SurfaceHolder.Callback, R
 
     void setStats(Stats s) { stats = s; }
 
+    /** Show the scene's canvas shape (letterboxed) rather than filling the view. */
+    void setCanvasShape(boolean on) { canvasShape = on; }
+    private volatile boolean canvasShape = true;
+    /** The scene's canvas, pixels. */
+    private volatile int cw, ch;
+
     /** Always draw at the screen's full size, however long a frame takes. */
     void setSharp(boolean on) { sharp = on; }
     private volatile boolean sharp;
@@ -124,13 +130,22 @@ final class PreviewView extends SurfaceView implements SurfaceHolder.Callback, R
                         float[] info = Native.info(h);
                         len = info[0];
                         secs = Math.max(0.1f, info[1]);
+                        cw = Math.round(info[3]);
+                        ch = Math.round(info[4]);
                     }
                     paint = Frame.paint(Look.pixelated(s));
                 }
                 int w = vw, hh = vh;
                 if (h == 0 || w <= 0 || hh <= 0) { sleep(50); continue; }
                 if (sharp) level = 0;
-                int rw = Math.max(64, Math.round(w * scales[level])), rh = Math.max(64, Math.round(hh * (rw / (float) w)));
+                // The shape drawn: the canvas's, fitted into the view (or the view's own).
+                float fw = w, fh = hh;
+                if (canvasShape && cw > 0 && ch > 0) {
+                    float k = Math.min(w / (float) cw, hh / (float) ch);
+                    fw = cw * k;
+                    fh = ch * k;
+                }
+                int rw = Math.max(32, Math.round(fw * scales[level])), rh = Math.max(32, Math.round(fh * (rw / fw)));
                 if (bmp == null || bmp.getWidth() != rw || bmp.getHeight() != rh) {
                     buf = ByteBuffer.allocateDirect(rw * rh * 4);
                     bmp = Bitmap.createBitmap(rw, rh, Bitmap.Config.ARGB_8888);
@@ -187,6 +202,10 @@ final class PreviewView extends SurfaceView implements SurfaceHolder.Callback, R
                 if (f > 0) {
                     c.drawColor(android.graphics.Color.BLACK);
                     Frame.fit(c, b, 0, fitInset, c.getWidth(), Math.round(c.getHeight() * f) - fitInset, paint, m);
+                } else if (canvasShape) {
+                    // The canvas's shape, whole, on black.
+                    c.drawColor(android.graphics.Color.BLACK);
+                    Frame.fit(c, b, 0, 0, c.getWidth(), c.getHeight(), paint, m);
                 } else {
                     Frame.cover(c, b, c.getWidth(), c.getHeight(), paint, m);
                 }

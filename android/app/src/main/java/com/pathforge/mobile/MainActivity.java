@@ -105,6 +105,7 @@ public final class MainActivity extends Activity implements Editor.Host {
         FrameLayout root = new FrameLayout(this);
         root.setBackgroundColor(Color.BLACK);
         preview = new PreviewView(this);
+        preview.setCanvasShape(getSharedPreferences("look", MODE_PRIVATE).getBoolean("canvas_shape", true));
         preview.setOnClickListener(v -> { if (editor.view.getVisibility() != View.VISIBLE) showPanel(panel.getVisibility() != View.VISIBLE); });
         root.addView(preview, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
 
@@ -287,6 +288,9 @@ public final class MainActivity extends Activity implements Editor.Host {
             getSharedPreferences("look", MODE_PRIVATE).edit().putBoolean("sharp", i == 1).apply();
             preview.setSharp(i == 1);
         }).view);
+        body.addView(Ui.label(this, "Shape"));
+        shapeChips = new Ui.Chips(this, new String[]{"The canvas's", "The whole screen"}, canvasPreview() ? 0 : 1, i -> setCanvasPreview(i == 0));
+        body.addView(shapeChips.view);
 
         // Every setting, and keeping it.
         LinearLayout edit = new LinearLayout(this);
@@ -648,6 +652,32 @@ public final class MainActivity extends Activity implements Editor.Host {
     }
 
     @Override
+    public int[] screen() { Point p = screenSize(); return new int[]{p.x, p.y}; }
+
+    @Override
+    public boolean canvasPreview() { return getSharedPreferences("look", MODE_PRIVATE).getBoolean("canvas_shape", true); }
+
+    @Override
+    public void setCanvasPreview(boolean on) {
+        getSharedPreferences("look", MODE_PRIVATE).edit().putBoolean("canvas_shape", on).apply();
+        preview.setCanvasShape(on);
+        if (shapeChips != null) shapeChips.select(on ? 0 : 1);
+    }
+
+    private Ui.Chips shapeChips;
+
+    /** The scene's canvas, pixels (480 x 854 when it has none). */
+    private Point canvas() {
+        try {
+            org.json.JSONObject c = new org.json.JSONObject(look.scene()).optJSONObject("canvas");
+            int w = c == null ? 480 : c.optInt("width", 480), h = c == null ? 854 : c.optInt("height", 854);
+            if (Editor.canvasProblem(w, h) == null) return new Point(w, h);
+        } catch (JSONException ignored) {
+        }
+        return new Point(480, 854);
+    }
+
+    @Override
     public void peek(String scene) {
         ui.removeCallbacks(applyEdit);
         preview.setScene(scene != null ? scene : look.scene());
@@ -751,7 +781,7 @@ public final class MainActivity extends Activity implements Editor.Host {
     // ── Wallpaper ────────────────────────────────────────────────────────
 
     /** The whole screen's size, in portrait. */
-    private Point screen() {
+    private Point screenSize() {
         int w, h;
         if (Build.VERSION.SDK_INT >= 30) {
             Rect b = getWindowManager().getMaximumWindowMetrics().getBounds();
@@ -812,7 +842,7 @@ public final class MainActivity extends Activity implements Editor.Host {
     private void setLive() {
         final String scene = look.scene();
         final int quality = look.quality;
-        final Point size = screen();
+        final Point size = screenSize();
         final Progress pr = new Progress("Drawing your wallpaper's loop…", true);
         preview.pause();
         work.execute(() -> {
@@ -861,10 +891,12 @@ public final class MainActivity extends Activity implements Editor.Host {
     }
 
     /** This moment of the walk at the screen's full size, on a worker thread, then `done` on the UI thread. */
-    private void renderMoment(String message, java.util.function.Consumer<Bitmap> done) {
+    private void renderMoment(String message, java.util.function.Consumer<Bitmap> done) { renderMoment(message, screenSize(), done); }
+
+    /** `renderMoment` at `size` pixels. */
+    private void renderMoment(String message, Point size, java.util.function.Consumer<Bitmap> done) {
         final String scene = look.scene();
         final float d = preview.distance(), t = preview.time();
-        final Point size = screen();
         final Progress pr = new Progress(message, false);
         work.execute(() -> {
             Bitmap bmp = null;
@@ -904,7 +936,9 @@ public final class MainActivity extends Activity implements Editor.Host {
     }
 
     private void saveImage() {
-        renderMoment("Drawing it at full size…", b -> work.execute(() -> {
+        // At the canvas's size and shape, or the screen's when the preview fills the screen.
+        Point size = canvasPreview() ? canvas() : screenSize();
+        renderMoment("Drawing it at " + size.x + " × " + size.y + "…", size, b -> work.execute(() -> {
             ContentResolver r = getContentResolver();
             ContentValues v = new ContentValues();
             v.put(MediaStore.Images.Media.DISPLAY_NAME, "PathForge " + System.currentTimeMillis() + ".png");
@@ -940,7 +974,9 @@ public final class MainActivity extends Activity implements Editor.Host {
         box.addView(Ui.label(this, "Format"));
         box.addView(new Ui.Chips(this, new String[]{"WebP (full colour, small)", "GIF (plays anywhere)"}, pick[0], i -> pick[0] = i).view);
         box.addView(Ui.label(this, "Size"));
-        box.addView(new Ui.Chips(this, new String[]{"Small", "Medium", "Large", "Full screen"}, pick[1], i -> pick[1] = i).view);
+        Point cv = canvas();
+        boolean byCanvas = canvasPreview();
+        box.addView(new Ui.Chips(this, new String[]{"Small", "Medium", "Large", byCanvas ? "Canvas (" + cv.x + "×" + cv.y + ")" : "Full screen"}, pick[1], i -> pick[1] = i).view);
         box.addView(Ui.label(this, "Frames a second"));
         box.addView(new Ui.Chips(this, new String[]{"12", "20", "30"}, pick[2], i -> pick[2] = i).view);
         TextView note = new TextView(this);
@@ -956,10 +992,19 @@ public final class MainActivity extends Activity implements Editor.Host {
     }
 
     private void exportAnimation(String format, int size, int fps) {
-        Point screen = screen();
-        int w = size == 3 ? screen.x : new int[]{360, 540, 720}[size];
-        int h = Math.round(w * screen.y / (float) screen.x) & ~1;
+        // The canvas's shape (or the screen's): Small, Medium and Large on its short side, or its
+        // own size.
+        Point shape = canvasPreview() ? canvas() : screenSize();
+        int w, h;
+        if (size == 3) { w = shape.x; h = shape.y; }
+        else {
+            int s = new int[]{360, 540, 720}[size];
+            float k = s / (float) Math.min(shape.x, shape.y);
+            w = Math.round(shape.x * k);
+            h = Math.round(shape.y * k);
+        }
         w &= ~1;
+        h &= ~1;
         final String scene = look.scene();
         final String name = look.name.replaceAll("[\\/:*?\"<>|]", "_");
         final File dir = new File(getCacheDir(), "export");

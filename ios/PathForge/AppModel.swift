@@ -54,6 +54,8 @@ final class AppModel: ObservableObject {
     @Published var mine: [String] = []
     /// The preview always at full size (else as much as keeps up).
     @Published var sharp = UserDefaults.standard.bool(forKey: "preview.sharp")
+    /// The preview, Still, video and GIF/WebP at the scene's canvas shape (else the whole screen).
+    @Published var canvasShape = UserDefaults.standard.object(forKey: "preview.canvasShape") as? Bool ?? true
     /// The animation export's settings window, and a file to share once made.
     @Published var askingAnimation = false
     @Published var shareURL: URL?
@@ -79,6 +81,9 @@ final class AppModel: ObservableObject {
         }
         if gpuOn { startGpu() }
         editor.onChange = { [weak self] json in self?.edited(json) }
+        editor.screen = AppModel.screenSize()
+        editor.canvasShape = { [weak self] in self?.canvasShape ?? true }
+        editor.setCanvasShape = { [weak self] on in self?.setCanvasShape(on) }
         editor.onPeek = { [weak self] json in
             guard let self = self else { return }
             self.pending?.cancel()
@@ -152,6 +157,26 @@ final class AppModel: ObservableObject {
         sharp = on
         UserDefaults.standard.set(on, forKey: "preview.sharp")
         preview?.setSharp(on)
+    }
+
+    func setCanvasShape(_ on: Bool) {
+        canvasShape = on
+        UserDefaults.standard.set(on, forKey: "preview.canvasShape")
+        preview?.setCanvasShape(on)
+    }
+
+    /// The screen's size in pixels, portrait.
+    static func screenSize() -> (Int, Int) {
+        let b = UIScreen.main.nativeBounds
+        return (Int(min(b.width, b.height)), Int(max(b.width, b.height)))
+    }
+
+    /// The scene's canvas in pixels (a usable default when it has none or a bad one).
+    func canvasPixels() -> (Int, Int) {
+        let o = scene.data(using: .utf8).flatMap { try? JSONSerialization.jsonObject(with: $0) } as? [String: Any]
+        let c = o?["canvas"] as? [String: Any]
+        let w = (c?["width"] as? NSNumber)?.intValue ?? 0, h = (c?["height"] as? NSNumber)?.intValue ?? 0
+        return CanvasPanel.problem(w, h) == nil ? (w, h) : (480, 854)
     }
 
     func showStats(gpu: Bool, width: Int, height: Int, fps: Double) {
