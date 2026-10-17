@@ -86,6 +86,7 @@ How one scene gives way to the next. Every `Auto` or 0 is decided by `plan` from
 | `style` | [StyleFrom](#stylefrom) | `"Auto"` | Whose look (pixel size, palette, outline, grade) the frames take. |
 | `marker` | [Marker](#marker) | `"Auto"` | A structure at the boundary: an arch, a gate, a portal ring. Auto adds one where the threshold asks for it (a gate, a portal). |
 | `seed` | integer | `7` |  |
+| `swing` | [Swing](#swing) | (see the type) | When the scenes look from different angles (`camera.yaw`, `camera.side`: a side-scroller and a view down the path), the camera swings: out of the first scene's view to look down the path before the boundary, and round into the second's after it. `seconds` each way (0 = auto, 2.5), with its `hold`, `ease`, `overshoot`, `orbit` and `bars` (`from` is not used: the views are the scenes'). Negative seconds: no swing, the views crossfade at the end. |
 
 ### Anchor
 

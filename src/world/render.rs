@@ -7550,6 +7550,42 @@ mod tests {
     }
 
     #[test]
+    fn a_transition_swings_out_of_one_view_crosses_and_swings_into_the_next() {
+        use crate::journey::{CrossWalk, Place};
+        use crate::scene::transition::{plan, Transition};
+        // Down the forest path, then into the village seen from the side.
+        let mut a = preset("Forest Path");
+        a.canvas = preset("Village Side Scroll").canvas;
+        let b = preset("Village Side Scroll");
+        let c = plan(&a, &b, &Transition::default());
+        assert_eq!(c.swing_out, 0.0, "the forest looks down the path already");
+        assert!((c.swing_in - 2.5 * b.motion.speed).abs() < 1e-3, "{}", c.swing_in);
+        assert!(c.notes.iter().any(|n| n.contains("swings round")), "{:?}", c.notes);
+        let w = CrossWalk::new(c.clone(), 0.0, 0.0);
+        let mut r = WorldRenderer::default();
+        let o = RenderOptions { size: Some((160, 90)), ..RenderOptions::default() };
+        let (pa, pb) = (Place { scene: &a, dir: None }, Place { scene: &b, dir: None });
+        let at = |r: &mut WorldRenderer, travel: f32| w.frame(r, pa, pb, travel, 1.0, 1.0, &o).rgba;
+        let len = w.length();
+        // It ends on the village's own side view; just before, it is still coming round.
+        let end = r.render(&b, w.at(len).2, &RenderOptions { time: Some(1.0), ..o.clone() }).rgba;
+        assert!(at(&mut r, len) == end);
+        assert!(at(&mut r, len - 0.5 * c.swing_in) != end);
+        // Where the crossing hands over to the swing, nothing jumps: the camera looks down the
+        // village's path either way.
+        let edge = len - c.swing_in;
+        let (x, y) = (at(&mut r, edge - 1e-3), at(&mut r, edge + 1e-3));
+        let diff = x.iter().zip(&y).map(|(p, q)| p.abs_diff(*q) as f64).sum::<f64>() / x.len() as f64;
+        assert!(diff < 1.0, "a jump at the handover ({diff})");
+        // The other way round: out of the side view first.
+        let back = plan(&b, &a, &Transition::default());
+        assert!(back.swing_out > 0.0 && back.swing_in == 0.0);
+        // And with the swing turned off, the views crossfade as before.
+        let off = plan(&a, &b, &Transition { swing: crate::scene::Swing { seconds: -1.0, ..Default::default() }, ..Transition::default() });
+        assert_eq!((off.swing_out, off.swing_in), (0.0, 0.0));
+    }
+
+    #[test]
     fn a_dissolve_leaves_out_its_share_of_pixels_evenly() {
         for k in [0.0f32, 0.1, 0.25, 0.5, 0.8, 1.0] {
             let gone = (0..4).flat_map(|y| (0..4).map(move |x| (x, y))).filter(|&(x, y)| raster::dissolved(x, y, k)).count();

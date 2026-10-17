@@ -287,7 +287,8 @@ times a loop, so loops still close, except the flight in, which plays once.
 | `pan`, `pans` | Looking slowly to the side and back: degrees (negative looks left first), and how many times a loop. The sky turns with the rest. |
 | `tilt`, `tilts` | Looking slowly up and down. |
 | `dolly`, `dolly_focus`, `dollies` | A dolly zoom: the camera draws back `dolly` metres while zooming in, so what stands `dolly_focus` metres ahead keeps its size while the background swells and shrinks round it (negative pushes in and zooms out). |
-| `fly_in`, `fly_height` | The flight in: over `fly_in` seconds the camera comes down from `fly_height` metres, looking down, to the walker's eyes. It plays at the start of the live runtime (`restart_intro` plays it again) and with `pf render --intro` / `pf sheet --intro`; loops and exports leave it out. Best under an open sky. |
+| `fly_in`, `fly_height` | The flight in: over `fly_in` seconds the camera comes down from `fly_height` metres, looking down, to the walker's eyes. It plays at the start of the live runtime (`restart_intro` plays it again) and with `pf render --intro` / `pf sheet --intro`; loops leave it out, `pf export --clip intro` writes it as a clip of its own. Best under an open sky. |
+| `swing_in` | The swing in: the camera comes round from another view (`from`) into the scene's own, once at the start (see Camera angles). Played like the flight in; `pf export --clip intro` writes it as a clip that ends where the loop begins. |
 
 `post.focus` is depth of field: with `mode: Depth` what stands `distance` metres ahead is sharp
 and nearer and further things blur (the far distance and sky the most), up to `blur` (the widest
@@ -602,6 +603,14 @@ Every value set to `Auto` or 0 in the `Transition` settings is decided by the pl
 override it: `threshold` (Open, Doorway, CaveMouth, Gate, Portal), `approach_m`, `blend_m`,
 `facade` and `facade_height`, `light_spill`, `adaptation`, `camera_blend_m`, `style`, and `marker`
 (an Archway, RuinedArch, Gate, Banners or Portal structure at the boundary).
+
+**Between views.** When the two scenes look from different angles (a side-scroller and a view
+down the path), the camera swings: out of the first scene's view to look down the path before the
+boundary, across it, and round into the second scene's view after it, circling the walker and
+dissolving the near side of the world out of its way as an intro's swing does. `swing` sets how
+(`seconds` each way, 0 = 2.5; `hold`, `ease`, `overshoot`, `orbit`, `bars`); negative seconds
+crossfade the views at the end instead. Give both scenes one canvas: the frame cannot change
+shape partway through.
 [SCENE_REFERENCE.md](SCENE_REFERENCE.md#transition) lists them all.
 
 **In the studio:** Edit > Transition / fork…, then "Transition into a scene".
@@ -737,7 +746,9 @@ let s = rt.state();                 // scene, stop, progress, choose_within, spe
 rt.set_hour(Some(19.5));            // dusk on every scene with an open sky
 rt.set_day_length(600.0);           // or let a day pass every 10 minutes of step time
 if rt.day().is_some_and(|d| d.daylight < 0.2) { /* night: spawn the bats */ }
-rt.restart_intro();                 // fly in again (camera.moves.fly_in), as at the start
+rt.restart_intro();                 // fly in / swing in again (camera.moves), as at the start
+if rt.state().intro_left.is_some() { /* hold the player's controls until the camera lands */ }
+rt.swing_to(SwingView { yaw: -90.0, side: 6.0, ..rt.view_now() }, Swing::default())?; // round to the side
 ```
 
 | Method | Purpose |
@@ -749,7 +760,8 @@ rt.restart_intro();                 // fly in again (camera.moves.fly_in), as at
 | `transition_to(scene, dir, transition)`, `fork(left, right, fork)` | Start a transition or fork to any scene at run time. |
 | `choose(branch)` | Take a branch of the fork ahead. Returns false when there is none or it is too late. |
 | `finish()` | Jump to the end of what is under way. |
-| `state()` | Where the walk stands: `scene`, `distance`, `time`, `stop`, `progress` (0..1 through a transition), `choose_within` (metres left to choose), `speed`, `end`. |
+| `state()` | Where the walk stands: `scene`, `distance`, `time`, `stop`, `progress` (0..1 through a transition), `choose_within` (metres left to choose), `speed`, `end`, `intro_left` and `swing_left` (seconds left of the intro or a swing). |
+| `swing_to(view, swing)`, `view_now()` | Swing the camera from where it is (even partway through another swing) to another view (`yaw`, `side`, `eye_height`, `horizon`, `zoom`), the way `swing` says; the view stays once it lands. The camera's view now. C `pf_runtime_swing_to` (JSON) and `pf_runtime_view` (interface 3). |
 | `set_hour(Some(h))`, `set_hour(None)` | Set the hour of the day (0..24) on every scene drawn (transitions and forks too), turning `sky.day_night` on with the scene's own settings; None gives each scene its own hour back. |
 | `set_day_length(seconds)`, `hour()` | Let a day pass every `seconds` of `step` time (0 holds the hour); the hour now. |
 | `day()` | Where the day stands: `hour`, `altitude` (sun height, -1..1), `is_day`, `daylight` (0 night .. 1 day), `phase` ("night", "dawn", "day", "dusk"); None without an open sky. Also in `state().day`. |
