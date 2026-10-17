@@ -44,7 +44,7 @@ final class Editor {
         /** Show `scene` in the preview for a moment without changing anything (null: the scene
          *  being edited again). */
         void peek(String scene);
-        /** The phone's screen in pixels, portrait (for the canvas's "This screen"). */
+        /** The phone's screen in pixels, as it is held now (for the canvas's "This screen"). */
         int[] screen();
         /** Whether the preview shows the canvas's shape (or fills the screen), and setting it. */
         boolean canvasPreview();

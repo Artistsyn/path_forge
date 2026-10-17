@@ -57,14 +57,14 @@ final class PreviewView extends SurfaceView implements SurfaceHolder.Callback, R
     void setSharp(boolean on) { sharp = on; }
     private volatile boolean sharp;
 
-    /** While editing: the whole frame shown in the top `fraction` of the view, below `top` pixels
-     *  (the status bar); 0 fills the view again. */
-    void setFitTop(float fraction, int top) {
-        fitTop = fraction;
-        fitInset = top;
+    /** Where in the view the scene is drawn (null: all of it), and whether the whole frame is shown
+     *  there as the full screen would show it (while editing) rather than filling it. */
+    void setArea(android.graphics.Rect area, boolean fit) {
+        this.area = area == null ? null : new android.graphics.Rect(area);
+        this.fit = fit;
     }
-    private volatile float fitTop;
-    private volatile int fitInset;
+    private volatile android.graphics.Rect area;
+    private volatile boolean fit;
 
     float distance() { return nowDistance; }
     float time() { return nowTime; }
@@ -138,13 +138,14 @@ final class PreviewView extends SurfaceView implements SurfaceHolder.Callback, R
                 int w = vw, hh = vh;
                 if (h == 0 || w <= 0 || hh <= 0) { sleep(50); continue; }
                 if (sharp) level = 0;
-                // The shape drawn: the canvas's, fitted into the view (or the view's own).
-                float fw = w, fh = hh;
-                if (canvasShape && cw > 0 && ch > 0) {
-                    float k = Math.min(w / (float) cw, hh / (float) ch);
-                    fw = cw * k;
-                    fh = ch * k;
-                }
+                // The shape drawn, fitted into the area it goes in: the canvas's; else, while editing,
+                // the whole view's (as the screen shows it), or the area's own.
+                android.graphics.Rect box = area;
+                float bw = box == null ? w : Math.max(1, box.width()), bh = box == null ? hh : Math.max(1, box.height());
+                float sw = bw, sh = bh;
+                if (canvasShape && cw > 0 && ch > 0) { sw = cw; sh = ch; }
+                else if (fit) { sw = w; sh = hh; }
+                float k0 = Math.min(bw / sw, bh / sh), fw = sw * k0, fh = sh * k0;
                 int rw = Math.max(32, Math.round(fw * scales[level])), rh = Math.max(32, Math.round(fh * (rw / fw)));
                 if (bmp == null || bmp.getWidth() != rw || bmp.getHeight() != rh) {
                     buf = ByteBuffer.allocateDirect(rw * rh * 4);
@@ -198,11 +199,12 @@ final class PreviewView extends SurfaceView implements SurfaceHolder.Callback, R
             }
             if (c == null) return;
             try {
-                float f = fitTop;
-                if (f > 0) {
+                android.graphics.Rect box = area;
+                if (box != null) {
+                    // The whole frame in its area, on black.
                     c.drawColor(android.graphics.Color.BLACK);
-                    Frame.fit(c, b, 0, fitInset, c.getWidth(), Math.round(c.getHeight() * f) - fitInset, paint, m);
-                } else if (canvasShape) {
+                    Frame.fit(c, b, box.left, box.top, box.width(), box.height(), paint, m);
+                } else if (canvasShape || fit) {
                     // The canvas's shape, whole, on black.
                     c.drawColor(android.graphics.Color.BLACK);
                     Frame.fit(c, b, 0, 0, c.getWidth(), c.getHeight(), paint, m);

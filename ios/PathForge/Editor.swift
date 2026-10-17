@@ -620,7 +620,11 @@ struct CanvasPanel: View {
                     // (Portrait and Landscape turn whatever size is chosen now.)
                     Button("Portrait") { stage(Swift.min(w, h), Swift.max(w, h)) }.buttonStyle(Pill())
                     Button("Landscape") { stage(Swift.max(w, h), Swift.min(w, h)) }.buttonStyle(Pill())
-                    Button("This screen") { stage(ed.screen.0, ed.screen.1) }.buttonStyle(Pill())
+                    Button("This screen") {
+                        // As the phone is held now.
+                        let b = UIScreen.main.bounds, s = ed.screen
+                        if b.width > b.height { stage(s.1, s.0) } else { stage(s.0, s.1) }
+                    }.buttonStyle(Pill())
                     ForEach(CanvasPanel.picks.indices, id: \.self) { i in
                         let p = CanvasPanel.picks[i]
                         Button(p.name) { stage(p.w, p.h) }.buttonStyle(Pill())

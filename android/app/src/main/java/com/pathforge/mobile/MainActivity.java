@@ -10,6 +10,7 @@ import android.content.ContentResolver;
 import android.content.ContentValues;
 import android.content.SharedPreferences;
 import android.content.Intent;
+import android.content.res.Configuration;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
 import android.graphics.Color;
@@ -74,7 +75,13 @@ public final class MainActivity extends Activity implements Editor.Host {
     private TextView showButton;
     private Ui.Chips skyChips, timeChips, seasonChips, cloudChips;
     private LinearLayout strip;
-    private int bottomInset, topInset;
+    private int bottomInset, topInset, leftInset, rightInset;
+    /** The panel's scrolling part, what is in it, and the rows of buttons under it (in it when the
+     *  phone is sideways). */
+    private ScrollView panelScroll;
+    private LinearLayout panelBody, panelTail;
+    /** The phone is sideways: the panel and the editor go down the right-hand side. */
+    private boolean wide;
     /** The strip's tiles: (name, one of yours?, its picture). */
     private final List<Object[]> tiles = new ArrayList<>();
     private String[] presets = new String[0];
@@ -108,14 +115,14 @@ public final class MainActivity extends Activity implements Editor.Host {
         preview.setCanvasShape(getSharedPreferences("look", MODE_PRIVATE).getBoolean("canvas_shape", true));
         preview.setOnClickListener(v -> { if (editor.view.getVisibility() != View.VISIBLE) showPanel(panel.getVisibility() != View.VISIBLE); });
         root.addView(preview, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+        preview.addOnLayoutChangeListener((v, l, t, r, b, ol, ot, or, ob) -> { if (r - l != or - ol || b - t != ob - ot) placePreview(); });
 
         panel = buildPanel();
         root.addView(panel, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.BOTTOM));
 
         editor = new Editor(this, Native.form(), this);
         editor.view.setVisibility(View.GONE);
-        int editorHeight = Math.round(getResources().getDisplayMetrics().heightPixels * 0.6f);
-        root.addView(editor.view, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, editorHeight, Gravity.BOTTOM));
+        root.addView(editor.view, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.BOTTOM));
 
         showButton = Ui.button(this, "Edit", false, v -> showPanel(true));
         showButton.setBackground(Ui.round(Ui.PANEL, Ui.dp(this, 22), Color.argb(110, 255, 255, 255), Ui.dp(this, 1)));
@@ -123,22 +130,24 @@ public final class MainActivity extends Activity implements Editor.Host {
         root.addView(showButton, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.BOTTOM | Gravity.END));
 
         root.setOnApplyWindowInsetsListener((v, in) -> {
+            // The bars, the keyboard and a camera cutout: on any side once the phone is turned.
             if (Build.VERSION.SDK_INT >= 30) {
-                android.graphics.Insets bars = in.getInsets(WindowInsets.Type.systemBars() | WindowInsets.Type.ime());
+                android.graphics.Insets bars = in.getInsets(WindowInsets.Type.systemBars() | WindowInsets.Type.displayCutout() | WindowInsets.Type.ime());
                 bottomInset = bars.bottom;
                 topInset = bars.top;
+                leftInset = bars.left;
+                rightInset = bars.right;
             } else {
                 bottomInset = in.getSystemWindowInsetBottom();
                 topInset = in.getSystemWindowInsetTop();
+                leftInset = in.getSystemWindowInsetLeft();
+                rightInset = in.getSystemWindowInsetRight();
             }
-            int p = Ui.dp(this, 16);
-            panel.setPadding(p, p, p, p + bottomInset);
-            editor.view.setPadding(p, p, p, bottomInset);
-            FrameLayout.LayoutParams lp = (FrameLayout.LayoutParams) showButton.getLayoutParams();
-            lp.setMargins(p, p, p, p + bottomInset);
-            showButton.setLayoutParams(lp);
+            pad();
+            placePreview();
             return in;
         });
+        relayout();
         setContentView(root);
         if (Gpu.crashedLastTime(this)) toast("The GPU stopped PathForge last time, so it draws on the CPU now. You can switch back under Draw on.");
         preview.setStats((engine, w, h, fps) -> ui.post(() -> status.setText(String.format(java.util.Locale.US,
@@ -202,12 +211,12 @@ public final class MainActivity extends Activity implements Editor.Host {
         LinearLayout body = new LinearLayout(this);
         body.setOrientation(LinearLayout.VERTICAL);
         scroll.addView(body);
-        DisplayMetrics dm = getResources().getDisplayMetrics();
         p.addView(scroll, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
-        scroll.post(() -> {
-            int max = (int) (dm.heightPixels * 0.36f);
-            if (scroll.getHeight() > max) scroll.setLayoutParams(new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, max));
-        });
+        panelScroll = scroll;
+        panelBody = body;
+        LinearLayout tail = new LinearLayout(this);
+        tail.setOrientation(LinearLayout.VERTICAL);
+        panelTail = tail;
 
         body.addView(Ui.label(this, "Scenes  ·  long-press yours to rename, copy, export or delete"));
         HorizontalScrollView sv = new HorizontalScrollView(this);
@@ -298,7 +307,7 @@ public final class MainActivity extends Activity implements Editor.Host {
         edit.addView(Ui.button(this, "Edit every setting", false, v -> openEditor()), new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1.4f));
         edit.addView(gap(8));
         edit.addView(Ui.button(this, "Save scene", false, v -> askSave(look.name, null)), new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
-        p.addView(edit);
+        tail.addView(edit);
 
         // A new scene at random (keeping the parts you lock), and scenes as share codes.
         LinearLayout fun = new LinearLayout(this);
@@ -312,13 +321,13 @@ public final class MainActivity extends Activity implements Editor.Host {
         backButton = Ui.button(this, "Back", false, v -> back());
         backButton.setAlpha(0.4f);
         fun.addView(backButton, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 0.8f));
-        p.addView(fun);
+        tail.addView(fun);
         LinearLayout codes = new LinearLayout(this);
         codes.setPadding(0, Ui.dp(this, 8), 0, 0);
         codes.addView(Ui.button(this, "Share code / QR", false, v -> shareCode()), new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1.2f));
         codes.addView(gap(6));
         codes.addView(Ui.button(this, "Open a code", false, v -> openCode(null)), new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
-        p.addView(codes);
+        tail.addView(codes);
 
         // What to do with it.
         LinearLayout actions = new LinearLayout(this);
@@ -330,8 +339,91 @@ public final class MainActivity extends Activity implements Editor.Host {
         actions.addView(Ui.button(this, "Image", false, v -> saveImage()), new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 0.8f));
         actions.addView(gap(6));
         actions.addView(Ui.button(this, "GIF/WebP", false, v -> askAnimation()), new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1.1f));
-        p.addView(actions);
+        tail.addView(actions);
+        p.addView(tail);
         return p;
+    }
+
+    // ── Upright and sideways ─────────────────────────────────────────────
+
+    @Override
+    public void onConfigurationChanged(Configuration c) {
+        super.onConfigurationChanged(c);
+        relayout();
+        View root = preview.getRootView();
+        if (root != null) root.requestApplyInsets();
+    }
+
+    /** A sheet's background: rounded at the top along the bottom of the screen, at the left down
+     *  its right-hand side. */
+    private android.graphics.drawable.GradientDrawable sheet(boolean side) {
+        float r = Ui.dp(this, 24);
+        android.graphics.drawable.GradientDrawable bg = new android.graphics.drawable.GradientDrawable();
+        bg.setColor(Ui.PANEL);
+        bg.setCornerRadii(side ? new float[]{r, r, 0, 0, 0, 0, r, r} : new float[]{r, r, r, r, 0, 0, 0, 0});
+        return bg;
+    }
+
+    /** Lay the panel and the editor out for the way the phone is held: along the bottom when it is
+     *  upright, down the right-hand side when it is sideways (with the scene beside them). */
+    private void relayout() {
+        DisplayMetrics dm = getResources().getDisplayMetrics();
+        wide = getResources().getConfiguration().orientation == Configuration.ORIENTATION_LANDSCAPE;
+        int full = ViewGroup.LayoutParams.MATCH_PARENT, wrap = ViewGroup.LayoutParams.WRAP_CONTENT;
+        int panelW = Math.min(dm.widthPixels, Math.max(Ui.dp(this, 340), Math.min(Ui.dp(this, 480), Math.round(dm.widthPixels * 0.45f))));
+        int editW = Math.min(dm.widthPixels, Math.max(Ui.dp(this, 360), Math.min(Ui.dp(this, 560), Math.round(dm.widthPixels * 0.55f))));
+        panel.setLayoutParams(new FrameLayout.LayoutParams(wide ? panelW : full, wide ? full : wrap, wide ? Gravity.END : Gravity.BOTTOM));
+        panel.setBackground(sheet(wide));
+        editor.view.setLayoutParams(new FrameLayout.LayoutParams(wide ? editW : full, wide ? full : Math.round(dm.heightPixels * 0.6f), wide ? Gravity.END : Gravity.BOTTOM));
+        editor.view.setBackground(sheet(wide));
+        // Sideways the screen is short, so everything under the name scrolls; upright the buttons
+        // stay put under the part that scrolls.
+        ((ViewGroup) panelTail.getParent()).removeView(panelTail);
+        if (wide) {
+            panelBody.addView(panelTail);
+            panelScroll.setLayoutParams(new LinearLayout.LayoutParams(full, 0, 1f));
+        } else {
+            panel.addView(panelTail);
+            panelScroll.setLayoutParams(new LinearLayout.LayoutParams(full, wrap));
+            panelScroll.post(() -> {
+                int max = Math.round(getResources().getDisplayMetrics().heightPixels * 0.36f);
+                if (!wide && panelScroll.getHeight() > max) panelScroll.setLayoutParams(new LinearLayout.LayoutParams(full, max));
+            });
+        }
+        pad();
+        placePreview();
+    }
+
+    /** Keep the sheets' contents clear of the bars, the keyboard and any cutout. */
+    private void pad() {
+        int p = Ui.dp(this, 16);
+        if (wide) {
+            panel.setPadding(p, p + topInset, p + rightInset, p + bottomInset);
+            editor.view.setPadding(p, p + topInset, p + rightInset, bottomInset);
+        } else {
+            panel.setPadding(p + leftInset, p, p + rightInset, p + bottomInset);
+            editor.view.setPadding(p + leftInset, p, p + rightInset, bottomInset);
+        }
+        FrameLayout.LayoutParams lp = (FrameLayout.LayoutParams) showButton.getLayoutParams();
+        lp.setMargins(p, p, p + rightInset, p + bottomInset);
+        showButton.setLayoutParams(lp);
+    }
+
+    /** Where the scene is drawn: beside a sheet when sideways, above the editor when upright,
+     *  else the whole screen. */
+    private void placePreview() {
+        int w = preview.getWidth(), h = preview.getHeight();
+        if (w <= 0 || h <= 0) return;
+        boolean editing = editor.view.getVisibility() == View.VISIBLE, panelUp = panel.getVisibility() == View.VISIBLE;
+        if (wide && (editing || panelUp)) {
+            int side = (editing ? editor.view : panel).getLayoutParams().width;
+            if (side <= 0) side = w / 2;
+            preview.setArea(new Rect(leftInset, topInset, Math.max(leftInset + 1, w - side), Math.max(topInset + 1, h - bottomInset)), editing);
+        } else if (editing) {
+            preview.setArea(new Rect(0, topInset, w, Math.max(topInset + 1, Math.round(h * 0.4f))), true);
+        } else {
+            preview.setArea(null, false);
+        }
     }
 
     // ── Scenes: yours, then the presets ──────────────────────────────────
@@ -641,7 +733,7 @@ public final class MainActivity extends Activity implements Editor.Host {
         panel.setVisibility(View.GONE);
         showButton.setVisibility(View.GONE);
         editor.view.setVisibility(View.VISIBLE);
-        preview.setFitTop(0.4f, topInset);
+        placePreview();
     }
 
     @Override
@@ -652,7 +744,11 @@ public final class MainActivity extends Activity implements Editor.Host {
     }
 
     @Override
-    public int[] screen() { Point p = screenSize(); return new int[]{p.x, p.y}; }
+    public int[] screen() {
+        // As the phone is held now.
+        Point p = screenSize();
+        return wide ? new int[]{p.y, p.x} : new int[]{p.x, p.y};
+    }
 
     @Override
     public boolean canvasPreview() { return getSharedPreferences("look", MODE_PRIVATE).getBoolean("canvas_shape", true); }
@@ -688,7 +784,6 @@ public final class MainActivity extends Activity implements Editor.Host {
         ui.removeCallbacks(applyEdit);
         applyEdit.run();
         editor.view.setVisibility(View.GONE);
-        preview.setFitTop(0, 0);
         showPanel(true);
         sceneChanged(true);
         if (look.mine) toast("Changed. Save scene keeps the changes in " + look.name);
@@ -715,6 +810,7 @@ public final class MainActivity extends Activity implements Editor.Host {
     private void showPanel(boolean show) {
         panel.setVisibility(show ? View.VISIBLE : View.GONE);
         showButton.setVisibility(show ? View.GONE : View.VISIBLE);
+        placePreview();
     }
 
     @Override

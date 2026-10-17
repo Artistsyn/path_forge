@@ -11,6 +11,8 @@ final class PreviewUIView: UIView {
     private var reopenWanted = false
     private var running = false
     private var pixelSize = CGSize.zero
+    /// The screen as it is held now.
+    private var screenShape = CGSize.zero
     private let t0 = CACurrentMediaTime()
     private var nowValue: (Float, Float) = (0, 0)
     /// Told about twice a second what is drawing, at what size and how fast.
@@ -63,7 +65,8 @@ final class PreviewUIView: UIView {
     override func layoutSubviews() {
         super.layoutSubviews()
         let s = window?.screen.scale ?? UIScreen.main.scale
-        lock.lock(); pixelSize = CGSize(width: bounds.width * s, height: bounds.height * s); lock.unlock()
+        let screen = (window?.screen ?? UIScreen.main).bounds.size
+        lock.lock(); pixelSize = CGSize(width: bounds.width * s, height: bounds.height * s); screenShape = screen; lock.unlock()
     }
 
     override func didMoveToWindow() {
@@ -116,10 +119,11 @@ final class PreviewUIView: UIView {
             reopenWanted = false
             var size = pixelSize
             let shaped = canvasShape
-            if fit && !shaped {
-                // The screen's shape, at the view's width.
-                let b = UIScreen.main.nativeBounds
-                size = CGSize(width: size.width, height: size.width * max(b.width, b.height) / min(b.width, b.height))
+            let screen = screenShape
+            if fit && !shaped && screen.width > 0 && screen.height > 0 && size.width > 0 && size.height > 0 {
+                // The screen's shape (as it is held now), fitted into the view.
+                let k = min(size.width / screen.width, size.height / screen.height)
+                size = CGSize(width: screen.width * k, height: screen.height * k)
             }
             lock.unlock()
             if let json = next {
