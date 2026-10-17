@@ -1200,6 +1200,7 @@ A structure spanning the path, repeated along it.
 | `offset` | number | `12.0` | Shift along the path, metres. |
 | `width` | number | `0.0` | Clear width of the opening, metres. 0 = fit the path (and the gap to the walls). |
 | `height` | number | `3.4` | Clear height of the opening, metres. |
+| `depth` | number | `0.0` | How deep it is along the path, metres: it is built solid from its picture, so it has sides, tops and the underside of its arch seen from any angle. 0 = as deep as its kind usually is (an arch 0.9 m, a gate 1.4 m, a portal's ring 0.35 m, banners 0.12 m). |
 | `tint` | integer × 3 | `[118,110,100]` | Stone or wood colour. |
 | `accent` | integer × 3 | `[150,30,36]` | Cloth, trim or glow colour. |
 | `shadow` | number | `0.6` | Sun shadow strength, 0..1. |
@@ -1602,6 +1603,12 @@ times a loop.
 | `rock` | integer × 3 | `[92,88,82]` |  |
 | `spray` | number | `0.7` | How much foam and spray at its foot (0..1). |
 | `rainbow` | number | `0.5` | The rainbow in its spray when the sun is out (0 none). |
+| `facing` | number | `45.0` | Which way its face looks, degrees: 0 back down the path, toward a walker coming, 90 across to the path. It stands where it is whichever way the camera looks. |
+| `cliff_width` | number | `0.0` | How wide its rock face is, metres (0: as wide as it is tall), and how far the rock runs back from it. |
+| `cliff_depth` | number | `5.0` |  |
+| `ridge` | number | `3.0` | A higher shoulder of the mountain behind, this much higher than the fall's rock, with a cascade down from it onto the top (0: none). |
+| `stream` | boolean | `true` | The stream running over the top to the lip, where the water comes from. |
+| `pool` | number | `1.0` | The pool at its foot, its size as a share of the usual (0: none; it falls on the ground). |
 | `seed` | integer | `0` |  |
 
 ### Waterway

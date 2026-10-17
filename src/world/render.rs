@@ -141,6 +141,9 @@ pub struct WorldRenderer {
     /// An hour of the day forced on every scene with a sky (`set_hour`): a game's or a live
     /// wallpaper's clock.
     hour: Option<f32>,
+    /// Pictures' outlines for building them as solids, by picture and grid (the picture held so
+    /// its address stays its own).
+    outlines: std::collections::HashMap<(usize, usize, usize), (Arc<Sprite>, Arc<Outline>)>,
 }
 
 /// Times the stages of one frame when profiling is on; costs one branch per stage when it is off.
@@ -340,10 +343,195 @@ fn tube_light(t: &TubeCard, n: [f32; 3]) -> [f32; 3] {
 
 /// A card standing in the world (x, y, d): its picture's top left corner is at `tl`, and its
 /// width and height run along `across` and `down`, so any flat face (a wall, a roof's slope). It
-/// is lit as a face turned to the camera. `strip` draws only one column of the picture (u)
-/// stretched across it: the plain end walls of a prop with depth.
+/// is lit as a face turned to the camera. `map` draws another part of the picture across it: (u, v)
+/// on the face (0..1 along `across` and `down`) shows the picture at (m0 + m1 u + m2 v,
+/// m3 + m4 u + m5 v). One column stretched across it (`Panel::strip`) makes the plain end walls
+/// of a prop with depth; a row along it, the top of a solid.
+/// `solid` faces (the walls and tops of a solid between its front and back) are opaque all over,
+/// whatever the picture's edge they show.
 #[derive(Clone, Copy, Debug)]
-struct Panel { tl: [f32; 3], across: [f32; 3], down: [f32; 3], strip: Option<f32> }
+struct Panel { tl: [f32; 3], across: [f32; 3], down: [f32; 3], map: Option<[f32; 6]>, solid: bool }
+
+impl Panel {
+    /// Column `u` of the picture, stretched across the face.
+    fn strip(u: f32) -> Option<[f32; 6]> { Some([u, 0.0, 0.0, 0.0, 0.0, 1.0]) }
+    /// The picture's part as the GPU's records keep it: a column (0..1), -1 for the whole
+    /// picture, -2 for another part (`map`, in the six numbers that follow), -3 for that on a
+    /// solid face.
+    fn strip_code(&self) -> f32 {
+        match self.map {
+            _ if self.solid => -3.0,
+            None => -1.0,
+            Some([u, 0.0, 0.0, 0.0, 0.0, 1.0]) => u,
+            Some(_) => -2.0,
+        }
+    }
+}
+
+/// Where a waterfall's lip is in its rock's picture (`sprites::paint_cliff`): the foot of the notch
+/// at its top, as a share of its height down from the top.
+const CLIFF_LIP: f32 = 18.5 / 250.0;
+
+/// A sheet of falling water for the splat pass (`draw_falls`): its foot (x, d), the height it
+/// lands at and falls from, how wide it is, its waterfall (`scene.waterfalls`), and the way its face
+/// runs and looks out (unit vectors in x, d).
+#[derive(Clone, Copy, Debug)]
+struct Fall { foot: [f32; 2], base: f32, top: f32, width: f32, wi: usize, along: [f32; 2], out: [f32; 2] }
+
+/// A picture's outline on a grid of `cols` x `rows` cells (the top row first): which of them are
+/// solid, for building the picture as a solid with depth (`solid_faces`).
+struct Outline { cols: usize, rows: usize, solid: Vec<bool> }
+
+impl Outline {
+    /// A cell is solid where a third of it is opaque (sampled at nine points), so a pole or a bar
+    /// thinner than a cell still stands.
+    fn of(sprite: &Sprite, cols: usize, rows: usize) -> Outline {
+        let mut solid = vec![false; cols * rows];
+        for r in 0..rows {
+            for c in 0..cols {
+                let mut n = 0;
+                for (i, j) in [(0.2, 0.2), (0.5, 0.2), (0.8, 0.2), (0.2, 0.5), (0.5, 0.5), (0.8, 0.5), (0.2, 0.8), (0.5, 0.8), (0.8, 0.8)] {
+                    if sprite.sample((c as f32 + i) / cols as f32, (r as f32 + j) / rows as f32, 4096.0, true)[3] > 0.5 { n += 1; }
+                }
+                solid[r * cols + c] = n >= 3;
+            }
+        }
+        Outline { cols, rows, solid }
+    }
+    fn at(&self, c: isize, r: isize) -> bool {
+        c >= 0 && r >= 0 && (c as usize) < self.cols && (r as usize) < self.rows && self.solid[r as usize * self.cols + c as usize]
+    }
+}
+
+/// A picture made solid: its face (at `tl`, running along `across` and `down`), the same at the
+/// back (`back` further on), and between them the walls and the tops and undersides its outline
+/// makes, each showing the picture where it runs (the column at a wall, the row at a top), so an
+/// arch has its piers' sides and the underside of its ring. Faces next to each other with the same
+/// edge are joined into one. The front and back come first. Each comes with the way it faces,
+/// out of the solid. A wall shows the picture `inset` cells in from its edge (a rock's edge is
+/// grass and ferns; its body, rock).
+fn solid_faces(o: &Outline, tl: [f32; 3], across: [f32; 3], down: [f32; 3], back: [f32; 3], inset: f32) -> Vec<(Panel, [f32; 3])> {
+    let at = |s: f32, t: f32| [tl[0] + s * across[0] + t * down[0], tl[1] + s * across[1] + t * down[1], tl[2] + s * across[2] + t * down[2]];
+    let scale = |v: [f32; 3], k: f32| [v[0] * k, v[1] * k, v[2] * k];
+    let (cols, rows) = (o.cols as isize, o.rows as isize);
+    let neg = |v: [f32; 3]| [-v[0], -v[1], -v[2]];
+    let mut faces = vec![
+        (Panel { tl, across, down, map: None, solid: false }, neg(back)),
+        (Panel { tl: [tl[0] + back[0], tl[1] + back[1], tl[2] + back[2]], across, down, map: None, solid: false }, back),
+    ];
+    // Walls: where a row goes from clear to solid or back, between columns c - 1 and c.
+    for c in 0..=cols {
+        let mut r = 0;
+        while r < rows {
+            let edge = |r: isize| o.at(c - 1, r) != o.at(c, r);
+            if !edge(r) { r += 1; continue; }
+            let solid_left = o.at(c - 1, r);
+            let r0 = r;
+            while r < rows && edge(r) && o.at(c - 1, r) == solid_left { r += 1; }
+            let u = ((if solid_left { c as f32 - 0.5 - inset } else { c as f32 + 0.5 + inset }) / cols as f32).clamp(0.0, 1.0);
+            let (v0, v1) = (r0 as f32 / rows as f32, r as f32 / rows as f32);
+            faces.push((Panel { tl: at(c as f32 / cols as f32, v0), across: back, down: scale(down, v1 - v0), map: Some([u, 0.0, 0.0, v0, 0.0, v1 - v0]), solid: true },
+                if solid_left { across } else { neg(across) }));
+        }
+    }
+    // Tops and undersides: where a column goes from clear to solid or back, between rows r - 1 and r.
+    for r in 0..=rows {
+        let mut c = 0;
+        while c < cols {
+            let edge = |c: isize| o.at(c, r - 1) != o.at(c, r);
+            if !edge(c) { c += 1; continue; }
+            let solid_above = o.at(c, r - 1);
+            let c0 = c;
+            while c < cols && edge(c) && o.at(c, r - 1) == solid_above { c += 1; }
+            let v = (if solid_above { r as f32 - 0.5 } else { r as f32 + 0.5 }) / rows as f32;
+            let (u0, u1) = (c0 as f32 / cols as f32, c as f32 / cols as f32);
+            faces.push((Panel { tl: at(u0, r as f32 / rows as f32), across: scale(across, u1 - u0), down: back, map: Some([u0, u1 - u0, 0.0, v, 0.0, 0.0]), solid: true },
+                if solid_above { down } else { neg(down) }));
+        }
+    }
+    faces
+}
+
+/// Where a side view cuts a solid (`solid_faces`) at `s` of the way along `across`: its cut face,
+/// in runs down the picture's column there, facing `out`, so what is left stays solid.
+fn cut_faces(o: &Outline, tl: [f32; 3], across: [f32; 3], down: [f32; 3], back: [f32; 3], s: f32) -> Vec<Panel> {
+    let c = ((s * o.cols as f32) as isize).clamp(0, o.cols as isize - 1);
+    let u = (c as f32 + 0.5) / o.cols as f32;
+    let base = [tl[0] + s * across[0], tl[1] + s * across[1], tl[2] + s * across[2]];
+    let mut out = Vec::new();
+    let mut r = 0isize;
+    while r < o.rows as isize {
+        if !o.at(c, r) { r += 1; continue; }
+        let r0 = r;
+        while r < o.rows as isize && o.at(c, r) { r += 1; }
+        let (v0, v1) = (r0 as f32 / o.rows as f32, r as f32 / o.rows as f32);
+        out.push(Panel {
+            tl: [base[0] + v0 * down[0], base[1] + v0 * down[1], base[2] + v0 * down[2]], across: back,
+            down: [down[0] * (v1 - v0), down[1] * (v1 - v0), down[2] * (v1 - v0)], map: Some([u, 0.0, 0.0, v0, 0.0, v1 - v0]), solid: true,
+        });
+    }
+    out
+}
+
+/// How a picture made solid is drawn (`solid_billboards`).
+struct SolidLook { sprite: Arc<Sprite>, nearest: bool, emissive: f32, shadow: f32, source: u16, tint: [f32; 3], inset: f32 }
+
+/// A picture made solid (`solid_faces`) as cards in the world: only the faces turned toward the
+/// camera (the rest are inside it as seen), its face and back casting its shadow. A side view cuts
+/// away what stands on its side of the path, as it does the wall: the faces that run across that
+/// cut are cut there too, and the cut face comes as what stood beyond it goes.
+fn solid_billboards(ctx: &Ctx, look: &SolidLook, o: &Outline, tl: [f32; 3], across: [f32; 3], down: [f32; 3], back: [f32; 3], bills: &mut Vec<Billboard>) {
+    let v = &ctx.view;
+    let mid = |f: &Panel| [f.tl[0] + 0.5 * (f.across[0] + f.down[0]), f.tl[1] + 0.5 * (f.across[1] + f.down[1]), f.tl[2] + 0.5 * (f.across[2] + f.down[2])];
+    let mut faces: Vec<(bool, Panel)> = solid_faces(o, tl, across, down, back, look.inset).into_iter().enumerate().filter(|(_, (f, n))| {
+        let m = mid(f);
+        let (c, e) = (v.to_cam(m[0], m[1], m[2]), v.to_cam(m[0] + 0.01 * n[0], m[1] + 0.01 * n[1], m[2] + 0.01 * n[2]));
+        (e[0] - c[0]) * c[0] + (e[1] - c[1]) * c[1] + (e[2] - c[2]) * c[2] < 0.0
+    }).map(|(i, (f, _))| (i < 2, f)).collect();
+    let mut cut = Vec::new();
+    if v.side_k > 0.0 && across[0].abs() > 1e-4 {
+        let xc = v.near * (v.half_width + v.cutaway);
+        faces = faces.into_iter().flat_map(|(main, f)| split_at_x(f, xc).into_iter().map(move |f| (main, f))).collect();
+        let s = (xc - tl[0]) / across[0];
+        if s > 0.0 && s < 1.0 { cut = cut_faces(o, tl, across, down, back, s); }
+    }
+    let len = |a: [f32; 3]| (a[0] * a[0] + a[1] * a[1] + a[2] * a[2]).sqrt();
+    let card = |pn: Panel, fade: f32, shadow: f32| {
+        let m = mid(&pn);
+        Billboard {
+            fade, z: v.to_cam(m[0], m[1], m[2])[2], world: m, height: len(pn.down), sprite: look.sprite.clone(), flip: false,
+            nearest: look.nearest, id: id::PROP, emissive: look.emissive, shadow, own_light: None, source: look.source, realm: ctx.realm,
+            panel: Some(pn), tube: None, sway: 0.0, tint: look.tint, wind: CardWind::default(),
+        }
+    };
+    for (main, pn) in faces {
+        if ctx.cut_away(mid(&pn)[0]) { continue; }
+        bills.push(card(pn, 0.0, if main { look.shadow } else { 0.0 }));
+    }
+    for pn in cut { bills.push(card(pn, 1.0 - v.side_k, 0.0)); }
+}
+
+/// A face that runs across `x = xc` cut there in two, each showing its own part of the picture,
+/// so the part on the camera's side of a side view's cut can go while the rest stays.
+fn split_at_x(pn: Panel, xc: f32) -> Vec<Panel> {
+    let ax = pn.across[0];
+    if ax.abs() < 1e-6 { return vec![pn]; }
+    let s = (xc - pn.tl[0]) / ax;
+    if s <= 0.01 || s >= 0.99 { return vec![pn]; }
+    let m = pn.map.unwrap_or([0.0, 1.0, 0.0, 0.0, 0.0, 1.0]);
+    let a = pn.across;
+    vec![
+        Panel { across: [a[0] * s, a[1] * s, a[2] * s], map: Some([m[0], m[1] * s, m[2], m[3], m[4] * s, m[5]]), ..pn },
+        Panel {
+            tl: [pn.tl[0] + a[0] * s, pn.tl[1] + a[1] * s, pn.tl[2] + a[2] * s], across: [a[0] * (1.0 - s), a[1] * (1.0 - s), a[2] * (1.0 - s)],
+            map: Some([m[0] + m[1] * s, m[1] * (1.0 - s), m[2], m[3] + m[4] * s, m[4] * (1.0 - s), m[5]]), ..pn
+        },
+    ]
+}
+
+/// Where (u, v) on a panel falls on its picture (`Panel::map`).
+#[inline]
+fn map_uv(m: &[f32; 6], u: f32, v: f32) -> (f32, f32) { (m[0] + m[1] * u + m[2] * v, m[3] + m[4] * u + m[5] * v) }
 
 /// The wind in a card's picture: the base and trunk stay where they are while the rest shifts by
 /// a field of waves running downwind. Lengths are shares of the card's width (`v`, of its
@@ -438,7 +626,7 @@ struct Ctx<'a> {
     /// Wires of strings of lights: close points along them (path space).
     wire_pts: Vec<[f32; 3]>,
     /// Waterfalls in view: (x of the water's middle, top height, d, width, index into scene.waterfalls).
-    falls: Vec<([f32; 3], f32, usize)>,
+    falls: Vec<Fall>,
     fog: Option<([f32; 3], f32)>,
     /// Colour fog fades to (also used by fog banks when the even fog is off).
     fog_col: [f32; 3],
@@ -2251,31 +2439,83 @@ impl WorldRenderer {
                     let x = sign * (ctx.view.path_half_width(d) + wf.lateral + 0.5 * wf.width);
                     if ctx.cut_away(x - sign * 0.5 * wf.width) || ctx.view.depth_of(x, d) < NEAR { continue; }
                     let h = wf.height.max(0.5);
-                    let sprite = self.sprites.cliff(wf.rock, hash(wf.seed ^ 0xC2, k.rem_euclid(n)) as u32);
-                    let base = -0.05;
-                    // The rock face stands just behind the water, as the camera sees it.
-                    let (rx, rd) = ctx.view.toward_camera(x, d, -0.3);
-                    let z = ctx.view.to_cam(rx, base, rd)[2];
-                    bills.push(Billboard {
-                        fade: 0.0, z, world: [rx, base, rd], height: h * 1.25, sprite, sway: 0.0, tint: [1.0; 3], wind: CardWind::default(),
-                        flip: sign > 0.0, nearest: false, id: id::PROP, emissive: 0.0, shadow: 0.0, own_light: None, source: 0, realm: ctx.realm, panel: None, tube: None,
-                    });
-                    ctx.falls.push(([x, h * 1.05, d], wf.width, wi));
+                    let variant = hash(wf.seed ^ 0xC2, k.rem_euclid(n)) as u32;
+                    // The way it faces (`facing`), and the way its face runs, left to right as seen.
+                    let th = wf.facing.clamp(0.0, 90.0).to_radians();
+                    let (out, along) = ([-sign * th.sin(), -th.cos()], [th.cos(), -sign * th.sin()]);
+                    let (hc, wc, depth) = (1.25 * h, if wf.cliff_width > 0.0 { wf.cliff_width } else { h }, wf.cliff_depth.clamp(0.5, 40.0));
+                    let at = |p: [f32; 2], s: f32, m: f32| [p[0] + s * along[0] + m * out[0], p[1] + s * along[1] + m * out[1]];
+                    // The rock it pours from: its face just behind the water, running `cliff_depth`
+                    // back, built solid from its picture and standing where it is.
+                    let face = at([x, d], 0.0, -0.3);
+                    let rock = |r: &mut Self, ctx: &Ctx, bills: &mut Vec<Billboard>, foot: [f32; 2], w: f32, ht: f32, deep: f32, variant: u32| {
+                        let sprite = r.sprites.cliff(wf.rock, variant);
+                        let outline = r.outline(&sprite, w, ht, 0.25);
+                        let tl = at(foot, -0.5 * w, 0.0);
+                        // (Painted to be lit face on; turned from the sun, its rock would go black.)
+                        let look = SolidLook { sprite, nearest: false, emissive: 0.0, shadow: 0.5, source: 0, tint: [1.3; 3], inset: (0.12 * outline.cols as f32).round() };
+                        solid_billboards(ctx, &look, &outline, [tl[0], ht - 0.05, tl[1]], [w * along[0], 0.0, w * along[1]], [0.0, -ht, 0.0], [-deep * out[0], 0.0, -deep * out[1]], bills);
+                    };
+                    rock(self, ctx, bills, face, wc, hc, depth, variant);
+                    // Its lip: the foot of the notch at the top of its picture.
+                    let lip = hc * (1.0 - CLIFF_LIP) - 0.05;
+                    // A higher shoulder of the mountain behind, a cascade coming down from it.
+                    let mut source = at(face, 0.0, -0.95 * depth);
+                    if wf.ridge > 0.0 {
+                        let (h2, back) = (hc + wf.ridge, at(face, 0.0, -0.55 * depth));
+                        rock(self, ctx, bills, back, 1.5 * wc, h2, depth, variant.wrapping_add(3));
+                        let foot = at(back, 0.0, 0.3);
+                        ctx.falls.push(Fall { foot, base: lip, top: h2 * (1.0 - CLIFF_LIP) - 0.07, width: 0.55 * wf.width, wi, along, out });
+                        source = back;
+                    }
+                    // The stream over the top, from there to the lip.
+                    if wf.stream {
+                        let ws = 0.9 * wf.width;
+                        let tl = at(source, -0.5 * ws, 0.0);
+                        let run = [face[0] - source[0], 0.0, face[1] - source[1]];
+                        let pn = Panel { tl: [tl[0], lip + 0.03, tl[1]], across: [ws * along[0], 0.0, ws * along[1]], down: run, map: None, solid: false };
+                        let m = [tl[0] + 0.5 * (pn.across[0] + run[0]), lip + 0.03, tl[1] + 0.5 * (pn.across[2] + run[2])];
+                        bills.push(Billboard {
+                            fade: 0.0, z: ctx.view.to_cam(m[0], m[1], m[2])[2], world: m, height: (run[0] * run[0] + run[2] * run[2]).sqrt(), sprite: self.sprites.stream(wf.water, wf.rock),
+                            sway: 0.0, tint: [1.0; 3], wind: CardWind::default(), flip: false, nearest: false, id: id::PROP, emissive: 0.0, shadow: 0.0, own_light: None,
+                            source: 0, realm: ctx.realm, panel: Some(pn), tube: None,
+                        });
+                    }
+                    // The pool it falls into, spreading out from the foot of the rock.
+                    if wf.pool > 0.0 {
+                        let (rp, ry) = (wf.pool.min(4.0) * (1.3 * wf.width).max(1.6), wf.pool.min(4.0) * (0.9 * wf.width).max(1.1));
+                        let tl = at(face, -rp, 0.0);
+                        let pn = Panel { tl: [tl[0], 0.03, tl[1]], across: [2.0 * rp * along[0], 0.0, 2.0 * rp * along[1]], down: [2.0 * ry * out[0], 0.0, 2.0 * ry * out[1]], map: None, solid: false };
+                        let c = at(face, 0.0, ry);
+                        bills.push(Billboard {
+                            fade: 0.0, z: ctx.view.to_cam(c[0], 0.03, c[1])[2], world: [c[0], 0.03, c[1]], height: 2.0 * ry, sprite: self.sprites.pool(wf.water, wf.rock, variant),
+                            sway: 0.0, tint: [1.0; 3], wind: CardWind::default(), flip: false, nearest: false, id: id::PROP, emissive: 0.0, shadow: 0.0, own_light: None,
+                            source: 0, realm: ctx.realm, panel: Some(pn), tube: None,
+                        });
+                    }
+                    ctx.falls.push(Fall { foot: [x, d], base: 0.0, top: lip - 0.02, width: wf.width, wi, along, out });
                 }
             }
         }
     }
 
-    /// Structures spanning the path. They are flat cards across it, which is exactly right for an
-    /// arch or a gate seen by a camera that always looks down the path.
+    /// A picture's outline for building it solid (`solid_faces`), `wide` x `high` metres, in cells
+    /// about `cell` metres (6 cm finds a banner's poles and a portcullis's bars; a rock needs less).
+    /// Kept for the next frame.
+    fn outline(&mut self, sprite: &Arc<Sprite>, wide: f32, high: f32, cell: f32) -> Arc<Outline> {
+        let (cols, rows) = (((wide / cell).round() as usize).clamp(8, 96), ((high / cell).round() as usize).clamp(8, 120));
+        let key = (Arc::as_ptr(sprite) as usize, cols, rows);
+        if self.outlines.len() > 128 { self.outlines.clear(); }
+        self.outlines.entry(key).or_insert_with(|| (sprite.clone(), Arc::new(Outline::of(sprite, cols, rows)))).1.clone()
+    }
+
+    /// Structures spanning the path, each built solid from its picture where it stands.
     fn collect_set_pieces(&mut self, ctx: &mut Ctx, opts: &RenderOptions, bills: &mut Vec<Billboard>) {
         let scene = ctx.scene;
         let far = ctx.far.min(150.0);
         for (li, p) in scene.set_pieces.iter().enumerate().filter(|(_, p)| p.enabled) {
             let sp = snap_to_loop(p.spacing.max(1.0), ctx.loop_len);
             let n = (ctx.loop_len / sp).round() as i64;
-            // (A card turned to the camera: seen from the side it stands face on where the path
-            // goes through it, as a side-scroller shows a gate, rather than edge on.)
             // Portals light the path a little before they come into view.
             let (lo, hi) = ctx.span(-6.0, far);
             let k_lo = ((ctx.scroll + lo - p.offset) / sp).ceil() as i64;
@@ -2311,13 +2551,16 @@ impl WorldRenderer {
                     let (sp, _, h) = self.sprites.set_piece(p.kind, p.tint, p.accent, ow, oh, variant);
                     (sp, h)
                 };
-                let z = ctx.view.to_cam(0.0, 0.0, d)[2];
-                // Banners stir in the wind; arches and gates stand firm.
-                let sway = if p.kind == SetPieceKind::Banners { ctx.wx.sway_at(hf(seed ^ 0x5E8, k.rem_euclid(n)) * TAU) * 0.05 * height } else { 0.0 };
-                bills.push(Billboard {
-                    fade: 0.0, z, world: [0.0, 0.0, d], height, sprite, flip: false, nearest: p.sprite.pixelated, id: id::PROP,
-                    emissive: if p.kind == SetPieceKind::Portal { 0.9 } else { 0.0 },
-                    shadow: p.shadow.clamp(0.0, 1.0), own_light: None, source: PICK_SET_PIECES | li as u16, realm: ctx.realm, panel: None, tube: None, sway, tint: [1.0; 3], wind: CardWind::default() });
+                // Built solid from its picture, standing across the path where it is, so seen from
+                // any angle it has its piers' sides, its top and the underside of its arch.
+                let depth = (if p.depth > 0.0 { p.depth } else { p.kind.depth() }).clamp(0.02, 12.0);
+                let wide = height * sprite.aspect;
+                let outline = self.outline(&sprite, wide, height, 0.06);
+                let look = SolidLook {
+                    sprite, nearest: p.sprite.pixelated, emissive: if p.kind == SetPieceKind::Portal { 0.9 } else { 0.0 },
+                    shadow: p.shadow.clamp(0.0, 1.0), source: PICK_SET_PIECES | li as u16, tint: [1.0; 3], inset: 0.0,
+                };
+                solid_billboards(ctx, &look, &outline, [-0.5 * wide, height, d - 0.5 * depth], [wide, 0.0, 0.0], [0.0, -height, 0.0], [0.0, 0.0, depth], bills);
             }
         }
     }
@@ -2510,17 +2753,17 @@ impl WorldRenderer {
                         let wide = height * sprite.aspect;
                         let panel = stands.then(|| {
                             let (o, a) = (spin(0.0, sign * 0.5 * wide), spin(0.0, -sign * wide));
-                            Panel { tl: [x + o[0], base + height, d + o[1]], across: [a[0], 0.0, a[1]], down: [0.0, -height, 0.0], strip: None }
+                            Panel { tl: [x + o[0], base + height, d + o[1]], across: [a[0], 0.0, a[1]], down: [0.0, -height, 0.0], map: None, solid: false }
                         });
                         let shadow = if p.shadow && !hanging && !floating { p.shadow_opacity.clamp(0.0, 1.0) } else { 0.0 };
                         let source = PICK_PROPS | li as u16;
-                        let face = |sprite: Arc<Sprite>, tl: [f32; 3], across: [f32; 3], down: [f32; 3], strip: Option<f32>| {
+                        let face = |sprite: Arc<Sprite>, tl: [f32; 3], across: [f32; 3], down: [f32; 3], map: Option<[f32; 6]>| {
                             let mid = [tl[0] + 0.5 * (across[0] + down[0]), tl[1] + 0.5 * (across[1] + down[1]), tl[2] + 0.5 * (across[2] + down[2])];
                             let len = |a: [f32; 3]| (a[0] * a[0] + a[1] * a[1] + a[2] * a[2]).sqrt();
                             Billboard {
                                 fade: 0.0, z: ctx.view.to_cam(mid[0], mid[1], mid[2])[2], world: mid, height: len(down), sprite, sway: 0.0, tint, wind: CardWind::default(), flip: false,
                                 nearest: look.pixelated, id: id::PROP, emissive: look.glow, shadow, own_light, source, realm: ctx.realm,
-                                panel: Some(Panel { tl, across, down, strip }), tube: None,
+                                panel: Some(Panel { tl, across, down, map, solid: false }), tube: None,
                             }
                         };
                         // The rest of it: its own faces, placed from its space (x across its front, y up,
@@ -2557,7 +2800,7 @@ impl WorldRenderer {
                                     let strip = if flip { 1.0 - strip } else { strip };
                                     let tl = [pn.tl[0] + end * pn.across[0], pn.tl[1], pn.tl[2] + end * pn.across[2]];
                                     let back = spin(sign * depth, 0.0);
-                                    bills.push(face(sprite.clone(), tl, [back[0], 0.0, back[1]], pn.down, Some(strip)));
+                                    bills.push(face(sprite.clone(), tl, [back[0], 0.0, back[1]], pn.down, Panel::strip(strip)));
                                 }
                             }
                         }
@@ -3692,7 +3935,7 @@ fn gpu_geom_input(ctx: &Ctx, prepared: &[raster::Prepared], bills: &[Billboard],
     let bits = |v: usize| f32::from_bits(v as u32);
     let mut cboxes = Vec::with_capacity(list.len());
     let casters: Vec<CasterIn> = list.iter().map(|c| {
-        let mut f = [0.0f32; 40];
+        let mut f = [0.0f32; 48];
         (f[0], f[1], f[2], f[3], f[4], f[5], f[6]) = (c.foot[0], c.foot[1], c.axis[0], c.axis[1], c.ra, c.shadow, c.rb);
         let (mut x0, mut y0, mut x1, mut y1) = (i64::MAX, i64::MAX, i64::MIN, i64::MIN);
         let mut grow = |r: (usize, usize, usize, usize)| { x0 = x0.min(r.0 as i64); y0 = y0.min(r.1 as i64); x1 = x1.max(r.2 as i64); y1 = y1.max(r.3 as i64); };
@@ -3702,7 +3945,8 @@ fn gpu_geom_input(ctx: &Ctx, prepared: &[raster::Prepared], bills: &[Billboard],
         let sprite = match &c.pic {
             Pic::Sprite(b) => {
                 f[7] = f32::from_bits(b.flip as u32);
-                f[18] = b.panel.and_then(|p| p.strip).unwrap_or(-1.0);
+                f[18] = b.panel.map_or(-1.0, |p| p.strip_code());
+                if let Some(m) = b.panel.and_then(|p| p.map) { f[40..46].copy_from_slice(&m); }
                 Some((b.sprite.clone(), b.sprite.lod(192.0)))
             }
             Pic::Fence(fc) => {
@@ -4659,7 +4903,8 @@ fn prop_shadows(ctx: &Ctx, bills: &[Billboard], gbuf: &[GPixel], sun_mask: &mut 
                     if !(0.0..1.0).contains(&u) || !(0.0..1.0).contains(&vv) { continue; }
                     let a = match &c.pic {
                         Pic::Sprite(b) => {
-                            if let Some(s) = b.panel.and_then(|p| p.strip) { u = s; } else if b.flip { u = 1.0 - u; }
+                            let mut vv = vv;
+                            if let Some(m) = b.panel.and_then(|p| p.map) { (u, vv) = map_uv(&m, u, vv); } else if b.flip { u = 1.0 - u; }
                             let mut a = b.sprite.sample(u, vv, 192.0, false)[3];
                             // A painted mask says which parts are solid: a flame or a pane of glass casts nothing.
                             if b.sprite.casts { if let Some(gl) = &b.sprite.glow { a *= gl.sample(u, vv, 192.0, false)[1]; } }
@@ -5374,7 +5619,7 @@ struct Card<'a> {
     /// A card standing in the world (`Billboard::panel`): pixel (X, Y) to its picture is
     /// u = (h0 X + h1 Y + h2) / w, v = (h3 X + h4 Y + h5) / w with w = h6 X + h7 Y + h8, and its
     /// depth there is 1 / (q0 X + q1 Y + q2); `strip` (or below 0) is the column an end wall shows.
-    pan: Option<([f32; 9], [f32; 3], f32)>,
+    pan: Option<([f32; 9], [f32; 3], f32, [f32; 6])>,
     /// A cylinder (`Billboard::tube`), drawn by `tube_at`.
     tube: Option<TubeCard>,
 }
@@ -5585,7 +5830,7 @@ impl<'a> Card<'a> {
         let (fog_mul, fog_add) = ctx.fog_affine(z);
         Some(Card {
             b, w, sx: 0.0, wp: 1.0, hp, sy_top: 0.0, sway_px: 0.0, x0, x1, y0, y1, light, snow, z, nearest: b.nearest || crisp,
-            fog: (plain, ctx.fog_t(z), ctx.fog_col, fog_mul, fog_add), pan: Some((hm, q, pn.strip.unwrap_or(-1.0))), tube: None,
+            fog: (plain, ctx.fog_t(z), ctx.fog_col, fog_mul, fog_add), pan: Some((hm, q, pn.strip_code(), pn.map.unwrap_or([0.0; 6]))), tube: None,
         })
     }
 
@@ -5604,6 +5849,7 @@ impl<'a> Card<'a> {
             w_amp: b.wind.amp, w_v: b.wind.v, w_lean: b.wind.lean, w_t1: b.wind.t1, w_t2: b.wind.t2,
             w_c0: b.wind.c0, w_c1: b.wind.c1, w_trunk: b.wind.trunk, w_foot: b.wind.foot, w_kv: b.wind.kv,
             pan: self.pan.is_some() as u32, ph: self.pan.map_or([0.0; 9], |p| p.0), pq: self.pan.map_or([0.0; 3], |p| p.1), strip: self.pan.map_or(-1.0, |p| p.2),
+            mp: self.pan.map_or([0.0; 6], |p| p.3),
             fade: b.fade,
             ..Default::default()
         };
@@ -5645,7 +5891,7 @@ impl<'a> Card<'a> {
             }
             return;
         }
-        if let Some((hm, q, strip)) = self.pan {
+        if let Some((hm, q, strip, mp)) = self.pan {
             for py in ya..=yb {
                 let fy = py as f32 + 0.5;
                 for px in self.x0..=self.x1 {
@@ -5659,11 +5905,11 @@ impl<'a> Card<'a> {
                     let wd = hm[6] * fx + hm[7] * fy + hm[8];
                     if wd.abs() < 1e-12 { continue; }
                     let mut u = (hm[0] * fx + hm[1] * fy + hm[2]) / wd;
-                    let vv = (hm[3] * fx + hm[4] * fy + hm[5]) / wd;
+                    let mut vv = (hm[3] * fx + hm[4] * fy + hm[5]) / wd;
                     if !(0.0..1.0).contains(&u) || !(0.0..1.0).contains(&vv) { continue; }
-                    if strip >= 0.0 { u = strip; } else if b.flip { u = 1.0 - u; }
+                    if strip >= 0.0 { u = strip; } else if strip < -1.5 { (u, vv) = map_uv(&mp, u, vv); } else if b.flip { u = 1.0 - u; }
                     let s = b.sprite.sample(u, vv, self.hp, self.nearest);
-                    let a = if self.nearest { if s[3] >= 0.5 { 1.0 } else { 0.0 } } else { s[3] };
+                    let a = if strip < -2.5 { 1.0 } else if self.nearest { if s[3] >= 0.5 { 1.0 } else { 0.0 } } else { s[3] };
                     if a < 0.02 { continue; }
                     let glow = b.emissive + b.sprite.glow.as_ref().map_or(0.0, |g| g.sample(u, vv, self.hp, self.nearest)[0]);
                     let mut lit = add3(mul3([s[0], s[1], s[2]], self.light), scale3([s[0], s[1], s[2]], glow));
@@ -5776,20 +6022,21 @@ fn draw_falls(ctx: &Ctx, out: &mut Vec<Splat>) {
         if x0 > x1 || y0 > y1 { return; }
         out.push(Splat { z: c[2], gate: None, shape: Shape::Wisp { sx, sy, rx, ry, x0, x1, y0, y1, lit, alpha } });
     };
-    for (at, width, wi) in &ctx.falls {
-        let wf = &ctx.scene.waterfalls[*wi];
-        let (x0, d) = ctx.view.toward_camera(at[0], at[2], 0.05);
-        let top = at[1];
-        let width = *width;
-        let lit = add3(ctx.light_at(x0, 0.5 * top, d, None, 0, 1.0), [0.1; 3]);
+    for f in &ctx.falls {
+        let wf = &ctx.scene.waterfalls[f.wi];
+        let (x0, d) = ctx.view.toward_camera(f.foot[0], f.foot[1], 0.05);
+        // Heights from where it lands (`base`): the ground, or the rock below a higher shoulder.
+        let (base, top, width) = (f.base, (f.top - f.base).max(0.2), f.width);
+        let lit = add3(ctx.light_at(x0, base + 0.5 * top, d, None, 0, 1.0), [0.1; 3]);
         // Deep water is the water's colour; broken into foam it is nearly white.
         let dz = v.depth_of(x0, d);
         let water = ctx.apply_fog(mul3(rgb_lin(wf.water), lit), dz);
         let white = ctx.apply_fog(mul3(mix3(rgb_lin(wf.water), [1.0; 3], 0.7), lit), dz);
         let glass = ctx.apply_fog(mul3(scale3(rgb_lin(wf.water), 0.55), lit), dz);
         let ppm = v.px_per_m(dz.max(NEAR));
-        // A point `m` metres in front of the fall (toward the camera, whichever way it looks).
-        let near = |x: f32, y: f32, m: f32| { let (x, d) = v.toward_camera(x, d, m); v.to_cam(x, y, d) };
+        // A point `s` metres along its face and `y` up from where it lands, brought `m` metres
+        // toward the camera (whichever way it looks).
+        let near = |s: f32, y: f32, m: f32| { let (x, d) = v.toward_camera(x0 + s * f.along[0], d + s * f.along[1], m); v.to_cam(x, base + y, d) };
         let h = |k: u32, i: i64| hf(wf.seed ^ k, i);
         // The curtain, water drawn pixel by pixel (splat::fall_at): it speeds up as it falls
         // (from 1 m/s over the lip), so its noise is carried down in falling time, a whole
@@ -5799,15 +6046,19 @@ fn draw_falls(ctx: &Ctx, out: &mut Vec<Splat>) {
         let n_of = |cells: f32| ((cells * loop_seconds / tau.max(0.05)).round().clamp(1.0, 65535.0)) as u32;
         let (n1, n2) = (n_of(7.0), n_of(15.0));
         let ky = [n1 as f32 * tau / loop_seconds, n2 as f32 * tau / loop_seconds];
-        let (ct, cf) = (near(x0, top, -0.02), near(x0, 0.0, -0.02));
+        let (ct, cf) = (near(0.0, top, -0.02), near(0.0, 0.0, -0.02));
+        // As wide as its face is seen, turned as it is (and never thinner than the water is thick).
+        let half = |y: f32| match (v.project(near(-0.5 * width, y, -0.02)), v.project(near(0.5 * width, y, -0.02))) {
+            (Some(a), Some(b)) => (0.5 * (b[0] - a[0]).abs()).max(0.12 * ppm),
+            _ => 0.5 * width * ppm,
+        };
         if ct[2] >= NEAR {
             if let (Some(pt), Some(pf)) = (v.project(ct), v.project(cf)) {
                 let k = splat::FallK {
                     seed: wf.seed.wrapping_mul(0x2545_F491) ^ 0xFA11, ky, n: [n1, n2], t: ctx.tphase.rem_euclid(1.0),
                     deep: scale3(glass, 1.1), foam: scale3(white, 1.12), strength: 1.0, kk: 2.0 * g * top,
                 };
-                let hw = 0.5 * width * ppm;
-                out.push(Splat { z: ct[2], gate: None, shape: Shape::Fall { cx: pt[0], top: pt[1], foot: pf[1], hw_top: hw, hw_foot: hw * 1.18, k } });
+                out.push(Splat { z: ct[2], gate: None, shape: Shape::Fall { cx: pt[0], top: pt[1], foot: pf[1], hw_top: half(top), hw_foot: half(0.0) * 1.18, k } });
             }
         }
         // Drops flung from its frayed edges low down, longer the faster they fall.
@@ -5816,7 +6067,7 @@ fn draw_falls(ctx: &Ctx, out: &mut Vec<Splat>) {
             let p = (cyc * ctx.tphase + h(0xD1, i)).rem_euclid(1.0);
             let side = if h(0xD2, i) < 0.5 { -1.0 } else { 1.0 };
             let y = top * (0.55 - 0.55 * p);
-            let x = x0 + side * width * (0.5 + 0.1 * h(0xD3, i) + 0.12 * p);
+            let x = side * width * (0.5 + 0.1 * h(0xD3, i) + 0.12 * p);
             let len = 0.08 + 0.35 * p;
             let (c0, c1) = (near(x, y + len, 0.05), near(x, y, 0.05));
             if c0[2] < NEAR { continue; }
@@ -5828,7 +6079,7 @@ fn draw_falls(ctx: &Ctx, out: &mut Vec<Splat>) {
         for i in 0..((width * 14.0).round() as i64).clamp(10, 70) {
             let p = (crown * ctx.tphase + h(0xB1, i)).rem_euclid(1.0);
             let (vx, vy) = ((h(0xB2, i) - 0.5) * 2.2, 1.0 + 1.6 * h(0xB3, i));
-            let x = x0 + (h(0xB4, i) - 0.5) * width + vx * p;
+            let x = (h(0xB4, i) - 0.5) * width + vx * p;
             let y = 0.1 + vy * p - 2.4 * p * p;
             if y < 0.0 { continue; }
             puff(out, near(x, y, 0.3 + 0.4 * h(0xB5, i)), ppm * (0.05 + 0.06 * h(0xB6, i)) * (1.0 - 0.5 * p), 1.0, scale3(white, 1.2), 0.75 * (std::f32::consts::PI * p).sin());
@@ -5836,18 +6087,18 @@ fn draw_falls(ctx: &Ctx, out: &mut Vec<Splat>) {
         // The foot: the pool, white water churning where the fall strikes it, and the plume of
         // spray billowing up and drifting off.
         let spray = wf.spray.clamp(0.0, 1.0);
-        puff(out, near(x0, 0.02, 0.7), ppm * width * 1.25, 0.24, mix3(water, white, 0.3), 0.8);
+        puff(out, near(0.0, 0.02, 0.7), ppm * width * 1.25, 0.24, mix3(water, white, 0.3), 0.8);
         let n_churn = ((width * 10.0).round() as i64).clamp(8, 60);
         let pc = cycles(0.8, loop_seconds).max(1.0);
         for i in 0..n_churn {
             let p = (pc * ctx.tphase + h(0xC1, i)).rem_euclid(1.0);
-            let x = x0 + (h(0xC2, i) - 0.5) * width * 1.25;
+            let x = (h(0xC2, i) - 0.5) * width * 1.25;
             let y = 0.04 + 0.5 * (p * (1.0 - p)) * 4.0 * h(0xC3, i);
             puff(out, near(x, y, 0.2 + 0.3 * h(0xC5, i)), ppm * width * (0.14 + 0.2 * h(0xC4, i)), 0.75, scale3(white, 1.2), 0.85 * (1.0 - p) * (p / 0.12).min(1.0));
         }
         // Where the curtain strikes the pool, a band of white water.
-        if let (Some(l), Some(r)) = (v.project(near(x0 - 0.62 * width, 0.12, 0.2)), v.project(near(x0 + 0.62 * width, 0.12, 0.2))) {
-            let z = near(x0, 0.12, 0.2)[2];
+        if let (Some(l), Some(r)) = (v.project(near(-0.62 * width, 0.12, 0.2)), v.project(near(0.62 * width, 0.12, 0.2))) {
+            let z = near(0.0, 0.12, 0.2)[2];
             if z >= NEAR { splat::streak(out, z, (l[0], l[1]), (r[0], r[1]), scale3(white, 1.15), 0.7, (0.28 * ppm).max(1.0)); }
         }
         let n_puff = (30.0 * spray).round() as i64;
@@ -5855,14 +6106,14 @@ fn draw_falls(ctx: &Ctx, out: &mut Vec<Splat>) {
         for i in 0..n_puff {
             let p = (sc * ctx.tphase + h(0xF5, i)).rem_euclid(1.0);
             let drift = ctx.wx.wind * 0.05 * p * top;
-            let x = x0 + (h(0xF6, i) - 0.5) * width * (1.0 + 1.8 * p) + drift;
+            let x = (h(0xF6, i) - 0.5) * width * (1.0 + 1.8 * p) + drift;
             let y = 0.2 + top * 0.6 * p * (0.4 + 0.6 * h(0xF7, i));
             let c = near(x, y, 0.4 + 0.9 * p);
             let r = v.px_per_m(c[2].max(NEAR)) * width * (0.3 + 0.6 * p);
             puff(out, c, r, 0.8, ctx.apply_fog(mul3([0.93, 0.96, 1.0], lit), c[2]), 0.3 * spray * (1.0 - p) * (p / 0.1).min(1.0));
         }
         // A haze of fine mist over the lower part of the fall.
-        puff(out, near(x0, 0.3 * top, 0.5), ppm * width * 1.6, 0.9, ctx.apply_fog(mul3([0.9, 0.93, 0.97], lit), dz), 0.12 * spray);
+        puff(out, near(0.0, 0.3 * top, 0.5), ppm * width * 1.6, 0.9, ctx.apply_fog(mul3([0.9, 0.93, 0.97], lit), dz), 0.12 * spray);
         // A rainbow in the spray, low over the foot.
         if sun && wf.rainbow > 0.0 {
             let rad = width * 0.9;
@@ -5875,7 +6126,7 @@ fn draw_falls(ctx: &Ctx, out: &mut Vec<Splat>) {
                     let f = k as f32 / 23.0;
                     let an = std::f32::consts::PI * (0.2 + 0.6 * f);
                     let fade = (std::f32::consts::PI * f).sin();
-                    let (x, y) = (x0 + rr * an.cos(), 0.3 + rr * 0.8 * an.sin());
+                    let (x, y) = (rr * an.cos(), 0.3 + rr * 0.8 * an.sin());
                     let c = near(x, y, 0.4);
                     if c[2] < NEAR { continue; }
                     let Some([sx, sy]) = v.project(c) else { continue };
@@ -6781,6 +7032,73 @@ mod tests {
             let water: Vec<f32> = g.iter().filter(|p| p.id == id::CHASM).map(|p| p.y).collect();
             assert!(!water.is_empty(), "no water seen at {level} m");
             assert!(water.iter().all(|&y| (y + level).abs() < 1e-3), "water at {level} m drawn at {:?}", water.first());
+        }
+    }
+
+    /// A picture made solid has the faces its outline makes: an arch-shaped one (two legs under a
+    /// lintel) its face and back, the outer sides of its legs and their inner sides under the
+    /// lintel, its top, the lintel's underside and the legs' feet, each facing out of it.
+    #[test]
+    fn an_arch_made_solid_has_its_sides_top_and_underside() {
+        let (w, h) = (10usize, 10usize);
+        let data: Vec<[f32; 4]> = (0..w * h).map(|i| { let (x, y) = (i % w, i / w); if y < 3 || x < 3 || x >= 7 { [0.5, 0.5, 0.5, 1.0] } else { [0.0; 4] } }).collect();
+        let sprite = Sprite { levels: vec![(w, h, data)], aspect: 1.0, glow: None, casts: false, lamp: None };
+        let o = Outline::of(&sprite, 10, 10);
+        let faces = solid_faces(&o, [-1.0, 2.0, 0.0], [2.0, 0.0, 0.0], [0.0, -2.0, 0.0], [0.0, 0.0, 0.5], 0.0);
+        assert_eq!(faces.len(), 2 + 4 + 4, "front and back, four walls, a top, an underside and two feet");
+        let walls: Vec<_> = faces.iter().filter(|(f, _)| f.across[2] > 0.0).collect();
+        assert_eq!(walls.len(), 4);
+        assert!(walls.iter().all(|(f, _)| f.solid), "walls are solid");
+        // The legs' inner sides run from under the lintel to the ground, facing into the opening.
+        let inner: Vec<_> = walls.iter().filter(|(f, _)| f.tl[0].abs() < 0.9).collect();
+        assert_eq!(inner.len(), 2);
+        for (f, n) in &inner {
+            assert!((f.tl[1] - 1.4).abs() < 1e-4 && (f.down[1] + 1.4).abs() < 1e-4, "inner wall from 1.4 m down: {f:?}");
+            assert!(n[0] * f.tl[0] < 0.0, "an inner wall faces into the opening: {f:?} {n:?}");
+        }
+        // The underside of the lintel faces down; the top faces up.
+        let caps: Vec<_> = faces.iter().filter(|(f, _)| f.down[2] > 0.0).collect();
+        assert!(caps.iter().any(|(f, n)| (f.tl[1] - 1.4).abs() < 1e-4 && n[1] < 0.0), "the lintel's underside");
+        assert!(caps.iter().any(|(f, n)| (f.tl[1] - 2.0).abs() < 1e-4 && n[1] > 0.0), "its top");
+    }
+
+    /// A waterfall stands in the world, whichever way the camera looks: it pours from the lip of a
+    /// solid rock (and a cascade from the shoulder behind it onto that rock's top) into a pool lying
+    /// flat at its foot, and its water stands in front of the rock's face.
+    #[test]
+    fn a_waterfall_pours_from_its_rock_into_its_pool() {
+        let mut s = preset("Waterfall Glen");
+        s.waterfalls.truncate(1);
+        let wf = s.waterfalls[0].clone();
+        let mut r = WorldRenderer::default();
+        for (yaw, side) in [(0.0f32, 0.0f32), (-90.0, 5.0)] {
+            s.camera.yaw = yaw;
+            s.camera.side = side;
+            let scroll = wf.offset - if yaw == 0.0 { 12.0 } else { 0.0 };
+            let view = View::new(&s, 160, 90).at(scroll);
+            let (d_lo, d_hi, x_reach) = view.footprint(320.0, 8.0);
+            let mut ctx = Ctx {
+                scene: &s, view, loop_len: s.motion.loop_length, tphase: 0.0, scroll, far: 320.0, d_lo, d_hi, x_reach,
+                path_tex: r.textures.get(&s.path.material), verge_tex: r.textures.get(&s.verge.material),
+                wall_tex: r.textures.get(&s.walls.material), ceil_tex: r.textures.get(&s.ceiling.material),
+                path_tile: 1.0, verge_tile: 1.0, wall_tile: 1.0, ceil_tile: 1.0,
+                bridge: None, fork: None, deck_tex: r.textures.get(&s.path.bridge.deck), bottom_tex: r.textures.get(&s.verge.material),
+                deck_tile: 1.0, bottom_tile: 1.0, ambient: [0.0; 3],
+                sky_lights: vec![], lights: vec![], smokes: vec![], wire_pts: vec![], falls: vec![], fog: None, fog_col: [0.0; 3], void_lin: [0.0; 3], realm: 0, bounds: None, facade: None, opening: None, portal: None, front: None, verge_beyond: None, gain: 1.0, wx: weather::Wx::default(), water: None, cover: Vec::new(),
+            };
+            let mut bills = Vec::new();
+            r.collect_waterfalls(&mut ctx, &mut bills);
+            assert!(!bills.is_empty() && bills.iter().all(|b| b.panel.is_some()), "yaw {yaw}: drawn as faces standing in the world, not cards turned to the camera");
+            assert!(bills.iter().any(|b| b.panel.is_some_and(|p| p.solid)), "yaw {yaw}: its rock is solid");
+            let pool = bills.iter().filter_map(|b| b.panel).find(|p| p.across[1] == 0.0 && p.down[1] == 0.0 && p.tl[1] < 0.1);
+            assert!(pool.is_some(), "yaw {yaw}: a pool lying flat on the ground");
+            let (mains, cascades) = (ctx.falls.iter().filter(|f| f.base == 0.0).count(), ctx.falls.iter().filter(|f| f.base > 0.0).count());
+            assert!(mains > 0 && mains == cascades, "yaw {yaw}: each fall with its cascade down onto its rock ({mains}, {cascades})");
+            let (main, cascade) = (ctx.falls.iter().find(|f| f.base == 0.0).unwrap(), ctx.falls.iter().find(|f| f.base > 0.0).unwrap());
+            assert!(cascade.top > main.top && cascade.base > 0.5 * main.top, "yaw {yaw}: the cascade comes down from higher, onto the rock's top");
+            // Its face looks `facing` round from back down the path, toward the path.
+            let th = wf.facing.to_radians();
+            assert!((main.out[1] + th.cos()).abs() < 1e-4 && (main.out[0] - th.sin()).abs() < 1e-4, "yaw {yaw}: facing {:?}", main.out);
         }
     }
 

@@ -1578,6 +1578,56 @@ fn paint_cliff(tint: Rgb, variant: u32) -> Sprite {
 /// A neon sign: tubes bent into a border and a cocktail glass with an olive, on a dark board
 /// bolted out from the wall. The tubes are white (the fixture's colour tints them) and glow;
 /// the board and its brackets do not.
+/// The pool at a waterfall's foot, seen from above: deep water darkening to its middle, white
+/// water churned up along the side the fall strikes (the top), and a rim of stones and wet rock.
+fn paint_pool(water: Rgb, rock: Rgb, variant: u32) -> Sprite {
+    let (wl, rl) = (rgb_lin(water), rgb_lin(rock));
+    let mut r = Rng(variant.wrapping_mul(2_654_435_761).wrapping_add(0xB0) | 1);
+    let (w, h) = (240.0, 160.0);
+    let mut c = Canvas::new(w as usize, h as usize);
+    // The rim: stones of all sizes round the edge, lit on top, a dark wet line where they meet the water.
+    for i in 0..56 {
+        let a = i as f32 / 56.0 * std::f32::consts::TAU + r.range(-0.05, 0.05);
+        let (rx, ry) = (r.range(8.0, 17.0), r.range(6.0, 12.0));
+        let (cx, cy) = (120.0 + (106.0 - 0.5 * rx) * a.cos(), 80.0 + (70.0 - 0.5 * ry) * a.sin());
+        let k = r.range(0.7, 1.2);
+        c.ellipse(cx, cy, rx, ry, [rl[0] * k, rl[1] * k, rl[2] * k], 0.5);
+    }
+    // The water, deep in the middle: the fall's colour seen through depth, bluer and darker.
+    let deep = [wl[0] * 0.16, wl[1] * 0.3, wl[2] * 0.36];
+    c.ellipse(120.0, 80.0, 94.0, 60.0, mix(deep, wl, 0.25), 0.0);
+    c.stain(120.0, 86.0, 78.0, 46.0, 0.0, deep, 0.8);
+    c.stain(120.0, 90.0, 52.0, 28.0, 0.0, mul(deep, 0.5), 0.6);
+    // Light on the far side, ripples running out from where the water strikes.
+    for k in 0..5 {
+        let rr = 22.0 + 15.0 * k as f32;
+        c.stain(120.0, 34.0 + 0.35 * rr, rr, 0.55 * rr, 0.0, mul(wl, 0.75), 0.18);
+    }
+    // White water where the fall comes down, along the top edge.
+    for _ in 0..40 {
+        let (x, y) = (120.0 + r.range(-40.0, 40.0), 30.0 + r.range(-6.0, 14.0));
+        c.stain(x, y, r.range(6.0, 16.0), r.range(3.0, 8.0), 0.0, mix(wl, [1.0; 3], 0.75), 0.5);
+    }
+    c.finish()
+}
+
+/// The stream over a waterfall's top, running from the far end (the top of the picture) to the
+/// lip (its foot): water between darker wet banks, its flow drawn in long pale streaks.
+fn paint_stream(water: Rgb, rock: Rgb) -> Sprite {
+    let (wl, rl) = (rgb_lin(water), rgb_lin(rock));
+    let mut r = Rng(0x57AE_A3 | 1);
+    let (w, h) = (64.0, 256.0);
+    let mut c = Canvas::new(w as usize, h as usize);
+    c.poly(&[[0.0, 0.0], [w, 0.0], [w, h], [0.0, h]], mul(rl, 0.45), 0.0);
+    c.poly(&[[8.0, 0.0], [w - 8.0, 0.0], [w - 6.0, h], [6.0, h]], mul(wl, 0.45), 0.0);
+    for _ in 0..30 {
+        let x = r.range(12.0, w - 12.0);
+        let y0 = r.range(0.0, h);
+        c.line([x, y0], [x + r.range(-2.0, 2.0), y0 + r.range(20.0, 60.0)], r.range(1.0, 2.2), mix(wl, [1.0; 3], 0.4));
+    }
+    c.finish()
+}
+
 fn paint_neon() -> Sprite {
     let mut c = Canvas::new(160, 144);
     let mut g = Canvas::new(160, 144);
@@ -1935,6 +1985,20 @@ impl SpriteCache {
         let key = (0xC1, tint, variant % VARIANTS);
         if self.procedural.len() > 256 { self.procedural.clear(); }
         self.procedural.entry(key).or_insert_with(|| Arc::new(paint_cliff(tint, variant % VARIANTS))).clone()
+    }
+
+    /// The pool at a waterfall's foot (`paint_pool`).
+    pub fn pool(&mut self, water: Rgb, rock: Rgb, variant: u32) -> Arc<Sprite> {
+        let key = (0xB0, water, (rock[0] as u32) << 16 | (rock[1] as u32) << 8 | rock[2] as u32 | (variant % VARIANTS) << 24);
+        if self.procedural.len() > 256 { self.procedural.clear(); }
+        self.procedural.entry(key).or_insert_with(|| Arc::new(paint_pool(water, rock, variant % VARIANTS))).clone()
+    }
+
+    /// The stream over a waterfall's top (`paint_stream`).
+    pub fn stream(&mut self, water: Rgb, rock: Rgb) -> Arc<Sprite> {
+        let key = (0xB1, water, (rock[0] as u32) << 16 | (rock[1] as u32) << 8 | rock[2] as u32);
+        if self.procedural.len() > 256 { self.procedural.clear(); }
+        self.procedural.entry(key).or_insert_with(|| Arc::new(paint_stream(water, rock))).clone()
     }
 
     /// A whole rock for one floating in space (`PropLayer.float`): the ground rocks are domes with
