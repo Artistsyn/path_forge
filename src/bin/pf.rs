@@ -34,6 +34,8 @@
 //!   pf transition (--preset NAME | --scene FILE) (--left-preset NAME | --left-scene FILE) (--right-preset NAME | --right-scene FILE)
 //!              [--take left|right] [--angle DEG] [--approach M] [--frames 12] [--cols 6] [--scale 0.3] [-o sheet.png]
 //!   pf journey --file J.journey.json [--out FOLDER [--formats webp,...] [--entries N]]
+//!   pf splice  --clips intro.webp,loop.webp*3,transition.webp,next.webp*2 -o all.webp [--once] [--quality 0..100] [--fps 24]
+//!              join exported clips (gif, webp, png frame folders; `*N` plays one N times) into one gif or webp
 //!
 //! Projects and the skill
 //!   pf project --new FOLDER [--preset NAME]                      scenes/ assets/ kits/ exports/ and a first scene
@@ -153,7 +155,7 @@ fn parse_args() -> Result<Args, String> {
 }
 
 fn usage() -> String {
-    "usage: pf <presets|dump|render|sheet|gallery|styles|kit|schema|seam|bench|animcheck|animsheet|gifdiff|export|transition|journey|project|assets|pack|skill|parity|share|unshare> [--preset NAME | --scene FILE] [options]  (see src/bin/pf.rs)".into()
+    "usage: pf <presets|dump|render|sheet|gallery|styles|kit|schema|seam|bench|animcheck|animsheet|gifdiff|export|splice|transition|journey|project|assets|pack|skill|parity|share|unshare> [--preset NAME | --scene FILE] [options]  (see src/bin/pf.rs)".into()
 }
 
 fn norm(s: &str) -> String { s.to_lowercase().replace([' ', '_', '-'], "") }
@@ -738,6 +740,26 @@ fn cmd_export(args: &Args) -> Result<(), String> {
     Ok(())
 }
 
+/// `pf splice --clips A,B*3,C -o out.webp`: join clips into one animation, and say how each join
+/// steps next to the clips' own steps.
+fn cmd_splice(args: &Args) -> Result<(), String> {
+    use path_forge::splice::{splice, Clip, SpliceOptions};
+    let list = args.opts.get("clips").ok_or("splice needs --clips A,B*3,C (gif, webp, or png frame folders; *N plays one N times)")?;
+    let clips = list.split(',').filter(|c| !c.trim().is_empty()).map(Clip::parse).collect::<Result<Vec<_>, _>>()?;
+    let out = args.opts.get("o").or(args.opts.get("out")).ok_or("splice needs -o FILE.gif|FILE.webp")?;
+    let o = SpliceOptions {
+        looping: !args.opts.contains_key("once"),
+        webp_quality: args.opts.get("quality").map(|q| q.parse()).transpose().map_err(|_| "--quality: a number 0..100")?,
+        folder_fps: args.opts.get("fps").map(|f| f.parse()).transpose().map_err(|_| "--fps: a number")?.unwrap_or(24.0),
+    };
+    let r = splice(&clips, std::path::Path::new(out), &o)?;
+    let kb = std::fs::metadata(&r.file).map(|m| m.len() / 1024).unwrap_or(0);
+    println!("{}: {} frames, {:.2} s, {}x{} ({kb} KB){}", r.file.display(), r.frames, r.seconds, r.width, r.height, if o.looping { "" } else { ", plays once" });
+    for j in &r.joins { println!("  join {} -> {}: step {:.1} (clips step {:.1})", j.from, j.to, j.step, j.usual); }
+    for w in &r.warnings { println!("  warning: {w}"); }
+    Ok(())
+}
+
 /// Plan a transition (or a fork) between scenes, print what was chosen and why, and draw a
 /// contact sheet of the walk.
 fn cmd_transition(args: &Args) -> Result<(), String> {
@@ -965,6 +987,7 @@ fn main() -> ExitCode {
         "bench" => cmd_bench(&args),
         "gallery" => cmd_gallery(&args),
         "export" => cmd_export(&args),
+        "splice" => cmd_splice(&args),
 "gifdiff" => cmd_gifdiff(&args),
 "animcheck" => cmd_animcheck(&args),
 "styles" => cmd_styles(&args),

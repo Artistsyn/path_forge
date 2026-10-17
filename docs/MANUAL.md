@@ -578,6 +578,29 @@ back into the walk. Every junction matches exactly. `<name>_encounter.json` says
 each one: wait for the loop frame given as `start_frame`, play `stop` once, repeat `idle` until the
 fight ends, then play `go` and continue the loop from the frame it names.
 
+**Intro clips.** A scene with a swing in or flight in (`camera.moves.swing_in`, `fly_in`) exports
+its intro as a clip of its own that ends where the loop begins:
+
+```bash
+pf export --scene village.json -o exports --formats webp --clip intro
+```
+
+Play `<name>_intro` once, then the loop from its frame 0.
+
+**Splicing clips into one file.** To share a sequence, or play it where clips cannot be
+sequenced, join exported clips one after another (`*N` plays a clip N times):
+
+```bash
+pf splice --clips exports/village_intro.webp,exports/village.webp*2 -o village_intro.webp
+pf splice --clips forest.webp,forest_to_village.webp,village.webp*3 -o journey.gif --once
+```
+
+It reads gif, webp and folders of png frames (`--formats png`), writes a gif or a webp
+(`--quality` for webp, `--once` to play once instead of looping), and prints the colour step
+across each join next to the clips' own steps, warning where a join jumps (clips that were not
+exported to follow each other). GIFs joined into a gif keep their palettes and pixels exactly.
+MCP `pf_splice` does the same.
+
 ## 9. Transitions
 
 A transition walks from one scene into another in a single unbroken shot. Both worlds are drawn
@@ -851,7 +874,7 @@ look at it, and export it:
 | `pf_save_preset` | Keep a scene as a preset of your own. |
 | `pf_new_scene`, `pf_get_scene`, `pf_edit_scene` | Create, read and edit scene files (merge patches and pointer edits, validated, atomic, with a revision check). |
 | `pf_render`, `pf_contact_sheet`, `pf_compare`, `pf_analyze`, `pf_check_loop`, `pf_camera` | Look at and measure a scene. |
-| `pf_export` | Export (§6). |
+| `pf_export`, `pf_splice` | Export (§6); join exported clips into one animation (§8). |
 | `pf_kit`, `pf_import_sprite`, `pf_pack`, `pf_remix` | Kits, sprites, packing, variations. |
 | `pf_transition`, `pf_journey` | Plan and preview transitions and forks; read, write, preview and export journeys. |
 

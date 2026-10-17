@@ -283,6 +283,11 @@ Clips beyond the plain loop (`clip`):
   (`slow_m` braking distance, `start_frame` where the stop begins).
 - `"intro"`: the swing in or flight in played once, ending where the loop begins: the game plays
   it, then the loop from frame 0.
+
+To hand over one file (a trailer, a share, a sequence for a player that cannot chain clips):
+`pf_splice {"clips": ["exports/v_intro.webp", "exports/v.webp*2"], "out": "exports/v_all.webp"}`
+joins exported clips in order and reports each join's step (a warning means the clips were not
+exported to follow each other).
 - `"transition"` and `"fork"`: see section 7b. Design those with pf_transition, not pf_export.
   Between a scene looking down the path and a side-scroller the camera swings out of one view and
   into the other (`transition.swing`); give both scenes one canvas.

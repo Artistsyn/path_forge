@@ -265,6 +265,14 @@ pub fn tools() -> Vec<Value> {
                 "overwrite": {"type": "boolean"},
                 "scale": {"type": "number", "description": "Size of each image (default 0.3)."}
             }})), false),
+        tool("pf_splice", "Splice clips", "Join exported clips one after another into one animated gif or webp: an intro, a few loops, a transition and the next scene's loops, to share or to play where clips cannot be sequenced. PathForge's clips are made to join (an intro ends where its loop begins, a transition starts on one loop's frame 0 and ends where the next begins); the reply gives the colour step across each join next to the clips' own steps, and warns where a join jumps. GIFs joined into a gif keep their palettes and pixels exactly.",
+            json!({"type": "object", "properties": {
+                "clips": {"type": "array", "items": {"type": "string"}, "description": "In play order: .gif, .webp, or a folder of .png frames; \"loop.webp*3\" plays one three times. Relative paths resolve under the PathForge home folder."},
+                "out": {"type": "string", "description": "The file to write, .gif or .webp."},
+                "once": {"type": "boolean", "description": "Play once instead of looping forever (default false)."},
+                "webp_quality": {"type": "number", "description": "0..100, 100 lossless (default 90)."},
+                "fps": {"type": "number", "description": "Frame rate for png folders with no export metadata beside them (default 24)."}
+            }, "required": ["clips", "out"]}), false),
         tool("pf_transition", "Plan and preview a transition or fork", "Walk from this scene (path/preset/scene) into another and see it: the plan PathForge makes from the two scenes (what stands at the boundary: an open blend, a doorway, a cave mouth, a gate or a portal; how far ahead it shows; light through the opening; the eye's adaptation) with notes on why and warnings on what will not look right, plus a contact sheet of the walk. Give to_path or to_preset for a transition, or left_* and right_* for a fork where the player chooses (take: which branch the preview takes). Adjust with `transition` (Transition fields, e.g. {\"threshold\": \"CaveMouth\", \"approach_m\": 30}) or `fork` (ForkChoice fields). With `export` ({formats, out_dir, name, entries}) also writes the clips: a transition (entries > 1 writes clips starting at evenly spaced loop frames, so a game need not wait for frame 0), or a fork's approach plus one clip per branch, each with a .json saying how to play it.",
             with_source(json!({"properties": {
                 "to_path": {"type": "string"}, "to_preset": {"type": "string"},
@@ -553,6 +561,7 @@ impl Server {
             "pf_check_loop" => self.check_loop(args),
             "pf_camera" => self.camera(args),
             "pf_export" => self.export(args),
+            "pf_splice" => self.splice(args),
             "pf_kit" => self.kit(args),
             "pf_pack" => self.pack(args),
             "pf_remix" => self.remix(args),
@@ -1267,6 +1276,18 @@ impl Server {
         })))
     }
 
+    fn splice(&mut self, args: &Value) -> ToolResult {
+        use crate::splice::{splice, Clip, SpliceOptions};
+        let clips = args.get("clips").and_then(|v| v.as_array()).ok_or("clips: a list of files")?
+            .iter().map(|c| c.as_str().ok_or("clips: strings".to_string()).and_then(Clip::parse).map(|c| Clip { path: self.resolve(&c.path.to_string_lossy()), ..c }))
+            .collect::<Result<Vec<_>, _>>()?;
+        let out = self.resolve(string(args, "out").ok_or("out: the .gif or .webp to write")?);
+        let o = SpliceOptions { looping: !flag(args, "once", false), webp_quality: num(args, "webp_quality").map(|q| q as f32), folder_fps: num(args, "fps").unwrap_or(24.0) as f32 };
+        let r = splice(&clips, &out, &o)?;
+        let kb = std::fs::metadata(&r.file).map(|m| m.len() / 1024).unwrap_or(0);
+        Ok(Reply::json(&json!({"report": r, "kb": kb})))
+    }
+
     fn export(&mut self, args: &Value) -> ToolResult {
         let l = self.load(args)?;
         let formats = match args.get("formats").and_then(|v| v.as_array()) {
@@ -1586,7 +1607,7 @@ mod tests {
 
     #[test]
     fn read_only_tools_are_marked_and_writers_are_not() {
-        let writers = ["pf_new_scene", "pf_edit_scene", "pf_export", "pf_kit", "pf_import_sprite", "pf_pack", "pf_remix", "pf_transition", "pf_journey", "pf_save_preset"];
+        let writers = ["pf_new_scene", "pf_edit_scene", "pf_export", "pf_splice", "pf_kit", "pf_import_sprite", "pf_pack", "pf_remix", "pf_transition", "pf_journey", "pf_save_preset"];
         for t in tools() {
             let name = t["name"].as_str().unwrap();
             let ro = t["annotations"]["readOnlyHint"].as_bool().unwrap();

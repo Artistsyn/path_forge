@@ -11,6 +11,7 @@ pub mod mcp;
 pub mod skill;
 pub mod project;
 pub mod runtime;
+pub mod splice;
 pub mod journey;
 pub mod tiles;
 pub mod renderer;
