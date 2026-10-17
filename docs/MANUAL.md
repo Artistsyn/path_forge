@@ -212,7 +212,8 @@ props, lights, weather), the loop still closes, and the GPU draws the same frame
   across the path; the walk carries the world past from right to left, with true parallax (near
   things pass faster than far ones), seamlessly. Yaw 90 with `side` -5 looks the other way. A
   landscape canvas (854 x 480) suits it (preset Village Side Scroll). Seen from the side the
-  path's bends are straightened, set pieces that span the path are left out, and the wall,
+  path's bends are straightened, set pieces that span the path (arches, gates) stand face on
+  where the path goes through them, as a side-scroller shows a gate, and the wall,
   ceiling, fences, lights and props on the camera's side are cut away beyond `camera.cutaway`
   metres past the path's edge, so the walking lane stays in view. Raise `eye_height` and lower
   `horizon` to see more of the lane.

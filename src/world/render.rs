@@ -1306,11 +1306,7 @@ impl WorldRenderer {
             }
             if layers.props {
                 self.collect_props(&mut ctxs[r], &o, &mut bills);
-                let pieces = bills.len();
                 self.collect_set_pieces(&mut ctxs[r], &o, &mut bills);
-                // A swinging camera dissolves what spans the path.
-                let k = ctxs[r].view.side_k;
-                for b in &mut bills[pieces..] { b.fade = k; }
                 self.collect_waterfalls(&mut ctxs[r], &mut bills);
                 self.collect_companions(&mut ctxs[r], &o, &mut bills);
             }
@@ -2257,9 +2253,11 @@ impl WorldRenderer {
                     let h = wf.height.max(0.5);
                     let sprite = self.sprites.cliff(wf.rock, hash(wf.seed ^ 0xC2, k.rem_euclid(n)) as u32);
                     let base = -0.05;
-                    let z = ctx.view.to_cam(x, base, d + 0.3)[2];
+                    // The rock face stands just behind the water, as the camera sees it.
+                    let (rx, rd) = ctx.view.toward_camera(x, d, -0.3);
+                    let z = ctx.view.to_cam(rx, base, rd)[2];
                     bills.push(Billboard {
-                        fade: 0.0, z, world: [x, base, d + 0.3], height: h * 1.25, sprite, sway: 0.0, tint: [1.0; 3], wind: CardWind::default(),
+                        fade: 0.0, z, world: [rx, base, rd], height: h * 1.25, sprite, sway: 0.0, tint: [1.0; 3], wind: CardWind::default(),
                         flip: sign > 0.0, nearest: false, id: id::PROP, emissive: 0.0, shadow: 0.0, own_light: None, source: 0, realm: ctx.realm, panel: None, tube: None,
                     });
                     ctx.falls.push(([x, h * 1.05, d], wf.width, wi));
@@ -2276,9 +2274,8 @@ impl WorldRenderer {
         for (li, p) in scene.set_pieces.iter().enumerate().filter(|(_, p)| p.enabled) {
             let sp = snap_to_loop(p.spacing.max(1.0), ctx.loop_len);
             let n = (ctx.loop_len / sp).round() as i64;
-            // (Seen from the side, a piece spanning the path would stand between the camera and it:
-            // a camera swinging round dissolves it as it goes.)
-            if ctx.view.side_k >= 1.0 { continue; }
+            // (A card turned to the camera: seen from the side it stands face on where the path
+            // goes through it, as a side-scroller shows a gate, rather than edge on.)
             // Portals light the path a little before they come into view.
             let (lo, hi) = ctx.span(-6.0, far);
             let k_lo = ((ctx.scroll + lo - p.offset) / sp).ceil() as i64;
@@ -5781,7 +5778,8 @@ fn draw_falls(ctx: &Ctx, out: &mut Vec<Splat>) {
     };
     for (at, width, wi) in &ctx.falls {
         let wf = &ctx.scene.waterfalls[*wi];
-        let (x0, top, d) = (at[0], at[1], at[2] - 0.05);
+        let (x0, d) = ctx.view.toward_camera(at[0], at[2], 0.05);
+        let top = at[1];
         let width = *width;
         let lit = add3(ctx.light_at(x0, 0.5 * top, d, None, 0, 1.0), [0.1; 3]);
         // Deep water is the water's colour; broken into foam it is nearly white.
@@ -5789,7 +5787,9 @@ fn draw_falls(ctx: &Ctx, out: &mut Vec<Splat>) {
         let water = ctx.apply_fog(mul3(rgb_lin(wf.water), lit), dz);
         let white = ctx.apply_fog(mul3(mix3(rgb_lin(wf.water), [1.0; 3], 0.7), lit), dz);
         let glass = ctx.apply_fog(mul3(scale3(rgb_lin(wf.water), 0.55), lit), dz);
-        let ppm = v.px_per_m(d.max(NEAR));
+        let ppm = v.px_per_m(dz.max(NEAR));
+        // A point `m` metres in front of the fall (toward the camera, whichever way it looks).
+        let near = |x: f32, y: f32, m: f32| { let (x, d) = v.toward_camera(x, d, m); v.to_cam(x, y, d) };
         let h = |k: u32, i: i64| hf(wf.seed ^ k, i);
         // The curtain, water drawn pixel by pixel (splat::fall_at): it speeds up as it falls
         // (from 1 m/s over the lip), so its noise is carried down in falling time, a whole
@@ -5799,7 +5799,7 @@ fn draw_falls(ctx: &Ctx, out: &mut Vec<Splat>) {
         let n_of = |cells: f32| ((cells * loop_seconds / tau.max(0.05)).round().clamp(1.0, 65535.0)) as u32;
         let (n1, n2) = (n_of(7.0), n_of(15.0));
         let ky = [n1 as f32 * tau / loop_seconds, n2 as f32 * tau / loop_seconds];
-        let (ct, cf) = (v.to_cam(x0, top, d + 0.02), v.to_cam(x0, 0.0, d + 0.02));
+        let (ct, cf) = (near(x0, top, -0.02), near(x0, 0.0, -0.02));
         if ct[2] >= NEAR {
             if let (Some(pt), Some(pf)) = (v.project(ct), v.project(cf)) {
                 let k = splat::FallK {
@@ -5818,7 +5818,7 @@ fn draw_falls(ctx: &Ctx, out: &mut Vec<Splat>) {
             let y = top * (0.55 - 0.55 * p);
             let x = x0 + side * width * (0.5 + 0.1 * h(0xD3, i) + 0.12 * p);
             let len = 0.08 + 0.35 * p;
-            let (c0, c1) = (v.to_cam(x, y + len, d - 0.05), v.to_cam(x, y, d - 0.05));
+            let (c0, c1) = (near(x, y + len, 0.05), near(x, y, 0.05));
             if c0[2] < NEAR { continue; }
             let (Some(a0), Some(a1)) = (v.project(c0), v.project(c1)) else { continue };
             splat::streak(out, c0[2], (a0[0], a0[1]), (a1[0], a1[1]), white, 0.25 * (p / 0.1).min(1.0), (0.015 * ppm).max(0.5));
@@ -5831,23 +5831,23 @@ fn draw_falls(ctx: &Ctx, out: &mut Vec<Splat>) {
             let x = x0 + (h(0xB4, i) - 0.5) * width + vx * p;
             let y = 0.1 + vy * p - 2.4 * p * p;
             if y < 0.0 { continue; }
-            puff(out, v.to_cam(x, y, d - 0.3 - 0.4 * h(0xB5, i)), ppm * (0.05 + 0.06 * h(0xB6, i)) * (1.0 - 0.5 * p), 1.0, scale3(white, 1.2), 0.75 * (std::f32::consts::PI * p).sin());
+            puff(out, near(x, y, 0.3 + 0.4 * h(0xB5, i)), ppm * (0.05 + 0.06 * h(0xB6, i)) * (1.0 - 0.5 * p), 1.0, scale3(white, 1.2), 0.75 * (std::f32::consts::PI * p).sin());
         }
         // The foot: the pool, white water churning where the fall strikes it, and the plume of
         // spray billowing up and drifting off.
         let spray = wf.spray.clamp(0.0, 1.0);
-        puff(out, v.to_cam(x0, 0.02, d - 0.7), ppm * width * 1.25, 0.24, mix3(water, white, 0.3), 0.8);
+        puff(out, near(x0, 0.02, 0.7), ppm * width * 1.25, 0.24, mix3(water, white, 0.3), 0.8);
         let n_churn = ((width * 10.0).round() as i64).clamp(8, 60);
         let pc = cycles(0.8, loop_seconds).max(1.0);
         for i in 0..n_churn {
             let p = (pc * ctx.tphase + h(0xC1, i)).rem_euclid(1.0);
             let x = x0 + (h(0xC2, i) - 0.5) * width * 1.25;
             let y = 0.04 + 0.5 * (p * (1.0 - p)) * 4.0 * h(0xC3, i);
-            puff(out, v.to_cam(x, y, d - 0.2 - 0.3 * h(0xC5, i)), ppm * width * (0.14 + 0.2 * h(0xC4, i)), 0.75, scale3(white, 1.2), 0.85 * (1.0 - p) * (p / 0.12).min(1.0));
+            puff(out, near(x, y, 0.2 + 0.3 * h(0xC5, i)), ppm * width * (0.14 + 0.2 * h(0xC4, i)), 0.75, scale3(white, 1.2), 0.85 * (1.0 - p) * (p / 0.12).min(1.0));
         }
         // Where the curtain strikes the pool, a band of white water.
-        if let (Some(l), Some(r)) = (v.project(v.to_cam(x0 - 0.62 * width, 0.12, d - 0.2)), v.project(v.to_cam(x0 + 0.62 * width, 0.12, d - 0.2))) {
-            let z = v.to_cam(x0, 0.12, d - 0.2)[2];
+        if let (Some(l), Some(r)) = (v.project(near(x0 - 0.62 * width, 0.12, 0.2)), v.project(near(x0 + 0.62 * width, 0.12, 0.2))) {
+            let z = near(x0, 0.12, 0.2)[2];
             if z >= NEAR { splat::streak(out, z, (l[0], l[1]), (r[0], r[1]), scale3(white, 1.15), 0.7, (0.28 * ppm).max(1.0)); }
         }
         let n_puff = (30.0 * spray).round() as i64;
@@ -5857,12 +5857,12 @@ fn draw_falls(ctx: &Ctx, out: &mut Vec<Splat>) {
             let drift = ctx.wx.wind * 0.05 * p * top;
             let x = x0 + (h(0xF6, i) - 0.5) * width * (1.0 + 1.8 * p) + drift;
             let y = 0.2 + top * 0.6 * p * (0.4 + 0.6 * h(0xF7, i));
-            let c = v.to_cam(x, y, d - 0.4 - 0.9 * p);
+            let c = near(x, y, 0.4 + 0.9 * p);
             let r = v.px_per_m(c[2].max(NEAR)) * width * (0.3 + 0.6 * p);
             puff(out, c, r, 0.8, ctx.apply_fog(mul3([0.93, 0.96, 1.0], lit), c[2]), 0.3 * spray * (1.0 - p) * (p / 0.1).min(1.0));
         }
         // A haze of fine mist over the lower part of the fall.
-        puff(out, v.to_cam(x0, 0.3 * top, d - 0.5), ppm * width * 1.6, 0.9, ctx.apply_fog(mul3([0.9, 0.93, 0.97], lit), dz), 0.12 * spray);
+        puff(out, near(x0, 0.3 * top, 0.5), ppm * width * 1.6, 0.9, ctx.apply_fog(mul3([0.9, 0.93, 0.97], lit), dz), 0.12 * spray);
         // A rainbow in the spray, low over the foot.
         if sun && wf.rainbow > 0.0 {
             let rad = width * 0.9;
@@ -5876,7 +5876,7 @@ fn draw_falls(ctx: &Ctx, out: &mut Vec<Splat>) {
                     let an = std::f32::consts::PI * (0.2 + 0.6 * f);
                     let fade = (std::f32::consts::PI * f).sin();
                     let (x, y) = (x0 + rr * an.cos(), 0.3 + rr * 0.8 * an.sin());
-                    let c = v.to_cam(x, y, d - 0.4);
+                    let c = near(x, y, 0.4);
                     if c[2] < NEAR { continue; }
                     let Some([sx, sy]) = v.project(c) else { continue };
                     splat::dot(out, c[2], (sx, sy), (v.px_per_m(c[2]) * rad * 0.06).max(0.8), scale3(spec, 1.4), 0.1 * fade * wf.rainbow.min(1.0));
@@ -6234,6 +6234,49 @@ mod tests {
         let before = shot(&even, 0.0);
         for f in &mut even.fixtures { f.cluster = 1; f.density = 1.0; f.jitter_along = 0.0; f.stagger = 0.0; }
         assert!(shot(&even, 0.0).rgba == before.rgba);
+    }
+
+    /// Set pieces (arches, gates, portals across the path) show from the side too: every preset
+    /// that has one shows it somewhere along the loop to a camera turned to look across the path.
+    #[test]
+    fn set_pieces_show_from_the_side() {
+        let mut r = WorldRenderer::default();
+        for (name, mk) in crate::scene::presets::ALL.iter() {
+            let mut s = mk();
+            if !s.set_pieces.iter().any(|p| p.enabled) { continue; }
+            s.camera.yaw = -90.0;
+            s.camera.side = 5.0;
+            s.camera.cutaway = 0.4;
+            let len = s.motion.loop_length.max(1.0);
+            let seen = (0..8).any(|k| {
+                let img = r.render(&s, len * k as f32 / 8.0, &RenderOptions { size: Some((192, 108)), pick: true, ..RenderOptions::default() });
+                img.pick.is_some_and(|p| p.ids.iter().any(|&i| i >> 12 == PICK_SET_PIECES >> 12))
+            });
+            assert!(seen, "{name}: its set piece never shows from the side");
+        }
+    }
+
+    /// A waterfall seen from the side is as big as it is there, with its spray: the sky over it
+    /// stays the sky, not hidden behind spray drawn as if the fall stood where the camera does.
+    #[test]
+    fn a_waterfall_seen_from_the_side_keeps_its_size() {
+        let mut s = preset("Waterfall Glen");
+        s.camera.yaw = -90.0;
+        s.camera.side = 5.0;
+        s.camera.eye_height = 2.0;
+        s.camera.zoom = 1.3;
+        s.camera.horizon = 0.5;
+        let (w, h) = (192usize, 108usize);
+        let mut r = WorldRenderer::default();
+        let len = s.motion.loop_length.max(1.0);
+        for k in 0..12 {
+            let img = r.render(&s, len * k as f32 / 12.0, &RenderOptions { size: Some((w as u32, h as u32)), ..RenderOptions::default() });
+            // The top of the frame is sky: blue over the glen, whatever stands below it.
+            let (mut red, mut blue) = (0.0f32, 0.0f32);
+            for i in 0..w * h / 8 { red += img.rgba[i * 4] as f32; blue += img.rgba[i * 4 + 2] as f32; }
+            let n = (w * h / 8) as f32;
+            assert!(blue / n > red / n + 15.0, "frame {k}: the top of the frame is {} red, {} blue", red / n, blue / n);
+        }
     }
 
     /// A camera turned to look across the path sees the lamps behind where it stands as well as
