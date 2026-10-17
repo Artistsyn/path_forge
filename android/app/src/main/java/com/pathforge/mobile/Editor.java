@@ -44,6 +44,11 @@ final class Editor {
         /** Show `scene` in the preview for a moment without changing anything (null: the scene
          *  being edited again). */
         void peek(String scene);
+        /** The phone's screen in pixels, as it is held now (for the canvas's "This screen"). */
+        int[] screen();
+        /** Whether the preview shows the canvas's shape (or fills the screen), and setting it. */
+        boolean canvasPreview();
+        void setCanvasPreview(boolean on);
     }
 
     private final Activity a;
@@ -137,6 +142,7 @@ final class Editor {
     void load(String json) {
         try { scene = new JSONObject(json); } catch (JSONException e) { scene = new JSONObject(); }
         original = scene.toString();
+        staged = null;
         undo.clear();
         redo.clear();
         rebuild();
@@ -202,6 +208,7 @@ final class Editor {
         to.push(scene.toString());
         while (to.size() > UNDO_MAX) to.removeLast();
         try { scene = new JSONObject(s); } catch (JSONException ignored) { }
+        staged = null;
         host.changed(scene.toString());
         rebuild();
     }
@@ -248,7 +255,8 @@ final class Editor {
         JSONObject p = parts.get(part);
         List<Object> path = new ArrayList<>();
         path.add(p.optString("key"));
-        if (p.optString("kind").equals("list")) list(body, p, path, 0);
+        if (p.optString("key").equals("canvas")) canvas(body);
+        else if (p.optString("kind").equals("list")) list(body, p, path, 0);
         else fields(body, p, path, 0);
         scroll.post(() -> scroll.scrollTo(0, y));
     }
@@ -326,9 +334,59 @@ final class Editor {
         return unit.isEmpty() ? s : s + " " + unit;
     }
 
+    /** Most a typed number may be, either way, where a setting has no range of its own. */
+    private static final double TYPED_LIMIT = 1e6;
+
+    /** A number to type in: selectable, keeping to `lo`..`hi` (rounded for an integer); text that
+     *  is not a number puts the value back. `commit` gets the value kept; it may say why it was
+     *  changed. */
+    private EditText numberField(double v, boolean integer, double lo, double hi, java.util.function.DoubleConsumer commit) {
+        EditText e = new EditText(a);
+        e.setTextColor(Ui.ACCENT);
+        e.setSingleLine(true);
+        e.setSelectAllOnFocus(true);
+        e.setBackground(Ui.round(Color.argb(28, 255, 255, 255), dp(8), 0, 0));
+        e.setPadding(dp(8), dp(4), dp(8), dp(4));
+        e.setInputType(InputType.TYPE_CLASS_NUMBER | (integer ? 0 : InputType.TYPE_NUMBER_FLAG_DECIMAL) | (lo < 0 ? InputType.TYPE_NUMBER_FLAG_SIGNED : 0));
+        e.setImeOptions(EditorInfo.IME_ACTION_DONE);
+        e.setText(fmt(v, integer, ""));
+        e.setMinWidth(dp(64));
+        e.setGravity(Gravity.END);
+        // (The value shown, kept in the tag: a slider beside it moves it too.)
+        e.setTag(v);
+        Runnable done = () -> {
+            double shown = e.getTag() instanceof Double ? (Double) e.getTag() : v;
+            String text = e.getText().toString().trim().replace(',', '.');
+            double x;
+            try { x = Double.parseDouble(text); } catch (NumberFormatException ex) { x = Double.NaN; }
+            if (Double.isNaN(x) || Double.isInfinite(x)) {
+                if (!text.isEmpty()) toast("“" + text + "” is not a number");
+                e.setText(fmt(shown, integer, ""));
+                return;
+            }
+            double kept = Math.max(lo, Math.min(hi, x));
+            if (integer) kept = Math.round(kept);
+            if (kept != x && Math.abs(kept - x) > 1e-9) toast("Kept within " + fmt(lo, integer, "") + " … " + fmt(hi, integer, ""));
+            e.setText(fmt(kept, integer, ""));
+            if (Math.abs(kept - shown) < 1e-12) return;
+            e.setTag(kept);
+            commit.accept(kept);
+        };
+        e.setOnEditorActionListener((t, id, ev) -> { done.run(); e.clearFocus(); hideKeyboard(e); return true; });
+        e.setOnFocusChangeListener((t, has) -> { if (!has) done.run(); });
+        return e;
+    }
+
+    private void hideKeyboard(View v) {
+        android.view.inputmethod.InputMethodManager im = (android.view.inputmethod.InputMethodManager) a.getSystemService(android.content.Context.INPUT_METHOD_SERVICE);
+        if (im != null) im.hideSoftInputFromWindow(v.getWindowToken(), 0);
+    }
+
+    private void toast(String s) { android.widget.Toast.makeText(a, s, android.widget.Toast.LENGTH_SHORT).show(); }
+
     private View number(JSONObject f, List<Object> path) {
         final boolean integer = f.optBoolean("int");
-        final String unit = f.optString("unit", "");
+        final String unit = f.optString("unit", "").trim();
         final double v = num(get(path), f.optDouble("default", 0));
         LinearLayout box = new LinearLayout(a);
         box.setOrientation(LinearLayout.VERTICAL);
@@ -337,11 +395,19 @@ final class Editor {
         if (f.has("min") && f.has("max")) {
             final double lo = f.optDouble("min"), hi = f.optDouble("max");
             final int steps = integer && hi - lo <= 1000 ? (int) Math.round(hi - lo) : 1000;
-            TextView val = new TextView(a);
-            val.setTextColor(Ui.ACCENT);
-            val.setText(fmt(v, integer, unit));
-            r.addView(val);
             SeekBar s = new SeekBar(a);
+            // The value: dragged with the slider, or typed in (kept to the slider's range).
+            EditText val = numberField(v, integer, lo, hi, x -> {
+                s.setProgress((int) Math.round(Math.max(0, Math.min(1, (x - lo) / (hi - lo))) * steps));
+                edit(path, integer ? (Object) Math.round(x) : (Object) x, true);
+            });
+            r.addView(val);
+            if (!unit.isEmpty()) {
+                TextView u = new TextView(a);
+                u.setText(" " + unit);
+                u.setTextColor(Ui.DIM);
+                r.addView(u);
+            }
             s.setMax(steps);
             s.setProgress((int) Math.round(Math.max(0, Math.min(1, (v - lo) / (hi - lo))) * steps));
             s.getProgressDrawable().setTint(Ui.ACCENT);
@@ -350,7 +416,9 @@ final class Editor {
                 @Override public void onProgressChanged(SeekBar b, int p, boolean user) {
                     if (!user) return;
                     double x = lo + (hi - lo) * p / steps;
-                    val.setText(fmt(x, integer, unit));
+                    if (integer) x = Math.round(x);
+                    val.setText(fmt(x, integer, ""));
+                    val.setTag(x);
                     edit(path, integer ? (Object) Math.round(x) : (Object) x, false);
                 }
                 @Override public void onStartTrackingTouch(SeekBar b) { remember(); }
@@ -358,36 +426,26 @@ final class Editor {
             });
             box.addView(s, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(36)));
         } else {
-            // No sensible slider: a number, nudged with − and +.
-            final double floor = f.has("min") ? f.optDouble("min") : -1e9;
-            EditText e = new EditText(a);
-            e.setTextColor(Ui.ACCENT);
-            e.setSingleLine(true);
-            e.setInputType(InputType.TYPE_CLASS_NUMBER | (integer ? 0 : InputType.TYPE_NUMBER_FLAG_DECIMAL) | (floor < 0 ? InputType.TYPE_NUMBER_FLAG_SIGNED : 0));
-            e.setImeOptions(EditorInfo.IME_ACTION_DONE);
-            e.setText(fmt(v, integer, ""));
-            e.setMinWidth(dp(72));
-            e.setGravity(Gravity.END);
-            final Runnable commit = () -> {
-                try {
-                    double x = Math.max(floor, Double.parseDouble(e.getText().toString().trim()));
-                    if (Math.abs(x - num(get(path), v)) < 1e-9) return;
-                    edit(path, integer ? (Object) Math.round(x) : (Object) x, true);
-                } catch (NumberFormatException ignored) {
-                }
-            };
-            e.setOnEditorActionListener((t, id, ev) -> { commit.run(); return false; });
-            e.setOnFocusChangeListener((t, has) -> { if (!has) commit.run(); });
+            // No sensible slider: a number, typed or nudged with − and +.
+            final double floor = f.has("min") ? f.optDouble("min") : -TYPED_LIMIT;
+            EditText e = numberField(v, integer, floor, TYPED_LIMIT, x -> edit(path, integer ? (Object) Math.round(x) : (Object) x, true));
             for (int sign : new int[]{-1, 1}) {
                 TextView b = Ui.button(a, sign < 0 ? "−" : "+", false, x -> {
                     double cur = num(get(path), v);
                     double step = integer ? 1 : (Math.abs(cur) >= 10 ? 1 : 0.1);
-                    double n = Math.max(floor, cur + sign * step);
+                    double n = Math.max(floor, Math.min(TYPED_LIMIT, cur + sign * step));
                     if (!integer) n = Math.round(n * 1000) / 1000.0;
                     e.setText(fmt(n, integer, ""));
+                    e.setTag(n);
                     edit(path, integer ? (Object) Math.round(n) : (Object) n, true);
                 });
                 if (sign < 0) { r.addView(b); r.addView(e); } else r.addView(b);
+            }
+            if (!unit.isEmpty()) {
+                TextView u = new TextView(a);
+                u.setText(" " + unit);
+                u.setTextColor(Ui.DIM);
+                r.addView(u);
             }
         }
         return box;
@@ -561,6 +619,17 @@ final class Editor {
                 @Override public void onStopTrackingTouch(SeekBar b) { }
             });
             r.addView(s, new LinearLayout.LayoutParams(0, dp(36), 1f));
+            // Or typed in, 0 … 1.
+            r.addView(numberField(v, false, 0, 1, x -> {
+                s.setProgress((int) Math.round(x * 1000));
+                try {
+                    Object now = get(path);
+                    JSONArray xy = now instanceof JSONArray ? new JSONArray(now.toString()) : new JSONArray(d == null ? "[0.5,0.5]" : d.toString());
+                    xy.put(k, x);
+                    edit(path, xy, true);
+                } catch (JSONException ignored) {
+                }
+            }));
             box.addView(r);
         }
         return box;
@@ -709,6 +778,163 @@ final class Editor {
             }
             into.addView(box);
         }
+    }
+
+    // ── The canvas ───────────────────────────────────────────────────────
+
+    /** Smallest and largest side, and most pixels, a canvas may have: what a phone can draw. */
+    static final int CANVAS_MIN = 64, CANVAS_MAX = 4096, CANVAS_PIXELS = 4096 * 2160;
+    /** The size being chosen, before Apply (null: the scene's own). */
+    private int[] staged;
+    /** The canvas's width keeps to its height (as `ratio`, width over height) as either is typed. */
+    private boolean ratioLocked;
+    private double ratio = 1;
+
+    private int[] canvasNow() {
+        Object w = get(java.util.Arrays.asList("canvas", "width")), h = get(java.util.Arrays.asList("canvas", "height"));
+        return new int[]{w instanceof Number ? ((Number) w).intValue() : 480, h instanceof Number ? ((Number) h).intValue() : 854};
+    }
+
+    /** Why a canvas of `w` x `h` cannot be used, or null. */
+    static String canvasProblem(int w, int h) {
+        if (w < CANVAS_MIN || h < CANVAS_MIN) return "Each side needs at least " + CANVAS_MIN + " px";
+        if (w > CANVAS_MAX || h > CANVAS_MAX) return "Each side can be at most " + CANVAS_MAX + " px";
+        if ((long) w * h > CANVAS_PIXELS) return String.format(Locale.US, "%.1f megapixels is more than a phone can draw (at most %.1f)", w * (double) h / 1e6, CANVAS_PIXELS / 1e6);
+        return null;
+    }
+
+    private static int gcd(int a, int b) { return b == 0 ? a : gcd(b, a % b); }
+
+    /** "16:9 landscape", "9:19.5 portrait", "1:1 square". */
+    static String shape(int w, int h) {
+        String o = w == h ? "square" : w > h ? "landscape" : "portrait";
+        int g = gcd(w, h);
+        String ratio;
+        if (w / g <= 32 && h / g <= 32) ratio = (w / g) + ":" + (h / g);
+        else if (w <= h) ratio = String.format(Locale.US, "9:%.1f", 9.0 * h / w).replace(".0", "");
+        else ratio = String.format(Locale.US, "%.1f:9", 9.0 * w / h).replace(".0", "");
+        return ratio + " " + o;
+    }
+
+    /** The canvas: its size typed in or picked, turned between portrait and landscape, and only
+     *  used once Apply is pressed; and what the preview shows. */
+    private void canvas(LinearLayout into) {
+        final int[] now = canvasNow();
+        if (staged == null) { staged = now.clone(); ratio = staged[0] / (double) Math.max(1, staged[1]); }
+        TextView title = Ui.label(a, "Size (pixels)");
+        into.addView(title);
+
+        LinearLayout size = new LinearLayout(a);
+        size.setGravity(Gravity.CENTER_VERTICAL);
+        size.setMinimumHeight(dp(52));
+        TextView info = new TextView(a);
+        info.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13);
+        info.setPadding(0, dp(2), 0, dp(6));
+        TextView apply = Ui.button(a, "Apply", true, null), revert = Ui.button(a, "Revert", false, null);
+        final EditText[] fields = new EditText[2];
+        Runnable show = () -> {
+            String why = canvasProblem(staged[0], staged[1]);
+            boolean changed = staged[0] != now[0] || staged[1] != now[1];
+            if (why != null) { info.setText(why); info.setTextColor(Color.rgb(255, 120, 110)); }
+            else {
+                info.setText(String.format(Locale.US, "%s%s · %.1f MP%s", shape(staged[0], staged[1]), ratioLocked ? " (locked)" : "", staged[0] * (double) staged[1] / 1e6,
+                        changed ? String.format(Locale.US, "  (now %d × %d: press Apply)", now[0], now[1]) : ""));
+                info.setTextColor(changed ? Ui.ACCENT : Ui.DIM);
+            }
+            apply.setAlpha(changed && why == null ? 1f : 0.4f);
+            revert.setAlpha(changed ? 1f : 0.4f);
+            for (int i = 0; i < 2; i++) if (fields[i] != null && !fields[i].hasFocus()) { fields[i].setText(String.valueOf(staged[i])); fields[i].setTag((double) staged[i]); }
+        };
+        for (int i = 0; i < 2; i++) {
+            final int k = i;
+            // Typed in: anything from 16 to 8192 is taken here, and Apply says whether it can be used.
+            fields[i] = numberField(staged[i], true, 16, 8192, x -> {
+                staged[k] = (int) Math.round(x);
+                // Locked: the other side follows, keeping the shape.
+                if (ratioLocked) staged[1 - k] = (int) Math.max(1, Math.round(k == 0 ? x / ratio : x * ratio));
+                show.run();
+            });
+            size.addView(fields[i], new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+            if (i == 0) {
+                TextView by = new TextView(a);
+                by.setText("  ×  ");
+                by.setTextColor(Ui.TEXT);
+                size.addView(by);
+            }
+        }
+        size.addView(gap());
+        size.addView(Ui.button(a, "⇄", false, v -> { staged = new int[]{staged[1], staged[0]}; ratio = 1 / ratio; show.run(); }));
+        size.addView(gap());
+        TextView lock = Ui.button(a, ratioLocked ? "Locked" : "Lock", ratioLocked, null);
+        lock.setOnClickListener(v -> {
+            ratioLocked = !ratioLocked;
+            ratio = staged[0] / (double) Math.max(1, staged[1]);
+            lock.setText(ratioLocked ? "Locked" : "Lock");
+            Ui.setPrimary(lock, ratioLocked);
+            toast(ratioLocked ? "The ratio is locked: change one side and the other follows" : "Each side changes on its own");
+            show.run();
+        });
+        size.addView(lock);
+        into.addView(size);
+        into.addView(info);
+
+        // Picks.
+        int[] scr = host.screen();
+        // (Portrait and Landscape turn whatever size is chosen now.)
+        String[] names = {"Portrait", "Landscape", "This screen", "Square", "720 × 1280", "1280 × 720", "1080 × 1920", "1920 × 1080"};
+        int[][] fixed = {null, null, {scr[0], scr[1]}, {1080, 1080}, {720, 1280}, {1280, 720}, {1080, 1920}, {1920, 1080}};
+        android.widget.HorizontalScrollView hs = new android.widget.HorizontalScrollView(a);
+        hs.setHorizontalScrollBarEnabled(false);
+        LinearLayout picks = new LinearLayout(a);
+        for (int i = 0; i < names.length; i++) {
+            final int k = i;
+            picks.addView(Ui.button(a, names[i], false, v -> {
+                int lo = Math.min(staged[0], staged[1]), hi = Math.max(staged[0], staged[1]);
+                staged = k == 0 ? new int[]{lo, hi} : k == 1 ? new int[]{hi, lo} : fixed[k].clone();
+                // A pick sets the shape, locked or not.
+                ratio = staged[0] / (double) Math.max(1, staged[1]);
+                show.run();
+            }));
+            picks.addView(gap());
+        }
+        hs.addView(picks);
+        into.addView(hs);
+
+        LinearLayout act = new LinearLayout(a);
+        act.setPadding(0, dp(10), 0, dp(4));
+        revert.setOnClickListener(v -> { staged = canvasNow(); ratio = staged[0] / (double) Math.max(1, staged[1]); show.run(); });
+        apply.setOnClickListener(v -> {
+            for (EditText f : fields) f.clearFocus();
+            hideKeyboard(v);
+            String why = canvasProblem(staged[0], staged[1]);
+            if (why != null) { toast(why); return; }
+            int[] cur = canvasNow();
+            if (cur[0] == staged[0] && cur[1] == staged[1]) return;
+            try {
+                remember();
+                JSONObject c = scene.optJSONObject("canvas") == null ? new JSONObject() : new JSONObject(scene.optJSONObject("canvas").toString());
+                c.put("width", staged[0]).put("height", staged[1]);
+                set(java.util.Collections.singletonList("canvas"), c);
+                host.changed(scene.toString());
+                toast("Canvas is now " + staged[0] + " × " + staged[1]);
+            } catch (JSONException ignored) {
+            }
+            rebuild();
+        });
+        act.addView(revert, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        act.addView(gap());
+        act.addView(apply, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1.4f));
+        into.addView(act);
+        show.run();
+
+        into.addView(Ui.label(a, "The preview shows"));
+        into.addView(new Ui.Chips(a, new String[]{"The canvas's shape", "The whole screen"}, host.canvasPreview() ? 0 : 1, i -> host.setCanvasPreview(i == 0)).view);
+        TextView note = new TextView(a);
+        note.setText("Pictures and GIF/WebP animations are made at the canvas's size and shape. A wallpaper always fills the screen. The camera's horizon and zoom are shares of the canvas's height, so a landscape canvas sees more to the sides.");
+        note.setTextColor(Ui.DIM);
+        note.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
+        note.setPadding(0, dp(8), 0, 0);
+        into.addView(note);
     }
 
     private static JSONObject findField(JSONObject group, String key) {

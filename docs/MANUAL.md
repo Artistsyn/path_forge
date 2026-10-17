@@ -75,7 +75,7 @@ times in seconds.
 
 | Part | What it controls |
 |---|---|
-| `canvas` | Output size in pixels (default 480 × 854, portrait). |
+| `canvas` | Output size in pixels (default 480 × 854, portrait; each side 64..4096, at most 4096 × 2160 pixels in all). The phone apps preview at the canvas's shape (or, set under Shape, the whole screen) and draw Still, Video and GIF/WebP at it; wallpapers and Live Photos always fill the screen. Their Canvas section stages a new size (typed, turned portrait ⇄ landscape, or picked) until Apply. |
 | `camera` | Eye height, horizon position, zoom, lens curve, the angle it looks from (`yaw`, `side`; side-scrollers): see [Camera angle and side-scrollers](#camera-angle-and-side-scrollers), and `moves`: see [Camera moves](#camera-moves). |
 | `path` | The road: width, flare, bend (curving left or right), hill (rising or dipping), ragged edges, material and pattern (cobblestone, brick, stone block, sand, dirt, grass, planks, water, ice, and the futuristic panels, grid, hex and circuit, whose lit parts glow with `material.glow`), stairs, bridges, side paths, roads that divide in two or three, side passages that branch off as scenery, and `edge_lights` (glowing lines along both edges, solid or dashed, the dashes running ahead with `flow`). `surface: false` draws no ground at all: the camera flies the route through open space (Starship Flight, Hyperspace Jump), with floating props, companions and the sky all round. |
 | `verge` | The ground beside an open path: its material and grass tufts. Off, the path edge drops into void (walls usually cover it). |

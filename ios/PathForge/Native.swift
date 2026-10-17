@@ -49,6 +49,13 @@ final class PathScene {
         return (max(v[0], 1), max(v[1], 0.1))
     }
 
+    /// The scene's canvas, pixels (0 when it has none).
+    var canvas: (width: Int, height: Int) {
+        var v = [Float](repeating: 0, count: 5)
+        _ = v.withUnsafeMutableBufferPointer { pfm_info(handle, $0.baseAddress) }
+        return (Int(v[3].rounded()), Int(v[4].rounded()))
+    }
+
     var onGPU: Bool { pfm_on_gpu(handle) }
 
     /// The view `distance` metres along at `time` seconds, as opaque RGBA rows.

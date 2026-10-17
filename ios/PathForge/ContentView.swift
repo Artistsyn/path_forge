@@ -45,29 +45,36 @@ struct ContentView: View {
 
     var body: some View {
         GeometryReader { geo in
+            // Sideways, the panel and the editor go down the right-hand side with the scene beside
+            // them; upright, along the bottom with the scene above.
+            let wide = geo.size.width > geo.size.height
+            let side = model.editing ? Swift.min(Swift.max(geo.size.width * 0.55, 360), 560) : Swift.min(Swift.max(geo.size.width * 0.45, 340), 480)
+            let beside = wide && (model.editing || model.panelShown)
             ZStack(alignment: .top) {
                 Color.black.ignoresSafeArea()
                 PreviewView(model: model)
-                    .frame(maxWidth: .infinity, maxHeight: model.editing ? geo.size.height * 0.4 : .infinity, alignment: .top)
+                    .frame(width: beside ? Swift.max(1, geo.size.width - side) : nil)
+                    .frame(maxWidth: .infinity, maxHeight: model.editing && !wide ? geo.size.height * 0.4 : .infinity, alignment: beside ? .leading : .top)
                     .ignoresSafeArea(edges: model.editing ? [] : .all)
                     .onTapGesture { if !model.editing { withAnimation(.easeOut(duration: 0.2)) { model.panelShown.toggle() } } }
                 VStack {
                     Spacer()
-                    if model.editing {
+                    if model.editing && !wide {
                         EditorView(ed: model.editor) { model.closeEditor() }
                             .padding(16)
                             .frame(height: geo.size.height * 0.62)
                             .background(Sheet().ignoresSafeArea(edges: .bottom))
-                    } else if model.panelShown {
+                    } else if model.panelShown && !wide {
                         Panel(model: model)
                             .transition(.move(edge: .bottom).combined(with: .opacity))
-                    } else {
+                    } else if !model.editing && !model.panelShown {
                         HStack {
                             Spacer()
                             Button("Edit") { withAnimation { model.panelShown = true } }.buttonStyle(Pill()).padding()
                         }
                     }
                 }
+                if beside { SideSheet(model: model, width: side) }
                 if let busy = model.busy {
                     ZStack {
                         Color.black.opacity(0.55).ignoresSafeArea()
@@ -119,18 +126,55 @@ struct ContentView: View {
     }
 }
 
-/// The panel's background: dark, rounded at the top.
-struct Sheet: View {
+/// The editor or the panel down the right-hand side, with the phone held sideways.
+struct SideSheet: View {
+    @ObservedObject var model: AppModel
+    let width: CGFloat
+
     var body: some View {
-        UnevenRounded().fill(Color(red: 0.08, green: 0.07, blue: 0.12).opacity(0.94))
+        HStack(spacing: 0) {
+            Spacer(minLength: 0)
+            if model.editing {
+                EditorView(ed: model.editor) { model.closeEditor() }
+                    .padding(16)
+                    .frame(width: width)
+                    .frame(maxHeight: .infinity)
+                    .background(Sheet(side: true).ignoresSafeArea(edges: [.trailing, .vertical]))
+            } else {
+                Panel(model: model, wide: true)
+                    .frame(width: width)
+                    .frame(maxHeight: .infinity)
+                    .transition(.move(edge: .trailing).combined(with: .opacity))
+            }
+        }
     }
 }
 
-/// A rectangle rounded at its top corners only.
+/// The panel's background: dark, rounded at the top (at the left when `side`, down the right-hand
+/// side of a phone held sideways).
+struct Sheet: View {
+    var side = false
+    var body: some View {
+        UnevenRounded(side: side).fill(Color(red: 0.08, green: 0.07, blue: 0.12).opacity(0.94))
+    }
+}
+
+/// A rectangle rounded at its top corners only (its left-hand ones when `side`).
 struct UnevenRounded: Shape {
+    var side = false
     func path(in r: CGRect) -> Path {
         let k: CGFloat = 24
         var p = Path()
+        if side {
+            p.move(to: CGPoint(x: r.maxX, y: r.minY))
+            p.addLine(to: CGPoint(x: r.minX + k, y: r.minY))
+            p.addQuadCurve(to: CGPoint(x: r.minX, y: r.minY + k), control: CGPoint(x: r.minX, y: r.minY))
+            p.addLine(to: CGPoint(x: r.minX, y: r.maxY - k))
+            p.addQuadCurve(to: CGPoint(x: r.minX + k, y: r.maxY), control: CGPoint(x: r.minX, y: r.maxY))
+            p.addLine(to: CGPoint(x: r.maxX, y: r.maxY))
+            p.closeSubpath()
+            return p
+        }
         p.move(to: CGPoint(x: r.minX, y: r.maxY))
         p.addLine(to: CGPoint(x: r.minX, y: r.minY + k))
         p.addQuadCurve(to: CGPoint(x: r.minX + k, y: r.minY), control: CGPoint(x: r.minX, y: r.minY))
@@ -145,6 +189,9 @@ struct UnevenRounded: Shape {
 struct Panel: View {
     @ObservedObject var model: AppModel
 
+    /// Sideways: down the right-hand side, all of it scrolling (the screen is short).
+    var wide = false
+
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack {
@@ -156,40 +203,59 @@ struct Panel: View {
                 Button("Import") { model.importing = true }.buttonStyle(Pill())
                 Button("Hide") { withAnimation { model.panelShown = false } }.buttonStyle(Pill())
             }
-            ScrollView {
-                VStack(alignment: .leading, spacing: 8) {
-                    SectionLabel(text: "Scenes · long-press for more")
-                    ScrollView(.horizontal, showsIndicators: false) {
-                        HStack(alignment: .top, spacing: 10) {
-                            ForEach(model.mine, id: \.self) { n in tile(n, mine: true) }
-                            if !model.mine.isEmpty { Rectangle().fill(Color.white.opacity(0.25)).frame(width: 1, height: 120) }
-                            ForEach(model.presets, id: \.self) { n in tile(n, mine: false) }
-                        }
-                    }
-                    SectionLabel(text: "Sunset")
-                    Chips(labels: Look.skies, selected: model.look.sky) { model.setSky($0) }
-                    SectionLabel(text: "Time of day")
-                    Chips(labels: Look.times, selected: model.look.time) { model.setTime($0) }
-                    SectionLabel(text: "Season")
-                    Chips(labels: Look.seasons, selected: model.look.season) { model.setSeason($0) }
-                    SectionLabel(text: "Clouds")
-                    HStack {
-                        Chips(labels: ["As designed", "Mixed"], selected: model.look.mixed ? 1 : 0) { model.setMix($0 == 1) }
-                        Button("Shuffle") { model.shuffle() }.buttonStyle(Pill())
-                    }
-                    SectionLabel(text: String(format: "Walking speed  %.1f m/s", model.look.speed))
-                    Slider(value: Binding(get: { model.look.speed }, set: { model.setSpeed($0) }), in: 0.5...12,
-                           onEditingChanged: { if !$0 { model.changed() } }).tint(accent)
-                    SectionLabel(text: "Draw on")
-                    Chips(labels: ["GPU (fast)", "CPU"], selected: model.gpuOn ? 0 : 1) { model.setGpu($0 == 0) }
-                    SectionLabel(text: "Preview")
-                    Chips(labels: ["Auto (smooth)", "Sharp (full size)"], selected: model.sharp ? 1 : 0) { model.setSharp($0 == 1) }
-                    SectionLabel(text: "Wallpaper")
-                    Text("iPhone apps can't set the wallpaper themselves. Save it to Photos below, then in Photos tap Share → Use as Wallpaper. A Live Photo moves on the lock screen (iOS 17+).")
-                        .font(.caption).foregroundColor(.secondary)
+            if wide {
+                ScrollView { VStack(alignment: .leading, spacing: 8) { settings; actions } }
+            } else {
+                ScrollView { settings }
+                    .frame(maxHeight: UIScreen.main.bounds.height * 0.34)
+                actions
+            }
+        }
+        .padding(16)
+        .background(Sheet(side: wide).ignoresSafeArea(edges: wide ? [.trailing, .vertical] : .bottom))
+    }
+
+    private var settings: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            SectionLabel(text: "Scenes · long-press for more")
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(alignment: .top, spacing: 10) {
+                    ForEach(model.mine, id: \.self) { n in tile(n, mine: true) }
+                    if !model.mine.isEmpty { Rectangle().fill(Color.white.opacity(0.25)).frame(width: 1, height: 120) }
+                    ForEach(model.presets, id: \.self) { n in tile(n, mine: false) }
                 }
             }
-            .frame(maxHeight: UIScreen.main.bounds.height * 0.34)
+            SectionLabel(text: "Sunset")
+            Chips(labels: Look.skies, selected: model.look.sky) { model.setSky($0) }
+            SectionLabel(text: "Time of day")
+            Chips(labels: Look.times, selected: model.look.time) { model.setTime($0) }
+            SectionLabel(text: "Season")
+            Chips(labels: Look.seasons, selected: model.look.season) { model.setSeason($0) }
+            SectionLabel(text: "Clouds")
+            HStack {
+                Chips(labels: ["As designed", "Mixed"], selected: model.look.mixed ? 1 : 0) { model.setMix($0 == 1) }
+                Button("Shuffle") { model.shuffle() }.buttonStyle(Pill())
+            }
+            SectionLabel(text: String(format: "Walking speed  %.1f m/s", model.look.speed))
+            Slider(value: Binding(get: { model.look.speed }, set: { model.setSpeed($0) }), in: 0.5...12,
+                   onEditingChanged: { if !$0 { model.changed() } }).tint(accent)
+            SectionLabel(text: "Draw on")
+            Chips(labels: ["GPU (fast)", "CPU"], selected: model.gpuOn ? 0 : 1) { model.setGpu($0 == 0) }
+            SectionLabel(text: "Preview")
+            Chips(labels: ["Auto (smooth)", "Sharp (full size)"], selected: model.sharp ? 1 : 0) { model.setSharp($0 == 1) }
+            SectionLabel(text: "Shape")
+            Chips(labels: ["The canvas's", "The whole screen"], selected: model.canvasShape ? 0 : 1) { model.setCanvasShape($0 == 0) }
+            Text("The canvas's shape (Edit every setting → Canvas) is what Still, Video and GIF/WebP make. Live Photos always fill the screen.")
+                .font(.caption).foregroundColor(.secondary)
+            SectionLabel(text: "Wallpaper")
+            Text("iPhone apps can't set the wallpaper themselves. Save it to Photos below, then in Photos tap Share → Use as Wallpaper. A Live Photo moves on the lock screen (iOS 17+).")
+                .font(.caption).foregroundColor(.secondary)
+        }
+    }
+
+    /// Editing and saving, Surprise me and share codes, and making pictures of it.
+    private var actions: some View {
+        VStack(alignment: .leading, spacing: 8) {
             HStack {
                 Button("Edit every setting") { model.openEditor() }.buttonStyle(Pill())
                 Button("Save scene") { model.save(suggest: model.look.name) }.buttonStyle(Pill())
@@ -202,8 +268,6 @@ struct Panel: View {
                 Button("GIF/WebP") { model.askingAnimation = true }.buttonStyle(Pill())
             }
         }
-        .padding(16)
-        .background(Sheet().ignoresSafeArea(edges: .bottom))
     }
 
     private func tile(_ name: String, mine: Bool) -> some View {
@@ -255,12 +319,14 @@ struct AnimationSheet: View {
     @AppStorage("anim.fps") private var fps = 1
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
+        let cw = model.canvasPixels().0, ch = model.canvasPixels().1
+        // (It scrolls when the phone is sideways and the sheet is short.)
+        ScrollView { VStack(alignment: .leading, spacing: 10) {
             Text("Save the loop as an animation").font(.title3.bold())
             SectionLabel(text: "Format")
             Chips(labels: ["WebP (full colour, small)", "GIF (plays anywhere)"], selected: format) { format = $0 }
             SectionLabel(text: "Size")
-            Chips(labels: ["Small", "Medium", "Large", "Full screen"], selected: size) { size = $0 }
+            Chips(labels: ["Small", "Medium", "Large", model.canvasShape ? "Canvas (\(cw)×\(ch))" : "Full screen"], selected: size) { size = $0 }
             SectionLabel(text: "Frames a second")
             Chips(labels: ["12", "20", "30"], selected: fps) { fps = $0 }
             Text("The whole loop, joining end to start, so it plays forever without a seam. Larger and smoother takes longer and makes a bigger file (GIF most of all). Photos plays GIFs; WebP is smaller and shows every colour.")
@@ -271,13 +337,13 @@ struct AnimationSheet: View {
                 Spacer()
                 Button("Make it") {
                     dismiss()
-                    let width = [360, 540, 720, 100_000][size]
-                    model.saveAnimation(format: format == 0 ? "webp" : "gif", width: width, fps: [12, 20, 30][fps])
+                    let short = [360, 540, 720, 100_000][size]
+                    model.saveAnimation(format: format == 0 ? "webp" : "gif", short: short, fps: [12, 20, 30][fps])
                 }.buttonStyle(Pill(primary: true))
             }
         }
-        .padding(20)
-        .presentationDetents([.medium])
+        .padding(20) }
+        .presentationDetents([.medium, .large])
         .preferredColorScheme(.dark)
     }
 }
