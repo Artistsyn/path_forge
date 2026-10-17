@@ -285,25 +285,16 @@ pub unsafe extern "C" fn pf_runtime_restart_intro(rt: *mut Runtime) -> i32 {
     0
 }
 
-/// Swing the camera from where it is now to another view, as JSON (every field optional):
-/// {"yaw","side","eye_height","horizon","zoom"} the view (missing ones stay as the camera has
-/// them), {"seconds","hold","ease","overshoot","orbit","bars"} how (as camera.moves.swing_in; 0
-/// seconds is 2.5). The view stays once it lands. 0 when it has begun, -1 for a null handle, -2
+/// Swing the camera from where it is now to another view: a name (home, ahead, side, side_left) or
+/// JSON, every field optional: {"view": a name, "yaw","side","eye_height","horizon","zoom"} the
+/// view (missing ones stay as the named view or the camera has them), {"seconds","hold","ease",
+/// "overshoot","orbit","bars"} how (as camera.moves.swing_in; 0 seconds is 2.5). The view stays
+/// once it lands (`Runtime::swing`). 0 when it has begun, -1 for a null handle, -2
 /// with the reason in `err` (bad JSON, or a transition under way).
 #[no_mangle]
 pub unsafe extern "C" fn pf_runtime_swing_to(rt: *mut Runtime, json: *const c_char, err: *mut c_char, err_len: usize) -> i32 {
     let Some(r) = rt.as_mut() else { return -1 };
-    let res = guard(Err("panic".to_string()), || {
-        let text = text(json).ok_or("json is null or not UTF-8")?;
-        let v: serde_json::Value = serde_json::from_str(text).map_err(|e| format!("swing: {e}"))?;
-        let mut style: path_forge::scene::Swing = serde_json::from_value(v.clone()).map_err(|e| format!("swing: {e}"))?;
-        // (A game's swing goes when asked unless it says to hold.)
-        if v.get("hold").is_none() { style.hold = 0.0; }
-        let mut to = path_forge::scene::SwingView::of(&r.scene().camera);
-        let f = |k: &str, d: f32| v.get(k).and_then(|x| x.as_f64()).map_or(d, |x| x as f32);
-        (to.yaw, to.side, to.eye_height, to.horizon, to.zoom) = (f("yaw", to.yaw), f("side", to.side), f("eye_height", to.eye_height), f("horizon", to.horizon), f("zoom", to.zoom));
-        r.swing_to(to, style)
-    });
+    let res = guard(Err("panic".to_string()), || r.swing(text(json).ok_or("json is null or not UTF-8")?));
     match res { Ok(()) => 0, Err(e) => { write_err(err, err_len, &e); -2 } }
 }
 
@@ -403,6 +394,12 @@ mod tests {
             pf_runtime_view(rt, out.as_mut_ptr(), out.len());
             let v: serde_json::Value = serde_json::from_str(CStr::from_ptr(out.as_ptr()).to_str().unwrap()).unwrap();
             assert_eq!((v["yaw"].as_f64(), v["side"].as_f64()), (Some(0.0), Some(0.0)), "landed and stays");
+            let home = CString::new("home").unwrap();
+            assert_eq!(pf_runtime_swing_to(rt, home.as_ptr(), err.as_mut_ptr(), err.len()), 0);
+            pf_runtime_step(rt, 3.0, 0.0);
+            pf_runtime_view(rt, out.as_mut_ptr(), out.len());
+            let v: serde_json::Value = serde_json::from_str(CStr::from_ptr(out.as_ptr()).to_str().unwrap()).unwrap();
+            assert_eq!(v["yaw"].as_f64(), Some(-90.0), "back to the scene's own view");
             let bad = CString::new("{nope").unwrap();
             assert_eq!(pf_runtime_swing_to(rt, bad.as_ptr(), err.as_mut_ptr(), err.len()), -2);
             pf_runtime_free(rt);

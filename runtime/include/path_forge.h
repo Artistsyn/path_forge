@@ -83,11 +83,12 @@ int pf_runtime_set_hour(PfRuntime *rt, float hour);
  * from above) and swing in (camera.moves.swing_in: it comes round from another view into the
  * scene's own) over the next seconds of pf_runtime_step (it plays once at the start). */
 int pf_runtime_restart_intro(PfRuntime *rt);
-/* Swing the camera from where it is now to another view (interface 3): JSON, every field
- * optional, {"yaw","side","eye_height","horizon","zoom"} the view (missing ones stay as they
- * are) and {"seconds","hold","ease","overshoot","orbit","bars"} how (as camera.moves.swing_in;
- * 0 seconds is 2.5), e.g. {"yaw":-90,"side":6} round to a side-scroller's view or {"yaw":0,
- * "side":0} back down the path. It circles the walker, dissolving the near side of the world out
+/* Swing the camera from where it is now to another view (interface 3): a view's name ("home":
+ * the camera the scene came with; "ahead": down the path; "side", "side_left": a side-scroller's
+ * view from the right or left), or JSON, every field optional: {"view": a name, "yaw","side",
+ * "eye_height","horizon","zoom"} the view (missing ones stay as the named view or the camera has
+ * them) and {"seconds","hold","ease","overshoot","orbit","bars"} how (as camera.moves.swing_in;
+ * 0 seconds is 2.5), e.g. "side", or {"view":"ahead","seconds":3,"ease":"Out"}. It circles the walker, dissolving the near side of the world out
  * of its way, over the next seconds of pf_runtime_step; the view stays once it lands
  * (pf_runtime_state's swing_left counts down). 0 begun, -1 null handle, -2 with the reason in err. */
 int pf_runtime_swing_to(PfRuntime *rt, const char *json, char *err, size_t err_len);

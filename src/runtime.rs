@@ -47,6 +47,8 @@ pub struct Runtime {
     played: f32,
     /// A swing the game started (`swing_to`) under way.
     swinging: Option<Swinging>,
+    /// The camera the current scene came with, for swinging back to (`swing("home")`).
+    home: scene::Camera,
 }
 
 /// The camera swinging from one view to another at the game's asking: how, from where, to what
@@ -75,7 +77,7 @@ enum Active {
 pub struct Planned { pub kind: String, pub notes: Vec<String>, pub warnings: Vec<String> }
 
 /// Where the walk stands, for the game.
-#[derive(Clone, Debug, PartialEq, serde::Serialize)]
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize)]
 pub struct WalkState {
     /// The scene the camera is in (the one it left, until a transition ends).
     pub scene: String,
@@ -103,7 +105,8 @@ pub struct WalkState {
 impl Runtime {
     /// A scene whose files (sprites, kits, grades) are named relative to `base_dir`.
     pub fn new(scene: Scene, base_dir: Option<PathBuf>) -> Runtime {
-        Runtime { scene, base_dir, renderer: WorldRenderer::default(), rgba: Vec::new(), distance: 0.0, time: 0.0, active: None, journey: None, day_seconds: 0.0, played: 0.0, swinging: None }
+        let home = scene.camera.clone();
+        Runtime { scene, base_dir, renderer: WorldRenderer::default(), rgba: Vec::new(), distance: 0.0, time: 0.0, active: None, journey: None, day_seconds: 0.0, played: 0.0, swinging: None, home }
     }
 
     /// Draw frames on the GPU, on a device the game hands over (with wgpu 25, the same one it
@@ -150,7 +153,7 @@ impl Runtime {
 
     /// Change the scene (another biome, a tweak); caches that depend on it are rebuilt as needed.
     /// This cuts; `transition_to` walks.
-    pub fn set_scene(&mut self, scene: Scene) { self.scene = scene; self.active = None; self.swinging = None; }
+    pub fn set_scene(&mut self, scene: Scene) { self.home = scene.camera.clone(); self.scene = scene; self.active = None; self.swinging = None; }
 
     /// `set_scene` for a scene whose files are named relative to `dir`.
     pub fn set_scene_in(&mut self, scene: Scene, dir: Option<PathBuf>) { self.set_scene(scene); self.base_dir = dir; }
@@ -250,6 +253,7 @@ impl Runtime {
             None => return,
         };
         self.scene = next.scene;
+        self.home = self.scene.camera.clone();
         self.base_dir = next.dir;
         self.distance = distance.rem_euclid(self.loop_length());
         self.time = clock;
@@ -276,6 +280,30 @@ impl Runtime {
         self.played = self.played.max(m.fly_in.max(0.0).max(m.swing_in.length()));
         self.swinging = Some(Swinging { style, from, to, t: 0.0 });
         Ok(())
+    }
+
+    /// `swing_to` as a game names it: a view by name (`home`: the camera the scene came with;
+    /// `ahead`: looking down the path; `side` / `side_left`: a side-scroller's view from the right
+    /// / left of the path), or JSON {"view": a name, "yaw", "side", "eye_height", "horizon",
+    /// "zoom", "seconds", "hold", "ease", "overshoot", "orbit", "bars"}, every field optional (the
+    /// view's fields override the named view's, or the camera's as it is; no hold unless given).
+    pub fn swing(&mut self, spec: &str) -> Result<(), String> {
+        let spec = spec.trim();
+        let v: serde_json::Value = if spec.starts_with('{') { serde_json::from_str(spec).map_err(|e| format!("swing: {e}"))? } else { serde_json::json!({ "view": spec }) };
+        let mut style: scene::Swing = serde_json::from_value(v.clone()).map_err(|e| format!("swing: {e}"))?;
+        if v.get("hold").is_none() { style.hold = 0.0; }
+        let now = scene::SwingView::of(&self.scene.camera);
+        let mut to = match v.get("view").and_then(|n| n.as_str()) {
+            None => now,
+            Some("home") => scene::SwingView::of(&self.home),
+            Some("ahead") => scene::SwingView { yaw: 0.0, side: 0.0, ..now },
+            Some("side") => scene::SwingView { yaw: -90.0, side: 6.0, ..now },
+            Some("side_left") => scene::SwingView { yaw: 90.0, side: -6.0, ..now },
+            Some(o) => return Err(format!("swing: no view `{o}` (home, ahead, side, side_left)")),
+        };
+        let f = |k: &str, d: f32| v.get(k).and_then(|x| x.as_f64()).map_or(d, |x| x as f32);
+        (to.yaw, to.side, to.eye_height, to.horizon, to.zoom) = (f("yaw", to.yaw), f("side", to.side), f("eye_height", to.eye_height), f("horizon", to.horizon), f("zoom", to.zoom));
+        self.swing_to(to, style)
     }
 
     /// The camera's view now: the scene's own, or where a swing has it.
