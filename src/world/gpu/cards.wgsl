@@ -216,12 +216,13 @@ fn cards_main(@builtin(global_invocation_id) gid: vec3<u32>) {
             let fx = f32(px) + 0.5; let fy = f32(py) + 0.5;
             let iz = rnd(cd.pq0 * fx) + rnd(cd.pq1 * fy) + cd.pq2;
             if iz <= 0.0 { continue; }
-            let pz = 1.0 / iz;
+            // (div: Metal's fast reciprocal is a bit off the CPU's 1/iz, and depth must match exactly.)
+            let pz = div(1.0, iz);
             if pz < 0.05 || pz >= g.depth { continue; }
             let wd = rnd(cd.ph[6] * fx) + rnd(cd.ph[7] * fy) + cd.ph[8];
             if abs(wd) < 1e-12 { continue; }
-            var pu = (rnd(cd.ph[0] * fx) + rnd(cd.ph[1] * fy) + cd.ph[2]) / wd;
-            var pv = (rnd(cd.ph[3] * fx) + rnd(cd.ph[4] * fy) + cd.ph[5]) / wd;
+            var pu = div(rnd(cd.ph[0] * fx) + rnd(cd.ph[1] * fy) + cd.ph[2], wd);
+            var pv = div(rnd(cd.ph[3] * fx) + rnd(cd.ph[4] * fy) + cd.ph[5], wd);
             if !(pu >= 0.0 && pu < 1.0) || !(pv >= 0.0 && pv < 1.0) { continue; }
             if cd.strip >= 0.0 { pu = cd.strip; }
             else if cd.strip < -1.5 {
