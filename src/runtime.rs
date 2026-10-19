@@ -216,12 +216,21 @@ impl Runtime {
 
     /// Walk on by `dt` seconds at `speed` metres per second (0 stands still; time still passes),
     /// through any transition under way. When it ends, the next scene becomes the current one.
+    /// A negative speed walks back: along a scene's loop freely, and through a crossing or fork
+    /// back to where it began (or, at a fork, to where its branch was taken) but no further.
     pub fn step(&mut self, dt: f32, speed: f32) {
         if self.day_seconds > 0.0 {
             let h = self.hour() + 24.0 * dt / self.day_seconds;
             self.renderer.set_hour(Some(h));
         }
-        let ds = (speed * dt).max(0.0);
+        let mut ds = if speed.is_finite() { speed * dt.max(0.0) } else { 0.0 };
+        // How far back a walk under way can go.
+        let floor = match &self.active {
+            None => None,
+            Some(Active::Cross { travel, .. }) => Some((*travel, 0.0)),
+            Some(Active::Fork { walk, travel, .. }) => Some((*travel, walk.branch(*travel).map_or(0.0, |(_, at)| at))),
+        };
+        if let Some((travel, floor)) = floor { if ds < 0.0 { ds = ds.max((floor - travel).min(0.0)); } }
         self.played += dt.max(0.0);
         if let Some(sw) = &mut self.swinging {
             sw.t += dt.max(0.0);
@@ -526,6 +535,52 @@ mod tests {
         r.render_into(len * 0.25, secs * 0.25, 120, 214, &mut buf).unwrap();
         assert!(buf == a);
         assert!(r.render_into(0.0, 0.0, 120, 214, &mut buf[..10]).is_err());
+    }
+
+    /// A game walks back (a backstep, a knockback): along the loop to exactly where it was, and
+    /// back through a crossing to where it began but no further; at a fork no further back than
+    /// where its branch was taken.
+    #[test]
+    fn a_walker_steps_back_along_the_loop_and_through_a_crossing_or_fork() {
+        let mut r = rt("Stone Dungeon");
+        let len = r.loop_length();
+        r.step(1.0, 3.0);
+        let d = r.state().distance;
+        r.step(0.5, 4.0);
+        r.step(0.5, -4.0);
+        assert!((r.state().distance - d).abs() < 1e-4, "back where it was ({} vs {d})", r.state().distance);
+        // Back past the loop's start it comes round to its end, and draws that view.
+        r.step(1.0, -(d + 1.5));
+        assert!((r.state().distance - (len - 1.5)).abs() < 1e-3, "{}", r.state().distance);
+        let t = r.state().time;
+        let back = r.frame(60, 107).to_vec();
+        assert!(back == r.render(len - 1.5, t, 60, 107).to_vec());
+        // A broken speed walks nowhere rather than poisoning the walk.
+        r.step(1.0, f32::NAN);
+        assert!((r.state().distance - (len - 1.5)).abs() < 1e-3);
+
+        // A crossing: back to its start and no further, then on again.
+        let next = rt("Forest Path").scene().clone();
+        r.transition_to(next, None, &crate::scene::transition::Transition::default());
+        r.step(1.0, 4.0);
+        let p = r.state().progress.expect("crossing");
+        r.step(1.0, -10.0);
+        assert_eq!(r.state().progress, Some(0.0), "back at the crossing's start");
+        assert_eq!(r.state().scene, "Stone Dungeon", "still in the scene it left");
+        r.step(1.0, 4.0);
+        assert!((r.state().progress.unwrap() - p).abs() < 1e-5);
+
+        // A fork: once a branch is taken it stays taken.
+        let mut f = rt("Stone Dungeon");
+        let (a, b) = (rt("Forest Path").scene().clone(), rt("Ice Cave").scene().clone());
+        f.fork((a, None), (b, None), &crate::scene::transition::ForkChoice::default());
+        f.step(1.0, 2.0);
+        assert!(f.choose(crate::scene::transition::Branch::Right));
+        f.step(1.0, 3.0);
+        let at5 = f.state().progress.unwrap();
+        f.step(1.0, -20.0);
+        let floor = f.state().progress.unwrap();
+        assert!((floor * 5.0 / at5 - 2.0).abs() < 1e-3, "back to where the branch was taken (2 m), not {} m", floor * 5.0 / at5);
     }
 
     #[test]

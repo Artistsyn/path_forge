@@ -781,7 +781,7 @@ rt.swing_to(SwingView { yaw: -90.0, side: 6.0, ..rt.view_now() }, Swing::default
 |---|---|
 | `new`, `from_file`, `from_json`, `from_journey` | Open a scene or a journey. |
 | `render(distance, time, w, h)`, `render_into` | Draw one frame (RGBA8, rows top to bottom). |
-| `step(dt, speed)`, `frame(w, h)` | Let the runtime walk; draw where it stands (with the camera's flight in at the start, `restart_intro` to play it again; C `pf_runtime_restart_intro`). |
+| `step(dt, speed)`, `frame(w, h)` | Let the runtime walk (a negative speed walks back: along the loop freely, through a crossing no further back than its start, at a fork no further back than where its branch was taken); draw where it stands (with the camera's flight in at the start, `restart_intro` to play it again; C `pf_runtime_restart_intro`). |
 | `go()` | Walk on to the journey's next stop: a transition, or the approach to a fork. |
 | `transition_to(scene, dir, transition)`, `fork(left, right, fork)` | Start a transition or fork to any scene at run time. |
 | `choose(branch)` | Take a branch of the fork ahead. Returns false when there is none or it is too late. |
