@@ -49,7 +49,9 @@ struct Post {
     // blur (pixels), the sharp band and half its width; it reads h_fsrc and writes h_fdst.
     fo_on: u32, fo_tilt: u32, fo_dist: f32,
     fo_max: f32, fo_band: f32, fo_half: f32, h_fsrc: u32,
-    h_fdst: u32, fo_pad0: u32, fo_pad1: u32, fo_pad2: u32,
+    // Grade and outline read r_gsrc and write r_mid (in place unless the outline is selective);
+    // a selective line is mix(ink, its object's colour * ol_keep, ol_sel).
+    h_fdst: u32, r_gsrc: u32, ol_sel: f32, ol_keep: f32,
 }
 
 @group(0) @binding(1) var<uniform> P: Post;
@@ -702,16 +704,11 @@ fn post_grade_outline(@builtin(global_invocation_id) gid: vec3<u32>) {
     if gid.x >= P.w || gid.y >= P.h { return; }
     let x = gid.x; let y = gid.y;
     let i = y * P.w + x;
-    var c = rd3(P.r_mid, i);
-    if P.grade != 0u {
-        let s = clamp(P.grade_s, 0.0, 1.0);
-        c = clamp(mixv(c, grade_of(c), s), vec3<f32>(0.0), vec3<f32>(255.0));
-    }
+    var c = graded(rd3(P.r_gsrc, i));
     if P.ol_on != 0u {
         let g = pg(i);
         let gid_ = g.idr & 0xFFu;
         let g_obj = gid_ >= ID_PROP && !is_rail(gid_) && g.depth < 14.0;
-        var hit = false;
         for (var k = 0; k < 4; k++) {
             var nx = i32(x); var ny = i32(y);
             if k == 0 { nx -= 1; } else if k == 1 { nx += 1; } else if k == 2 { ny -= 1; } else { ny += 1; }
@@ -719,14 +716,28 @@ fn post_grade_outline(@builtin(global_invocation_id) gid: vec3<u32>) {
             let n = pg(u32(ny) * P.w + u32(nx));
             let nid = n.idr & 0xFFu;
             let n_obj = nid >= ID_PROP && !is_rail(nid) && n.depth < 14.0;
-            if n_obj && !g_obj && n.depth < g.depth { hit = true; break; }
-            if n_obj && g_obj && n.depth < g.depth * 0.85 { hit = true; break; }
+            var h = (n_obj && !g_obj && n.depth < g.depth) || (n_obj && g_obj && n.depth < g.depth * 0.85);
             if P.ol_objects_only == 0u && nid != gid_ && n.depth < g.depth && gid_ != ID_NONE && nid != ID_NONE
-                && !(nid == ID_GROUND && (gid_ == ID_WALL_L || gid_ == ID_WALL_R)) { hit = true; break; }
+                && !(nid == ID_GROUND && (gid_ == ID_WALL_L || gid_ == ID_WALL_R)) { h = true; }
+            if h {
+                // The line is the nearer thing's: flat ink, or a deeper shade of its own colour.
+                let ink = vec3<f32>(P.ol_r, P.ol_g, P.ol_b);
+                if P.ol_sel > 0.0 {
+                    let nc = graded(rd3(P.r_gsrc, u32(ny) * P.w + u32(nx)));
+                    c = ink + (nc * P.ol_keep - ink) * P.ol_sel;
+                } else { c = ink; }
+                break;
+            }
         }
-        if hit { c = vec3<f32>(P.ol_r, P.ol_g, P.ol_b); }
     }
     wr3(P.r_mid, i, c);
+}
+
+/// The style's colour grade of one colour (none: the colour as it is).
+fn graded(c0: vec3<f32>) -> vec3<f32> {
+    if P.grade == 0u { return c0; }
+    let s = clamp(P.grade_s, 0.0, 1.0);
+    return clamp(mixv(c0, grade_of(c0), s), vec3<f32>(0.0), vec3<f32>(255.0));
 }
 
 // ── post::lens_warp ───────────────────────────────────────────────────────

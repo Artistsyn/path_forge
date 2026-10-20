@@ -1096,6 +1096,43 @@ mod tests {
     }
 
     #[test]
+    fn a_fork_branch_keeps_the_road_look_until_the_player_is_on_their_way() {
+        use crate::journey::{ForkWalk, Place};
+        use crate::scene::transition::{plan_fork, Branch, ForkChoice};
+        use crate::world::RenderOptions;
+        let a = crate::scene::presets::ALL.iter().find(|(m, _)| *m == "Forest Path").unwrap().1();
+        let mut red = a.clone();
+        (red.path.material.base, red.path.material.mortar) = ([210, 30, 30], [160, 20, 20]);
+        let opts = RenderOptions { size: Some((90, 160)), ..RenderOptions::default() };
+        // How red the path is a couple of metres ahead (the bottom middle of the frame).
+        let redness = |img: &crate::world::Image| {
+            let (w, h) = (img.width, img.height);
+            let (mut r, mut g) = (0.0, 0.0);
+            for y in h - 24..h - 10 { for x in w / 2 - 5..w / 2 + 5 { let k = (y * w + x) * 4; r += img.rgba[k] as f32; g += img.rgba[k + 1] as f32; } }
+            r / g.max(1.0)
+        };
+        for gpu in engines() {
+            let mut rr = renderer(gpu);
+            let (pa, pr) = (Place { scene: &a, dir: None }, Place { scene: &red, dir: None });
+            let road = redness(&rr.render(&a, 0.0, &opts));
+            for hold in [0.0, -1.0] {
+                let plan = plan_fork(&a, &red, &red, &ForkChoice { path_hold_m: hold, ..ForkChoice::default() });
+                let mut w = ForkWalk::new(plan.clone(), 0.0, [0.0, 0.0]);
+                w.choose(Branch::Left, 0.0);
+                let past = redness(&w.frame(&mut rr, pa, pr, pr, plan.approach + 2.0, [0.0; 3], &opts));
+                let end = redness(&w.frame(&mut rr, pa, pr, pr, w.length() - 1.5, [0.0; 3], &opts));
+                if hold >= 0.0 {
+                    assert!((past - road).abs() < 0.25, "gpu {gpu}: 2 m down the branch it is still the road ({past} vs {road})");
+                    assert!(w.length() >= plan.approach + plan.hold + plan.blend, "the walk goes on past the change");
+                } else {
+                    assert!(past > road + 1.0, "gpu {gpu}: without a hold the branch is its own at once ({past} vs {road})");
+                }
+                assert!(end > road + 1.0, "gpu {gpu}, hold {hold}: by the walk's end it is the branch's own ({end} vs {road})");
+            }
+        }
+    }
+
+    #[test]
     fn encounter_clips_join_the_loop_exactly() {
         use crate::world::{RenderOptions, WorldRenderer};
         for (name, start) in [("Stone Dungeon", 0u32), ("Night Road", 37)] {

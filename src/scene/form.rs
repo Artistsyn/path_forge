@@ -28,7 +28,7 @@ pub const META: &[Meta] = &[
     m("*.material.tile_size", 0.2, 10.0, " m"), m("*.material.brightness", 0.2, 3.0, "×"), m("*.material.damage", 0.0, 1.0, ""),
     a("*.material.noise", 0.0, 60.0, ""), a("*.material.rotate", 0.0, 1.0, ""),
     m("verge.tuft_density", 0.0, 4.0, "×"), m("verge.tuft_height", 0.02, 1.5, " m"),
-    m("walls.gap", 0.0, 20.0, " m"), m("walls.height", 0.0, 20.0, " m"), m("walls.base_shadow", 0.0, 1.0, ""),
+    m("walls.gap", 0.0, 20.0, " m"), m("walls.height", 0.0, 20.0, " m"), m("walls.base_shadow", 0.0, 1.0, ""), m("walls.thickness", 0.0, 8.0, " m"),
     m("ceiling.height", 1.0, 20.0, " m"),
     m("*.radius", 0.0, 0.4, ""), m("*.intensity", 0.0, 5.0, "×"), m("sky.moon.phase", -1.0, 1.0, ""), m("sky.moon.opacity", 0.0, 1.0, ""), m("sky.moon.relief", 0.0, 2.0, ""), m("sky.moon.seed", 0.0, 9999.0, ""),
     m("sky.meteors.count", 0.0, 40.0, " per loop"), m("sky.meteors.duration", 0.2, 3.0, " s"), m("sky.meteors.length", 0.05, 1.0, ""),

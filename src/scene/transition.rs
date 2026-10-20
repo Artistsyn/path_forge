@@ -326,12 +326,23 @@ pub struct ForkChoice {
     pub overshoot_m: f32,
     /// Band over which each branch turns from this world into its own, metres (0 = auto).
     pub blend_m: f32,
-    /// Length of ground of this world left between the branches past the junction, metres (0 = auto).
+    /// Length of ground of this world left between the branches past the junction, metres (0 = auto;
+    /// negative = none: the ground between the branches is the branch worlds' from where they
+    /// part, each its own half, so what stands beside the branch taken goes on into its world).
     pub wedge_m: f32,
+    /// Metres down each branch over which its path keeps this world's look before turning into
+    /// its own over `blend_m`, in patches (0 = auto; negative = none: each branch's path is its
+    /// own from the junction). Two differently coloured paths parting at the junction read as a
+    /// seam; this way the fork is one path that changes once the player is on their way.
+    pub path_hold_m: f32,
     /// Metres of walking over which the camera turns onto the chosen branch.
     pub steer_m: f32,
     /// Metres either side of the junction over which the camera becomes the chosen world's.
     pub camera_blend_m: f32,
+    /// Length of the fork's mouth, metres (0 = auto): over this stretch before the junction the
+    /// first world's props stand back from the path in a widening funnel, so both branches can be
+    /// seen parting instead of vanishing behind the trees that line the road.
+    pub mouth_m: f32,
     /// The branch taken when the game has not chosen by the time the camera reaches the junction.
     pub default_branch: Branch,
     /// How much the eye adapts across (0..1).
@@ -342,7 +353,7 @@ pub struct ForkChoice {
 impl Default for ForkChoice {
     fn default() -> Self {
         ForkChoice {
-            angle: 0.0, approach_m: 0.0, overshoot_m: 1.0, blend_m: 0.0, wedge_m: 0.0, steer_m: 6.0, camera_blend_m: 4.0,
+            angle: 0.0, approach_m: 0.0, overshoot_m: 1.0, blend_m: 0.0, wedge_m: 0.0, path_hold_m: 0.0, steer_m: 6.0, camera_blend_m: 4.0, mouth_m: 0.0,
             default_branch: Branch::Left, adaptation: 1.0, style: StyleFrom::Auto, seed: 11,
         }
     }
@@ -365,8 +376,12 @@ pub struct ForkPlan {
     pub overshoot: f32,
     pub blend: f32,
     pub wedge: f32,
+    /// Metres down each branch its path keeps the first world's look (negative: none).
+    pub hold: f32,
     pub steer: f32,
     pub camera_blend: f32,
+    /// Metres before the junction over which the first world's props stand back (the mouth).
+    pub mouth: f32,
     pub default_branch: Branch,
     pub adaptation: f32,
     pub style: StyleFrom,
@@ -404,7 +419,8 @@ pub fn plan_fork(a: &Scene, left: &Scene, right: &Scene, f: &ForkChoice) -> Fork
     }
     let approach = if f.approach_m > 0.0 { f.approach_m.max(4.0) } else { (visibility(a) * 0.7).clamp(14.0, 40.0) };
     let blend = if f.blend_m > 0.0 { f.blend_m } else { (approach * 0.25).clamp(3.0, 10.0) };
-    let wedge = if f.wedge_m > 0.0 { f.wedge_m } else { (approach * 0.6).clamp(8.0, 30.0) };
+    let wedge = if f.wedge_m > 0.0 { f.wedge_m } else if f.wedge_m < 0.0 { 0.0 } else { (approach * 0.6).clamp(8.0, 30.0) };
+    let hold = if f.path_hold_m != 0.0 { f.path_hold_m } else { (approach * 0.2).clamp(4.0, 10.0) };
     notes.push(format!("The junction first shows {approach:.0} m ahead. Left goes to {}, right to {}; each branch turns into its world over {blend:.0} m, with {an}'s ground between them for {wedge:.0} m.",
         if left.name.is_empty() { "the left scene" } else { left.name.as_str() }, if right.name.is_empty() { "the right scene" } else { right.name.as_str() }));
     notes.push(format!("The game chooses before the junction; the camera turns onto the branch over {:.0} m. If nothing is chosen, it takes the {} branch.", f.steer_m.max(1.0), f.default_branch.name()));
@@ -420,9 +436,16 @@ pub fn plan_fork(a: &Scene, left: &Scene, right: &Scene, f: &ForkChoice) -> Fork
             warnings.push(format!("The {n} world's look differs from {an}'s (pixel size or palette): the frame switches look once the camera is on that branch."));
         }
     }
+    if hold >= 0.0 {
+        notes.push(format!("Each branch's path keeps {an}'s look for {hold:.0} m past the junction and turns into its own world's over the next {blend:.0} m, so the walk goes on until the camera is past that."));
+    }
     let camera_blend = f.camera_blend_m.max(0.5);
+    // A walk that ended with the old look still on the ground ahead would change it at once.
+    let restyled = if hold >= 0.0 { hold + blend + 1.0 } else { 0.0 };
+    let mouth = if f.mouth_m > 0.0 { f.mouth_m.min(approach) } else { (approach * 0.35).clamp(6.0, 16.0) };
+    notes.push(format!("For the last {mouth:.0} m before the junction {an}'s props stand back from the path in a widening mouth, so the branches show parting."));
     ForkPlan {
-        slope, approach, overshoot: f.overshoot_m.max(camera_blend.max(blend) + 1.0), blend, wedge, steer: f.steer_m.max(1.0), camera_blend,
+        slope, approach, overshoot: f.overshoot_m.max(camera_blend.max(blend) + 1.0).max(restyled), blend, wedge, hold, steer: f.steer_m.max(1.0), camera_blend, mouth,
         default_branch: f.default_branch, adaptation: f.adaptation.clamp(0.0, 1.0), style: f.style, seed: f.seed, notes, warnings,
     }
 }

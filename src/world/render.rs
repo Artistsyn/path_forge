@@ -69,6 +69,9 @@ pub struct RenderOptions {
     /// The camera partway through a swing a game or a transition is making, in place of the
     /// scene's own (and of a swing in).
     pub swing: Option<crate::scene::SwingPose>,
+    /// Points (x right of the path centre, y up, d ahead, metres) to measure the light at, for
+    /// `WorldRenderer::lighting`: a game lighting its own sprites as the world is lit.
+    pub probes: Vec<[f32; 3]>,
 }
 
 /// Which part of the scene each pixel of a frame shows, at the frame's render resolution (the
@@ -108,6 +111,21 @@ pub struct Image {
     pub pick: Option<Pick>,
 }
 
+/// The light a frame found at a point of its world. A surface there facing the camera, of albedo
+/// `a` (linear), shows `a * scale + add` in linear light before post: the sun and sky (with what
+/// shades them: walls, the ceiling, props' shadows, clouds), lamps, the eye's adaptation and the air
+/// between the point and the camera are all in it.
+/// `sun` is the share of that light (0..1) coming straight from the sun or moon, for how dark a
+/// shadow cast there is.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Probe { pub scale: [f32; 3], pub add: [f32; 3], pub sun: f32 }
+
+/// What the last frame asked for with `RenderOptions::probes` found: a probe per point, in their
+/// order, what post then does to a colour, and the way to the sun (path space: x right, y up, z
+/// ahead; None when nothing casts a shadow: under a roof, the sun down) as props' shadows take it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Lighting { pub probes: Vec<Probe>, pub look: super::post::Look, pub sun: Option<[f32; 3]> }
+
 /// Share of the frame each kind of thing covers, and how bright it is there (0..255 luma).
 #[derive(Clone, Debug, Default, serde::Serialize)]
 pub struct FrameStats {
@@ -144,6 +162,8 @@ pub struct WorldRenderer {
     /// Pictures' outlines for building them as solids, by picture and grid (the picture held so
     /// its address stays its own).
     outlines: std::collections::HashMap<(usize, usize, usize), (Arc<Sprite>, Arc<Outline>)>,
+    /// The light at the last frame's `RenderOptions::probes`.
+    lighting: Option<Lighting>,
 }
 
 /// Times the stages of one frame when profiling is on; costs one branch per stage when it is off.
@@ -658,7 +678,32 @@ pub(crate) struct Bounds {
     /// Where along the next world the camera stands, so patches stay put on the ground.
     anchor: f32,
     seed: u32,
+    /// A fork's mouth in the first world's own metres: the junction's distance ahead, the mouth's
+    /// length, how fast it widens (sideways metres per metre) and the path's half width.
+    mouth: Option<[f32; 4]>,
+    /// Each branch world's path half width (left, right), for the opening of its branch.
+    branch_hw: [f32; 2],
+    /// Where worlds never mix in patches, as convex pieces: a fork's paths and the verge beside
+    /// them. Its branches leave the road at an angle, so a patch of one world on another's path
+    /// lays that world's ground, with its own path somewhere else, over this one's: blotches of
+    /// branch path on the road before the junction and of grass on the branches after it.
+    calm: Vec<Vec<raster::Half>>,
+    /// A fork's junction distance, the split between the branch worlds (x = sd (z - zb) + cd) and
+    /// where the branches have parted (the wedge's apex), for the soft seams inside `calm`.
+    seams: Option<[f32; 4]>,
+    /// A fork's branch paths past the junction: [zb, left slope, right slope, left half width,
+    /// right half width] (centres at slope (z - zb)). Ground on a branch's path is always that
+    /// branch's world, so the two paths join as one surface where they overlap.
+    strips: Option<[f32; 5]>,
+    /// A fork's branches looking like the first world near the junction: [zb, hold, band, seed]
+    /// (`road_look`).
+    restyle: Option<[f32; 4]>,
 }
+
+/// In a soft patch edge's other world (`shade`'s `soft`), the bit saying the pixel is drawn there
+/// at its own place across its world rather than moved into the other's: a fork's branch looking
+/// like the first world (`Bounds::road_look`) keeps its own path, in that world's look.
+const SAME_X: u8 = 0x80;
 
 /// A line where two worlds mix: `line` gives signed metres from it (world `a` on the negative
 /// side, `b` on the positive), over `width` either side, only inside the `within` half-planes.
@@ -668,7 +713,7 @@ impl Bounds {
     /// The next world begins `zb` metres ahead, mixing with this one over `blend` metres.
     fn cross(zb: f32, blend: f32, anchor: f32, seed: u32) -> Bounds {
         let edges = if blend > 0.0 { vec![Edge { line: (0.0, 1.0, -zb), width: blend, a: 0, b: 1, within: vec![] }] } else { vec![] };
-        Bounds { realms: vec![vec![vec![(0.0, -1.0, zb)]], vec![vec![(0.0, 1.0, -zb)]]], edges, anchor, seed }
+        Bounds { realms: vec![vec![vec![(0.0, -1.0, zb)]], vec![vec![(0.0, 1.0, -zb)]]], edges, anchor, seed, mouth: None, branch_hw: [0.0; 2], calm: Vec::new(), seams: None, strips: None, restyle: None }
     }
 
     /// A fork `zb` metres ahead: branch centres run off at `slopes[1]` and `slopes[2]` (sideways
@@ -721,7 +766,83 @@ impl Bounds {
         }
         edges.push(Edge { line: norm(neg(in_left)), width: 2.5, a: 1, b: 0, within: vec![past, before_end] });
         edges.push(Edge { line: norm(in_right), width: 2.5, a: 0, b: 2, within: vec![past, before_end] });
-        Bounds { realms, edges, anchor, seed }
+        // The road up to the junction and each branch past it, with a verge's width beside them.
+        const CALM: f32 = 1.6;
+        let calm = vec![
+            vec![(0.0, -1.0, zb), (1.0, 0.0, hw[0] + CALM), (-1.0, 0.0, hw[0] + CALM)],
+            vec![past, (-1.0, sl, -sl * zb + hw[1] + CALM), (1.0, -sl, sl * zb + hw[1] + CALM)],
+            vec![past, (-1.0, sr, -sr * zb + hw[2] + CALM), (1.0, -sr, sr * zb + hw[2] + CALM)],
+        ];
+        Bounds { realms, edges, anchor, seed, mouth: None, branch_hw: [hw[1], hw[2]], calm, seams: Some([zb, sd, cd, apex]), strips: Some([zb, sl, sr, hw[1], hw[2]]), restyle: None }
+    }
+
+    /// Whether the first world's ground point (x, d) lies in the fork's mouth, where its props
+    /// stand back: a funnel from the path's edge `len` metres before the junction out to the
+    /// branches' angle at it.
+    fn in_mouth(&self, x: f32, d: f32) -> bool {
+        let Some([zb, len, slope, hw]) = self.mouth else { return false };
+        let into = d - (zb - len);
+        (0.0..=len + 2.0).contains(&into) && x.abs() < hw + 0.8 + slope * into.min(len)
+    }
+
+    /// Inside a fork's paths, where the road meets the branches and the branches meet each other
+    /// the worlds blend over a metre or so instead of cutting at a line: the same ground at two
+    /// places along two loops shows a step in its pattern otherwise.
+    fn seam(&self, r: u8, x: f32, z: f32) -> (u8, u8, f32) {
+        const SEAM: f32 = 1.2;
+        let Some([zb, sd, cd, apex]) = self.seams else { return (r, r, 0.0) };
+        let split = (x - (sd * (z - zb) + cd)) / (1.0 + sd * sd).sqrt();
+        if r == 0 && z > zb - SEAM && z <= zb {
+            return (0, if split < 0.0 { 1 } else { 2 }, 0.5 * (1.0 - (zb - z) / SEAM));
+        }
+        if r != 0 && z >= zb && z < zb + SEAM {
+            return (r, 0, 0.5 * (1.0 - (z - zb) / SEAM));
+        }
+        if r != 0 && z < apex && split.abs() < SEAM * 0.6 {
+            return (r, 3 - r, 0.5 * (1.0 - split.abs() / (SEAM * 0.6)));
+        }
+        (r, r, 0.0)
+    }
+
+    /// Whether a branch world's (`realm` 1 or 2) ground point (x, d), in its own metres, lies in
+    /// the opening of its branch: for as long as the mouth past the junction its props stand
+    /// back, furthest at the junction, so the branch shows as a way in rather than a wall of trees.
+    fn in_branch_mouth(&self, realm: u8, x: f32, d: f32) -> bool {
+        let Some([zb, len, _, _]) = self.mouth else { return false };
+        let hw = self.branch_hw[(realm as usize).clamp(1, 2) - 1];
+        let past = d - zb;
+        (-1.0..=len).contains(&past) && x.abs() < hw + 0.8 + 0.5 * (len - past.max(0.0))
+    }
+
+    /// Past a fork's junction, the branch whose path (x, z) is on, when only one of them claims it:
+    /// a path's middle first, then a margin either side for its ragged edge (drawn by its own
+    /// world, as grass or path). Where both paths' middles overlap either world draws path, and
+    /// the regions decide as usual.
+    fn on_branch(&self, x: f32, z: f32) -> Option<u8> {
+        const EDGE: f32 = 0.45;
+        let [zb, sl, sr, hl, hr] = self.strips?;
+        if z <= zb { return None; }
+        let (dl, dr) = ((x - sl * (z - zb)).abs(), (x - sr * (z - zb)).abs());
+        let one = |l: bool, r: bool| match (l, r) { (true, false) => Some(1), (false, true) => Some(2), _ => None };
+        let (core_l, core_r) = (dl < hl - EDGE, dr < hr - EDGE);
+        if core_l || core_r { return one(core_l, core_r); }
+        one(dl < hl + EDGE, dr < hr + EDGE)
+    }
+
+    /// How much a fork's branch ground still looks like the first world: `x` across the branch,
+    /// `w` along its world (so the patches stay put on the ground) and `z` ahead of the camera. 1
+    /// up to `hold` past the junction, 0 past the band after it, ragged patches between (the noise
+    /// of `realm_mix`'s patches). The fork then reads as one road that changes once the player is
+    /// on their way, not as two looks parting at the junction.
+    fn road_look(&self, x: f32, w: f32, z: f32) -> f32 {
+        let Some([zb, hold, band, seed]) = self.restyle else { return 0.0 };
+        let past = z - zb - hold;
+        if past <= -band { return 1.0; }
+        if past >= band * 1.1 { return 0.0; }
+        let n = super::looks::value_noise(x * 0.35 + seed * 0.37, w * 0.35) * 0.55
+            + super::looks::value_noise(x * 1.1 + 31.0, w * 1.1 + seed) * 0.3
+            + super::looks::value_noise(x * 3.7 + 7.0, w * 3.7 - 11.0) * 0.15;
+        1.0 - smoothstep(-0.07, 0.07, past / band - n)
     }
 
     /// Which world's region a camera-space point (x, z) is in.
@@ -738,7 +859,14 @@ impl Bounds {
     /// `realm_at`, plus at the edge of a patch the other world and how much of it shows (0..0.5),
     /// so patch edges are soft instead of cut out.
     fn realm_mix(&self, x: f32, z: f32) -> (u8, u8, f32) {
+        if let Some(b) = self.on_branch(x, z) {
+            // Still blended with the road for its first metre, as the seam does.
+            const SEAM: f32 = 1.2;
+            let zb = self.strips.map_or(0.0, |s| s[0]);
+            return if z < zb + SEAM { (b, 0, 0.5 * (1.0 - (z - zb) / SEAM)) } else { (b, b, 0.0) };
+        }
         let r = self.region_of(x, z);
+        if self.calm.iter().any(|p| p.iter().all(|h| h.0 * x + h.1 * z + h.2 >= 0.0)) { return self.seam(r, x, z); }
         for e in &self.edges {
             if r != e.a && r != e.b { continue; }
             if !e.within.iter().all(|h| h.0 * x + h.1 * z + h.2 >= 0.0) { continue; }
@@ -890,6 +1018,16 @@ impl<'a> Ctx<'a> {
         match self.bounds {
             None => true,
             Some(b) => { let c = self.view.to_cam(x, y, d); b.realm_at(c[0], c[2]) == self.realm }
+        }
+    }
+
+    /// Whether a prop of this world at ground point (x, d) stands in a fork's mouth and so steps
+    /// back out of the way (the first world only).
+    fn in_mouth(&self, x: f32, d: f32) -> bool {
+        match (self.realm, self.bounds) {
+            (_, None) => false,
+            (0, Some(b)) => b.in_mouth(x, d),
+            (r, Some(b)) => b.in_branch_mouth(r, x, d),
         }
     }
 
@@ -1171,6 +1309,8 @@ impl WorldRenderer {
     /// night (`sky.day_night`) on with the scene's own settings; None leaves each scene's own.
     pub fn set_hour(&mut self, hour: Option<f32>) { self.hour = hour.map(|h| h.rem_euclid(24.0)); }
     pub fn hour(&self) -> Option<f32> { self.hour }
+    /// The light the last frame found at its `RenderOptions::probes` (None when it asked for none).
+    pub fn lighting(&self) -> Option<&Lighting> { self.lighting.as_ref() }
 
     /// A renderer that draws on the GPU where there is one (`gpu::shared`), else on the CPU.
     pub fn auto() -> WorldRenderer {
@@ -1242,10 +1382,13 @@ impl WorldRenderer {
                 let keep = match next { 1 => [1.0, 1.0 - taken], _ => [1.0 - taken, 1.0] };
                 // The frame's camera is filled in by the caller (see `render_worlds`).
                 let sky_w = SkyW { base: vec![1.0, 0.0, 0.0], fork: Some(ForkSky { center: 0.0, focal: 1.0, split: 0.5 * (slopes[1] + slopes[2]), near: smoothstep(f.approach, 0.0, zb).max(cam_t), keep }) };
-                let hw = [0.0, worlds[1].scene.path.half_width, worlds[2].scene.path.half_width];
+                let hw = [worlds[0].scene.path.half_width, worlds[1].scene.path.half_width, worlds[2].scene.path.half_width];
                 Plan {
                     zb, next, cam_t, look, sky_w, shear: slopes.iter().map(|&s| Some((zb, s))).collect(),
-                    bounds: Some(Bounds::fork(zb, slopes, hw, f.wedge, f.blend, chosen.map(|b| (b.realm(), steer)), worlds[next].distance, f.seed)), taper: 0.0, adaptation: f.adaptation,
+                    bounds: Some(Bounds {
+                        mouth: Some([zb, f.mouth, f.slope, worlds[0].scene.path.half_width]),
+                        restyle: (f.hold >= 0.0).then(|| [zb, f.hold, f.blend.max(1.0), f.seed as f32]),
+                        ..Bounds::fork(zb, slopes, hw, f.wedge, f.blend, chosen.map(|b| (b.realm(), steer)), worlds[next].distance, f.seed) }), taper: 0.0, adaptation: f.adaptation,
                 }
             }
         }
@@ -1441,11 +1584,12 @@ impl WorldRenderer {
         // Geometry: each world's, cut to its part of the view.
         let mut tris = Vec::new();
         for ctx in &ctxs {
-            let t = build_geometry(ctx, &layers);
+            let (t, whole) = build_geometry_parts(ctx, &layers);
             match bounds {
                 None => tris.extend(t),
                 Some(b) => tris.extend(raster::clip_region(t, &b.realms[ctx.realm as usize], ctx.realm)),
             }
+            tris.extend(whole);
         }
         tris.extend(facade_tris);
         prof.mark("geometry");
@@ -1477,6 +1621,11 @@ impl WorldRenderer {
                     g.realm = to as u8;
                 }
                 if k > 0.0 && other != g.realm as usize && has(other) { *sf = (other as u8, k); }
+                // Near a fork's junction its branches' ground is drawn as the first world would draw it.
+                if g.id == id::GROUND && g.realm != 0 {
+                    let r = b.road_look(g.x, g.d + ctxs[g.realm as usize].scroll, c[2]);
+                    if r > 0.0 && r >= sf.1 { *sf = (SAME_X, r); }
+                }
             });
         }
 
@@ -1564,7 +1713,7 @@ impl WorldRenderer {
         let mut sun_mask = vec![1.0f32; bw * bh];
         let mut ao_mask = vec![1.0f32; bw * bh];
         if layers.ground && !gpu_geom {
-            for ctx in &ctxs { prop_shadows(ctx, &bills, &gbuf, &mut sun_mask, &mut ao_mask); }
+            for ctx in &ctxs { prop_shadows(ctx, &ctxs, &bills, &gbuf, &mut sun_mask, &mut ao_mask); }
         }
         // Cloud shadows drifting over the ground and walls.
         if ctxs.iter().any(|c| c.wx.clouds > 0.0) && !gpu_geom {
@@ -1594,6 +1743,14 @@ impl WorldRenderer {
             blended = s;
             &blended
         } else { look };
+        self.lighting = (!opts.probes.is_empty()).then(|| Lighting {
+            probes: {
+                let casters: Vec<_> = ctxs.iter().map(|c| shadow_casters(c, &bills)).collect();
+                opts.probes.iter().map(|&p| probe(&ctxs, bounds, &casters, p)).collect()
+            },
+            look: super::post::Look::of(post_scene, layers.post),
+            sun: shadow_casters(&ctxs[if plan.zb > 0.0 { 0 } else { plan.next.min(ctxs.len() - 1) }], &[]).0,
+        });
         // Deferred lighting.
         let mut hdr = vec![[0.0f32; 3]; bw * bh];
         let mut refl = vec![Refl::default(); bw * bh];
@@ -1662,6 +1819,14 @@ impl WorldRenderer {
         #[cfg(not(feature = "gpu"))]
         let on_gpu = false;
         if !on_gpu { shade(&ctxs, &plan.sky_w, &soft, &gbuf, &sun_mask, &ao_mask, &layers, &mut hdr, &mut refl); }
+        // PF_REALMS=1 (with --engine cpu): every surface tinted by the world it was drawn from
+        // (red the first, green the second, blue the third), to see where worlds meet.
+        if !on_gpu && n > 1 && std::env::var_os("PF_REALMS").is_some() {
+            const TINT: [[f32; 3]; 3] = [[1.0, 0.35, 0.35], [0.35, 1.0, 0.35], [0.35, 0.35, 1.0]];
+            for (c, g) in hdr.iter_mut().zip(&gbuf) {
+                if g.id != id::NONE { let t = TINT[g.realm as usize % 3]; *c = [c[0] * t[0], c[1] * t[1], c[2] * t[2]]; }
+            }
+        }
         prof.mark("shade");
         let bank_t = ctxs[here].bank_t(ctxs[here].far);
         // On the GPU the sky, the veil and the bank are drawn in one pass per world: one world's over
@@ -2667,7 +2832,7 @@ impl WorldRenderer {
                         if ctx.on_bridge(d) && x.abs() > edge - 0.05 && !floating { continue; }
                         // Nor on a branch path, nor in the mouth of a side passage.
                         if ring.is_none() && ctx.on_fork(x, d) { continue; }
-                        if !ctx.owns(x, 0.0, d) { continue; }
+                        if !ctx.owns(x, 0.0, d) || (ring.is_none() && !floating && ctx.in_mouth(x, d)) { continue; }
                         let sc = p.scale.max(0.01) * (1.0 + (hf(seed ^ 0x5C, ikey) * 2.0 - 1.0) * p.scale_var.clamp(0.0, 0.95));
                         let height = look.height * sc;
                         let variant = hash(seed ^ 0x7E, ikey);
@@ -3105,6 +3270,15 @@ fn passage_dark(ctx: &Ctx, g: &GPixel) -> f32 {
 }
 
 fn build_geometry(ctx: &Ctx, layers: &Layers) -> Vec<Tri> {
+    let (mut tris, whole) = build_geometry_parts(ctx, layers);
+    tris.extend(whole);
+    tris
+}
+
+/// `build_geometry` in two parts: what is cut to the world's part of a frame of several, and the
+/// walls with thickness, which end in a face of their own where they leave it instead (the cut
+/// slices a wall at a slant, and its stone showed as a sheet there).
+fn build_geometry_parts(ctx: &Ctx, layers: &Layers) -> (Vec<Tri>, Vec<Tri>) {
     let v = &ctx.view;
     let s = ctx.scene;
     // Open flight: no ground at all, so nothing of the path, its verge or its bridges is built.
@@ -3159,6 +3333,31 @@ fn build_geometry(ctx: &Ctx, layers: &Layers) -> Vec<Tri> {
     let side = v.side_k >= 1.0;
     let near_side = v.near;
     let mut tris = Vec::with_capacity(ds.len() * 8);
+    // A wall's thickness: its top (when it has one), its back where it can be seen (from a turned
+    // camera, or from another world's ground in a frame of several) and its ends.
+    let thick = if walls { s.walls.thickness.max(0.0) } else { 0.0 };
+    let back = thick > 0.0 && (v.turned || ctx.bounds.is_some());
+    let topped = top < 1.0e3;
+    // In a frame of several, each wall runs where its middle is in this world's part of the view.
+    let own = ctx.bounds.filter(|_| thick > 0.0);
+    let inside = |sign: f32, d: f32| own.is_none_or(|b| {
+        let c = v.to_cam(sign * (ctx.wall_x(d) + 0.5 * thick), 0.0, d);
+        b.region_of(c[0], c[2]) == ctx.realm
+    });
+    let mut whole: Vec<Tri> = Vec::new();
+    // The stone behind a wall's face over [d0, d1] (its face is built by the caller).
+    let slab = |out: &mut Vec<Tri>, sign: f32, d0: f32, d1: f32, foot: f32| {
+        if thick <= 0.0 { return; }
+        let (x0, x1) = (sign * ctx.wall_x(d0), sign * ctx.wall_x(d1));
+        let (o0, o1) = (sign * (ctx.wall_x(d0) + thick), sign * (ctx.wall_x(d1) + thick));
+        if topped { raster::quad(out, [vert(x0, top, d0), vert(x1, top, d1), vert(o1, top, d1), vert(o0, top, d0)], id::rail(id::STONE, id::TOP)); }
+        if back { raster::quad(out, [vert(o0, foot, d0), vert(o1, foot, d1), vert(o1, top, d1), vert(o0, top, d0)], id::rail(id::STONE, id::OUTER)); }
+    };
+    // A wall's end at `d`: its stone, across its thickness.
+    let end = |out: &mut Vec<Tri>, sign: f32, d: f32, foot: f32| {
+        let (x, o) = (sign * ctx.wall_x(d), sign * (ctx.wall_x(d) + thick));
+        raster::quad(out, [vert(x, foot, d), vert(o, foot, d), vert(o, top, d), vert(x, top, d)], id::rail(id::STONE, id::FRONT));
+    };
     if layers.ground {
         for &d in &risers {
             // Built from the very vertices of the step below (its far edge) and the step above (its
@@ -3231,30 +3430,48 @@ fn build_geometry(ctx: &Ctx, layers: &Layers) -> Vec<Tri> {
             let mid = v.scroll + 0.5 * (d0 + d1);
             for (sign, wid) in [(-1.0f32, id::WALL_L), (1.0, id::WALL_R)] {
                 if side && sign == near_side { continue; }
+                // Where the wall leaves this world's part of the frame it ends, in a face of its own.
+                let (d0, d1, out) = match own {
+                    None => (d0, d1, &mut tris),
+                    Some(_) => {
+                        let (a, b) = (inside(sign, d0), inside(sign, d1));
+                        if !a && !b { continue; }
+                        let (d0, d1) = if a && b { (d0, d1) } else {
+                            // Where it crosses the boundary, to a millimetre or so.
+                            let (mut lo, mut hi) = (d0, d1);
+                            for _ in 0..14 { let m = 0.5 * (lo + hi); if inside(sign, m) == a { lo = m } else { hi = m } }
+                            let at = 0.5 * (lo + hi);
+                            end(&mut whole, sign, at, foot);
+                            if a { (d0, at) } else { (at, d1) }
+                        };
+                        (d0, d1, &mut whole)
+                    }
+                };
                 let (x0, x1) = (sign * ctx.wall_x(d0), sign * ctx.wall_x(d1));
                 if let Some(f) = open.filter(|f| f.opens(mid, sign)) {
                     // A side passage: floor and ceiling run back into the dark, a lintel above.
                     let (p0, p1) = (sign * (ctx.wall_x(d0) + f.depth), sign * (ctx.wall_x(d1) + f.depth));
                     let h = ph.unwrap_or(top);
                     if layers.ground {
-                        raster::quad(&mut tris, [vert(x0, 0.0, d0), vert(p0, 0.0, d0), vert(p1, 0.0, d1), vert(x1, 0.0, d1)], id::GROUND);
+                        raster::quad(out, [vert(x0, 0.0, d0), vert(p0, 0.0, d0), vert(p1, 0.0, d1), vert(x1, 0.0, d1)], id::GROUND);
                     }
                     if let Some(h) = ph {
-                        raster::quad(&mut tris, [vert(x0, h, d0), vert(x1, h, d1), vert(x1, top, d1), vert(x0, top, d0)], wid);
-                        raster::quad(&mut tris, [vert(x0, h, d0), vert(x1, h, d1), vert(p1, h, d1), vert(p0, h, d0)], id::CEILING);
+                        raster::quad(out, [vert(x0, h, d0), vert(x1, h, d1), vert(x1, top, d1), vert(x0, top, d0)], wid);
+                        raster::quad(out, [vert(x0, h, d0), vert(x1, h, d1), vert(p1, h, d1), vert(p0, h, d0)], id::CEILING);
                     } else {
                         // Open to the sky: an alley that ends in a wall rather than in nothing.
-                        raster::quad(&mut tris, [vert(p0, 0.0, d0), vert(p1, 0.0, d1), vert(p1, h, d1), vert(p0, h, d0)], wid);
+                        raster::quad(out, [vert(p0, 0.0, d0), vert(p1, 0.0, d1), vert(p1, h, d1), vert(p0, h, d0)], wid);
                     }
                     continue;
                 }
                 match ph {
                     Some(h) => {
-                        raster::quad(&mut tris, [vert(x0, foot, d0), vert(x1, foot, d1), vert(x1, h, d1), vert(x0, h, d0)], wid);
-                        raster::quad(&mut tris, [vert(x0, h, d0), vert(x1, h, d1), vert(x1, top, d1), vert(x0, top, d0)], wid);
+                        raster::quad(out, [vert(x0, foot, d0), vert(x1, foot, d1), vert(x1, h, d1), vert(x0, h, d0)], wid);
+                        raster::quad(out, [vert(x0, h, d0), vert(x1, h, d1), vert(x1, top, d1), vert(x0, top, d0)], wid);
                     }
-                    None => raster::quad(&mut tris, [vert(x0, foot, d0), vert(x1, foot, d1), vert(x1, top, d1), vert(x0, top, d0)], wid),
+                    None => raster::quad(out, [vert(x0, foot, d0), vert(x1, foot, d1), vert(x1, top, d1), vert(x0, top, d0)], wid),
                 }
+                slab(out, sign, d0, d1, foot);
             }
         }
         if s.ceiling.enabled && layers.walls && !side {
@@ -3264,7 +3481,7 @@ fn build_geometry(ctx: &Ctx, layers: &Layers) -> Vec<Tri> {
             raster::quad(&mut tris, [vert(-e0, ch, d0), vert(-e1, ch, d1), vert(e1, ch, d1), vert(e0, ch, d0)], id::CEILING);
         }
     }
-    tris
+    (tris, whole)
 }
 
 // ── Shading ────────────────────────────────────────────────────────────────
@@ -3577,6 +3794,16 @@ fn railing(v: &View, b: Spans, s0: f32, e: f32, ds: &[f32], (near, far): (f32, f
     }
 }
 
+/// Whether ground on a fork's branch `realm` (the G-buffer's, 1 or 2; `x` across that branch, `d`
+/// ahead) lies on the other branch's path too. The two paths are one surface there, so its own
+/// edge is no edge and does not darken (a dark line ran down the middle of the shared ground).
+fn on_other_branch(ctx: &Ctx, x: f32, d: f32, realm: u8) -> bool {
+    let (Some([zb, sl, sr, hl, hr]), 1 | 2) = (ctx.bounds.and_then(|b| b.strips), realm) else { return false };
+    if d <= zb { return false; }
+    let (own, other, hw) = if realm == 1 { (sl, sr, hr) } else { (sr, sl, hl) };
+    (x + (own - other) * (d - zb)).abs() < hw
+}
+
 /// Texture coordinates (in repeats) and which texture a G-buffer pixel uses.
 #[inline]
 fn surface_uv(ctx: &Ctx, g: &GPixel) -> Option<(f32, f32, u8)> {
@@ -3788,7 +4015,7 @@ fn shade_px(ctx: &Ctx, g: &GPixel, gbuf: &[GPixel], i: usize, x: usize, y: usize
             ao *= passage_dark(ctx, g);
             if tex == 0 && ctx.fork.is_some_and(|f| f.split) && !scene.walls.enabled {
                 ao *= ctx.split_edge_dark(g.x, g.d);
-            } else if tex == 0 && !ctx.on_fork(g.x, g.d) {
+            } else if tex == 0 && !ctx.on_fork(g.x, g.d) && !on_other_branch(ctx, g.x, g.d, gbuf[i].realm) {
                 let edge = ctx.path_edge(g.d).max(0.05);
                 ao *= 1.0 - scene.path.edge_dark.clamp(0.0, 1.0) * smoothstep(0.5, 1.0, g.x.abs() / edge);
             }
@@ -4057,7 +4284,7 @@ fn gpu_params(ctx: &Ctx, layers: &Layers) -> super::gpu::WorldParams {
         ww_k1: ctx.water.map_or(0.0, |k| k.k1), ww_k2: ctx.water.map_or(0.0, |k| k.k2), ww_wet: ctx.water.map_or(0.0, |k| k.wet),
         ww_kind: ctx.water.map_or(0, |k| k.kind), ww_dens: ctx.water.map_or(0.0, |k| k.dens), ww_fcol: ctx.water.map_or([0.0; 3], |k| k.fcol),
         ww_fsize: ctx.water.map_or(1.0, |k| k.fsize), ww_period: ctx.water.map_or(1.0, |k| k.period), ww_cs: ctx.water.map_or(1.0, |k| k.cs), ww_seed: ctx.water.map_or(0, |k| k.seed),
-        br_inset: ctx.bridge.map_or(0.0, |b| b.rail_inset()), ww_frozen: ctx.water.map_or(0.0, |k| k.frozen), ww_hw: ctx.water.map_or(1.0, |k| k.hw), fence: fence_paint(s), spare: [0.0; 2], wind: v.wind_now(), gc_n: ctx.cover.len() as u32, gc_sway: ctx.wx.sway_parts().0, gc_lean: ctx.wx.sway_parts().1, gc_phase: ctx.wx.sway_parts().2, gc: { let mut a = [[0.0f32; 4]; 12]; for (i, k) in ctx.cover.iter().enumerate() { a[i * 4..i * 4 + 4].copy_from_slice(&k.rec()); } a },
+        br_inset: ctx.bridge.map_or(0.0, |b| b.rail_inset()), ww_frozen: ctx.water.map_or(0.0, |k| k.frozen), ww_hw: ctx.water.map_or(1.0, |k| k.hw), fence: fence_paint(s), branch_hw: ctx.bounds.and_then(|b| b.strips).map_or([0.0; 2], |s| [s[3], s[4]]), wind: v.wind_now(), gc_n: ctx.cover.len() as u32, gc_sway: ctx.wx.sway_parts().0, gc_lean: ctx.wx.sway_parts().1, gc_phase: ctx.wx.sway_parts().2, gc: { let mut a = [[0.0f32; 4]; 12]; for (i, k) in ctx.cover.iter().enumerate() { a[i * 4..i * 4 + 4].copy_from_slice(&k.rec()); } a },
         cam_yc: v.yaw_c, cam_ys: v.yaw_s, cam_x: v.cam_x, cam_turned: v.turned as u32,
         ..bytemuck::Zeroable::zeroed()
     }
@@ -4192,6 +4419,7 @@ fn gpu_post_params<'a>(ctx: &Ctx, ctxs: &[Ctx], fv: &View, scene: &Scene, lens: 
     if st.outline.enabled {
         (p.ol_on, p.ol_objects_only) = (1, st.outline.objects_only as u32);
         (p.ol_r, p.ol_g, p.ol_b) = (st.outline.color[0] as f32, st.outline.color[1] as f32, st.outline.color[2] as f32);
+        (p.ol_sel, p.ol_keep) = (st.outline.selective.clamp(0.0, 1.0), 1.0 - st.outline.dark.clamp(0.0, 1.0));
     }
     let warp = fv.lens_curve.abs() > 0.001;
     if warp {
@@ -4460,10 +4688,12 @@ fn shade(ctxs: &[Ctx], sky_w: &SkyW, soft: &[(u8, f32)], gbuf: &[GPixel], sun_ma
             let (c, rf) = match soft.get(i).filter(|s| s.1 > 0.0) {
                 // At the edge of a patch where two worlds mix, a little of each.
                 Some(&(o, k)) => {
+                    let (o, same) = (o & !SAME_X, o & SAME_X != 0);
                     let other = &ctxs[o as usize];
                     let from = &ctxs[g.realm as usize];
                     let cam = from.view.to_cam(g.x, g.y, g.d);
-                    let go = GPixel { x: cam[0] - other.view.bend_x(g.d) - other.view.shear_x(g.d), realm: o, ..*g };
+                    let across = if same { g.x } else { cam[0] - other.view.bend_x(g.d) - other.view.shear_x(g.d) };
+                    let go = GPixel { x: across, realm: o, ..*g };
                     match shade_px(other, &go, gbuf, i, x, y, sun_mask, ao_mask, layers, None, None) {
                         Some((c2, r2)) => (mix3(c, c2, k), if r2.r > rf.r { r2 } else { rf }),
                         None => (c, rf),
@@ -4860,8 +5090,15 @@ fn shadow_casters<'b>(ctx: &Ctx, bills: &'b [Billboard]) -> (Option<[f32; 3]>, V
     (sun, casters)
 }
 
-fn prop_shadows(ctx: &Ctx, bills: &[Billboard], gbuf: &[GPixel], sun_mask: &mut [f32], ao_mask: &mut [f32]) {
+/// `all`: every world of the frame. A shadow falls across where worlds meet, onto ground that
+/// keeps its place in its own world's path frame; it is brought into this world's to be tested.
+fn prop_shadows(ctx: &Ctx, all: &[Ctx], bills: &[Billboard], gbuf: &[GPixel], sun_mask: &mut [f32], ao_mask: &mut [f32]) {
     let w = ctx.view.width;
+    // Across from this world's path centre, for a bit of ground of any world.
+    let across = |g: &GPixel| match all.get(g.realm as usize) {
+        Some(f) if g.realm != ctx.realm => f.view.to_cam(g.x, g.y, g.d)[0] - ctx.view.bend_x(g.d) - ctx.view.shear_x(g.d),
+        _ => g.x,
+    };
     let (sun, casters) = shadow_casters(ctx, bills);
     if casters.is_empty() { return; }
     // Drawn in bands of rows side by side, each caster in the same order as one after another.
@@ -4875,7 +5112,7 @@ fn prop_shadows(ctx: &Ctx, bills: &[Billboard], gbuf: &[GPixel], sun_mask: &mut 
                         let i = y * w + x;
                         let g = &gbuf[i];
                         if g.id != id::GROUND { continue; }
-                        let (dx, dd) = (g.x - c.foot[0], g.d - c.foot[1]);
+                        let (dx, dd) = (across(g) - c.foot[0], g.d - c.foot[1]);
                         let (na, nb) = ((dx * c.axis[0] + dd * c.axis[1]) / c.ra, (dd * c.axis[0] - dx * c.axis[1]) / c.rb);
                         // Under a prop a soft oval; along a fence's foot a soft strip.
                         let r2 = match c.pic { Pic::Fence(_) if na.abs() <= 1.0 => nb * nb, Pic::Fence(_) => 1.0, _ => na * na + nb * nb };
@@ -4898,7 +5135,8 @@ fn prop_shadows(ctx: &Ctx, bills: &[Billboard], gbuf: &[GPixel], sun_mask: &mut 
                     let i = y * w + x;
                     let g = &gbuf[i];
                     if g.id != id::GROUND { continue; }
-                    let (t, mut u, vv) = on_pic(g.x, g.d);
+                    let gx = across(g);
+                    let (t, mut u, vv) = on_pic(gx, g.d);
                     if t <= 0.0 { continue; }
                     if !(0.0..1.0).contains(&u) || !(0.0..1.0).contains(&vv) { continue; }
                     let a = match &c.pic {
@@ -4913,8 +5151,8 @@ fn prop_shadows(ctx: &Ctx, bills: &[Billboard], gbuf: &[GPixel], sun_mask: &mut 
                         Pic::Fence(fc) => {
                             // Averaged over the ground this pixel covers, so pickets far off do not shimmer.
                             let (fu, fv) = ground_step(gbuf, w, x, y).map_or((0.0, 0.0), |((ax, ad), (bx, bd))| {
-                                let (_, ua, va) = on_pic(g.x + ax, g.d + ad);
-                                let (_, ub, vb) = on_pic(g.x + bx, g.d + bd);
+                                let (_, ua, va) = on_pic(gx + ax, g.d + ad);
+                                let (_, ub, vb) = on_pic(gx + bx, g.d + bd);
                                 ((ua - u).abs() + (ub - u).abs(), (va - vv).abs() + (vb - vv).abs())
                             });
                             fc.alpha(u, vv, fu.min(1.0), fv.min(1.0))
@@ -4925,6 +5163,61 @@ fn prop_shadows(ctx: &Ctx, bills: &[Billboard], gbuf: &[GPixel], sun_mask: &mut 
             }
         }
     });
+}
+
+/// The side paths of `scene` (`path.fork`) whose mouths lie between loop distances `from` and
+/// `to` (metres along the walk, not wrapped): where each meets the path and the side it leaves on
+/// (-1 left, 1 right; both, for a fork to both sides), as the renderer draws them.
+pub fn side_paths(scene: &Scene, from: f32, to: f32) -> Vec<(f32, f32)> {
+    let Some(f) = Forks::new(&scene.path.fork, scene.path.edge_noise, scene.motion.loop_length.max(1.0)) else { return Vec::new() };
+    let (k0, k1) = (((from - f.offset) / f.period).ceil() as i64, ((to - f.offset) / f.period).floor() as i64);
+    (k0..=k1).flat_map(|k| f.sides(k).into_iter().filter(|&s| s != 0.0).map(move |s| (f.offset + k as f32 * f.period, s))).collect()
+}
+
+/// The light at point `p` (path space) of the world that owns it, for a card there facing the
+/// camera: as `light_among` lights a billboard, with the sun dimmed by the props' pictures between
+/// it and the point (their shadows) and by clouds, then fogged by the air to the camera.
+fn probe(ctxs: &[Ctx], bounds: Option<&Bounds>, casters: &[(Option<[f32; 3]>, Vec<Caster>)], p: [f32; 3]) -> Probe {
+    let [x, y, d] = p;
+    let c = ctxs[0].view.to_cam(x, y, d);
+    let r = bounds.map_or(0, |b| b.realm_at(c[0], c[2]) as usize).min(ctxs.len() - 1);
+    let ctx = &ctxs[r];
+    let (sun, casters) = &casters[r];
+    let mut lit = sun.map_or(1.0, |l| sun_past_casters(l, casters, x, y, d));
+    if ctx.wx.clouds > 0.0 { lit *= weather::cloud_shade(ctx, x, d); }
+    let light = ctx.light_among(x, y, d, None, id::NONE, lit, None, None);
+    let shade = ctx.light_among(x, y, d, None, id::NONE, 0.0, None, None);
+    let lum = |c: [f32; 3]| 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2];
+    let sun = (1.0 - lum(shade) / lum(light).max(1e-5)).clamp(0.0, 1.0);
+    let z = ctx.view.to_cam(x, y, d)[2].max(NEAR);
+    let add = ctx.apply_fog([0.0; 3], z);
+    let through = sub3(ctx.apply_fog([1.0; 3], z), add);
+    Probe { scale: mul3(light, through), add, sun }
+}
+
+/// How much sun reaches point (x, y, d) past the casters' pictures (1 all of it), traced as
+/// `prop_shadows` casts them on the ground.
+fn sun_past_casters(l: [f32; 3], casters: &[Caster], x: f32, y: f32, d: f32) -> f32 {
+    let mut lit = 1.0f32;
+    for c in casters {
+        let rel = [c.c0[0] - x, c.c0[1] - y, c.c0[2] - d];
+        let t = dot3(c.n, rel) / c.nl;
+        if t <= 0.0 { continue; }
+        let q = [x + l[0] * t - c.c0[0], y + l[1] * t - c.c0[1], d + l[2] * t - c.c0[2]];
+        let (mut u, mut vv) = (dot3(q, c.across) * c.ia, dot3(q, c.down) * c.idn);
+        if !(0.0..1.0).contains(&u) || !(0.0..1.0).contains(&vv) { continue; }
+        let a = match &c.pic {
+            Pic::Sprite(b) => {
+                if let Some(m) = b.panel.and_then(|p| p.map) { (u, vv) = map_uv(&m, u, vv); } else if b.flip { u = 1.0 - u; }
+                let mut a = b.sprite.sample(u, vv, 192.0, false)[3];
+                if b.sprite.casts { if let Some(gl) = &b.sprite.glow { a *= gl.sample(u, vv, 192.0, false)[1]; } }
+                a
+            }
+            Pic::Fence(fc) => fc.alpha(u, vv, 0.0, 0.0),
+        };
+        lit = lit.min(1.0 - c.shadow * a.min(1.0));
+    }
+    lit.max(0.0)
 }
 
 /// How far the ground moves (x, d) from pixel (x, y) to the next pixel across and the next down,
@@ -6530,6 +6823,65 @@ mod tests {
         }
     }
 
+    /// The side paths a game is told of are where the renderer opens them, on the sides it does.
+    #[test]
+    fn side_paths_are_reported_where_they_are_drawn() {
+        let mut s = preset("Haunted Forest");
+        s.path.fork.enabled = true;
+        s.path.fork.side = crate::scene::ForkSide::Alternate;
+        let loop_len = s.motion.loop_length.max(1.0);
+        let f = Forks::new(&s.path.fork, s.path.edge_noise, loop_len).unwrap();
+        let got = side_paths(&s, 0.0, 2.0 * loop_len);
+        let want: Vec<(f32, f32)> = f.near(2.0 * loop_len, 2.0 * loop_len).filter(|&(w, _)| (0.0..=2.0 * loop_len).contains(&w)).collect();
+        assert!(!got.is_empty());
+        assert_eq!(got, want);
+        s.path.fork.enabled = false;
+        assert!(side_paths(&s, 0.0, 100.0).is_empty());
+    }
+
+    /// Probes see the frame's own light: lamps make pools along the road that the lampless road
+    /// lacks, and the air between a probe and the camera grows with its distance.
+    #[test]
+    fn probes_find_the_lamps_and_the_fog() {
+        let mut s = preset("Night Road");
+        s.particles.clear();
+        s.weather = Weather::default();
+        let points: Vec<[f32; 3]> = (2..60).map(|k| [0.0, 1.0, k as f32 * 0.5]).collect();
+        let light = |s: &Scene| {
+            let mut r = WorldRenderer::default();
+            r.render(s, 0.0, &RenderOptions { size: Some((160, 90)), time: Some(0.0), probes: points.clone(), ..RenderOptions::default() });
+            r.lighting().unwrap().probes.clone()
+        };
+        let lum = |p: &Probe| 0.3 * p.scale[0] + 0.55 * p.scale[1] + 0.15 * p.scale[2];
+        let mut dark = s.clone();
+        dark.fixtures.clear();
+        let (lit, unlit) = (light(&s), light(&dark));
+        assert_eq!(lit.len(), points.len());
+        let most = lit.iter().zip(&unlit).map(|(a, b)| lum(a) / lum(b).max(1e-4)).fold(0.0f32, f32::max);
+        assert!(most > 3.0, "the lamps light the probes near them: at most {most}x the lampless road");
+        let (lo, hi) = lit.iter().map(lum).fold((f32::MAX, 0.0f32), |(a, b), l| (a.min(l), b.max(l)));
+        assert!(hi > 2.0 * lo, "pools, not an even wash: {lo}..{hi}");
+        // Fog: the far probe shows more of the air and less of itself.
+        let mut fog = dark.clone();
+        fog.light.fog.enabled = true;
+        fog.light.fog.distance = 12.0;
+        fog.light.fog.color = [120, 120, 140];
+        fog.light.fog.match_sky = false;
+        let f = light(&fog);
+        let (near, far) = (f[0], f[f.len() - 1]);
+        assert!(far.add[1] > near.add[1] + 0.01 && lum(&far) < lum(&near), "{near:?} vs {far:?}");
+        // Out in the sun most of the light is the sun's, and it says where the sun is.
+        let mut r = WorldRenderer::default();
+        r.render(&preset("Forest Path"), 0.0, &RenderOptions { size: Some((160, 90)), time: Some(0.0), probes: points.clone(), ..RenderOptions::default() });
+        let l = r.lighting().unwrap();
+        let most = l.probes.iter().map(|p| p.sun).fold(0.0f32, f32::max);
+        assert!(most > 0.3 && l.sun.is_some_and(|s| s[1] > 0.0), "sun share {most}, way {:?}", l.sun);
+        // Asking for none measures nothing.
+        let mut r = WorldRenderer::default();
+        r.render(&s, 0.0, &RenderOptions { size: Some((160, 90)), ..RenderOptions::default() });
+        assert!(r.lighting().is_none());
+    }
+
     /// A camera turned to look across the path sees the lamps behind where it stands as well as
     /// those ahead: each draws, with its glow, wherever it is in the frame.
     #[test]
@@ -7177,6 +7529,41 @@ mod tests {
     }
 
     #[test]
+    fn walls_have_a_top_and_end_in_their_stone() {
+        // Night Road's parapets are lower than the eye, so their tops are seen; a frame of several
+        // ends each wall in a face across its thickness where its world ends.
+        let mut r = WorldRenderer::default();
+        let geometry = |r: &mut WorldRenderer, s: &Scene, bounds: Option<&Bounds>| {
+            let ctx = Ctx {
+                scene: s, view: View::new(s, 120, 214).at(0.0), loop_len: 24.0, tphase: 0.0, scroll: 0.0, far: 320.0, d_lo: 0.0, d_hi: 320.0, x_reach: 0.0,
+                path_tex: r.textures.get(&s.path.material), verge_tex: r.textures.get(&s.verge.material),
+                wall_tex: r.textures.get(&s.walls.material), ceil_tex: r.textures.get(&s.ceiling.material),
+                path_tile: 1.0, verge_tile: 1.0, wall_tile: 1.0, ceil_tile: 1.0,
+                bridge: None, fork: None, deck_tex: r.textures.get(&s.path.bridge.deck), bottom_tex: r.textures.get(&s.verge.material),
+                deck_tile: 1.0, bottom_tile: 1.0, ambient: [0.0; 3],
+                sky_lights: vec![], lights: vec![], smokes: vec![], wire_pts: vec![], falls: vec![], fog: None, fog_col: [0.0; 3], void_lin: [0.0; 3], realm: 0, bounds, facade: None, opening: None, portal: None, front: None, verge_beyond: None, gain: 1.0, wx: weather::Wx::default(), water: None, cover: Vec::new(),
+            };
+            let tris = build_geometry(&ctx, &Layers::default());
+            let mut gbuf = vec![raster::GPixel::EMPTY; 120 * 214];
+            raster::rasterize(&mut gbuf, 120, 214, &tris, &ctx.view);
+            (tris, gbuf)
+        };
+        let night = preset("Night Road");
+        let tops = |g: &[raster::GPixel]| g.iter().filter(|p| p.id == id::rail(id::STONE, id::TOP)).count();
+        let (_, g) = geometry(&mut r, &night, None);
+        assert!(tops(&g) > 10, "the parapets' tops show from above: {}", tops(&g));
+        let sheet = Scene { walls: crate::scene::Walls { thickness: 0.0, ..night.walls.clone() }, ..night.clone() };
+        assert_eq!(tops(&geometry(&mut r, &sheet, None).1), 0, "a sheet has no top");
+        // Ending 12 m ahead, where the next world begins: an end face there, and nothing past it.
+        let b = Bounds::cross(12.0, 0.0, 0.0, 1);
+        let (tris, _) = geometry(&mut r, &night, Some(&b));
+        let ends: Vec<_> = tris.iter().filter(|t| t.id == id::rail(id::STONE, id::FRONT)).collect();
+        assert!(!ends.is_empty() && ends.iter().all(|t| t.v.iter().all(|v| (v.world[2] - 12.0).abs() < 0.05)), "each wall ends in a face where its world ends");
+        let walls_past = tris.iter().filter(|t| matches!(t.id, id::WALL_L | id::WALL_R) && t.v.iter().any(|v| v.world[2] > 12.05)).count();
+        assert_eq!(walls_past, 0, "no wall runs on into the next world");
+    }
+
+    #[test]
     fn side_passages_open_the_wall_without_cracks() {
         let base = preset("Stone Dungeon");
         let mut forked = base.clone();
@@ -7531,6 +7918,34 @@ mod tests {
             let depth = a.depth.unwrap().iter().zip(b.depth.unwrap().iter()).filter(|(x, y)| x != y).count();
             assert!(ids == 0 && depth == 0, "{name}: {ids} pick ids and {depth} depths differ of {}", pa.len());
         }
+    }
+
+    #[cfg(feature = "gpu")]
+    #[test]
+    fn gpu_selective_outlines_match_the_cpu_and_take_their_objects_colour() {
+        // A selective line is a deeper shade of the thing it outlines, read from its neighbour's
+        // graded colour: the GPU reads a separate image for that, so it agrees with the CPU.
+        let Ok(ctx) = super::super::gpu::GpuContext::headless() else { eprintln!("no GPU here, skipped"); return };
+        let mut g = WorldRenderer::default();
+        g.set_gpu(Some(Arc::new(super::super::gpu::Gpu::new(ctx).unwrap())));
+        let mut c = WorldRenderer::default();
+        let mut s = preset("Forest Path");
+        s.style.outline = crate::scene::Outline { enabled: true, color: [10, 8, 12], objects_only: true, selective: 1.0, dark: 0.5 };
+        s.style.grade = "Warm".into();
+        s.style.grade_strength = 0.5;
+        let o = RenderOptions { size: Some((240, 135)), ..RenderOptions::default() };
+        let (a, b) = (c.render(&s, 3.0, &o), g.render(&s, 3.0, &o));
+        let worst = a.rgba.iter().zip(&b.rgba).map(|(x, y)| x.abs_diff(*y)).max().unwrap();
+        assert!(worst <= 4, "worst channel difference {worst}");
+        // Flat ink draws the same lines in one colour: the selective ones are not that colour.
+        let mut flat = s.clone();
+        flat.style.outline.selective = 0.0;
+        let f = c.render(&flat, 3.0, &o);
+        let ink = [10u8, 8, 12];
+        let lines: Vec<usize> = (0..f.rgba.len() / 4).filter(|&i| f.rgba[i * 4..i * 4 + 3] == ink).collect();
+        assert!(lines.len() > 50, "{} ink pixels", lines.len());
+        let tinted = lines.iter().filter(|&&i| a.rgba[i * 4..i * 4 + 3] != ink).count();
+        assert!(tinted * 10 > lines.len() * 9, "{tinted} of {} lines took a colour", lines.len());
     }
 
     #[test]

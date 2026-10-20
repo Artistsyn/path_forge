@@ -39,6 +39,8 @@ pub struct Runtime {
     /// The runtime's own walk (see `step`): metres along the current scene and its clock.
     distance: f32,
     time: f32,
+    /// Metres walked since the walk began (`WalkState::walked`).
+    walked: f64,
     active: Option<Active>,
     journey: Option<(Journey, Option<PathBuf>, String)>,
     /// Real seconds one day lasts when the game lets the days pass (`set_day_length`); 0 holds the hour.
@@ -49,6 +51,10 @@ pub struct Runtime {
     swinging: Option<Swinging>,
     /// The camera the current scene came with, for swinging back to (`swing("home")`).
     home: scene::Camera,
+    /// Journey stops `warm_next` has still to get ready.
+    cold: Vec<String>,
+    /// Points `frame` measures the light at (`set_probes`, `lighting`).
+    probes: Vec<[f32; 3]>,
 }
 
 /// The camera swinging from one view to another at the game's asking: how, from where, to what
@@ -81,8 +87,13 @@ pub struct Planned { pub kind: String, pub notes: Vec<String>, pub warnings: Vec
 pub struct WalkState {
     /// The scene the camera is in (the one it left, until a transition ends).
     pub scene: String,
+    /// Metres along the current scene's loop (it comes round: 0 again a loop on).
     pub distance: f32,
     pub time: f32,
+    /// Metres walked since the walk began, back steps taken off; never comes round, across
+    /// loops and scenes alike. A game keeps things at a place on the road by it: something
+    /// at `s` stands `s - walked` metres ahead.
+    pub walked: f64,
     /// The journey stop the walk is at, if a journey is loaded.
     pub stop: Option<String>,
     /// 0..1 through a transition or fork under way.
@@ -100,13 +111,16 @@ pub struct WalkState {
     pub intro_left: Option<f32>,
     /// Seconds left of a swing the game started (`swing_to`), while it plays.
     pub swing_left: Option<f32>,
+    /// Side paths (`path.fork`) opening off the path near the walker, outside a transition:
+    /// (metres ahead, -1 left or 1 right), from 6 m behind to 40 m ahead.
+    pub side_paths: Vec<(f32, f32)>,
 }
 
 impl Runtime {
     /// A scene whose files (sprites, kits, grades) are named relative to `base_dir`.
     pub fn new(scene: Scene, base_dir: Option<PathBuf>) -> Runtime {
         let home = scene.camera.clone();
-        Runtime { scene, base_dir, renderer: WorldRenderer::default(), rgba: Vec::new(), distance: 0.0, time: 0.0, active: None, journey: None, day_seconds: 0.0, played: 0.0, swinging: None, home }
+        Runtime { scene, base_dir, renderer: WorldRenderer::default(), rgba: Vec::new(), distance: 0.0, time: 0.0, walked: 0.0, active: None, journey: None, day_seconds: 0.0, played: 0.0, swinging: None, home, cold: Vec::new(), probes: Vec::new() }
     }
 
     /// Draw frames on the GPU, on a device the game hands over (with wgpu 25, the same one it
@@ -135,6 +149,7 @@ impl Runtime {
         let (scene, sdir) = j.scene_of(&j.start, dir.as_deref())?;
         let start = j.start.clone();
         let mut rt = Runtime::new(scene, sdir);
+        rt.cold = j.stops.keys().filter(|k| **k != start).cloned().collect();
         rt.journey = Some((j, dir, start));
         Ok(rt)
     }
@@ -176,6 +191,22 @@ impl Runtime {
         let opts = self.opts(time, width, height);
         self.rgba = self.renderer.render(&self.scene, distance, &opts).rgba;
         &self.rgba
+    }
+
+    /// Get one more journey stop ready before the walk reaches it: its average colour (which a
+    /// fork or crossing needs on its first frame) and the sprites and textures it paints, drawn
+    /// once at `width` x `height` and thrown away. Otherwise the first frame into each new place
+    /// pays for them, a hitch of a few tenths of a second. One stop per call, so a game spreads
+    /// them over frames; false once every stop is ready (and with no journey).
+    pub fn warm_next(&mut self, width: u32, height: u32) -> bool {
+        let Some((j, dir, _)) = self.journey.as_ref() else { return false };
+        let Some(stop) = self.cold.pop() else { return false };
+        if let Ok((scene, sdir)) = j.scene_of(&stop, dir.as_deref()) {
+            self.renderer.scene_mean(&scene, sdir.clone());
+            let opts = RenderOptions { base_dir: sdir, ..self.opts(0.0, width, height) };
+            let _ = self.renderer.render(&scene, 0.0, &opts);
+        }
+        !self.cold.is_empty()
     }
 
     /// `render` into a buffer the caller owns (`width * height * 4` bytes).
@@ -238,6 +269,7 @@ impl Runtime {
         }
         self.time = (self.time + dt).rem_euclid(self.loop_seconds().max(1e-3));
         self.distance += ds;
+        self.walked += ds as f64;
         let done = match &mut self.active {
             None => None,
             Some(Active::Cross { walk, travel, clock, .. }) => {
@@ -340,9 +372,15 @@ impl Runtime {
         self.intro().filter(|_| self.active.is_none()).map(|t| m.fly_in.max(0.0).max(m.swing_in.length()) - t)
     }
 
+    /// Points (x, y, d in metres, as `View::project` takes them) each `frame` measures the light at,
+    /// for a game lighting its own sprites as the world is lit; none by default.
+    pub fn set_probes(&mut self, points: Vec<[f32; 3]>) { self.probes = points; }
+    /// The light the last `frame` found at the `set_probes` points.
+    pub fn lighting(&self) -> Option<&crate::world::render::Lighting> { self.renderer.lighting() }
+
     /// The current frame of the runtime's own walk, `width` x `height` RGBA8.
     pub fn frame(&mut self, width: u32, height: u32) -> &[u8] {
-        let opts = RenderOptions { size: Some((width.max(1), height.max(1))), ..RenderOptions::default() };
+        let opts = RenderOptions { size: Some((width.max(1), height.max(1))), probes: self.probes.clone(), ..RenderOptions::default() };
         let a = Place { scene: &self.scene, dir: self.base_dir.as_deref() };
         let img = match &self.active {
             None => {
@@ -432,6 +470,19 @@ impl Runtime {
         }
     }
 
+    /// Cut to the journey stop `stop`, at the start of its scene's loop with nothing under way: a
+    /// shrine the player wakes at, a fast travel. `walked` carries on, so things a game keeps by it
+    /// stay where they were. Fails without a journey or for a stop it does not have.
+    pub fn warp(&mut self, stop: &str) -> Result<(), String> {
+        let (j, dir, _) = self.journey.as_ref().ok_or("no journey loaded")?;
+        if !j.stops.contains_key(stop) { return Err(format!("no stop `{stop}`")); }
+        let (scene, sdir) = j.scene_of(stop, dir.as_deref())?;
+        self.set_scene_in(scene, sdir);
+        self.distance = 0.0;
+        if let Some((_, _, at)) = self.journey.as_mut() { *at = stop.to_owned(); }
+        Ok(())
+    }
+
     // ── Day and night ──────────────────────────────────────────────────────
 
     /// Set the hour of the day (0..24) on every scene the runtime draws, transitions and forks
@@ -470,7 +521,8 @@ impl Runtime {
             Some(Active::Fork { walk, travel, .. }) => (Some((travel / walk.length()).min(1.0)), walk.chosen.is_none().then(|| (walk.decide_by() - travel).max(0.0))),
         };
         let end = self.active.is_none() && self.journey.as_ref().is_some_and(|(j, _, at)| j.stops.get(at).is_some_and(|s| matches!(s.next, Next::End)));
-        WalkState { scene: self.scene.name.clone(), distance: self.distance, time: self.time, stop: self.journey.as_ref().map(|j| j.2.clone()), progress, choose_within, speed: self.scene.motion.speed, end, day: self.day(), intro_left: self.intro_left(), swing_left: self.swing_left() }
+        WalkState { scene: self.scene.name.clone(), distance: self.distance, walked: self.walked, time: self.time, stop: self.journey.as_ref().map(|j| j.2.clone()), progress, choose_within, speed: self.scene.motion.speed, end, day: self.day(), intro_left: self.intro_left(), swing_left: self.swing_left(),
+            side_paths: if self.active.is_none() { crate::world::render::side_paths(&self.scene, self.distance - 6.0, self.distance + 40.0).into_iter().map(|(w, side)| (w - self.distance, side)).collect() } else { Vec::new() } }
     }
 
     /// The camera of the runtime's own walk now, for a `width` x `height` frame. In a transition,
@@ -549,6 +601,10 @@ mod tests {
         r.step(0.5, 4.0);
         r.step(0.5, -4.0);
         assert!((r.state().distance - d).abs() < 1e-4, "back where it was ({} vs {d})", r.state().distance);
+        // The distance walked does not come round with the loop.
+        r.step(2.0, len);
+        assert!((r.state().walked - (3.0 + 2.0 * len as f64)).abs() < 1e-3, "walked {}", r.state().walked);
+        r.step(2.0, -len);
         // Back past the loop's start it comes round to its end, and draws that view.
         r.step(1.0, -(d + 1.5));
         assert!((r.state().distance - (len - 1.5)).abs() < 1e-3, "{}", r.state().distance);
@@ -714,6 +770,10 @@ mod tests {
         j.save(&path).unwrap();
         let mut r = Runtime::from_journey(&path).unwrap();
         assert_eq!(r.state().stop.as_deref(), Some("crypt"));
+        // Every other stop is got ready one call at a time, and the walk is left where it was.
+        let before = r.state();
+        let calls = std::iter::repeat_with(|| r.warm_next(48, 27)).take_while(|more| *more).count() + 1;
+        assert_eq!((calls, r.warm_next(48, 27), r.state()), (3, false, before));
         r.go().unwrap();
         r.finish();
         assert_eq!(r.state().stop.as_deref(), Some("woods"));
@@ -722,6 +782,12 @@ mod tests {
         r.finish();
         assert_eq!(r.state().stop.as_deref(), Some("sands"));
         assert!(r.go().is_err(), "the end leads nowhere");
+        // Back to the first stop (a shrine to wake at), the metres walked kept.
+        r.step(1.0, 3.0);
+        let walked = r.state().walked;
+        r.warp("crypt").unwrap();
+        assert_eq!((r.state().stop.as_deref(), r.state().walked, r.state().distance), (Some("crypt"), walked, 0.0));
+        assert!(r.go().is_ok() && r.warp("lost").is_err());
         let mut bad = j.clone();
         bad.stops.insert("lost".into(), crate::journey::Stop { scene: "missing.json".into(), next: Next::Go { to: "nowhere".into(), transition: Transition::default() } });
         assert_eq!(bad.problems(Some(&dir)).len(), 3, "{:?}", bad.problems(Some(&dir)));

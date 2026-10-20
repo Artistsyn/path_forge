@@ -149,9 +149,9 @@ pub(crate) struct WorldParams {
     pub ww_lap_ph: f32, pub ww_lap_k: f32, pub ww_k1: f32, pub ww_k2: f32, pub ww_wet: f32,
     pub ww_kind: u32, pub ww_dens: f32, pub ww_fcol: [f32; 3], pub ww_fsize: f32, pub ww_period: f32, pub ww_cs: f32, pub ww_seed: u32,
     /// How far in from the deck's edge a bridge's railing stands (Spans::rail_inset), the waterway's
-    /// ice and width, the fences' paint (render::fence_paint), then words
-    /// kept free for what comes next.
-    pub br_inset: f32, pub ww_frozen: f32, pub ww_hw: f32, pub fence: [f32; 3], pub spare: [f32; 2],
+    /// ice and width, the fences' paint (render::fence_paint), and a fork's branch path half widths
+    /// (left, right; 0 outside a fork) for render::on_other_branch.
+    pub br_inset: f32, pub ww_frozen: f32, pub ww_hw: f32, pub fence: [f32; 3], pub branch_hw: [f32; 2],
     /// View::wind_now: the path's winding.
     pub wind: [[f32; 4]; 4],
     /// Ground cover (render::cover): how many layers, the wind in them, and each layer's record.
@@ -472,7 +472,9 @@ pub(crate) struct PostParams {
     /// Depth of field (weather::FocusK); it reads h_fsrc and writes h_fdst.
     pub fo_on: u32, pub fo_tilt: u32, pub fo_dist: f32,
     pub fo_max: f32, pub fo_band: f32, pub fo_half: f32, pub h_fsrc: u32,
-    pub h_fdst: u32, pub fo_pad: [u32; 3],
+    /// Grade and outline read r_gsrc and write r_mid: in place unless the outline is selective
+    /// (it reads its neighbours' colours, so it needs them unwritten).
+    pub h_fdst: u32, pub r_gsrc: u32, pub ol_sel: f32, pub ol_keep: f32,
 }
 
 /// What post needs besides its settings: the lens drops, the palette and grade tables (cached by
@@ -1330,6 +1332,9 @@ impl<'g> Frame<'g> {
         p.r_fin = ra as u32;
         let mut cr = ra;
         if pin.kuwahara { p.r_kuw = rb as u32; cr = rb; }
+        // A selective outline reads neighbours' colours, so it writes the other rgb image.
+        p.r_gsrc = cr as u32;
+        if p.ol_on != 0 && p.ol_sel > 0.0 { cr = other_r(cr); }
         p.r_mid = cr as u32;
         if pin.warp { cr = other_r(cr); p.r_wdst = cr as u32; }
         p.r_last = cr as u32;

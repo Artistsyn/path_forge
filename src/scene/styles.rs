@@ -16,7 +16,7 @@ fn reset(s: &mut Scene) {
     s.post = Post { bloom: keep_bloom, ..Post::default() };
 }
 
-fn outline(color: Rgb, objects_only: bool) -> Outline { Outline { enabled: true, color, objects_only } }
+fn outline(color: Rgb, objects_only: bool) -> Outline { Outline { enabled: true, color, objects_only, ..Outline::default() } }
 
 pub const ALL: &[StylePreset] = &[
     StylePreset { name: "Clean", about: "Full colour, no filters: the scene as lit.", apply: |s| reset(s) },
@@ -35,6 +35,17 @@ pub const ALL: &[StylePreset] = &[
             s.post.contrast = 1.12;
             s.post.saturation = 1.1;
             s.post.vignette = 0.5;
+        },
+    },
+    StylePreset {
+        name: "Realistic Pixel",
+        about: "Sits under realistic generated pixel art (Pixellab-style sprites): hard 2 px pixels in full colour (a reduced palette bands the sky), a light paint that gathers noise into clean clusters of colour the way hand-made pixel art does, no ink lines, a touch of contrast.",
+        apply: |s| {
+            reset(s);
+            s.style.pixel_size = 2;
+            s.style.paint = 2.0;
+            s.post.contrast = 1.08;
+            s.post.vignette = 0.35;
         },
     },
     StylePreset {

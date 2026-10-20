@@ -47,9 +47,11 @@ each running into its own world. Every 0 or Auto is decided by `plan_fork`.
 | `approach_m` | number | `0.0` | How far ahead the junction is when the branches first show, metres (0 = auto). |
 | `overshoot_m` | number | `1.0` | Metres walked past the junction at the end of an exported clip. |
 | `blend_m` | number | `0.0` | Band over which each branch turns from this world into its own, metres (0 = auto). |
-| `wedge_m` | number | `0.0` | Length of ground of this world left between the branches past the junction, metres (0 = auto). |
+| `wedge_m` | number | `0.0` | Length of ground of this world left between the branches past the junction, metres (0 = auto; negative = none: the ground between the branches is the branch worlds' from where they part, each its own half, so what stands beside the branch taken goes on into its world). |
+| `path_hold_m` | number | `0.0` | Metres down each branch over which its path keeps this world's look before turning into its own over `blend_m`, in patches (0 = auto; negative = none: each branch's path is its own from the junction). Two differently coloured paths parting at the junction read as a seam; this way the fork is one path that changes once the player is on their way. |
 | `steer_m` | number | `6.0` | Metres of walking over which the camera turns onto the chosen branch. |
 | `camera_blend_m` | number | `4.0` | Metres either side of the junction over which the camera becomes the chosen world's. |
+| `mouth_m` | number | `0.0` | Length of the fork's mouth, metres (0 = auto): over this stretch before the junction the first world's props stand back from the path in a widening funnel, so both branches can be seen parting instead of vanishing behind the trees that line the road. |
 | `default_branch` | [Branch](#branch) | `"Left"` | The branch taken when the game has not chosen by the time the camera reaches the junction. |
 | `adaptation` | number | `1.0` | How much the eye adapts across (0..1). |
 | `style` | [StyleFrom](#stylefrom) | `"Auto"` |  |
@@ -862,6 +864,8 @@ more strands between; `spacing`, `density` and the rest work as they do for a ro
 | `enabled` | boolean | `false` |  |
 | `color` | integer × 3 | `[12,10,14]` |  |
 | `objects_only` | boolean | `true` | Outline props and fixtures only (true) or also wall and ground edges (false). |
+| `selective` | number | `0.0` | Selective outline, 0..1: how far each line takes the colour of the thing it outlines (darkened by `dark`) instead of `color`. 1 is the hand-drawn pixel-art line, a deeper shade of the leaf or stone itself; 0 is flat ink. |
+| `dark` | number | `0.5` | How dark a selective line is against its object's colour, 0..1 (0.5 halves it). |
 
 ### Palette
 
@@ -1581,6 +1585,7 @@ Ground beside the path. Disabled = void beyond the path edge (walls usually cove
 | `gap` | number | `0.25` | Gap between the path edge and the wall, metres. |
 | `height` | number | `4.5` | Wall height, metres. 0 = taller than anything the camera can see. |
 | `base_shadow` | number | `0.55` | Darkening where the wall meets the ground (0..1). |
+| `thickness` | number | `0.5` | How thick the wall is, metres: its top, its back and its ends show this much stone wherever they are seen (from above, from a turned camera, where a fork or crossing ends it). 0 = a sheet with no thickness. |
 | `material` | [Material](#material) | (see the type) |  |
 
 ### Waterfall

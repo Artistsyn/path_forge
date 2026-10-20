@@ -60,8 +60,9 @@ struct World {
     ww_on: u32, ww_shift: f32, ww_foam: f32, ww_foam_r: f32, ww_foam_g: f32, ww_foam_b: f32, ww_foam_w: f32,
     ww_lap_ph: f32, ww_lap_k: f32, ww_k1: f32, ww_k2: f32, ww_wet: f32,
     ww_kind: u32, ww_dens: f32, ww_fr: f32, ww_fg: f32, ww_fb: f32, ww_fsize: f32, ww_period: f32, ww_cs: f32, ww_seed: u32,
-    // Spans::rail_inset, then spare words.
-    br_inset: f32, ww_frozen: f32, ww_hw: f32, fence_r: f32, fence_g: f32, fence_b: f32, sp5: f32, sp6: f32,
+    // Spans::rail_inset, the waterway's ice and width, the fences' paint, a fork's branch path half
+    // widths (render::on_other_branch).
+    br_inset: f32, ww_frozen: f32, ww_hw: f32, fence_r: f32, fence_g: f32, fence_b: f32, fk_hl: f32, fk_hr: f32,
     // View::wind_now: (amplitude, wave number, phase at the camera, turn) of each wave.
     wind: array<vec4<f32>, 4>,
     // Ground cover (render::cover): layers, the wind in them (Wx::sway_parts), CoverK::rec each.

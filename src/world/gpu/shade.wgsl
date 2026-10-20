@@ -672,6 +672,16 @@ fn edge_light(edge: f32, x: f32, dw: f32, px_x: f32, px_d: f32, albedo: vec3<f32
     return col * (2.0 * line * dash) + albedo * col * spill;
 }
 
+// render::on_other_branch: ground on a fork's branch `r` (the G-buffer's) on the other's path too.
+fn on_other_branch(x: f32, d: f32, r: u32) -> bool {
+    if !MULTI || W.fk_hl <= 0.0 || (r != 1u && r != 2u) { return false; }
+    let zb = W.sh_z0_1;
+    if d <= zb { return false; }
+    var own = W.sh_k_1; var other = W.sh_k_2; var hw = W.fk_hr;
+    if r == 2u { own = W.sh_k_2; other = W.sh_k_1; hw = W.fk_hl; }
+    return abs(x + (own - other) * (d - zb)) < hw;
+}
+
 fn shade_px(g: GPix, i: u32, x: u32, y: u32, own: bool) -> Shaded {
     var out = Shaded(vec3<f32>(0.0), 0.0, vec3<f32>(0.0), 0.0, 0.0, false);
     let w = W.width; let h = W.height;
@@ -751,7 +761,7 @@ fn shade_px(g: GPix, i: u32, x: u32, y: u32, own: bool) -> Shaded {
         ao *= passage_dark(g.x, g.d);
         if tex == 0u && W.fork_on != 0u && W.fk_style != 0u && W.walls_on == 0u {
             ao *= split_edge_dark(g.x, g.d);
-        } else if tex == 0u && !on_fork(g.x, g.d) {
+        } else if tex == 0u && !on_fork(g.x, g.d) && !on_other_branch(g.x, g.d, gbuf[i].idr >> 8u) {
             let edge = max(path_edge(g.d), 0.05);
             ao *= 1.0 - clamp(W.edge_dark, 0.0, 1.0) * smoothstep_r(0.5, 1.0, abs(g.x) / edge);
         }
@@ -911,11 +921,14 @@ fn soft_main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let i = gid.y * W.width + gid.x;
     let n = W.width * W.height;
     let k = masks[2u * n + i * 2u + 1u];
-    if k <= 0.0 || bitcast<u32>(masks[2u * n + i * 2u]) != W.realm { return; }
+    let o = bitcast<u32>(masks[2u * n + i * 2u]);
+    // 0x80 (render::SAME_X): drawn at its own place across its world, not moved into this one's.
+    if k <= 0.0 || (o & 0x7Fu) != W.realm { return; }
     let g0 = gbuf[i];
     let src = g0.idr >> 8u;
     let cam_x = g0.x + bend_x(g0.d) + shear_of(src, g0.d);
-    let g = GPix(g0.depth, cam_x - bend_x(g0.d) - shear_x(g0.d), g0.y, g0.d, (g0.idr & 0xFFu) | (W.realm << 8u));
+    let gx = select(cam_x - bend_x(g0.d) - shear_x(g0.d), g0.x, (o & 0x80u) != 0u);
+    let g = GPix(g0.depth, gx, g0.y, g0.d, (g0.idr & 0xFFu) | (W.realm << 8u));
     let s = shade_px(g, i, gid.x, gid.y, false);
     if !s.drawn { return; }
     let c = mix3(vec3<f32>(hdr[i * 3u], hdr[i * 3u + 1u], hdr[i * 3u + 2u]), s.c, k);

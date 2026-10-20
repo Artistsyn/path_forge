@@ -8,16 +8,58 @@ use super::view::View;
 use crate::scene::{Dither, Outline, Scene};
 use rayon::prelude::*;
 
+/// What post does to a colour wherever it is on screen: exposure, the filmic curve, then
+/// saturation, contrast and tint. (Not bloom, vignette or grain, which depend on the pixel, nor a
+/// grade or a palette.) A game drawing its own sprites over a frame puts their light through it,
+/// so they sit in the picture as the world does.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Look { pub exposure: f32, pub saturation: f32, pub contrast: f32, pub tint: [f32; 3], pub on: bool }
+
+impl Look {
+    pub fn of(scene: &Scene, post_on: bool) -> Look {
+        let p = &scene.post;
+        Look {
+            exposure: if post_on { p.exposure.max(0.0) } else { 1.0 },
+            saturation: p.saturation, contrast: p.contrast,
+            tint: [p.tint[0] as f32 / 255.0, p.tint[1] as f32 / 255.0, p.tint[2] as f32 / 255.0],
+            on: post_on,
+        }
+    }
+    /// One channel of linear light, exposed and through the filmic curve, as display 0..255.
+    #[inline]
+    pub fn curve(&self, c: f32) -> f32 {
+        let v = c * self.exposure * 1.15;
+        // Filmic curve (Narkowicz ACES fit): soft highlights instead of hard clipping.
+        let t = (v * (2.51 * v + 0.03)) / (v * (2.43 * v + 0.59) + 0.14);
+        lin_to_srgb(t) as f32
+    }
+    /// Saturation, contrast and tint on display RGB (nothing when post is off).
+    #[inline]
+    pub fn grade(&self, mut rgb: [f32; 3]) -> [f32; 3] {
+        if !self.on { return rgb; }
+        let lum = 0.299 * rgb[0] + 0.587 * rgb[1] + 0.114 * rgb[2];
+        for k in 0..3 {
+            let v = lum + (rgb[k] - lum) * self.saturation;
+            rgb[k] = ((v - 128.0) * self.contrast + 128.0) * self.tint[k];
+        }
+        rgb
+    }
+    /// Linear light to display RGB 0..255.
+    pub fn display(&self, c: [f32; 3]) -> [f32; 3] {
+        self.grade([self.curve(c[0]), self.curve(c[1]), self.curve(c[2])]).map(|v| v.clamp(0.0, 255.0))
+    }
+}
+
 /// HDR linear light to display RGB in 0..255 (as f32 so later stages keep precision).
 /// (`gbuf` is the frame's, to tell the sky from the world.)
 pub fn finish(view: &View, scene: &Scene, phase: f32, hdr: &[[f32; 3]], gbuf: &[GPixel], post_on: bool) -> Vec<[f32; 3]> {
     let (w, h) = (view.width, view.height);
     let p = &scene.post;
     let flare = FlareK::of(scene, post_on);
-    let exposure = if post_on { p.exposure.max(0.0) } else { 1.0 };
+    let look = Look::of(scene, post_on);
+    let exposure = look.exposure;
     let glow = BloomK { exposure, sky: sky_threshold(scene), hy: view.horizon_px };
     let bloom = if post_on && (p.bloom > 0.001 || flare.on()) { Some(bloom_buffer(hdr, gbuf, w, h, p.bloom.max(0.0), glow, flare)) } else { None };
-    let tint = [p.tint[0] as f32 / 255.0, p.tint[1] as f32 / 255.0, p.tint[2] as f32 / 255.0];
     let grain_seed = (phase.rem_euclid(1.0) * 4096.0).round() as u32 % 4096;
     let (cx, cy) = (w as f32 * 0.5, h as f32 * 0.5);
     let max_r2 = cx * cx + cy * cy;
@@ -30,20 +72,8 @@ pub fn finish(view: &View, scene: &Scene, phase: f32, hdr: &[[f32; 3]], gbuf: &[
                 let s = sample_quarter(b, w, h, x, y);
                 for k in 0..3 { c[k] += s[k]; }
             }
-            let mut rgb = [0.0f32; 3];
-            for k in 0..3 {
-                let v = c[k] * exposure * 1.15;
-                // Filmic curve (Narkowicz ACES fit): soft highlights instead of hard clipping.
-                let t = (v * (2.51 * v + 0.03)) / (v * (2.43 * v + 0.59) + 0.14);
-                rgb[k] = lin_to_srgb(t) as f32;
-            }
+            let mut rgb = look.grade([look.curve(c[0]), look.curve(c[1]), look.curve(c[2])]);
             if post_on {
-                let lum = 0.299 * rgb[0] + 0.587 * rgb[1] + 0.114 * rgb[2];
-                for k in 0..3 {
-                    let mut v = lum + (rgb[k] - lum) * p.saturation;
-                    v = (v - 128.0) * p.contrast + 128.0;
-                    rgb[k] = v * tint[k];
-                }
                 if p.vignette > 0.001 {
                     let (dx, dy) = (x as f32 - cx, y as f32 - cy);
                     let f = (1.0 - ((dx * dx + dy * dy) / max_r2).powf(1.4) * p.vignette).max(0.0);
@@ -259,28 +289,37 @@ fn sample_quarter(q: &[[f32; 3]], w: usize, h: usize, x: usize, y: usize) -> [f3
     out
 }
 
-/// Draw a one-pixel outline around objects (and optionally around every surface edge).
+/// Draw a one-pixel outline around objects (and optionally around every surface edge). The line
+/// sits on the far side of an edge and belongs to the nearer thing: in flat ink (`color`), or with
+/// `selective`, in a deeper shade of that thing's own colour (the shared GPU pass matches this).
 pub fn outline(rgb: &mut [[f32; 3]], gbuf: &[GPixel], w: usize, h: usize, o: &Outline) {
     let col = [o.color[0] as f32, o.color[1] as f32, o.color[2] as f32];
+    let sel = o.selective.clamp(0.0, 1.0);
+    let keep = 1.0 - o.dark.clamp(0.0, 1.0);
     // Ink lines only around things near enough to carry them; far away they turn into noise.
     const INK_DISTANCE: f32 = 14.0;
     let is_obj = |g: &GPixel| g.id >= id::PROP && !id::is_rail(g.id) && g.depth < INK_DISTANCE;
-    let marks: Vec<bool> = (0..w * h).into_par_iter().map(|i| {
+    let src: &[[f32; 3]] = rgb;
+    let marks: Vec<Option<[f32; 3]>> = (0..w * h).into_par_iter().map(|i| {
         let (x, y) = (i % w, i / w);
         let g = &gbuf[i];
-        let mut hit = false;
         for (dx, dy) in [(-1i64, 0i64), (1, 0), (0, -1), (0, 1)] {
             let (nx, ny) = (x as i64 + dx, y as i64 + dy);
             if nx < 0 || ny < 0 || nx as usize >= w || ny as usize >= h { continue; }
-            let n = &gbuf[ny as usize * w + nx as usize];
-            if is_obj(n) && !is_obj(g) && n.depth < g.depth { hit = true; break; }
-            if is_obj(n) && is_obj(g) && n.depth < g.depth * 0.85 { hit = true; break; }
-            if !o.objects_only && n.id != g.id && n.depth < g.depth && g.id != id::NONE && n.id != id::NONE
-                && !(n.id == id::GROUND && (g.id == id::WALL_L || g.id == id::WALL_R)) { hit = true; break; }
+            let ni = ny as usize * w + nx as usize;
+            let n = &gbuf[ni];
+            let hit = (is_obj(n) && !is_obj(g) && n.depth < g.depth)
+                || (is_obj(n) && is_obj(g) && n.depth < g.depth * 0.85)
+                || (!o.objects_only && n.id != g.id && n.depth < g.depth && g.id != id::NONE && n.id != id::NONE
+                    && !(n.id == id::GROUND && (g.id == id::WALL_L || g.id == id::WALL_R)));
+            if hit {
+                let c = src[ni];
+                return Some([0, 1, 2].map(|k| col[k] + (c[k] * keep - col[k]) * sel));
+            }
         }
-        hit
+        None
     }).collect();
-    for (i, m) in marks.into_iter().enumerate() { if m { rgb[i] = col; } }
+    for (i, m) in marks.into_iter().enumerate() { if let Some(c) = m { rgb[i] = c; } }
 }
 
 /// Bend the image around the horizon like a wide lens (same curve as PathForge 2.0).

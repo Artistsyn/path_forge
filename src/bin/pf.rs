@@ -795,13 +795,16 @@ fn cmd_transition(args: &Args) -> Result<(), String> {
         let mut f = ForkChoice::default();
         if let Some(v) = args.opts.get("angle") { f.angle = v.parse().map_err(|_| "--angle: not a number")?; }
         if let Some(v) = args.opts.get("approach") { f.approach_m = v.parse().map_err(|_| "--approach: not a number")?; }
+        if let Some(v) = args.opts.get("wedge") { f.wedge_m = v.parse().map_err(|_| "--wedge: not a number")?; }
+        if let Some(v) = args.opts.get("hold") { f.path_hold_m = v.parse().map_err(|_| "--hold: not a number")?; }
         let plan = tr::plan_fork(&a, &l, &rt, &f);
         println!("fork from {} into {} (left) or {} (right):", a.name, l.name, rt.name);
         say(&plan.notes, &plan.warnings);
         let mut walk = ForkWalk::new(plan, 0.0, [0.0, 0.0]);
         let take = match args.opts.get("take").map(String::as_str) { Some("right") => Branch::Right, Some("left") => Branch::Left, _ => walk.plan.default_branch };
         let len = walk.length();
-        let at = walk.decide_by() * 0.5;
+        // When the branch is chosen (--choose-at metres; default half way to the last moment).
+        let at = match args.opts.get("choose-at") { Some(v) => v.parse::<f32>().map_err(|_| "--choose-at: not a number")?.min(walk.decide_by()), None => walk.decide_by() * 0.5 };
         for i in 0..frames {
             let travel = len * i as f32 / (frames - 1) as f32;
             if travel >= at { walk.choose(take, at); }
@@ -848,6 +851,10 @@ fn cmd_transition(args: &Args) -> Result<(), String> {
         // One frame of the walk, by its index among --frames.
         let k: usize = k.parse().map_err(|_| "--frame: not a number")?;
         imgs = vec![imgs.get(k).cloned().ok_or(format!("--frame {k}: only {} frames", imgs.len()))?];
+    } else if let Some(k) = args.opts.get("from") {
+        // The frames from this index on (the end of a walk, a turn onto a branch, at full size).
+        let k: usize = k.parse().map_err(|_| "--from: not a number")?;
+        imgs = imgs.split_off(k.min(imgs.len().saturating_sub(1)));
     }
     if let Some(out) = args.opts.get("o") {
         std::fs::write(out, path_forge::review::png_bytes(&path_forge::review::sheet(&imgs, cols))?).map_err(|e| e.to_string())?;

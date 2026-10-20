@@ -396,7 +396,7 @@ pub fn canal_lanterns() -> Scene {
     s.path.material = water([20, 30, 38], [10, 16, 22], 0.18);
     s.path.waterway = Waterway { foam_color: [150, 160, 160], foam_width: 0.25, wet: 0.7, ..waterway(1, 0.2) };
     s.verge.enabled = false;
-    s.walls = Walls { enabled: true, gap: 0.0, height: 9.0, base_shadow: 0.3, material: mat(Pattern::StoneBlock, [96, 82, 66], [44, 36, 28], 2.2) };
+    s.walls = Walls { enabled: true, gap: 0.0, height: 9.0, base_shadow: 0.3, thickness: 0.8, material: mat(Pattern::StoneBlock, [96, 82, 66], [44, 36, 28], 2.2) };
     s.sky = night_sky([6, 8, 22], [34, 28, 48]);
     s.light = outdoor_light(0.16, [14, 14, 26], 40.0);
     s.light.ambient_color = [150, 150, 190];
@@ -742,7 +742,7 @@ pub fn ice_cave() -> Scene {
     s.path.half_width = 1.3;
     s.path.edge_noise = 0.3;
     s.path.material = Material { gloss: 0.55, ripples: 0.04, damage: 0.0, ..mat(Pattern::Ice, [70, 104, 128], [150, 190, 214], 3.0) };
-    s.walls = Walls { enabled: true, gap: 0.9, height: 7.0, base_shadow: 0.35, material: mat(Pattern::RockFace, [64, 98, 124], [30, 52, 70], 3.0) };
+    s.walls = Walls { enabled: true, gap: 0.9, height: 7.0, base_shadow: 0.35, thickness: 2.0, material: mat(Pattern::RockFace, [64, 98, 124], [30, 52, 70], 3.0) };
     s.ceiling = Ceiling { enabled: true, height: 4.6, material: mat(Pattern::RockFace, [46, 72, 94], [22, 38, 52], 3.0) };
     s.light = indoor_light(0.26, [4, 10, 18], 26.0);
     s.light.ambient_color = [140, 190, 235];
@@ -765,7 +765,7 @@ pub fn tower_stair() -> Scene {
     s.path.edge_noise = 0.0;
     s.path.material = mat(Pattern::StoneBlock, [96, 86, 74], [34, 29, 24], 1.2);
     s.path.stairs = Stairs { enabled: true, spacing: 8.0, steps: 10, rise: 0.18, run: 0.3, offset: 2.0, descending: false };
-    s.walls = Walls { enabled: true, gap: 0.0, height: 6.0, base_shadow: 0.45, material: mat(Pattern::StoneBlock, [70, 62, 54], [26, 22, 18], 1.8) };
+    s.walls = Walls { enabled: true, gap: 0.0, height: 6.0, base_shadow: 0.45, thickness: 0.8, material: mat(Pattern::StoneBlock, [70, 62, 54], [26, 22, 18], 1.8) };
     s.ceiling = Ceiling { enabled: true, height: 3.6, material: mat(Pattern::StoneBlock, [50, 44, 38], [20, 17, 14], 1.8) };
     s.light = indoor_light(0.24, [4, 2, 1], 26.0);
     s.fixtures = vec![Fixture { offset: 5.4, radius: 9.0, intensity: 1.5, ..torches(FixtureKind::Torch, 1.9, 8.0) }];
@@ -1014,7 +1014,7 @@ pub fn desert_canyon() -> Scene {
     s.path.edge_noise = 0.4;
     s.path.material = mat(Pattern::Sand, [196, 160, 108], [160, 124, 76], 3.0);
     s.verge = Verge { enabled: true, material: mat(Pattern::Sand, [176, 138, 90], [140, 106, 64], 3.0), ..Verge::default() };
-    s.walls = Walls { enabled: true, gap: 4.0, height: 14.0, base_shadow: 0.3, material: mat(Pattern::RockFace, [170, 116, 70], [120, 80, 46], 6.0) };
+    s.walls = Walls { enabled: true, gap: 4.0, height: 14.0, base_shadow: 0.3, thickness: 4.0, material: mat(Pattern::RockFace, [170, 116, 70], [120, 80, 46], 6.0) };
     s.sky = day_sky([96, 150, 210], [236, 206, 150], [0.3, 0.3]);
     s.sky.clouds.cover = 0.25;
     s.light = outdoor_light(0.6, [220, 190, 150], 70.0);
@@ -1033,7 +1033,7 @@ pub fn night_road() -> Scene {
     s.path.half_width = 1.8;
     s.path.material = mat(Pattern::Brick, [70, 70, 84], [36, 36, 46], 1.6);
     s.verge = Verge { enabled: true, material: mat(Pattern::Grass, [30, 44, 34], [20, 30, 24], 2.0), tufts: true, tuft_color: [34, 60, 40], ..Verge::default() };
-    s.walls = Walls { enabled: true, gap: 3.0, height: 1.2, base_shadow: 0.4, material: mat(Pattern::StoneBlock, [64, 64, 76], [30, 30, 40], 1.6) };
+    s.walls = Walls { enabled: true, gap: 3.0, height: 1.2, base_shadow: 0.4, thickness: 0.45, material: mat(Pattern::StoneBlock, [64, 64, 76], [30, 30, 40], 1.6) };
     s.sky = night_sky([6, 8, 24], [26, 22, 52]);
     s.light = outdoor_light(0.2, [14, 14, 30], 40.0);
     s.fixtures = vec![Fixture { kind: FixtureKind::StreetLamp, mount: Mount::Ground, lateral: 0.6, height: 3.0, spacing: 8.0, radius: 9.0, intensity: 1.3, ..Fixture::default() }];
@@ -1045,7 +1045,7 @@ pub fn night_road() -> Scene {
 pub fn magic_cavern() -> Scene {
     let mut s = scene("Magic Cavern");
     s.path.material = mat(Pattern::Cobblestone, [60, 44, 84], [24, 16, 40], 2.2);
-    s.walls = Walls { enabled: true, gap: 1.2, height: 0.0, base_shadow: 0.5, material: mat(Pattern::RockFace, [52, 38, 74], [24, 16, 38], 3.0) };
+    s.walls = Walls { enabled: true, gap: 1.2, height: 0.0, base_shadow: 0.5, thickness: 2.0, material: mat(Pattern::RockFace, [52, 38, 74], [24, 16, 38], 3.0) };
     s.light = indoor_light(0.2, [4, 0, 12], 20.0);
     s.fixtures = vec![Fixture { kind: FixtureKind::Crystal, mount: Mount::Ground, lateral: 0.4, height: 0.6, spacing: 6.0, radius: 5.0, intensity: 1.2, ..Fixture::default() }];
     s.props = vec![
@@ -1078,7 +1078,7 @@ pub fn ruins_path() -> Scene {
     s.path.material = mat(Pattern::Cobblestone, [150, 130, 100], [90, 76, 58], 2.4);
     s.path.material.damage = 0.5;
     s.verge = Verge { enabled: true, material: mat(Pattern::Grass, [74, 96, 52], [52, 70, 36], 2.0), tufts: true, ..Verge::default() };
-    s.walls = Walls { enabled: true, gap: 1.8, height: 2.2, base_shadow: 0.4, material: mat(Pattern::StoneBlock, [140, 124, 98], [86, 74, 58], 2.4) };
+    s.walls = Walls { enabled: true, gap: 1.8, height: 2.2, base_shadow: 0.4, thickness: 0.6, material: mat(Pattern::StoneBlock, [140, 124, 98], [86, 74, 58], 2.4) };
     s.walls.material.damage = 0.7;
     s.sky = day_sky([84, 124, 176], [206, 206, 186], [0.78, 0.45]);
     s.sky.cloud_layers = vec![Clouds { enabled: true, kind: CloudKind::Cirrus, cover: 0.45, opacity: 0.4, seed: 4, ..Clouds::default() }];
@@ -1100,7 +1100,7 @@ pub fn dark_street() -> Scene {
     let mut s = scene("Dark Street");
     s.path.half_width = 1.4;
     s.path.material = mat(Pattern::Brick, [64, 64, 70], [28, 28, 32], 1.4);
-    s.walls = Walls { enabled: true, gap: 0.8, height: 8.0, base_shadow: 0.5, material: mat(Pattern::Brick, [70, 60, 56], [30, 26, 24], 2.0) };
+    s.walls = Walls { enabled: true, gap: 0.8, height: 8.0, base_shadow: 0.5, thickness: 0.5, material: mat(Pattern::Brick, [70, 60, 56], [30, 26, 24], 2.0) };
     s.sky = night_sky([4, 6, 18], [20, 16, 34]);
     s.light = indoor_light(0.18, [6, 6, 12], 30.0);
     s.sky.clouds = Clouds { kind: CloudKind::Storm, cover: 0.6, opacity: 0.5, ..s.sky.clouds };
@@ -1144,7 +1144,7 @@ pub fn mountain_pass() -> Scene {
 pub fn volcanic_rift() -> Scene {
     let mut s = scene("Volcanic Rift");
     s.path.material = mat(Pattern::StoneBlock, [60, 36, 30], [150, 40, 12], 2.4);
-    s.walls = Walls { enabled: true, gap: 1.0, height: 0.0, base_shadow: 0.6, material: mat(Pattern::RockFace, [56, 30, 22], [32, 14, 8], 3.0) };
+    s.walls = Walls { enabled: true, gap: 1.0, height: 0.0, base_shadow: 0.6, thickness: 2.0, material: mat(Pattern::RockFace, [56, 30, 22], [32, 14, 8], 3.0) };
     s.light = indoor_light(0.2, [30, 6, 2], 24.0);
     s.light.ambient_color = [255, 150, 110];
     s.fixtures = vec![Fixture { kind: FixtureKind::Brazier, mount: Mount::Ground, lateral: 0.3, height: 1.1, spacing: 8.0, radius: 7.0, intensity: 1.4, ..Fixture::default() }];
@@ -1185,7 +1185,7 @@ pub fn ruined_castle() -> Scene {
     s.path.half_width = 1.5;
     s.path.material = mat(Pattern::StoneBlock, [120, 112, 104], [60, 56, 52], 2.0);
     s.path.material.damage = 0.45;
-    s.walls = Walls { enabled: true, gap: 0.5, height: 7.0, base_shadow: 0.5, material: mat(Pattern::StoneBlock, [110, 102, 96], [56, 52, 48], 2.4) };
+    s.walls = Walls { enabled: true, gap: 0.5, height: 7.0, base_shadow: 0.5, thickness: 0.7, material: mat(Pattern::StoneBlock, [110, 102, 96], [56, 52, 48], 2.4) };
     s.walls.material.damage = 0.6;
     s.sky = day_sky([70, 90, 130], [180, 170, 160], [0.25, 0.45]);
     s.sky.clouds.opacity = 0.6;

@@ -18,6 +18,10 @@ struct Shafts {
 @group(0) @binding(6) var<uniform> S: Shafts;
 
 const Q: u32 = 2u;
+// weather::SHAFT_BREAK: rays fade as the way to the sun opens (none under an open sky).
+const SHAFT_BREAK: f32 = 2.5;
+// weather::SHAFT_AIR: the shafts build up along the air in front of a surface.
+const SHAFT_AIR: f32 = 22.0;
 
 @compute @workgroup_size(8, 8)
 fn shaft_mask(@builtin(global_invocation_id) gid: vec3<u32>) {
@@ -48,6 +52,7 @@ fn shaft_add(@builtin(global_invocation_id) gid: vec3<u32>) {
         let steps = 48.0;
         let dx = div(S.sx - px, steps); let dy = div(S.sy - py, steps);
         var x = px; var y = py; var wgt = 1.0; var acc = 0.0;
+        var open_acc = 0.0; var wsum = 0.0;
         for (var k = 0; k < 48; k++) {
             x = rnd(x + dx); y = rnd(y + dy);
             // The mask read between cells: read cell by cell, the long steps far from the sun
@@ -60,9 +65,18 @@ fn shaft_add(@builtin(global_invocation_id) gid: vec3<u32>) {
             let top = rnd(c00 + rnd((c10 - c00) * tx)); let bot = rnd(c01 + rnd((c11 - c01) * tx));
             let m = rnd(top + rnd((bot - top) * ty));
             acc = rnd(acc + rnd(m * wgt));
+            // Only what stands against the sky can break the sun up (weather::light_shafts).
+            if y < div(S.hy, f32(Q)) {
+                let ddx = rnd(x - S.sx); let ddy = rnd(y - S.sy);
+                let ns = 0.1 + 12.0 * exp(-(rnd(ddx * ddx) + rnd(ddy * ddy)) / rnd(S.glow_r * S.glow_r));
+                open_acc = rnd(open_acc + rnd(div(m, ns) * wgt));
+                wsum = rnd(wsum + wgt);
+            }
             wgt = rnd(wgt * 0.975);
         }
-        o += vec3<f32>(S.sun_r, S.sun_g, S.sun_b) * ((1.0 - exp(-acc * 0.04)) * S.k_sun);
+        var broken = 1.0;
+        if wsum > 0.0 { broken = clamp((1.0 - div(open_acc, wsum)) * SHAFT_BREAK, 0.0, 1.0); }
+        o += vec3<f32>(S.sun_r, S.sun_g, S.sun_b) * ((1.0 - exp(-acc * 0.04)) * S.k_sun * broken);
     }
     if S.lamps_on != 0u {
         let p = cell_px(gid.x, gid.y);
@@ -109,6 +123,7 @@ fn shaft_apply(@builtin(global_invocation_id) gid: vec3<u32>) {
     let tx = clamp(fx - f32(x0), 0.0, 1.0); let ty = clamp(fy - f32(y0), 0.0, 1.0);
     let top = mix3(cell_add(x0, y0), cell_add(x1, y0), tx);
     let bot = mix3(cell_add(x0, y1), cell_add(x1, y1), tx);
-    let c = vec3<f32>(hdr[i * 3u], hdr[i * 3u + 1u], hdr[i * 3u + 2u]) + mix3(top, bot, ty);
+    let air = 1.0 - exp(-max(gbuf[i].depth, 0.0) / SHAFT_AIR);
+    let c = vec3<f32>(hdr[i * 3u], hdr[i * 3u + 1u], hdr[i * 3u + 2u]) + mix3(top, bot, ty) * air;
     hdr[i * 3u] = c.x; hdr[i * 3u + 1u] = c.y; hdr[i * 3u + 2u] = c.z;
 }

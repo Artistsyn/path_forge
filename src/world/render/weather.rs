@@ -833,6 +833,16 @@ fn shaft_ray(v: &View, cx: usize, cy: usize) -> ([f32; 3], f32) {
     ([dir[0] / dl, dir[1] / dl, dir[2] / dl], dl)
 }
 
+/// How fast sun rays fade as the way to the sun opens: full while at most 1 - 1/SHAFT_BREAK of it
+/// is open sky, none under a sky with nothing in front of it. `SHAFT_BREAK` in shafts.wgsl.
+const SHAFT_BREAK: f32 = 2.5;
+/// Metres of air over which light shafts build to most of their strength in front of a surface
+/// (`SHAFT_AIR` in shafts.wgsl).
+const SHAFT_AIR: f32 = 22.0;
+
+/// How much of the shafts' light the air in front of a surface `depth` metres away carries.
+fn shaft_air(depth: f32) -> f32 { 1.0 - (-depth.max(0.0) / SHAFT_AIR).exp() }
+
 /// Light made visible by the air: rays from the sun streaming past whatever stands against the
 /// sky, and haloes round lamps. Worked out at half resolution and added over the frame.
 pub(super) fn light_shafts(ctxs: &[Ctx], here: usize, gbuf: &[GPixel], hdr: &mut [[f32; 3]]) {
@@ -860,6 +870,10 @@ pub(super) fn light_shafts(ctxs: &[Ctx], here: usize, gbuf: &[GPixel], hdr: &mut
             let (px, py) = ((c % mw) as f32 + 0.5, (c / mw) as f32 + 0.5);
             let (dx, dy) = ((sx - px) / steps as f32, (sy - py) / steps as f32);
             let (mut x, mut y, mut wgt, mut acc) = (px, py, 1.0f32, 0.0f32);
+            // How much of the way to the sun is open sky: rays are light between occluders, so
+            // where nothing breaks the sun up (a clearing, a fork's mouth, open country) the air is
+            // evenly lit, which the fog already draws, and the rays fade instead of veiling the frame.
+            let (mut open_acc, mut wsum) = (0.0f32, 0.0f32);
             for _ in 0..steps {
                 x += dx;
                 y += dy;
@@ -872,11 +886,21 @@ pub(super) fn light_shafts(ctxs: &[Ctx], here: usize, gbuf: &[GPixel], hdr: &mut
                 let (ix, iy) = (x0 as i64, y0 as i64);
                 let top = at(ix, iy) + (at(ix + 1, iy) - at(ix, iy)) * tx;
                 let bot = at(ix, iy + 1) + (at(ix + 1, iy + 1) - at(ix, iy + 1)) * tx;
-                acc += (top + (bot - top) * ty) * wgt;
+                let m = top + (bot - top) * ty;
+                acc += m * wgt;
+                // Only what stands against the sky can break the sun up: the ground below the
+                // horizon is never open, whatever is in the way.
+                if y < hy / q as f32 {
+                    let (ddx, ddy) = (x - sx, y - sy);
+                    let ns = 0.1 + 12.0 * (-(ddx * ddx + ddy * ddy) / (glow_r * glow_r)).exp();
+                    open_acc += m / ns * wgt;
+                    wsum += wgt;
+                }
                 wgt *= 0.975;
             }
+            let broken = if wsum > 0.0 { ((1.0 - open_acc / wsum) * SHAFT_BREAK).clamp(0.0, 1.0) } else { 1.0 };
             // Light gathered along the way, saturating softly toward the sun's own glare.
-            *o = add3(*o, scale3(sun_col, (1.0 - (-acc * 0.04).exp()) * k));
+            *o = add3(*o, scale3(sun_col, (1.0 - (-acc * 0.04).exp()) * k * broken));
         });
     }
     if let Some((k, tc, lists)) = &su.lamps {
@@ -913,7 +937,9 @@ pub(super) fn light_shafts(ctxs: &[Ctx], here: usize, gbuf: &[GPixel], hdr: &mut
             let (tx, ty) = ((fx - x0 as f32).clamp(0.0, 1.0), (fy - y0 as f32).clamp(0.0, 1.0));
             let top = mix3(add[y0 * mw + x0], add[y0 * mw + x1], tx);
             let bot = mix3(add[y1 * mw + x0], add[y1 * mw + x1], tx);
-            *px = add3(*px, mix3(top, bot, ty));
+            // Light scattered toward the eye builds up along the air in front of a surface: the
+            // ground at the eye's feet carries almost none, the far air and the sky all of it.
+            *px = add3(*px, scale3(mix3(top, bot, ty), shaft_air(gbuf[y * w + x].depth)));
         }
     });
 }

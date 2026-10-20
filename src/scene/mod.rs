@@ -742,12 +742,16 @@ pub struct Walls {
     pub height: f32,
     /// Darkening where the wall meets the ground (0..1).
     pub base_shadow: f32,
+    /// How thick the wall is, metres: its top, its back and its ends show this much stone wherever
+    /// they are seen (from above, from a turned camera, where a fork or crossing ends it).
+    /// 0 = a sheet with no thickness.
+    pub thickness: f32,
     pub material: Material,
 }
 impl Default for Walls {
     fn default() -> Self {
         Self {
-            enabled: true, gap: 0.25, height: 4.5, base_shadow: 0.55,
+            enabled: true, gap: 0.25, height: 4.5, base_shadow: 0.55, thickness: 0.5,
             material: Material { pattern: Pattern::StoneBlock, ..Material::default() },
         }
     }
@@ -3403,9 +3407,15 @@ pub struct Outline {
     pub color: Rgb,
     /// Outline props and fixtures only (true) or also wall and ground edges (false).
     pub objects_only: bool,
+    /// Selective outline, 0..1: how far each line takes the colour of the thing it outlines
+    /// (darkened by `dark`) instead of `color`. 1 is the hand-drawn pixel-art line, a deeper shade
+    /// of the leaf or stone itself; 0 is flat ink.
+    pub selective: f32,
+    /// How dark a selective line is against its object's colour, 0..1 (0.5 halves it).
+    pub dark: f32,
 }
 impl Default for Outline {
-    fn default() -> Self { Self { enabled: false, color: [12, 10, 14], objects_only: true } }
+    fn default() -> Self { Self { enabled: false, color: [12, 10, 14], objects_only: true, selective: 0.0, dark: 0.5 } }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]

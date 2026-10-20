@@ -76,6 +76,7 @@ pub fn from_v2(o: &PathForgeSettings, name: &str) -> Scene {
         gap: (o.walls.l_wx * 0.8 - half_width).max(0.1),
         height: if o.walls.top_coverage >= 0.98 { 0.0 } else { eye * (1.3 + o.walls.top_coverage * 4.0) },
         base_shadow: (1.0 - o.walls.junc_shadow / 60.0).clamp(0.0, 0.9),
+        thickness: Walls::default().thickness,
         material: Material {
             pattern: pattern_from_wall(&o.walls.pattern), base: o.walls.base, mortar: o.walls.mortar,
             noise: o.walls.noise, damage: o.walls.damage, seed: o.walls.variation_seed,
