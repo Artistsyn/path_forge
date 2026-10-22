@@ -483,6 +483,14 @@ impl Runtime {
         Ok(())
     }
 
+    /// `warp`, but `metres` into the stop's scene: turning round partway along a place, the walk
+    /// back starts where the player stood.
+    pub fn warp_at(&mut self, stop: &str, metres: f32) -> Result<(), String> {
+        self.warp(stop)?;
+        self.distance = metres.max(0.0);
+        Ok(())
+    }
+
     // ── Day and night ──────────────────────────────────────────────────────
 
     /// Set the hour of the day (0..24) on every scene the runtime draws, transitions and forks
