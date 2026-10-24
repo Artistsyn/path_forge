@@ -1265,6 +1265,9 @@ pub fn paint_prop(kind: PropKind, tint: Rgb, variant: u32) -> Sprite {
     }
 }
 
+/// Across the painted lantern (`paint_fixture`), the middle of its glass: where its flame burns.
+pub const LANTERN_GLASS_U: f32 = 64.0 / 96.0;
+
 /// Paint a fixture body (the flame or orb is drawn separately). The wall side is on the left.
 pub fn paint_fixture(kind: FixtureKind) -> Option<Sprite> {
     let wood = [0.12, 0.06, 0.025];
@@ -1955,16 +1958,81 @@ pub fn paint_face(parts: &[ShapePart], width: f32, height: f32) -> Option<Sprite
     Some(sprite)
 }
 
-/// Sprites by key: procedural variants and loaded image files.
+/// Pictures painted or read once for every renderer in the process (and for the thread that
+/// paints them ahead of the walk, `Runtime::set_paint_ahead`), within a budget of bytes: past it
+/// the ones longest unused are let go, one at a time. (They were cleared all at once at a count
+/// before, painted again on the road's thread the next frame they were seen.)
+struct Shared<K> {
+    map: HashMap<K, (Option<Arc<Sprite>>, u64)>,
+    bytes: usize,
+    tick: u64,
+    budget: usize,
+}
+
+impl<K: std::hash::Hash + Eq + Clone> Shared<K> {
+    fn new(budget: usize) -> Self { Shared { map: HashMap::new(), bytes: 0, tick: 0, budget } }
+    fn get(&mut self, k: &K) -> Option<Option<Arc<Sprite>>> {
+        self.tick += 1;
+        let tick = self.tick;
+        self.map.get_mut(k).map(|e| { e.1 = tick; e.0.clone() })
+    }
+    /// Keep `v` (or, when another thread got there first, theirs: one picture per key, so the GPU
+    /// holds it once).
+    fn put(&mut self, k: K, v: Option<Arc<Sprite>>) -> Option<Arc<Sprite>> {
+        if let Some(e) = self.map.get(&k) { return e.0.clone(); }
+        self.tick += 1;
+        self.bytes += v.as_deref().map_or(0, sprite_bytes);
+        self.map.insert(k, (v.clone(), self.tick));
+        while self.bytes > self.budget && self.map.len() > 1 {
+            let Some(old) = self.map.iter().min_by_key(|e| e.1 .1).map(|e| e.0.clone()) else { break };
+            if let Some((s, _)) = self.map.remove(&old) { self.bytes -= s.as_deref().map_or(0, sprite_bytes); }
+        }
+        v
+    }
+}
+
+fn sprite_bytes(s: &Sprite) -> usize {
+    s.levels.iter().map(|l| l.2.len() * 16).sum::<usize>() + s.glow.as_deref().map_or(0, sprite_bytes)
+}
+
+type PaintKey = (u8, Rgb, u32);
+/// Painted props, rocks and water (by kind, colour and variant).
+static PAINTED: std::sync::LazyLock<std::sync::Mutex<Shared<PaintKey>>> = std::sync::LazyLock::new(|| std::sync::Mutex::new(Shared::new(128 << 20)));
+/// Image files, by path, trim and the file's time when it was read (a changed file is another).
+static FILES: std::sync::LazyLock<std::sync::Mutex<Shared<(PathBuf, bool, Option<std::time::SystemTime>)>>> = std::sync::LazyLock::new(|| std::sync::Mutex::new(Shared::new(320 << 20)));
+/// The shared picture under `key`, painted (outside the lock, so another thread waits only for a
+/// lookup) when it is not there.
+fn painted(key: PaintKey, paint: impl FnOnce() -> Sprite) -> Arc<Sprite> {
+    if let Some(Some(s)) = PAINTED.lock().unwrap().get(&key) { return s; }
+    let s = Arc::new(paint());
+    PAINTED.lock().unwrap().put(key, Some(s)).unwrap()
+}
+
+/// A prop as `SpriteCache::prop` paints it, from any thread: for painting ahead of the walk.
+pub fn paint_prop_shared(kind: PropKind, tint: Rgb, variant: u32) -> Arc<Sprite> {
+    painted((kind as u8, tint, variant % VARIANTS), || paint_prop(kind, tint, variant % VARIANTS))
+}
+
+/// A floating rock as `SpriteCache::asteroid` paints it, from any thread.
+pub fn paint_asteroid_shared(tint: Rgb, variant: u32) -> Arc<Sprite> {
+    painted((0xA5, tint, variant % VARIANTS), || paint_asteroid(tint, variant % VARIANTS))
+}
+
+/// The time a file (and the mask painted for it) last changed, as `SpriteCache::file_at` keys it:
+/// the later of the image's time and its mask's (painting a mask redraws the image).
+fn file_stamp(full: &Path) -> Option<std::time::SystemTime> {
+    let stamp = |p: &Path| std::fs::metadata(p).and_then(|m| m.modified()).ok();
+    stamp(full).max(stamp(&mask_path(full)).map(|t| t + std::time::Duration::from_nanos(1)))
+}
+
+/// Sprites by key: procedural variants and loaded image files (the props, rocks, water and files
+/// shared by every renderer: `PAINTED`, `FILES`).
 #[derive(Default)]
 pub struct SpriteCache {
-    procedural: HashMap<(u8, Rgb, u32), Arc<Sprite>>,
     /// Set-pieces by kind, colours, opening size in centimetres and variant; with their size in metres.
     pieces: HashMap<(u8, Rgb, Rgb, u32, u32, u32), (Arc<Sprite>, f32, f32)>,
     fixtures: HashMap<u8, Option<Arc<Sprite>>>,
     posts: HashMap<u8, Arc<Sprite>>,
-    /// By path and trim, with the file's modification time when it was read.
-    files: HashMap<(PathBuf, bool), (Option<std::time::SystemTime>, Option<Arc<Sprite>>)>,
     /// Images with a glow layer from their lightest texels, with the image they were made from.
     glowing: HashMap<(PathBuf, bool, u32, u32), (Arc<Sprite>, Arc<Sprite>)>,
     /// Drawn props by the text of their parts, with their height in metres.
@@ -1974,40 +2042,28 @@ pub struct SpriteCache {
 pub const VARIANTS: u32 = 6;
 
 impl SpriteCache {
-    pub fn prop(&mut self, kind: PropKind, tint: Rgb, variant: u32) -> Arc<Sprite> {
-        let key = (kind as u8, tint, variant % VARIANTS);
-        if self.procedural.len() > 256 { self.procedural.clear(); }
-        self.procedural.entry(key).or_insert_with(|| Arc::new(paint_prop(kind, tint, variant % VARIANTS))).clone()
-    }
+    pub fn prop(&mut self, kind: PropKind, tint: Rgb, variant: u32) -> Arc<Sprite> { paint_prop_shared(kind, tint, variant) }
 
     /// A rock face for a waterfall to pour down: craggy, banded, mossy, darker and wet down its middle.
     pub fn cliff(&mut self, tint: Rgb, variant: u32) -> Arc<Sprite> {
-        let key = (0xC1, tint, variant % VARIANTS);
-        if self.procedural.len() > 256 { self.procedural.clear(); }
-        self.procedural.entry(key).or_insert_with(|| Arc::new(paint_cliff(tint, variant % VARIANTS))).clone()
+        painted((0xC1, tint, variant % VARIANTS), || paint_cliff(tint, variant % VARIANTS))
     }
 
     /// The pool at a waterfall's foot (`paint_pool`).
     pub fn pool(&mut self, water: Rgb, rock: Rgb, variant: u32) -> Arc<Sprite> {
         let key = (0xB0, water, (rock[0] as u32) << 16 | (rock[1] as u32) << 8 | rock[2] as u32 | (variant % VARIANTS) << 24);
-        if self.procedural.len() > 256 { self.procedural.clear(); }
-        self.procedural.entry(key).or_insert_with(|| Arc::new(paint_pool(water, rock, variant % VARIANTS))).clone()
+        painted(key, || paint_pool(water, rock, variant % VARIANTS))
     }
 
     /// The stream over a waterfall's top (`paint_stream`).
     pub fn stream(&mut self, water: Rgb, rock: Rgb) -> Arc<Sprite> {
         let key = (0xB1, water, (rock[0] as u32) << 16 | (rock[1] as u32) << 8 | rock[2] as u32);
-        if self.procedural.len() > 256 { self.procedural.clear(); }
-        self.procedural.entry(key).or_insert_with(|| Arc::new(paint_stream(water, rock))).clone()
+        painted(key, || paint_stream(water, rock))
     }
 
     /// A whole rock for one floating in space (`PropLayer.float`): the ground rocks are domes with
 /// a flat base, which reads as a cut edge in mid-air.
-pub fn asteroid(&mut self, tint: Rgb, variant: u32) -> Arc<Sprite> {
-    let key = (0xA5, tint, variant % VARIANTS);
-    if self.procedural.len() > 256 { self.procedural.clear(); }
-    self.procedural.entry(key).or_insert_with(|| Arc::new(paint_asteroid(tint, variant % VARIANTS))).clone()
-}
+pub fn asteroid(&mut self, tint: Rgb, variant: u32) -> Arc<Sprite> { paint_asteroid_shared(tint, variant) }
 
 pub fn set_piece(&mut self, kind: SetPieceKind, tint: Rgb, accent: Rgb, ow: f32, oh: f32, variant: u32) -> (Arc<Sprite>, f32, f32) {
         let key = (kind as u8, tint, accent, (ow * 10.0).round() as u32, (oh * 10.0).round() as u32, variant % VARIANTS);
@@ -2035,17 +2091,10 @@ pub fn set_piece(&mut self, kind: SetPieceKind, tint: Rgb, accent: Rgb, ow: f32,
     /// An image at a resolved path, optionally trimmed to what is visible.
     /// Read again when the file changes on disk.
     pub fn file_at(&mut self, full: &Path, trim: bool) -> Option<Arc<Sprite>> {
-        // (The later of the image's time and its mask's: painting a mask redraws the image.)
-        let stamp = |p: &Path| std::fs::metadata(p).and_then(|m| m.modified()).ok();
-        let mtime = stamp(full).max(stamp(&mask_path(full)).map(|t| t + std::time::Duration::from_nanos(1)));
-        let key = (full.to_path_buf(), trim);
-        if let Some((t, s)) = self.files.get(&key) {
-            if *t == mtime { return s.clone(); }
-        }
-        if self.files.len() > 512 { self.files.clear(); }
+        let key = (full.to_path_buf(), trim, file_stamp(full));
+        if let Some(s) = FILES.lock().unwrap().get(&key) { return s; }
         let s = Sprite::load_opt(full, trim).map(Arc::new);
-        self.files.insert(key, (mtime, s.clone()));
-        s
+        FILES.lock().unwrap().put(key, s)
     }
 
     /// An image whose texels at least `from` light (0..1, perceived) glow by `strength`.

@@ -398,7 +398,8 @@ fn surface_uv(g: GPix) -> vec3<f32> {
 }
 
 @compute @workgroup_size(8, 8)
-fn uvs_main(@builtin(global_invocation_id) id: vec3<u32>) {
+fn uvs_main(@builtin(global_invocation_id) id0: vec3<u32>) {
+    let id = vec3<u32>(id0.x + W.org_x, id0.y + W.org_y, id0.z);
     if id.x >= W.width || id.y >= W.height { return; }
     let i = id.y * W.width + id.x;
     if (gbuf[i].idr >> 8u) != W.realm { return; }
@@ -821,6 +822,10 @@ fn shade_px(g: GPix, i: u32, x: u32, y: u32, own: bool) -> Shaded {
     } else {
         ao *= passage_dark(g.x, g.d);
     }
+    // A street front's windows (render.rs shade_px): dark glass in a frame, a third lit within.
+    var win = vec2<f32>(0.0, -9.0);
+    if id == ID_FACADE { win = op_window(g.x, g.y); }
+    if win.y > -1.0 { if win.y < 0.0 { albedo = albedo * 0.35; } else { albedo = vec3<f32>(0.018, 0.02, 0.026); } }
     let gr0 = gloss_of(tex, id);
     let gr = vec2<f32>(max(gr0.x * gloss_k, wet_g), gr0.y);
     let s = weather_surface(g, id, tex, albedo, gr.x, gr.y);
@@ -829,6 +834,7 @@ fn shade_px(g: GPix, i: u32, x: u32, y: u32, own: bool) -> Shaded {
     if W.ww_on != 0u && id == ID_GROUND && tex == 0u { sun_d = 1.0 - 0.4 * (1.0 - sun); }
     let light = light_at(g.x, g.y, g.d, normal, skip, sun_d, x, y);
     var c = s.albedo * (light * ao);
+    if win.x > 0.0 && win.y >= 0.0 { c += vec3<f32>(0.95, 0.58, 0.28) * (win.x * (0.75 + 0.25 * smoothstep_r(0.0, 0.2, win.y))); }
     if s.gloss > 0.001 {
         let gloss = s.gloss;
         let p = to_cam(g.x, g.y, g.d);
@@ -891,7 +897,8 @@ fn shade_px(g: GPix, i: u32, x: u32, y: u32, own: bool) -> Shaded {
 }
 
 @compute @workgroup_size(8, 8)
-fn shade_main(@builtin(global_invocation_id) gid: vec3<u32>) {
+fn shade_main(@builtin(global_invocation_id) gid0: vec3<u32>) {
+    let gid = vec3<u32>(gid0.x + W.org_x, gid0.y + W.org_y, gid0.z);
     if gid.x >= W.width || gid.y >= W.height { return; }
     let i = gid.y * W.width + gid.x;
     let g = gbuf[i];
@@ -916,7 +923,8 @@ fn shade_main(@builtin(global_invocation_id) gid: vec3<u32>) {
 
 // Where a patch of this world reaches into another's pixels: a little of each (render::shade).
 @compute @workgroup_size(8, 8)
-fn soft_main(@builtin(global_invocation_id) gid: vec3<u32>) {
+fn soft_main(@builtin(global_invocation_id) gid0: vec3<u32>) {
+    let gid = vec3<u32>(gid0.x + W.soft_ox, gid0.y + W.soft_oy, gid0.z);
     if gid.x >= W.width || gid.y >= W.height { return; }
     let i = gid.y * W.width + gid.x;
     let n = W.width * W.height;

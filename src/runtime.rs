@@ -25,7 +25,7 @@
 //! that `scene::transition::plan` chooses, `fork` offers two branches and `choose` takes one, and a
 //! `Journey` file maps a whole game's worth of places so `go` knows where each one leads.
 
-use crate::journey::{Camera, CrossWalk, ForkWalk, Journey, Next, Place};
+use crate::journey::{Camera, CrossWalk, ForkWalk, Journey, Next, Place, Stop};
 use crate::scene::transition::{self as tr, Branch, Crossing, ForkChoice, ForkPlan, Transition};
 use crate::scene::{self, Scene};
 use crate::world::{RenderOptions, View, WorldRenderer};
@@ -36,6 +36,8 @@ pub struct Runtime {
     base_dir: Option<PathBuf>,
     renderer: WorldRenderer,
     rgba: Vec<u8>,
+    /// Frames drawn pipelined (`set_pipelined`).
+    pipelined: bool,
     /// The runtime's own walk (see `step`): metres along the current scene and its clock.
     distance: f32,
     time: f32,
@@ -53,8 +55,90 @@ pub struct Runtime {
     home: scene::Camera,
     /// Journey stops `warm_next` has still to get ready.
     cold: Vec<String>,
+    /// Stops the game has asked for ahead of the rest (`warm`): a cut it is about to make.
+    wanted: Vec<String>,
     /// Points `frame` measures the light at (`set_probes`, `lighting`).
     probes: Vec<[f32; 3]>,
+    /// The least brightness a frame is let fall to (`set_visibility_floor`), and the exposure
+    /// lift now holding it there.
+    floor: Option<f32>,
+    lift: f32,
+    /// Painting ahead of the walk (`set_paint_ahead`).
+    ahead: Option<Ahead>,
+}
+
+/// A thread of its own painting the props of the stops near the walk (`warm_next`'s), so the stop's
+/// first draw on the road's thread finds them painted: a cold stop's procedural props took up to
+/// 0.9 s to paint on a phone, in the middle of the walk. What it paints goes into the pictures
+/// every renderer shares (`sprites::paint_prop_shared`).
+struct Ahead {
+    tx: std::sync::mpsc::Sender<(String, Scene, Option<PathBuf>)>,
+    done: std::sync::Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
+    sent: std::collections::HashSet<String>,
+}
+
+/// Run at the start of the painting-ahead thread and its helpers (`set_background_start`).
+static BACKGROUND_START: std::sync::OnceLock<fn()> = std::sync::OnceLock::new();
+
+/// Something for the threads that work ahead of the walk to run first: on a phone, a game keeps
+/// them on the slower cores the road's threads leave idle. Only the first call counts.
+pub fn set_background_start(f: fn()) { let _ = BACKGROUND_START.set(f); }
+
+impl Ahead {
+    fn spawn() -> Ahead {
+        let (tx, rx) = std::sync::mpsc::channel::<(String, Scene, Option<PathBuf>)>();
+        let done = std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashSet::new()));
+        let finished = done.clone();
+        let start = || if let Some(f) = BACKGROUND_START.get() { f() };
+        std::thread::Builder::new().name("pf-ahead".into()).spawn(move || {
+            start();
+            let pool = rayon::ThreadPoolBuilder::new().num_threads(2).thread_name(|i| format!("pf-ahead-{i}")).start_handler(move |_| start()).build().ok();
+            let mut defs = crate::world::propdefs::PropDefs::default();
+            let mut sprites = crate::world::sprites::SpriteCache::default();
+            // On the CPU: its average colour, and the textures and pictures its frames draw.
+            let mut renderer = WorldRenderer::default();
+            for (stop, scene, dir) in rx {
+                let mut paint = || {
+                    paint_props_of(&scene, dir.as_deref(), &mut defs, &mut sprites);
+                    renderer.scene_mean(&scene, dir.clone());
+                };
+                match &pool { Some(p) => p.install(paint), None => paint() }
+                finished.lock().unwrap().insert(stop);
+            }
+        }).expect("the painting-ahead thread");
+        Ahead { tx, done, sent: std::collections::HashSet::new() }
+    }
+
+    /// Whether `stop` is painted, asking for it (once) when it is not.
+    fn ready(&mut self, stop: &str, j: &Journey, dir: Option<&Path>) -> bool {
+        if self.done.lock().unwrap().contains(stop) { return true; }
+        if self.sent.insert(stop.to_owned()) {
+            match j.scene_of(stop, dir) {
+                Ok((scene, sdir)) => { let _ = self.tx.send((stop.to_owned(), scene, sdir)); }
+                Err(_) => return true,
+            }
+        }
+        false
+    }
+}
+
+/// Every procedural picture a scene's prop layers draw, every variant, painted (side by side, on
+/// the current rayon pool) into the shared pictures; image files are read on the way.
+fn paint_props_of(scene: &Scene, dir: Option<&Path>, defs: &mut crate::world::propdefs::PropDefs, sprites: &mut crate::world::sprites::SpriteCache) {
+    use crate::scene::PropKind;
+    use crate::world::sprites::{paint_asteroid_shared, paint_prop_shared, VARIANTS};
+    use rayon::prelude::*;
+    let mut jobs: Vec<(PropKind, scene::Rgb, bool)> = Vec::new();
+    for p in scene.props.iter().filter(|p| p.enabled) {
+        let Some(r) = defs.resolve(scene, dir, p, sprites).0 else { continue };
+        let floating = p.float > 0.0 || p.orbit.enabled;
+        for look in if r.alts.is_empty() { std::slice::from_ref(&r) } else { &r.alts[..] } {
+            let rock = floating && matches!(look.kind, PropKind::Rock | PropKind::Boulder);
+            if look.sprites.is_empty() && !jobs.contains(&(look.kind, look.tint, rock)) { jobs.push((look.kind, look.tint, rock)); }
+        }
+    }
+    let all: Vec<(PropKind, scene::Rgb, bool, u32)> = jobs.into_iter().flat_map(|(k, t, r)| (0..VARIANTS).map(move |v| (k, t, r, v))).collect();
+    all.par_iter().for_each(|&(k, t, rock, v)| { if rock { paint_asteroid_shared(t, v); } else { paint_prop_shared(k, t, v); } });
 }
 
 /// The camera swinging from one view to another at the game's asking: how, from where, to what
@@ -116,11 +200,42 @@ pub struct WalkState {
     pub side_paths: Vec<(f32, f32)>,
 }
 
+/// How many stops out from the walk `warm_next` gets ready: the next ones each way. Each warm
+/// holds up a frame by a stop's first draw (a tenth of a second to half a second on a large
+/// journey), so three out (twenty stops past a fork) kept a cut to a new place stuttering for
+/// seconds; one out is ready before the walk can reach it.
+const WARM_REACH: u32 = 1;
+
+/// Journey stops within `WARM_REACH` of `at`, with how far: along the roads either way, and a
+/// stop showing the same scene file as one reached costs nothing more (walking a place back).
+fn warm_order(j: &Journey, at: &str) -> std::collections::HashMap<String, u32> {
+    let mut far: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
+    let mut todo = std::collections::VecDeque::from([(at.to_owned(), 0u32)]);
+    let ahead = |s: &Stop| -> Vec<String> {
+        match &s.next {
+            Next::End => Vec::new(),
+            Next::Go { to, .. } => vec![to.clone()],
+            Next::Fork { left, right, .. } => vec![left.clone(), right.clone()],
+        }
+    };
+    while let Some((s, d)) = todo.pop_front() {
+        if far.get(&s).is_some_and(|&e| e <= d) || d > WARM_REACH { continue; }
+        far.insert(s.clone(), d);
+        let Some(st) = j.stops.get(&s) else { continue };
+        for n in ahead(st) { todo.push_back((n, d + 1)); }
+        for (k, other) in &j.stops {
+            if ahead(other).contains(&s) { todo.push_back((k.clone(), d + 1)); }
+            if other.scene == st.scene && *k != s { todo.push_back((k.clone(), d)); }
+        }
+    }
+    far
+}
+
 impl Runtime {
     /// A scene whose files (sprites, kits, grades) are named relative to `base_dir`.
     pub fn new(scene: Scene, base_dir: Option<PathBuf>) -> Runtime {
         let home = scene.camera.clone();
-        Runtime { scene, base_dir, renderer: WorldRenderer::default(), rgba: Vec::new(), distance: 0.0, time: 0.0, walked: 0.0, active: None, journey: None, day_seconds: 0.0, played: 0.0, swinging: None, home, cold: Vec::new(), probes: Vec::new() }
+        Runtime { scene, base_dir, renderer: WorldRenderer::default(), rgba: Vec::new(), pipelined: false, distance: 0.0, time: 0.0, walked: 0.0, active: None, journey: None, day_seconds: 0.0, played: 0.0, swinging: None, home, cold: Vec::new(), wanted: Vec::new(), floor: None, lift: 1.0, probes: Vec::new(), ahead: None }
     }
 
     /// Draw frames on the GPU, on a device the game hands over (with wgpu 25, the same one it
@@ -140,6 +255,24 @@ impl Runtime {
 
     /// Which engine draws this runtime's frames: "gpu" or "cpu".
     pub fn engine(&self) -> &'static str { self.renderer.engine() }
+
+    /// Draw frames pipelined (`RenderOptions::pipelined`): `frame` may return the frame drawn
+    /// before (`frame_late`), so the GPU's work overlaps the CPU's. For a live road.
+    pub fn set_pipelined(&mut self, on: bool) { self.pipelined = on; }
+    /// Whether the last `frame` is the one drawn before it: its state and camera were those
+    /// asked for then.
+    pub fn frame_late(&self) -> bool { self.renderer.frame_late() }
+
+    /// Time every stage of each frame drawn (`WorldRenderer::profile`), or stop.
+    pub fn set_profile(&mut self, on: bool) { self.renderer.profile = on; self.renderer.stages.clear(); }
+    /// With the profile on, time each GPU pass too (it stops frames overlapping the GPU's work).
+    pub fn set_profile_gpu(&mut self, on: bool) { self.renderer.profile_gpu = on; }
+    /// The stages timed since last asked (name, milliseconds summed), loudest first.
+    pub fn take_stages(&mut self) -> Vec<(&'static str, f64)> {
+        let mut st = std::mem::take(&mut self.renderer.stages);
+        st.sort_by(|a, b| b.1.total_cmp(&a.1));
+        st
+    }
 
     /// A journey file: the walk begins at its start stop.
     pub fn from_journey(path: impl AsRef<Path>) -> Result<Runtime, String> {
@@ -197,16 +330,110 @@ impl Runtime {
     /// fork or crossing needs on its first frame) and the sprites and textures it paints, drawn
     /// once at `width` x `height` and thrown away. Otherwise the first frame into each new place
     /// pays for them, a hitch of a few tenths of a second. One stop per call, so a game spreads
-    /// them over frames; false once every stop is ready (and with no journey).
+    /// them over frames: first any the game asked for (`warm`), then the nearest to where the walk
+    /// is, by the journey's roads either way and by a shared scene (the same place walked back),
+    /// only as far as `WARM_REACH` stops. Each costs a frame's worth of time or more, so warming the
+    /// whole journey up front stalled the frames the game was waiting on for many seconds; the
+    /// ring moves with the walk instead. False once nothing near is left (and with no journey).
     pub fn warm_next(&mut self, width: u32, height: u32) -> bool {
-        let Some((j, dir, _)) = self.journey.as_ref() else { return false };
-        let Some(stop) = self.cold.pop() else { return false };
+        let Some((j, dir, at)) = self.journey.as_ref() else { return false };
+        let near = warm_order(j, at);
+        // With painting ahead, every near stop is asked for, and one is drawn only once painted.
+        if let Some(a) = self.ahead.as_mut() {
+            let mut order: Vec<(&String, u32)> = self.wanted.iter().rev().map(|s| (s, 0)).chain(self.cold.iter().filter_map(|s| near.get(s).map(|d| (s, *d)))).collect();
+            order.sort_by_key(|o| o.1);
+            let mut first = None;
+            for (s, _) in order { if a.ready(s, j, dir.as_deref()) && first.is_none() { first = Some(s.clone()); } }
+            match first {
+                Some(s) => { self.wanted.retain(|w| *w != s); self.cold.retain(|c| *c != s); return self.warm_stop(s, width, height); }
+                None => return !self.wanted.is_empty() || self.cold.iter().any(|s| near.contains_key(s)),
+            }
+        }
+        let stop = match self.wanted.pop() {
+            Some(s) => s,
+            None => {
+                let Some((i, _)) = self.cold.iter().enumerate().filter_map(|(i, s)| near.get(s).map(|d| (i, *d))).min_by_key(|(_, d)| *d) else { return false };
+                self.cold.swap_remove(i)
+            }
+        };
+        self.cold.retain(|s| *s != stop);
+        self.warm_stop(stop, width, height)
+    }
+
+    /// Have the threads that work ahead of the walk paint each near stop's props before
+    /// `warm_next` draws it (off by default: then `warm_next` paints them as it draws).
+    pub fn set_paint_ahead(&mut self, on: bool) {
+        if on != self.ahead.is_some() { self.ahead = on.then(Ahead::spawn); }
+    }
+
+    /// `warm_next`'s draw of one stop (nothing more to do once it is got ready ahead: its pictures
+    /// are sent to the GPU as they come into view).
+    fn warm_stop(&mut self, stop: String, width: u32, height: u32) -> bool {
+        let Some((j, dir, at)) = self.journey.as_ref() else { return false };
+        if self.ahead.is_some() { return !self.wanted.is_empty() || { let near = warm_order(j, at); self.cold.iter().any(|s| near.contains_key(s)) }; }
         if let Ok((scene, sdir)) = j.scene_of(&stop, dir.as_deref()) {
             self.renderer.scene_mean(&scene, sdir.clone());
             let opts = RenderOptions { base_dir: sdir, ..self.opts(0.0, width, height) };
             let _ = self.renderer.render(&scene, 0.0, &opts);
         }
-        !self.cold.is_empty()
+        !self.wanted.is_empty() || { let near = warm_order(j, at); self.cold.iter().any(|s| near.contains_key(s)) }
+    }
+
+    /// Shut the fork ahead's branches (left, right) `BAR_PAST` metres past the junction, each in
+    /// its own world (`Barrier`): a way the game will not let the walk take, seen to be shut.
+    /// False with no fork under way.
+    pub fn bar(&mut self, left: Option<tr::Barrier>, right: Option<tr::Barrier>) -> bool {
+        let Some(Active::Fork { walk, .. }) = self.active.as_mut() else { return false };
+        // Through an opened one the walk goes on until it is past the wall, not handing over to
+        // the branch alone with the doorway still ahead.
+        if left.iter().chain(&right).any(|b| b.open) { walk.plan.overshoot = walk.plan.overshoot.max(tr::BAR_PAST + 3.0); }
+        walk.barred = [left, right];
+        true
+    }
+
+    /// Never let the road fall darker than `brightness` (the mean perceived brightness, 0..1, of
+    /// the frame below the horizon band, where the path and what stands on it are): exposure is
+    /// raised over the scene's own, gently, frame by frame, until it is that bright, and let back
+    /// down as the light returns. A place that keeps dark (`Post::keep_dark`) is left as drawn,
+    /// for threats that are meant to hide. None: every scene as drawn.
+    pub fn set_visibility_floor(&mut self, brightness: Option<f32>) {
+        self.floor = brightness.map(|b| b.clamp(0.0, 0.6));
+        if self.floor.is_none() { self.lift = 1.0; self.renderer.set_lift(None); }
+    }
+
+    /// Measure the frame just drawn and move the lift toward holding the floor (`set_visibility_floor`).
+    fn hold_floor(&mut self, w: usize, h: usize) {
+        let Some(floor) = self.floor else { return };
+        if self.scene.post.keep_dark || w == 0 || h == 0 || self.rgba.len() < w * h * 4 {
+            self.lift += (1.0 - self.lift) * 0.1;
+        } else {
+            let (mut sum, mut n) = (0.0f32, 0.0f32);
+            for y in (h * 2 / 5..h).step_by(3) {
+                for x in (0..w).step_by(5) {
+                    let p = &self.rgba[(y * w + x) * 4..(y * w + x) * 4 + 3];
+                    sum += (0.2126 * p[0] as f32 + 0.7152 * p[1] as f32 + 0.0722 * p[2] as f32) / 255.0;
+                    n += 1.0;
+                }
+            }
+            let mean = (sum / n.max(1.0)).max(1e-3);
+            // Toward the lift that would bring the mean up to the floor (picture brightness goes
+            // as about the square root of exposure, sRGB), never below the scene's own; down
+            // again only once well clear of it.
+            let want = if mean < floor { self.lift * (floor / mean).powi(2) } else if mean > floor * 1.25 { self.lift * (floor * 1.25 / mean).powi(2) } else { self.lift };
+            self.lift += (want.clamp(1.0, 3.0) - self.lift) * 0.06;
+        }
+        self.renderer.set_lift(Some(self.lift));
+    }
+
+    /// Whether any stop the game asked for (`warm`) is still to be got ready.
+    pub fn warm_wanted(&self) -> bool { !self.wanted.is_empty() }
+
+    /// Have `warm_next` get these stops ready next, before the ones near the walk (the first
+    /// soonest): the stops of a cutscene the game is about to cut to. Already warm ones are skipped.
+    pub fn warm(&mut self, stops: &[String]) {
+        for s in stops.iter().rev() {
+            if self.cold.contains(s) && !self.wanted.contains(s) { self.wanted.push(s.clone()); }
+        }
     }
 
     /// `render` into a buffer the caller owns (`width * height * 4` bytes).
@@ -380,7 +607,7 @@ impl Runtime {
 
     /// The current frame of the runtime's own walk, `width` x `height` RGBA8.
     pub fn frame(&mut self, width: u32, height: u32) -> &[u8] {
-        let opts = RenderOptions { size: Some((width.max(1), height.max(1))), probes: self.probes.clone(), ..RenderOptions::default() };
+        let opts = RenderOptions { size: Some((width.max(1), height.max(1))), probes: self.probes.clone(), pipelined: self.pipelined, ..RenderOptions::default() };
         let a = Place { scene: &self.scene, dir: self.base_dir.as_deref() };
         let img = match &self.active {
             None => {
@@ -397,6 +624,7 @@ impl Runtime {
             }
         };
         self.rgba = img.rgba;
+        self.hold_floor(width as usize, height as usize);
         &self.rgba
     }
 
@@ -499,6 +727,15 @@ impl Runtime {
     /// Scenes without an open sky (dungeons, space, tunnels) are not touched.
     pub fn set_hour(&mut self, hour: Option<f32>) { self.renderer.set_hour(hour); }
 
+    /// Lay a grade over every scene the runtime draws, transitions and forks included, until it
+    /// is taken off (None): JSON merging into the scenes' `post` (exposure, contrast, saturation,
+    /// bloom, vignette, grain, tint, flare, focus), the rest as each scene has it. A game's
+    /// cutscene look; a field `Post` lacks is refused.
+    pub fn set_grade(&mut self, grade: Option<&str>) -> Result<(), String> {
+        let v = grade.map(|g| serde_json::from_str(g).map_err(|e| format!("grade: {e}"))).transpose()?;
+        self.renderer.set_grade(v)
+    }
+
     /// Let the days pass as the game runs: one day every `seconds` of `step` time, from the hour
     /// set (or the scene's own). 0 holds the hour where it is.
     pub fn set_day_length(&mut self, seconds: f32) {
@@ -574,6 +811,35 @@ mod tests {
 
     fn rt(name: &str) -> Runtime {
         Runtime::new(scene::presets::ALL.iter().find(|p| p.0 == name).map(|p| (p.1)()).unwrap(), None)
+    }
+
+    #[test]
+    fn a_visibility_floor_lifts_a_dark_road_until_it_can_be_seen_and_leaves_a_dark_place_dark() {
+        let mean = |r: &Runtime, w: usize, h: usize| {
+            let px: Vec<f32> = (h * 2 / 5..h).flat_map(|y| (0..w).map(move |x| (y, x))).map(|(y, x)| {
+                let p = &r.rgba[(y * w + x) * 4..(y * w + x) * 4 + 3];
+                (0.2126 * p[0] as f32 + 0.7152 * p[1] as f32 + 0.0722 * p[2] as f32) / 255.0
+            }).collect();
+            px.iter().sum::<f32>() / px.len() as f32
+        };
+        let (w, h) = (64, 36);
+        let mut r = rt("Night Road");
+        r.frame(w as u32, h as u32);
+        let dark = mean(&r, w, h);
+        r.set_visibility_floor(Some(dark * 1.6));
+        for _ in 0..120 { r.frame(w as u32, h as u32); }
+        assert!(r.lift > 1.2 && mean(&r, w, h) > dark * 1.35, "lift {} brightness {} from {dark}", r.lift, mean(&r, w, h));
+        // Off again: the scene as drawn.
+        r.set_visibility_floor(None);
+        r.frame(w as u32, h as u32);
+        assert!((mean(&r, w, h) - dark).abs() < 0.01);
+        // A place that keeps dark is not lifted.
+        let mut s = r.scene().clone();
+        s.post.keep_dark = true;
+        let mut k = Runtime::new(s, None);
+        k.set_visibility_floor(Some(dark * 1.6));
+        for _ in 0..60 { k.frame(w as u32, h as u32); }
+        assert!(k.lift < 1.01, "{}", k.lift);
     }
 
     #[test]
@@ -778,10 +1044,16 @@ mod tests {
         j.save(&path).unwrap();
         let mut r = Runtime::from_journey(&path).unwrap();
         assert_eq!(r.state().stop.as_deref(), Some("crypt"));
-        // Every other stop is got ready one call at a time, and the walk is left where it was.
+        // The stops next to the walk are got ready one call at a time (the crypt leads only to
+        // the woods), the walk left where it was; asked for, a far one is got ready too.
         let before = r.state();
         let calls = std::iter::repeat_with(|| r.warm_next(48, 27)).take_while(|more| *more).count() + 1;
-        assert_eq!((calls, r.warm_next(48, 27), r.state()), (3, false, before));
+        assert_eq!((calls, r.warm_next(48, 27), r.state()), (1, false, before.clone()));
+        assert_eq!(r.cold.len(), 2);
+        r.warm(&["sands".to_owned()]);
+        assert!(r.warm_wanted());
+        assert!(!r.warm_next(48, 27) && !r.warm_wanted() && r.cold == ["pass"], "{:?}", r.cold);
+        assert_eq!(r.state(), before);
         r.go().unwrap();
         r.finish();
         assert_eq!(r.state().stop.as_deref(), Some("woods"));

@@ -52,6 +52,7 @@ struct World {
     pt_on: u32, pt_zb: f32, pt_front: u32, pt_r: f32, pt_g: f32, pt_b: f32,
     pt0x: f32, pt0y: f32, pt0z: f32, pt1x: f32, pt1y: f32, pt1z: f32, pt2x: f32, pt2y: f32, pt2z: f32, pt3x: f32, pt3y: f32, pt3z: f32,
     op_on: u32, op_hw: f32, op_top: f32, op_arch: f32, op_rim: f32, op_seed: u32, op_outer_hw: f32, op_outer_top: f32, op_hill: f32,
+    op_skyline: f32, op_pad0: f32, op_pad1: f32, op_pad2: f32,
     fac_tile: f32,
     vb_on: u32, vb_z: f32,
     wg0a: f32, wg0b: f32, wg0c: f32, wg1a: f32, wg1b: f32, wg1c: f32, wg2a: f32, wg2b: f32, wg2c: f32, wg3a: f32, wg3b: f32, wg3c: f32,
@@ -70,6 +71,8 @@ struct World {
     gc: array<vec4<f32>, 12>,
     // The camera turned (View::to_cam).
     cam_yc: f32, cam_ys: f32, cam_x: f32, cam_turned: u32,
+    // Where this world's shading starts (Frame::regions): its own pixels, then those it softens.
+    org_x: u32, org_y: u32, soft_ox: u32, soft_oy: u32,
 }
 
 // Every pass binds the world's parameters here.
@@ -527,6 +530,34 @@ fn op_rim_distance(x: f32, y: f32) -> f32 {
     let edge_top = op_top_at(sign(x) * (hw - 1e-3));
     let dy = max(y - edge_top, 0.0);
     return sqrt((abs(x) - hw) * (abs(x) - hw) + dy * dy);
+}
+
+// A street front (Opening::skyline): Opening::block, outer_at and window_at, which see.
+fn op_block(x: f32) -> i32 { return i32(max(abs(x) - op_half_width(), 0.0) / 5.0); }
+fn op_outer_at(x: f32) -> f32 {
+    let b = op_block(x);
+    if b == 0 { return W.op_outer_top; }
+    let k = hf(W.op_seed ^ 0x71u ^ select(0u, 1u, x < 0.0), b);
+    return W.op_outer_top * (1.0 + W.op_skyline * (k * 0.85 - 0.3));
+}
+// (lit, edge): how brightly lit from within, and metres in from the frame and bars; edge < -1 for none.
+fn op_window(x: f32, y: f32) -> vec2<f32> {
+    let none = vec2<f32>(0.0, -9.0);
+    if W.op_on == 0u || W.op_skyline <= 0.0 || abs(x) < op_half_width() { return none; }
+    if y < 2.8 || y > op_outer_at(x) - 0.9 { return none; }
+    let b = op_block(x);
+    let u = abs(x) - op_half_width() - f32(b) * 5.0;
+    let storey = floor((y - 2.8) / 3.0);
+    let v = y - 2.8 - storey * 3.0 - 0.35;
+    var bay = -1;
+    if abs(u - 1.25) < 0.5 { bay = 0; } else if abs(u - 3.75) < 0.5 { bay = 1; }
+    if bay < 0 || v < 0.0 || v >= 1.5 { return none; }
+    let c = 1.25 + 2.5 * f32(bay);
+    let edge = min(min(min(0.5 - abs(u - c), v), min(1.5 - v, abs(u - c) - 0.03)), abs(v - 0.87) - 0.03);
+    let key = b * 64 + i32(storey) * 4 + bay + select(0, 1 << 20u, x < 0.0);
+    var lit = 0.0;
+    if hf(W.op_seed ^ 0x77u, key) < 0.35 { lit = 0.45 + 0.35 * hf(W.op_seed ^ 0x78u, key); }
+    return vec2<f32>(lit, edge);
 }
 
 // Bounds::region_of(x, z) == 0 past a fork's junction: inside the wedge's four half-planes.

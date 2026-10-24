@@ -52,6 +52,8 @@ struct Post {
     // Grade and outline read r_gsrc and write r_mid (in place unless the outline is selective);
     // a selective line is mix(ink, its object's colour * ol_keep, ol_sel).
     h_fdst: u32, r_gsrc: u32, ol_sel: f32, ol_keep: f32,
+    // Letterbox rows top and bottom; mixed over the held frame by mix_t when mix_on.
+    lb_n: u32, mix_on: u32, mix_t: f32, mix_pad: u32,
 }
 
 @group(0) @binding(1) var<uniform> P: Post;
@@ -64,6 +66,8 @@ struct Post {
 // are in scratch at t_drops.)
 @group(0) @binding(6) var<storage, read> tables: array<u32>;
 @group(0) @binding(7) var<storage, read_write> outp: array<u32>;
+// The frame held for this one to be mixed over (Pipeline::held).
+@group(0) @binding(8) var<storage, read> held: array<u32>;
 
 fn rd3(o: u32, i: u32) -> vec3<f32> { return vec3<f32>(scratch[o + i * 3u], scratch[o + i * 3u + 1u], scratch[o + i * 3u + 2u]); }
 fn wr3(o: u32, i: u32, c: vec3<f32>) { scratch[o + i * 3u] = c.x; scratch[o + i * 3u + 1u] = c.y; scratch[o + i * 3u + 2u] = c.z; }
@@ -842,5 +846,25 @@ fn post_out(@builtin(global_invocation_id) gid: vec3<u32>) {
         }
         for (var k = 0; k < 3; k++) { b[k] = u32(clamp(f32(b[k]) * f, 0.0, 255.0)); }
     }
+    // render::letterbox: black bars top and bottom.
+    if y < P.lb_n || y + P.lb_n >= P.out_h { b = vec3<u32>(0u); }
     outp[y * P.out_w + x] = b.x | (b.y << 8u) | (b.z << 16u) | (255u << 24u);
+}
+
+// journey::mix_images: this frame over the held one by mix_t (0 = the held), byte by byte.
+@compute @workgroup_size(8, 8)
+fn post_blend(@builtin(global_invocation_id) gid: vec3<u32>) {
+    if gid.x >= P.out_w || gid.y >= P.out_h { return; }
+    let i = gid.y * P.out_w + gid.x;
+    let a = held[i];
+    if P.mix_t <= 0.0 { outp[i] = a; return; }
+    let b = outp[i];
+    var o = 0u;
+    for (var k = 0u; k < 4u; k++) {
+        let xa = f32((a >> (8u * k)) & 255u);
+        let yb = f32((b >> (8u * k)) & 255u);
+        let v = rround(xa + rnd((yb - xa) * P.mix_t));
+        o |= u32(clamp(v, 0.0, 255.0)) << (8u * k);
+    }
+    outp[i] = o;
 }

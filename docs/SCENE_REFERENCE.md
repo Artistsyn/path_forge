@@ -980,6 +980,7 @@ A planet's orbit round another (`Planet::orbit`).
 | `tint` | integer × 3 | `[255,255,255]` | Colour multiplied over the final image. |
 | `flare` | [Flare](#flare) | `{"style":"None","amount":0.5}` | What bright light does in the lens besides bloom. |
 | `focus` | [Focus](#focus) | (see the type) | Depth of field: what is nearer or further than the focus blurs, or (tilt-shift) all but a band across the frame does, for the look of a miniature. |
+| `keep_dark` | boolean | `false` | Left as dark as it is drawn: a game's visibility floor (`Runtime::set_visibility_floor`) does not lift it. For a place where what hides in the dark is meant to. |
 
 ### Precipitation
 

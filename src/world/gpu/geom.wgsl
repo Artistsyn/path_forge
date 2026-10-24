@@ -2,7 +2,8 @@
 // - raster_main (then small_z_main, small_pick_main, resolve_main): raster::rasterize, with the
 //   same edge and span arithmetic on triangles set up on the CPU as `raster::prepare` sets them up;
 // - shadow_main: render::prop_shadows (contact darkening and sun shadows of billboards) and
-//   weather::cloud_shade, into the sun and ambient-occlusion masks;
+//   weather::cloud_shade, into the sun and ambient-occlusion masks (also, once per world, in a
+//   frame of several, its G-buffer drawn on the CPU: `Geom::shadow_mode`);
 // - tiles_main: render::tile_lights, one workgroup per 16 x 16 tile: the camera-space box of what
 //   it shows, and every lamp whose reach touches it, in index order.
 
@@ -24,7 +25,14 @@ struct Geom {
     sun_x: f32, sun_y: f32, sun_z: f32, clouds: f32,
     cloud_travel: f32, cloud_seed: u32, tiles_on: u32, cap: u32,
     small_off: u32, n_small: u32, fade_k: f32, fade_near: f32,
-    fade_cut: f32, pad0: u32, pad1: u32, pad2: u32,
+    fade_cut: f32,
+    // A frame of several worlds runs shadow_main once per world (its casters, at W's dynamic
+    // offset): bit 0, ground of another world is placed by `lights` from gx_off (render::
+    // prop_shadows' `across`, worked out on the CPU); bit 1, it goes on from the masks so far; and
+    // from bit 2, 0 for props and clouds, 1 for props only, 2 for the clouds of W's own pixels only.
+    shadow_mode: u32, gx_off: u32, pad2: u32,
+    // The box lights from gx_off covers, row by row (x0, y0, width, height).
+    gx_box: vec4<u32>,
 }
 
 // raster::Dissolve::hides: a swinging camera dissolving the ceiling, the wall on its side, and
@@ -46,6 +54,7 @@ fn hides(p: GPix, x: i32, y: i32) -> bool {
 @group(0) @binding(6) var<storage, read> texels: array<vec4<f32>>;
 // Per tile: a count, then up to `cap` lamp indices.
 @group(0) @binding(7) var<storage, read_write> tile_lights: array<u32>;
+// (shadow_main in a frame of several worlds: where its ground lies in each world's path, gx_off on.)
 @group(0) @binding(8) var<storage, read> lights: array<f32>;
 @group(0) @binding(9) var<uniform> G: Geom;
 // raster_main's meeting place for big and small triangles: 3 words per pixel (see raster_main).
@@ -297,15 +306,21 @@ fn shadow_main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let g = gbuf[i];
     let id = g.idr & 0xFFu;
     var sun = 1.0; var ao = 1.0;
+    if (G.shadow_mode & 2u) != 0u { sun = masks[i]; ao = masks[n + i]; }
+    let part = G.shadow_mode >> 2u;
+    // Across this world's path (another world's ground brought into it, as prop_shadows does).
+    var gx = g.x;
+    let bx = x - G.gx_box.x; let by = y - G.gx_box.y;
+    if (G.shadow_mode & 1u) != 0u && (g.idr >> 8u) != W.realm && bx < G.gx_box.z && by < G.gx_box.w { gx = lights[G.gx_off + by * G.gx_box.z + bx]; }
     let tile = (y / 16u) * G.tile_cols + x / 16u;
     let ntiles = G.tile_cols * ((W.height + 15u) / 16u);
     let b = G.cast_bins;
-    if id == ID_GROUND {
+    if id == ID_GROUND && part != 2u {
         for (var q = bins[b + tile]; q < bins[b + tile + 1u]; q++) {
             let c = bins[b + ntiles + 1u + q];
             let shadow = cf(c, 5u);
             if cu(c, 8u) != 0u && x >= cu(c, 9u) && x <= cu(c, 11u) && y >= cu(c, 10u) && y <= cu(c, 12u) {
-                let dx = g.x - cf(c, 0u); let dd = g.d - cf(c, 1u);
+                let dx = gx - cf(c, 0u); let dd = g.d - cf(c, 1u);
                 let ax = cf(c, 2u); let ad = cf(c, 3u);
                 let na = div(rnd(dx * ax) + rnd(dd * ad), cf(c, 4u));
                 let nb = div(rnd(dd * ax) - rnd(dx * ad), cf(c, 6u));
@@ -316,7 +331,7 @@ fn shadow_main(@builtin(global_invocation_id) gid: vec3<u32>) {
             }
             if G.sun_on != 0u && cu(c, 13u) != 0u && x >= cu(c, 14u) && x <= cu(c, 16u) && y >= cu(c, 15u) && y <= cu(c, 17u) {
                 // Toward the sun from this bit of ground: where the ray meets the picture's plane.
-                let tuv = on_pic(c, g.x, g.d);
+                let tuv = on_pic(c, gx, g.d);
                 if tuv.x <= 0.0 { continue; }
                 var u = tuv.y; let vv = tuv.z;
                 if !(u >= 0.0 && u < 1.0) || !(vv >= 0.0 && vv < 1.0) { continue; }
@@ -330,8 +345,8 @@ fn shadow_main(@builtin(global_invocation_id) gid: vec3<u32>) {
                     if y + 1u < W.height { dn = ground_to(g, i + W.width, 1.0); }
                     if dn.x > 1e29 && y > 0u { dn = ground_to(g, i - W.width, -1.0); }
                     if ax.x < 1e29 && dn.x < 1e29 {
-                        let pa = on_pic(c, g.x + ax.x, g.d + ax.y);
-                        let pb = on_pic(c, g.x + dn.x, g.d + dn.y);
+                        let pa = on_pic(c, gx + ax.x, g.d + ax.y);
+                        let pb = on_pic(c, gx + dn.x, g.d + dn.y);
                         fu = abs(pa.y - u) + abs(pb.y - u);
                         fv = abs(pa.z - vv) + abs(pb.z - vv);
                     }
@@ -353,7 +368,7 @@ fn shadow_main(@builtin(global_invocation_id) gid: vec3<u32>) {
         }
     }
     // Cloud shadows drifting over the ground and walls (weather::cloud_shade).
-    if G.clouds > 0.0 && id != ID_NONE {
+    if G.clouds > 0.0 && id != ID_NONE && part != 1u && (part != 2u || (g.idr >> 8u) == W.realm) {
         let nz = drifting_noise(g.x, W.scroll + g.d, 11.0, G.cloud_travel, G.cloud_seed ^ 0xC1u);
         sun *= 1.0 - G.clouds * 0.85 * smoothstep_r(0.4, 0.58, nz);
     }

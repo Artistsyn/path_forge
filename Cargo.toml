@@ -18,7 +18,7 @@ required-features = ["studio"]
 [[bin]]
 name = "pf"
 path = "src/bin/pf.rs"
-required-features = ["studio"]
+required-features = ["gpu"]
 
 [[bin]]
 name = "pf_mcp"

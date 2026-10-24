@@ -206,6 +206,41 @@ fn winding(scene: &Scene) -> [[f32; 4]; 4] {
     out
 }
 
+/// A view's sideways bend with its per-frame parts worked out (`View::bender`): the same numbers
+/// as `bend_x`, `shear_x` and `to_cam` give, without each pixel taking the sine and cosine of
+/// every wave's phase again.
+#[derive(Clone, Copy, Debug)]
+pub struct Bend {
+    bk: f32,
+    /// Each wave that is there: amplitude, wave number, phase now, its sine and cosine, turn * k.
+    wind: [[f32; 6]; 4],
+    n: usize,
+    shear: Option<(f32, f32)>,
+    /// cam_x, yaw_c, yaw_s when the camera has turned.
+    turned: Option<[f32; 3]>,
+}
+
+impl Bend {
+    /// `View::bend_x`.
+    #[inline]
+    pub fn x(&self, d: f32) -> f32 {
+        let mut x = self.bk * d * d;
+        for &[a, k, p, sp, cp, tk] in &self.wind[..self.n] { x += a * ((k * d + p).sin() - sp - tk * d * cp); }
+        x
+    }
+    /// `View::shear_x`.
+    #[inline]
+    pub fn shear(&self, d: f32) -> f32 { match self.shear { Some((z0, k)) => k * (d - z0).max(0.0), None => 0.0 } }
+    /// `View::to_cam`'s x and z (its height is not needed here).
+    #[inline]
+    pub fn cam_xz(&self, x: f32, d: f32) -> [f32; 2] {
+        let cx = x + self.x(d) + self.shear(d);
+        let Some([cam_x, yc, ys]) = self.turned else { return [cx, d] };
+        let px = cx - cam_x;
+        [yc * px - ys * d, ys * px + yc * d]
+    }
+}
+
 impl View {
     pub fn new(scene: &Scene, width: usize, height: usize) -> View { View::with_camera(scene, &scene.camera, width, height) }
 
@@ -295,6 +330,21 @@ impl View {
             }
         }
         x
+    }
+
+    /// `bend_x`, `shear_x` and `to_cam`'s ground plane with what stays the same across the frame
+    /// worked out once (the same numbers, bit for bit): for loops over every pixel.
+    pub fn bender(&self) -> Bend {
+        let mut b = Bend { bk: self.bend * BEND_K, wind: [[0.0; 6]; 4], n: 0, shear: self.shear, turned: self.turned.then_some([self.cam_x, self.yaw_c, self.yaw_s]) };
+        for [a, k, p0, turn] in self.wind {
+            if a != 0.0 {
+                let p = k * self.scroll + p0;
+                // (turn * k * d * cos p is ((turn * k) * d) * cos p.)
+                b.wind[b.n] = [a, k, p, p.sin(), p.cos(), turn * k];
+                b.n += 1;
+            }
+        }
+        b
     }
 
     /// How far the camera has turned to follow the winding path, as the tangent of the angle:

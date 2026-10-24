@@ -189,6 +189,7 @@ pub fn from_v2(o: &PathForgeSettings, name: &str) -> Scene {
             tint: [255, 255, 255],
             flare: Flare::default(),
             focus: Focus::default(),
+            keep_dark: false,
         },
         style: Style::default(),
         motion: Motion { loop_length, speed: o.anim.play_speed.max(0.01) * loop_length, fps: 24 },

@@ -475,6 +475,7 @@ fn cmd_bench(args: &Args) -> Result<(), String> {
         r.frame(&item, 0.0)?; // warm caches
         let stages = args.opts.contains_key("stages");
         r.world.profile = stages;
+        r.world.profile_gpu = stages;
         r.world.stages.clear();
         let t0 = Instant::now();
         for i in 0..frames {
@@ -487,6 +488,92 @@ fn cmd_bench(args: &Args) -> Result<(), String> {
             st.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
             let line: Vec<String> = st.iter().filter(|(_, ms)| *ms / frames as f64 >= 0.05).map(|(n, ms)| format!("{n} {:.1}", ms / frames as f64)).collect();
             println!("    {}", line.join(" | "));
+        }
+    }
+    Ok(())
+}
+
+/// A journey walked as a game walks it, every frame timed: from `--from` (a stop), `--before`
+/// metres (25) along it, then on to where it leads (taking `--take left|right` at a fork,
+/// `--bar left|right` shut), and `--after` metres (40) past the end of the way there, at
+/// `--speed` m/s (2.2) and `--size WxH` (480x270), on the GPU unless `--backend cpu`, pipelined
+/// as a live road draws unless `--sync`. Prints each stretch's frame times and, with
+/// `--stages`, where they went; `--dump DIR` writes every 40th frame (and the next) there.
+/// `pf walkbench --file world.journey.json --from warrens@warrens_lane --take right`
+fn cmd_walkbench(args: &Args) -> Result<(), String> {
+    use path_forge::runtime::Runtime;
+    use path_forge::scene::transition::{Barrier, Branch};
+    let file = args.opts.get("file").ok_or("walkbench needs --file J.journey.json")?;
+    let from = args.opts.get("from").ok_or("walkbench needs --from STOP")?;
+    let (w, h) = match args.opts.get("size").map(String::as_str).unwrap_or("480x270").split_once('x') {
+        Some((a, b)) => (a.parse::<u32>().map_err(|e| e.to_string())?, b.parse::<u32>().map_err(|e| e.to_string())?),
+        None => return Err("--size is WxH".into()),
+    };
+    let (before, after, speed): (f32, f32, f32) = (opt(args, "before", 25.0)?, opt(args, "after", 40.0)?, opt(args, "speed", 2.2)?);
+    let take = if args.opts.get("take").is_some_and(|t| t == "left") { Branch::Left } else { Branch::Right };
+    let mut rt = Runtime::from_journey(file)?;
+    rt.warp(from)?;
+    if args.opts.get("backend").is_none_or(|b| b != "cpu") { rt.set_gpu(Some(world_gpu()?)); }
+    rt.set_pipelined(!args.opts.contains_key("sync"));
+    // Props painted ahead of the walk, as a game's live road does (`--noahead` paints them as drawn).
+    rt.set_paint_ahead(!args.opts.contains_key("noahead"));
+    if !args.opts.contains_key("nofloor") { rt.set_visibility_floor(Some(0.15)); }
+    let stages = args.opts.contains_key("stages");
+    rt.set_profile(stages);
+    // `--stages gpu`: each GPU pass timed too.
+    rt.set_profile_gpu(args.opts.get("stages").is_some_and(|v| v == "gpu"));
+    let dt = 1.0 / 60.0;
+    // (stretch, render ms, warm ms) per frame, and each stretch's stages.
+    let mut frames: Vec<(String, f32, f32)> = Vec::new();
+    let mut st: Vec<(String, Vec<(&'static str, f64)>)> = Vec::new();
+    let (mut walked, mut gone, mut chose, mut done_at): (f32, bool, bool, Option<f32>) = (0.0, false, false, None);
+    for _ in 0..60 * 600 {
+        rt.step(dt, speed);
+        walked += speed * dt;
+        let s = rt.state();
+        if !gone && walked >= before { rt.go()?; gone = true; if let Some(b) = args.opts.get("bar") { let shut = Some(Barrier::default()); if b == "left" { rt.bar(shut, None); } else { rt.bar(None, shut); } } }
+        if gone && !chose && s.choose_within.is_some_and(|m| m < 6.0) { rt.choose(take); chose = true; }
+        if gone && done_at.is_none() && s.progress.is_none() && walked > before + 1.0 { done_at = Some(walked); }
+        if done_at.is_some_and(|d| walked > d + after) { break; }
+        let label = format!("{}{}", if s.progress.is_some() { "~" } else { "" }, s.stop.clone().unwrap_or_default());
+        let t = Instant::now();
+        let img = rt.frame(w, h);
+        let ms = t.elapsed().as_secs_f32() * 1000.0;
+        // `--dump DIR`: every 40th frame and the one after it as PNGs, so a pipelined frame (the
+        // step before's) can be checked against a `--sync` run's.
+        if let Some(dir) = args.opts.get("dump").filter(|_| frames.len() % 40 <= 1) {
+            save_png(&format!("{dir}/{:05}.png", frames.len()), w as usize, h as usize, img)?;
+        }
+        if stages {
+            let got = rt.take_stages();
+            // A spike: its own stages, as it happened.
+            if ms > 20.0 { eprintln!("[spike] {label} {ms:.1} ms: {}", got.iter().filter(|(_, v)| *v >= 0.5).map(|(k, v)| format!("{k} {v:.1}")).collect::<Vec<_>>().join(" | ")); }
+            let e = match st.iter().position(|(l, _)| *l == label) { Some(i) => &mut st[i].1, None => { st.push((label.clone(), Vec::new())); &mut st.last_mut().unwrap().1 } };
+            for (n, v) in got { match e.iter_mut().find(|(m, _)| *m == n) { Some(x) => x.1 += v, None => e.push((n, v)) } }
+        }
+        let t = Instant::now();
+        rt.warm_next(w, h);
+        let wm = t.elapsed().as_secs_f32() * 1000.0;
+        if stages {
+            let got = rt.take_stages();
+            // A slow warm (a stop got ready): where its time went.
+            if wm > 50.0 { eprintln!("[warm] {label} {wm:.1} ms: {}", got.iter().filter(|(_, v)| *v >= 1.0).map(|(k, v)| format!("{k} {v:.1}")).collect::<Vec<_>>().join(" | ")); }
+        }
+        frames.push((label, ms, wm));
+    }
+    let mut order: Vec<String> = Vec::new();
+    for (l, _, _) in &frames { if !order.contains(l) { order.push(l.clone()); } }
+    println!("{:<34} {:>6} {:>8} {:>8} {:>8} {:>8}", "stretch", "frames", "median", "p95", "max", "warm");
+    for l in &order {
+        let mut ms: Vec<f32> = frames.iter().filter(|f| &f.0 == l).map(|f| f.1).collect();
+        let warm: f32 = frames.iter().filter(|f| &f.0 == l).map(|f| f.2).sum::<f32>() / ms.len() as f32;
+        ms.sort_by(f32::total_cmp);
+        println!("{:<34} {:>6} {:>8.1} {:>8.1} {:>8.1} {:>8.1}", l, ms.len(), ms[ms.len() / 2], ms[ms.len() * 95 / 100], ms[ms.len() - 1], warm);
+        if let Some((_, e)) = st.iter().find(|(m, _)| m == l) {
+            let mut e = e.clone();
+            e.sort_by(|a, b| b.1.total_cmp(&a.1));
+            let n = ms.len() as f64;
+            println!("    {}", e.iter().filter(|(_, v)| *v / n >= 0.1).map(|(k, v)| format!("{k} {:.1}", v / n)).collect::<Vec<_>>().join(" | "));
         }
     }
     Ok(())
@@ -801,6 +888,14 @@ fn cmd_transition(args: &Args) -> Result<(), String> {
         println!("fork from {} into {} (left) or {} (right):", a.name, l.name, rt.name);
         say(&plan.notes, &plan.warnings);
         let mut walk = ForkWalk::new(plan, 0.0, [0.0, 0.0]);
+        // --bar left|right|both: shut that branch across its mouth, as a game bars a way;
+        // --bar-sprite: what stands in the way (a door in the wall, or debris with --bar-debris).
+        if let Some(v) = args.opts.get("bar") {
+            // --bar-debris: no wall, the picture across the path; --bar-opened: the doorway open.
+            let bar = tr::Barrier { wall: !args.opts.contains_key("bar-debris"), sprite: args.opts.get("bar-sprite").cloned().unwrap_or_default(),
+                height: opt(args, "bar-height", 0.0f32)?, open: args.opts.contains_key("bar-opened"), ..tr::Barrier::default() };
+            walk.barred = [matches!(v.as_str(), "left" | "both").then(|| bar.clone()), matches!(v.as_str(), "right" | "both").then(|| bar.clone())];
+        }
         let take = match args.opts.get("take").map(String::as_str) { Some("right") => Branch::Right, Some("left") => Branch::Left, _ => walk.plan.default_branch };
         let len = walk.length();
         // When the branch is chosen (--choose-at metres; default half way to the last moment).
@@ -964,6 +1059,7 @@ fn main() -> ExitCode {
         "dump" => cmd_dump(&args),
         "render" => cmd_render(&args),
         "transition" => cmd_transition(&args),
+        "walkbench" => cmd_walkbench(&args),
         "journey" => cmd_journey(&args),
         "sheet" => cmd_sheet(&args),
         "seam" => cmd_seam(&args),

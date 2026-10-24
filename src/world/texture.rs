@@ -184,16 +184,51 @@ impl Texture {
     }
 }
 
-/// Textures keyed by material, rebuilt only when a material changes.
+/// Textures keyed by material, rebuilt only when a material changes. Each renderer keeps the ones
+/// it has asked for; all of them come from `TEXTURES`, made once for every renderer in the process
+/// (and for the thread that gets places ready ahead of the walk).
 #[derive(Default)]
 pub struct TextureCache {
     map: HashMap<String, std::sync::Arc<Texture>>,
 }
 
+/// Every renderer's textures, within a budget of bytes: past it the ones longest unused are let
+/// go. (Each renderer cleared its own at 64 before, made them all again on the road's thread, and
+/// sent them to the GPU again as new ones.)
+struct SharedTextures { map: HashMap<String, (std::sync::Arc<Texture>, u64)>, bytes: usize, tick: u64 }
+
+const TEXTURE_BUDGET: usize = 96 << 20;
+
+static TEXTURES: std::sync::LazyLock<std::sync::Mutex<SharedTextures>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(SharedTextures { map: HashMap::new(), bytes: 0, tick: 0 }));
+
+fn texture_bytes(t: &Texture) -> usize {
+    t.levels.iter().map(|l| l.1.len() * 12).sum::<usize>() + t.emit.iter().map(|e| e.len() * 4).sum::<usize>()
+}
+
 impl TextureCache {
     pub fn get(&mut self, m: &Material) -> std::sync::Arc<Texture> {
         let key = format!("{:?}{:?}{:?}{}{}{}{}/{}", m.pattern, m.base, m.mortar, m.noise, m.damage, m.seed, m.brightness, m.glow);
-        if self.map.len() > 64 { self.map.clear(); }
-        self.map.entry(key).or_insert_with(|| std::sync::Arc::new(Texture::from_material(m))).clone()
+        if let Some(t) = self.map.get(&key) { return t.clone(); }
+        let shared = |st: &mut SharedTextures| { st.tick += 1; let tick = st.tick; st.map.get_mut(&key).map(|e| { e.1 = tick; e.0.clone() }) };
+        let found = shared(&mut TEXTURES.lock().unwrap());
+        let t = found.unwrap_or_else(|| {
+            // Made outside the lock (another thread waits only for a lookup); kept once.
+            let t = std::sync::Arc::new(Texture::from_material(m));
+            let mut st = TEXTURES.lock().unwrap();
+            if let Some(e) = st.map.get(&key) { return e.0.clone(); }
+            st.tick += 1;
+            let tick = st.tick;
+            st.bytes += texture_bytes(&t);
+            st.map.insert(key.clone(), (t.clone(), tick));
+            while st.bytes > TEXTURE_BUDGET && st.map.len() > 1 {
+                let Some(old) = st.map.iter().min_by_key(|e| e.1 .1).map(|e| e.0.clone()) else { break };
+                if let Some((o, _)) = st.map.remove(&old) { st.bytes -= texture_bytes(&o); }
+            }
+            t
+        });
+        if self.map.len() > 256 { self.map.clear(); }
+        self.map.insert(key, t.clone());
+        t
     }
 }

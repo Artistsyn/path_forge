@@ -517,7 +517,7 @@ impl Server {
     fn opts(&self, l: &Loaded, scale: f32, layers: Layers, stats: bool) -> RenderOptions {
         let (w, h) = (l.scene.canvas.width.max(16), l.scene.canvas.height.max(16));
         let size = if scale < 0.999 { Some((((w as f32 * scale).round() as u32).max(16), ((h as f32 * scale).round() as u32).max(16))) } else { None };
-        RenderOptions { probes: Vec::new(), size, base_dir: Some(self.base_of(l)), layers, palette: None, stats, depth: false, time: None, pick: false, intro: None, swing: None }
+        RenderOptions { probes: Vec::new(), size, base_dir: Some(self.base_of(l)), layers, palette: None, stats, depth: false, time: None, pick: false, intro: None, swing: None, pipelined: false, blend: None, hold: false }
     }
 
     /// Render at `scale` of the canvas. Pixel styles render at full size and are box-scaled down so

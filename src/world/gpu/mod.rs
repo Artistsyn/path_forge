@@ -139,6 +139,8 @@ pub(crate) struct WorldParams {
     pub pt_on: u32, pub pt_zb: f32, pub pt_front: u32, pub pt_rad: [f32; 3], pub pt_c: [f32; 12],
     // Opening: the face round a threshold's opening, and its texture's tile size.
     pub op_on: u32, pub op_hw: f32, pub op_top: f32, pub op_arch: f32, pub op_rim: f32, pub op_seed: u32, pub op_outer_hw: f32, pub op_outer_top: f32, pub op_hill: f32,
+    // A street front's roofline and windows (Opening::skyline), padded to keep what follows aligned.
+    pub op_skyline: f32, pub op_pad: [f32; 3],
     pub fac_tile: f32,
     // Ctx::verge_beyond, and the first world's region past it (Bounds::region_of): four half-planes.
     pub vb_on: u32, pub vb_z: f32, pub wedge: [f32; 12],
@@ -159,6 +161,9 @@ pub(crate) struct WorldParams {
     pub gc: [[f32; 4]; 12],
     /// The camera turned (View::yaw_c, yaw_s, cam_x; turned as 0 or 1).
     pub cam_yc: f32, pub cam_ys: f32, pub cam_x: f32, pub cam_turned: u32,
+    /// Where this world's shading starts (`Frame::regions`), in pixels: the box of its own pixels,
+    /// then the box of the pixels it softens into. (0, 0) for a whole frame.
+    pub org: [u32; 4],
 }
 
 /// The sky pass's parameters; `Sky` in sky.wgsl, field for field.
@@ -288,29 +293,67 @@ pub(crate) struct CardIn { pub card: CardGpu, pub sprite: Arc<Sprite>, pub lod: 
 struct CardPassParams { tile_cols: u32, pick: u32, n_cards: u32, pad: u32 }
 
 /// Every sprite level the cards have used, as RGBA texels in one buffer; sprites are kept alive
-/// here so their pointers stay unique. Grows when a new sprite appears.
+/// here so their pointers stay unique. Grows when a new sprite appears; past `SPRITE_BUDGET` the
+/// ones longest unused are let go (`compact`, between frames).
 #[derive(Default)]
 struct SpriteStore {
     held: Vec<Arc<Sprite>>,
-    /// Pointer -> first texel of each level.
-    at: std::collections::HashMap<usize, Vec<u32>>,
+    /// Pointer -> first texel of each level, and the frame it was last used in.
+    at: std::collections::HashMap<usize, (Vec<u32>, u64)>,
+    /// Frames begun (`compact` counts them).
+    gen: u64,
     texels: Vec<[f32; 4]>,
     buf: Option<wgpu::Buffer>,
+    /// How many of `texels` are on the GPU already (a new sprite's are added after them).
+    sent: usize,
     dirty: bool,
 }
 
 impl SpriteStore {
     fn level(&mut self, s: &Arc<Sprite>, lod: usize) -> (u32, u32, u32) {
         let key = Arc::as_ptr(s) as usize;
-        if !self.at.contains_key(&key) {
-            let mut offs = Vec::with_capacity(s.levels.len());
-            for (_, _, data) in &s.levels { offs.push(self.texels.len() as u32); self.texels.extend_from_slice(data); }
-            self.at.insert(key, offs);
+        let gen = self.gen;
+        let (w, h, _) = &s.levels[lod];
+        // Each level is sent the first time it is drawn: far off only the small ones are.
+        let (offs, last) = self.at.entry(key).or_insert_with(|| {
             self.held.push(s.clone());
+            (vec![u32::MAX; s.levels.len()], gen)
+        });
+        *last = gen;
+        if offs[lod] == u32::MAX {
+            offs[lod] = self.texels.len() as u32;
+            self.texels.extend_from_slice(&s.levels[lod].2);
             self.dirty = true;
         }
-        let (w, h, _) = &s.levels[lod];
-        (*w as u32, *h as u32, self.at[&key][lod])
+        (*w as u32, *h as u32, offs[lod])
+    }
+
+    /// At the start of a frame (no offsets handed out yet): past the budget, keep only the sprites
+    /// used most recently, packed again from the start, down to half of it (all of the last frame's
+    /// at least), so a walk through many places neither grows without end nor repacks every frame.
+    fn compact(&mut self, budget: usize) {
+        self.gen += 1;
+        if self.texels.len() * 16 <= budget { return; }
+        let last = |s: &Arc<Sprite>, at: &std::collections::HashMap<usize, (Vec<u32>, u64)>| at.get(&(Arc::as_ptr(s) as usize)).map_or(0, |a| a.1);
+        let mut held = std::mem::take(&mut self.held);
+        held.sort_by_key(|s| std::cmp::Reverse(last(s, &self.at)));
+        let old = std::mem::take(&mut self.at);
+        self.texels.clear();
+        for s in held {
+            let used = last(&s, &old);
+            let had = &old[&(Arc::as_ptr(&s) as usize)].0;
+            let size: usize = s.levels.iter().zip(had).filter(|(_, o)| **o != u32::MAX).map(|(l, _)| l.2.len()).sum();
+            if used + 1 < self.gen && (self.texels.len() + size) * 16 > budget / 2 { break; }
+            // (Only the levels it had: the others are sent when drawn.)
+            let offs = s.levels.iter().zip(had).map(|((_, _, data), o)| if *o == u32::MAX { u32::MAX } else {
+                let at = self.texels.len() as u32;
+                self.texels.extend_from_slice(data);
+                at
+            }).collect();
+            self.at.insert(Arc::as_ptr(&s) as usize, (offs, used));
+            self.held.push(s);
+        }
+        (self.sent, self.dirty) = (0, true);
     }
 }
 
@@ -360,7 +403,18 @@ pub(crate) struct GeomParams {
     pub sun: [f32; 3], pub clouds: f32,
     pub cloud_travel: f32, pub cloud_seed: u32, pub tiles_on: u32, pub cap: u32,
     pub small_off: u32, pub n_small: u32, pub fade_k: f32, pub fade_near: f32,
-    pub fade_cut: f32, pub pad: [u32; 3],
+    pub fade_cut: f32, pub shadow_mode: u32, pub gx_off: u32, pub pad: u32,
+    /// The box `gx_off`'s table covers (x0, y0, width, height): where this world's casters reach.
+    pub gx_box: [u32; 4],
+}
+
+/// One world of a frame of several for `Frame::shadows`: its casters and their per-tile lists (as
+/// `GeomIn`'s), the sun when it casts, its cloud shade, and where each pixel of another world's
+/// ground lies across its path (`render::prop_shadows`' `across`, row by row over `gx_box`, the box
+/// its casters reach: x0, y0, width, height; empty with one world).
+pub(crate) struct ShadowWorld {
+    pub casters: Vec<CasterIn>, pub cast_bins: Vec<u32>, pub sun: Option<[f32; 3]>,
+    pub clouds: Option<(f32, f32, u32)>, pub gx: Vec<f32>, pub gx_box: [u32; 4],
 }
 
 /// What the geometry pass draws: the triangles and their per-tile lists, the shadow casters and
@@ -420,7 +474,7 @@ struct SplatPass { layout: wgpu::BindGroupLayout, pipe: wgpu::ComputePipeline, p
 
 /// Timestamp queries: a pair per pass (start, end), read back when the frame is profiled.
 struct Timestamps { set: wgpu::QuerySet, resolve: wgpu::Buffer, read: wgpu::Buffer }
-const TS_PASSES: u32 = 16;
+const TS_PASSES: u32 = 64;
 
 /// The light shafts' settings; `Shafts` in shafts.wgsl.
 #[repr(C)]
@@ -475,6 +529,9 @@ pub(crate) struct PostParams {
     /// Grade and outline read r_gsrc and write r_mid: in place unless the outline is selective
     /// (it reads its neighbours' colours, so it needs them unwritten).
     pub h_fdst: u32, pub r_gsrc: u32, pub ol_sel: f32, pub ol_keep: f32,
+    /// Letterbox rows top and bottom (render::letterbox); this frame mixed over the held one by
+    /// `mix_t` (journey's mix_images) when `mix_on`.
+    pub lb_n: u32, pub mix_on: u32, pub mix_t: f32, pub mix_pad: u32,
 }
 
 /// What post needs besides its settings: the lens drops, the palette and grade tables (cached by
@@ -486,11 +543,51 @@ pub(crate) struct PostIn<'a> {
     pub lut: Option<(u32, &'a [u8], Vec<u32>)>,
     pub cube: Option<&'a [[f32; 3]]>,
     pub kuwahara: bool, pub shimmer: bool, pub focus: bool, pub warp: bool, pub bloom: bool,
+    /// Mixed over the frame held (`RenderOptions::blend`); kept on the GPU as the frame held
+    /// instead of read back (`hold`); the frame to hold first, when the CPU drew it (`base`).
+    pub blend: Option<f32>, pub hold: bool, pub base: Option<(&'a [u8], (u32, u32))>,
     pub want_depth: bool,
 }
 
-/// Post's results: the output bytes, and when asked the pick ids, the depth and per-row stats.
-pub(crate) struct PostOut { pub rgba: Vec<u8>, pub pick: Option<Vec<u16>>, pub depth: Option<Vec<f32>>, pub stats: Option<Vec<f32>> }
+/// Post's results: the output bytes, and when asked the pick ids, the depth and per-row stats;
+/// `late` when the bytes are the frame drawn before this one (`Frame::post`, pipelined).
+pub(crate) struct PostOut { pub rgba: Vec<u8>, pub pick: Option<Vec<u16>>, pub depth: Option<Vec<f32>>, pub stats: Option<Vec<f32>>, pub late: bool }
+
+/// A pipelined frame's colours on their way back: the buffer they are copied into, being mapped.
+struct Late { buf: wgpu::Buffer, bytes: u64, after: Option<wgpu::SubmissionIndex>, rx: std::sync::mpsc::Receiver<Result<(), wgpu::BufferAsyncError>>, size: (u32, u32) }
+
+/// A renderer's pipelined frames (`Frame::post`): two readback buffers taken in turn, and the
+/// frame still coming back. Each renderer has its own: renderers sharing a `Gpu` (a game's
+/// several roads, tests run side by side) must never be handed each other's frames.
+#[derive(Default)]
+pub struct Pipeline {
+    spare: [Mutex<Option<wgpu::Buffer>>; 2],
+    turn: std::sync::atomic::AtomicUsize,
+    late: Mutex<Option<Late>>,
+    /// A frame kept on the GPU for the next to be mixed over (`PostIn::hold`), and its size.
+    held: Mutex<Option<wgpu::Buffer>>,
+    held_size: Mutex<Option<(u32, u32)>>,
+}
+
+impl Pipeline {
+    /// The frame held on the GPU, brought back (for a frame mixed over it on the CPU).
+    pub(crate) fn take_held(&self, g: &Gpu) -> Option<(Vec<u8>, (u32, u32))> {
+        let (w, h) = self.held_size.lock().unwrap().take()?;
+        let held = self.held.lock().unwrap().clone()?;
+        let len = (w * h * 4) as u64;
+        let read = g.buffer("post held readback", len, wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST);
+        let mut e = g.ctx.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("post held") });
+        e.copy_buffer_to_buffer(&held, 0, &read, 0, len);
+        g.ctx.queue.submit([e.finish()]);
+        Some((g.read(&read, len), (w, h)))
+    }
+
+    /// The frame still coming back, let go of (the next is drawn another way).
+    pub(crate) fn drop_late(&self, g: &Gpu) {
+        let l = self.late.lock().unwrap().take();
+        if let Some(l) = l { g.take_late(l); }
+    }
+}
 
 struct PostPass {
     layout: wgpu::BindGroupLayout,
@@ -507,6 +604,8 @@ struct GeomPass {
     small_z: wgpu::ComputePipeline, small_pick: wgpu::ComputePipeline, resolve: wgpu::ComputePipeline,
     raster: wgpu::ComputePipeline, shadow: wgpu::ComputePipeline, tiles: wgpu::ComputePipeline,
     params: wgpu::Buffer, tris: Mutex<Option<wgpu::Buffer>>, bins: Mutex<Option<wgpu::Buffer>>, casters: Mutex<Option<wgpu::Buffer>>,
+    /// `Frame::shadows`' parameters, one per dispatch at the uniform offset alignment.
+    shadow_params: Mutex<Option<wgpu::Buffer>>,
     lamps: Mutex<Option<wgpu::Buffer>>, lists: Mutex<Option<wgpu::Buffer>>,
 }
 struct ReflectPass { layout: wgpu::BindGroupLayout, colsum_a: wgpu::ComputePipeline, colsum_b: wgpu::ComputePipeline, reflect: wgpu::ComputePipeline }
@@ -541,6 +640,12 @@ pub(crate) struct AirParams {
 /// Textures kept on the GPU (see `Gpu::texel_buffer`): each held texture and where its levels
 /// start in the texel data (offset in floats, side), `used` of `cap` words taken.
 struct TexStore { buf: wgpu::Buffer, cap: u64, used: u64, held: Vec<(Arc<Texture>, Vec<(u32, u32)>)> }
+
+/// How many bytes of sprite texels the GPU keeps before the longest unused are let go.
+const SPRITE_BUDGET: usize = 192 << 20;
+
+/// How many words of texels the GPU keeps (64 M words, 256 MB): past it, the store starts again.
+const TEX_BUDGET: u64 = 64 << 20;
 
 impl TexStore {
     /// Three floats a texel, or four when it glows (its glow after its colour).
@@ -653,7 +758,7 @@ impl Gpu {
                 raster: ctx.compute_with(&m, &rpl, "raster_main", false)?, small_z: ctx.compute_with(&m, &rpl, "small_z_main", false)?,
                 small_pick: ctx.compute_with(&m, &rpl, "small_pick_main", false)?, resolve: ctx.compute_with(&m, &rpl, "resolve_main", false)?,
                 raster_layout, shadow: ctx.compute_with(&m, &pl, "shadow_main", false)?, tiles: ctx.compute_with(&m, &pl, "tiles_main", false)?,
-                layout, params, tris: Mutex::new(None), bins: Mutex::new(None), casters: Mutex::new(None), lamps: Mutex::new(None), lists: Mutex::new(None),
+                layout, params, tris: Mutex::new(None), bins: Mutex::new(None), casters: Mutex::new(None), shadow_params: Mutex::new(None), lamps: Mutex::new(None), lists: Mutex::new(None),
             }
         };
         let sky = {
@@ -718,13 +823,13 @@ impl Gpu {
         };
         let post = {
             let layout = d.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                label: Some("post"), entries: &[world_uniform(0), uniform(1), storage(2, true), storage(3, true), storage(4, true), storage(5, false), storage(6, true), storage(7, false)],
+                label: Some("post"), entries: &[world_uniform(0), uniform(1), storage(2, true), storage(3, true), storage(4, true), storage(5, false), storage(6, true), storage(7, false), storage(8, true)],
             });
             let pl = d.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: Some("post"), bind_group_layouts: &[&layout], push_constant_ranges: &[] });
             let m = ctx.module("post.wgsl", include_str!("post.wgsl"))?;
             let mut pipes = std::collections::HashMap::new();
             for e in ["post_crop", "post_shimmer", "post_focus", "post_frost_rows", "post_frost_mean", "post_lens", "post_bloom_down", "post_bh0", "post_bv0", "post_bh1", "post_bv1", "post_bh2", "post_bv2", "post_bh3", "post_bv3", "post_bh4", "post_bv4", "post_rays", "post_ghosts",
-                      "post_finish", "post_kuw_h", "post_kuw_v", "post_grade_outline", "post_warp", "post_quant", "post_stats", "post_out"] {
+                      "post_finish", "post_kuw_h", "post_kuw_v", "post_grade_outline", "post_warp", "post_quant", "post_stats", "post_out", "post_blend"] {
                 pipes.insert(e, ctx.compute(&m, &pl, e)?);
             }
             let params = d.create_buffer(&wgpu::BufferDescriptor {
@@ -805,16 +910,31 @@ impl Gpu {
     /// change which worlds they draw only rewrite the header.
     fn texel_buffer(&self, worlds: &[[&Arc<Texture>; 7]]) -> wgpu::Buffer {
         let mut guard = self.textures.lock().unwrap();
-        let fits = |st: &TexStore| worlds.iter().flatten().map(|t| if st.find(t).is_some() { 0 } else { TexStore::words(t) }).sum::<u64>() + st.used <= st.cap;
-        if !guard.as_ref().is_some_and(|st| fits(st) && st.held.len() < 64) {
-            // Start again with room for these and more: everything in it is uploaded anew.
-            let keep: Vec<Arc<Texture>> = guard.as_ref().filter(|st| st.held.len() < 64).map(|st| st.held.iter().map(|h| h.0.clone()).collect()).unwrap_or_default();
-            let need: u64 = keep.iter().chain(worlds.iter().flatten().map(|t| *t)).map(TexStore::words).sum::<u64>();
-            let cap = (need * 2).max(1 << 20);
-            let buf = self.buffer("texels", (544 + cap) * 4, wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST);
-            let mut st = TexStore { buf, cap, used: 0, held: Vec::new() };
-            for t in &keep { st.add(&self.ctx.queue, t); }
-            *guard = Some(st);
+        // Words this frame adds (a texture in two slots counted twice: room to spare).
+        let all: u64 = worlds.iter().flatten().map(|t| TexStore::words(t)).sum();
+        let fresh: u64 = guard.as_ref().map_or(all, |st| worlds.iter().flatten().map(|t| if st.find(t).is_some() { 0 } else { TexStore::words(t) }).sum());
+        // The budget, within what one storage binding may hold on this device.
+        let budget = TEX_BUDGET.min((self.ctx.device.limits().max_storage_buffer_binding_size as u64 / 4).saturating_sub(544));
+        match guard.as_mut() {
+            Some(st) if st.used + fresh <= st.cap => {}
+            // Out of room but within the budget: a bigger buffer, the old texels copied across on
+            // the GPU, so a long journey's textures are uploaded once each. (It used to start
+            // again, every texture uploaded anew from the CPU in one frame: a spike of 100+ ms,
+            // and at 64 textures it did so however much room was left.)
+            Some(st) if st.used + fresh <= budget => {
+                let cap = ((st.used + fresh) * 2).min(budget).max(1 << 20);
+                let buf = self.buffer("texels", (544 + cap) * 4, wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC);
+                let mut e = self.ctx.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("texels grown") });
+                e.copy_buffer_to_buffer(&st.buf, 544 * 4, &buf, 544 * 4, st.used * 4);
+                self.ctx.queue.submit([e.finish()]);
+                (st.buf, st.cap) = (buf, cap);
+            }
+            // Over the budget (or the first frame): start again with this frame's alone.
+            _ => {
+                let cap = (all * 2).clamp(1 << 20, budget.max(all));
+                let buf = self.buffer("texels", (544 + cap) * 4, wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC);
+                *guard = Some(TexStore { buf, cap, used: 0, held: Vec::new() });
+            }
         }
         let st = guard.as_mut().unwrap();
         let mut header = vec![0u32; 544];
@@ -837,8 +957,10 @@ impl Gpu {
         assert!(!worlds.is_empty() && worlds.len() <= MAX_WORLDS);
         let (w, h) = (worlds[0].width as usize, worlds[0].height as usize);
         let sz = self.sized(w, h);
+        let max = self.ctx.device.limits().max_storage_buffer_binding_size as usize;
+        self.cards.store.lock().unwrap().compact(SPRITE_BUDGET.min(max));
         for (r, p) in worlds.iter().enumerate() { self.ctx.queue.write_buffer(&self.params, r as u64 * self.wstride, bytemuck::bytes_of(p)); }
-        Frame { g: self, sz, w, h, worlds: worlds.len(), here: 0, look: 0, enc: None, profile: false, passes: Vec::new(), shade_bg: None, soft: false, gpu_tiles: None, last: None }
+        Frame { g: self, sz, w, h, worlds: worlds.len(), here: 0, look: 0, enc: None, profile: false, passes: Vec::new(), shade_bg: None, soft: false, gpu_tiles: None, last: None, regions: Vec::new() }
     }
 
         /// Map `buf` and hand its first `len` bytes to `f` (zeros if the map failed).
@@ -857,6 +979,18 @@ impl Gpu {
             buf.unmap();
         } else {
             f(&vec![0u8; len as usize]);
+        }
+    }
+    /// A pipelined frame's colours, once its copy is done (by now it nearly always is).
+    fn take_late(&self, l: Late) -> Vec<u8> {
+        let _ = self.ctx.device.poll(match l.after { Some(i) => wgpu::PollType::WaitForSubmissionIndex(i), None => wgpu::PollType::Wait });
+        let got = match l.rx.try_recv() { Ok(r) => Ok(r), Err(_) => { let _ = self.ctx.device.poll(wgpu::PollType::Wait); l.rx.recv() } };
+        if matches!(got, Ok(Ok(()))) {
+            let out = l.buf.slice(..l.bytes).get_mapped_range().to_vec();
+            l.buf.unmap();
+            out
+        } else {
+            vec![0u8; l.bytes as usize]
         }
     }
     fn read(&self, buf: &wgpu::Buffer, len: u64) -> Vec<u8> {
@@ -893,6 +1027,9 @@ pub(crate) struct Frame<'g> {
     /// Per-tile lamp lists made by the geometry pass, for shading to read.
     gpu_tiles: Option<wgpu::Buffer>,
     last: Option<wgpu::SubmissionIndex>,
+    /// Per world, the workgroups its shading covers from `WorldParams::org`: its own pixels'
+    /// box, then the box it softens into ((0, 0): none). Empty: every world over the whole frame.
+    pub regions: Vec<[(u32, u32); 2]>,
 }
 
 impl<'g> Frame<'g> {
@@ -961,6 +1098,9 @@ impl<'g> Frame<'g> {
         refl.copy_from_slice(bytemuck::cast_slice(&bytes));
     }
 
+    /// A pipelined frame still coming back, let go of (the next is drawn another way).
+    pub fn drop_late(&mut self, pipe: &Pipeline) { pipe.drop_late(self.g); }
+
     /// Fetch any of the frame's buffers in one wait.
     pub fn download(&mut self, d: Down) {
         let n = self.n() as u64;
@@ -990,12 +1130,30 @@ impl<'g> Frame<'g> {
     /// The sprite store's texels on the GPU, uploaded again if sprites were added since.
     fn sprite_texels(&mut self, st: &mut SpriteStore) -> wgpu::Buffer {
         if st.dirty || st.buf.is_none() {
-            let mut t = st.texels.clone();
-            if t.is_empty() { t.push([0.0; 4]); }
-            let b = self.g.buffer("sprites", (t.len() * 16) as u64, wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST);
-            self.submit();
-            self.g.ctx.queue.write_buffer(&b, 0, bytemuck::cast_slice(&t));
-            st.buf = Some(b);
+            // Only the new sprites' texels are sent; the buffer doubles when they no longer fit
+            // (sending everything, then, as a new buffer starts empty). Sending the whole store
+            // for each new sprite took 100 ms a time on a phone once it held 40 MB.
+            let need = (st.texels.len().max(1) * 16) as u64;
+            if !st.buf.as_ref().is_some_and(|b| b.size() >= need) {
+                let max = self.g.ctx.device.limits().max_storage_buffer_binding_size as u64;
+                let cap = need.next_power_of_two().max(16 << 20).min(max.max(need));
+                let b = self.g.buffer("sprites", cap, wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC);
+                // What is there already is copied across on the GPU, not sent again.
+                match st.buf.take().filter(|_| st.sent > 0) {
+                    Some(old) => {
+                        let mut enc = self.g.ctx.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("sprites grow") });
+                        enc.copy_buffer_to_buffer(&old, 0, &b, 0, (st.sent * 16) as u64);
+                        self.submit();
+                        self.g.ctx.queue.submit([enc.finish()]);
+                    }
+                    None => st.sent = 0,
+                }
+                st.buf = Some(b);
+            }
+            if st.sent < st.texels.len() {
+                self.g.ctx.queue.write_buffer(st.buf.as_ref().unwrap(), (st.sent * 16) as u64, bytemuck::cast_slice(&st.texels[st.sent..]));
+                st.sent = st.texels.len();
+            }
             st.dirty = false;
         }
         st.buf.clone().unwrap()
@@ -1110,6 +1268,97 @@ impl<'g> Frame<'g> {
     }
 
     /// Billboards drawn far to near (hdr, gbuf and, with `pick`, the pick ids, in place).
+    /// A frame of several worlds, its G-buffer drawn on the CPU (`put_gbuf`): the shadow masks
+    /// made here as `render::prop_shadows` makes them, one world's casters after another's (the
+    /// first always, so the masks start afresh), then the clouds over each world's own pixels.
+    /// geom.wgsl's shadow_main does both, at each world's dynamic offset (`Geom::shadow_mode`).
+    pub fn shadows(&mut self, worlds: &[ShadowWorld]) {
+        let g = self.g;
+        let tc = (self.w as u32).div_ceil(16);
+        let ntiles = (tc * (self.h as u32).div_ceil(16)) as usize;
+        let (mut cs, mut bins, mut gx): (Vec<CasterGpu>, Vec<u32>, Vec<f32>) = (Vec::new(), Vec::new(), Vec::new());
+        let mut runs: Vec<(GeomParams, usize)> = Vec::new();
+        let texels = {
+            let mut st = g.cards.store.lock().unwrap();
+            for (r, w) in worlds.iter().enumerate() {
+                if w.casters.is_empty() && r > 0 { continue; }
+                let base = cs.len() as u32;
+                for c in &w.casters {
+                    let mut cd = c.c;
+                    if let Some((sp, lod)) = &c.sprite {
+                        let (sw, sh, off) = st.level(sp, *lod);
+                        (cd.f[19], cd.f[20], cd.f[21]) = (f32::from_bits(off), f32::from_bits(sw), f32::from_bits(sh));
+                    }
+                    cs.push(cd);
+                }
+                // Its lists: the tiles' starts as they are, the casters' indices past those it follows.
+                let cast_off = bins.len() as u32;
+                if w.cast_bins.len() > ntiles { bins.extend(w.cast_bins.iter().enumerate().map(|(k, &v)| if k > ntiles { v + base } else { v })); }
+                else { bins.extend(std::iter::repeat_n(0, ntiles + 1)); }
+                let gx_off = gx.len() as u32;
+                gx.extend_from_slice(&w.gx);
+                let mut p = GeomParams { tile_cols: tc, cast_bins: cast_off, gx_off, gx_box: w.gx_box, ..Default::default() };
+                if let Some(l) = w.sun { (p.sun_on, p.sun) = (1, l); }
+                p.shadow_mode = (!w.gx.is_empty()) as u32 | ((!runs.is_empty() as u32) << 1) | (1 << 2);
+                runs.push((p, r));
+            }
+            for (r, w) in worlds.iter().enumerate() {
+                let Some((k, t, seed)) = w.clouds else { continue };
+                runs.push((GeomParams { tile_cols: tc, clouds: k, cloud_travel: t, cloud_seed: seed, shadow_mode: 2 | (2 << 2), ..Default::default() }, r));
+            }
+            self.sprite_texels(&mut st)
+        };
+        if cs.is_empty() { cs.push(CasterGpu::default()); }
+        if gx.is_empty() { gx.push(0.0); }
+        self.submit();
+        let cb = g.upload(&g.geom.casters, "casters", bytemuck::cast_slice(&cs));
+        let bb = g.upload(&g.geom.bins, "geom bins", bytemuck::cast_slice(&bins));
+        let xb = g.upload(&g.geom.lamps, "shadow gx", bytemuck::cast_slice(&gx));
+        let tb = g.upload(&g.geom.tris, "triangles", bytemuck::cast_slice(&[TriGpu { f: [0.0; 36] }]));
+        let lists = {
+            let mut l = g.geom.lists.lock().unwrap();
+            if l.is_none() { *l = Some(g.buffer("tile lamps", 16, wgpu::BufferUsages::STORAGE)); }
+            l.clone().unwrap()
+        };
+        let size = std::mem::size_of::<GeomParams>() as u64;
+        let stride = size.next_multiple_of(g.ctx.device.limits().min_uniform_buffer_offset_alignment as u64);
+        let pb = {
+            let mut sl = g.geom.shadow_params.lock().unwrap();
+            let need = stride * runs.len() as u64;
+            if !sl.as_ref().is_some_and(|b| b.size() >= need) { *sl = Some(g.buffer("shadow params", need.next_power_of_two(), wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST)); }
+            sl.clone().unwrap()
+        };
+        let mut bytes = vec![0u8; (stride * runs.len() as u64) as usize];
+        for (k, (p, _)) in runs.iter().enumerate() { bytes[k * stride as usize..][..size as usize].copy_from_slice(bytemuck::bytes_of(p)); }
+        g.ctx.queue.write_buffer(&pb, 0, &bytes);
+        let sz = self.bufs();
+        let groups: Vec<(wgpu::BindGroup, u32)> = runs.iter().enumerate().map(|(k, (_, r))| {
+            let bg = g.ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("shadows"), layout: &g.geom.layout,
+                entries: &[
+                    wgpu::BindGroupEntry { binding: 0, resource: g.world_binding() },
+                    wgpu::BindGroupEntry { binding: 1, resource: sz.gbuf.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 2, resource: tb.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 3, resource: bb.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 4, resource: sz.masks.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 5, resource: cb.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 6, resource: texels.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 7, resource: lists.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 8, resource: xb.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 9, resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding { buffer: &pb, offset: k as u64 * stride, size: wgpu::BufferSize::new(size) }) },
+                ],
+            });
+            (bg, self.wo(*r))
+        }).collect();
+        let (x, y) = self.groups();
+        for (bg, wo) in &groups {
+            let mut cp = self.pass("g.shadows");
+            cp.set_bind_group(0, bg, &[*wo]);
+            cp.set_pipeline(&g.geom.shadow);
+            cp.dispatch_workgroups(x, y, 1);
+        }
+    }
+
     pub fn cards(&mut self, list: &[CardIn], bins: &[u32], pick: bool) {
         let g = self.g;
         let mut cs: Vec<CardGpu> = Vec::with_capacity(list.len().max(1));
@@ -1303,7 +1552,11 @@ impl<'g> Frame<'g> {
     }
 
     /// Post and style, to output bytes (and pick, depth, stats when asked): the end of the frame.
-    pub fn post(&mut self, mut pin: PostIn) -> PostOut {
+    ///
+    /// `pipelined` (the renderer's `Pipeline`): the frame's colours are left coming back and the
+    /// previous pipelined frame's are returned (`late`), so the GPU draws this frame while the
+    /// CPU builds the next; the first such frame, or one of another size, waits for itself.
+    pub fn post(&mut self, mut pin: PostIn, pipe: &Pipeline, pipelined: bool) -> PostOut {
         let g = self.g;
         let p = &mut pin.params;
         let (w, h) = (p.w as usize, p.h as usize);
@@ -1338,7 +1591,7 @@ impl<'g> Frame<'g> {
         p.r_mid = cr as u32;
         if pin.warp { cr = other_r(cr); p.r_wdst = cr as u32; }
         p.r_last = cr as u32;
-        let params = *p;
+        let mut params = *p;
         // Tables: the sRGB curve, then the palette and the .cube (rebuilt when `key` changes).
         let (tables, t_lut, t_col, t_cube) = {
             let mut t = g.post.tables.lock().unwrap();
@@ -1376,6 +1629,17 @@ impl<'g> Frame<'g> {
         self.submit();
         g.ctx.queue.write_buffer(&g.post.params, 0, bytemuck::bytes_of(&params));
         if !pin.drops.is_empty() { g.ctx.queue.write_buffer(&scratch, (t_drops * 4) as u64, bytemuck::cast_slice(&pin.drops)); }
+        // The frame held: one the CPU drew put there first; mixed over when it is this size.
+        let size = (params.out_w, params.out_h);
+        let heldb = sized(&pipe.held, "post held", out_bytes.max(16), U::STORAGE | U::COPY_DST | U::COPY_SRC);
+        if let Some((bytes, s)) = pin.base.filter(|(b, _)| b.len() as u64 <= heldb.size()) {
+            g.ctx.queue.write_buffer(&heldb, 0, bytes);
+            *pipe.held_size.lock().unwrap() = Some(s);
+        }
+        let mixing = pin.blend.is_some() && *pipe.held_size.lock().unwrap() == Some(size);
+        if mixing { (params.mix_on, params.mix_t) = (1, pin.blend.unwrap_or(0.0)); g.ctx.queue.write_buffer(&g.post.params, 0, bytemuck::bytes_of(&params)); }
+        // Mixed over, the frame held is used up (unless this one is held in its place, below).
+        if pin.blend.is_some() { *pipe.held_size.lock().unwrap() = None; }
         let sz = self.bufs();
         let bg = g.ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("post"), layout: &g.post.layout,
@@ -1388,6 +1652,7 @@ impl<'g> Frame<'g> {
                 wgpu::BindGroupEntry { binding: 5, resource: scratch.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 6, resource: tables.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 7, resource: outb.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 8, resource: heldb.as_entire_binding() },
             ],
         });
         let full = ((w as u32).div_ceil(8), (h as u32).div_ceil(8));
@@ -1418,19 +1683,70 @@ impl<'g> Frame<'g> {
         if params.ramp_on != 0 || params.q_on != 0 { steps.push(("post_quant", full)); }
         if params.stats_on != 0 { steps.push(("post_stats", (rows, 1))); }
         steps.push(("post_out", ((params.out_w).div_ceil(8), (params.out_h).div_ceil(8))));
+        if mixing { steps.push(("post_blend", ((params.out_w).div_ceil(8), (params.out_h).div_ceil(8)))); }
         {
             let wo = self.wo(self.look);
-            let mut cp = self.pass("g.post");
-            cp.set_bind_group(0, &bg, &[wo]);
-            for (e, (x, y)) in steps {
-                cp.set_pipeline(&g.post.pipes[e]);
-                cp.dispatch_workgroups(x, y, 1);
+            if self.profile {
+                // Timed step by step (`pf bench --stages`), each its own pass.
+                for (e, (x, y)) in steps {
+                    let mut cp = self.pass(e);
+                    cp.set_bind_group(0, &bg, &[wo]);
+                    cp.set_pipeline(&g.post.pipes[e]);
+                    cp.dispatch_workgroups(x, y, 1);
+                }
+            } else {
+                let mut cp = self.pass("g.post");
+                cp.set_bind_group(0, &bg, &[wo]);
+                for (e, (x, y)) in steps {
+                    cp.set_pipeline(&g.post.pipes[e]);
+                    cp.dispatch_workgroups(x, y, 1);
+                }
             }
+        }
+        let pick_on = params.pick_on != 0;
+        if pin.hold {
+            // Kept for the next frame to be mixed over: nothing comes back.
+            self.enc().copy_buffer_to_buffer(&outb, 0, &heldb, 0, out_bytes);
+            self.submit();
+            *pipe.held_size.lock().unwrap() = Some(size);
+            return PostOut { rgba: Vec::new(), pick: None, depth: None, stats: None, late: false };
+        }
+        if let (true, false, false, 0) = (pipelined, pick_on, pin.want_depth, params.stats_on) {
+            use std::sync::atomic::Ordering;
+            let slot = pipe.turn.fetch_add(1, Ordering::Relaxed) % 2;
+            let buf = sized(&pipe.spare[slot], "post readback (pipelined)", out_bytes, U::MAP_READ | U::COPY_DST);
+            self.enc().copy_buffer_to_buffer(&outb, 0, &buf, 0, out_bytes);
+            let pending = |buf: wgpu::Buffer, after: Option<wgpu::SubmissionIndex>| {
+                let (tx, rx) = std::sync::mpsc::channel();
+                buf.slice(..out_bytes).map_async(wgpu::MapMode::Read, move |r| { let _ = tx.send(r); });
+                Late { buf, bytes: out_bytes, after, rx, size }
+            };
+            let prev = pipe.late.lock().unwrap().take();
+            let (rgba, late) = match prev {
+                Some(p) if p.size == size => {
+                    self.submit();
+                    *pipe.late.lock().unwrap() = Some(pending(buf, self.last.clone()));
+                    (g.take_late(p), true)
+                }
+                other => {
+                    if let Some(p) = other { g.take_late(p); }
+                    // Nothing of this size is coming back: this frame waits for itself, and a
+                    // second copy of it is left coming back, so the next frame returns at once
+                    // (this picture again, as the frame before it) and those after run one behind.
+                    let twin = sized(&pipe.spare[1 - slot], "post readback (pipelined)", out_bytes, U::MAP_READ | U::COPY_DST);
+                    self.enc().copy_buffer_to_buffer(&outb, 0, &twin, 0, out_bytes);
+                    pipe.turn.fetch_add(1, Ordering::Relaxed);
+                    self.submit();
+                    let now = pending(buf, self.last.clone());
+                    *pipe.late.lock().unwrap() = Some(pending(twin, self.last.clone()));
+                    (g.take_late(now), false)
+                }
+            };
+            return PostOut { rgba, pick: None, depth: None, stats: None, late };
         }
         // One readback: the bytes, then the pick ids, the cropped G-buffer (for depth), the stats rows.
         let mut parts: Vec<(u64, u64, u64)> = vec![(0, 0, out_bytes)];
         let mut at = out_bytes;
-        let pick_on = params.pick_on != 0;
         let (pk_at, pg_at, st_at) = (at, at + if pick_on { (n * 4) as u64 } else { 0 }, 0u64);
         if pick_on { parts.push(((o_pk * 4) as u64, at, (n * 4) as u64)); at += (n * 4) as u64; }
         let pg_at = if pin.want_depth { let a = at; parts.push(((o_pg * 4) as u64, at, (n * 20) as u64)); at += (n * 20) as u64; a } else { pg_at };
@@ -1443,7 +1759,7 @@ impl<'g> Frame<'g> {
             }
         }
         self.submit();
-        let mut out = PostOut { rgba: Vec::new(), pick: None, depth: None, stats: None };
+        let mut out = PostOut { rgba: Vec::new(), pick: None, depth: None, stats: None, late: false };
         g.read_with(&read, at, self.last.clone(), |b| {
             out.rgba = b[..out_bytes as usize].to_vec();
             if pick_on { out.pick = Some(bytemuck::cast_slice::<u8, u32>(&b[pk_at as usize..pk_at as usize + n * 4]).iter().map(|&v| v as u16).collect()); }
@@ -1497,6 +1813,11 @@ impl<'g> Frame<'g> {
             for (k, name) in names.iter().enumerate() {
                 out.push((*name, t[2 * k + 1].saturating_sub(t[2 * k]) as f64 * period / 1e6));
             }
+            // How long the frame's timed passes took end to end, and of that the time between them.
+            let span = t[2 * names.len() - 1].saturating_sub(t[0]) as f64 * period / 1e6;
+            let busy: f64 = out.iter().map(|o| o.1).sum();
+            out.push(("g:span", span));
+            out.push(("g:between", (span - busy).max(0.0)));
         });
         out
     }
@@ -1571,18 +1892,38 @@ impl<'g> Frame<'g> {
             ],
         });
         self.shade_bg = Some(bg.clone());
-        let (gx, gy) = self.groups();
-        let offs: Vec<u32> = (0..self.worlds).map(|r| self.wo(r)).collect();
+        let full = self.groups();
+        // (offset, own workgroups, softened workgroups) per world.
+        let worlds: Vec<(u32, (u32, u32), (u32, u32))> = (0..self.worlds)
+            .map(|r| { let [own, soft] = self.regions.get(r).copied().unwrap_or([full; 2]); (self.wo(r), own, soft) })
+            .collect();
         let soft = self.soft;
         let k = (self.worlds > 1) as usize;
+        let stages = [(0, &g.shade.uvs[k]), (0, &g.shade.shade[k])].into_iter().chain(soft.then_some((1, &g.shade.soft)));
+        if self.profile {
+            // Each stage of each world timed on its own (profiling only: one pass is cheaper).
+            const LABELS: [[&str; 4]; 3] = [["g.uvs0", "g.uvs1", "g.uvs2", "g.uvs3"], ["g.shade0", "g.shade1", "g.shade2", "g.shade3"], ["g.soft0", "g.soft1", "g.soft2", "g.soft3"]];
+            for (s, (which, pipe)) in stages.enumerate() {
+                for (r, &(o, own, sf)) in worlds.iter().enumerate() {
+                    let (x, y) = if which == 0 { own } else { sf };
+                    if x == 0 || y == 0 { continue; }
+                    let mut p = self.pass(LABELS[if which == 1 { 2 } else { s }][r.min(3)]);
+                    p.set_pipeline(pipe);
+                    p.set_bind_group(0, &bg, &[o, 0]);
+                    p.dispatch_workgroups(x, y, 1);
+                }
+            }
+            return;
+        }
         let mut p = self.pass("g.shade");
-        p.set_pipeline(&g.shade.uvs[k]);
-        for &o in &offs { p.set_bind_group(0, &bg, &[o, 0]); p.dispatch_workgroups(gx, gy, 1); }
-        p.set_pipeline(&g.shade.shade[k]);
-        for &o in &offs { p.set_bind_group(0, &bg, &[o, 0]); p.dispatch_workgroups(gx, gy, 1); }
-        if soft {
-            p.set_pipeline(&g.shade.soft);
-            for &o in &offs { p.set_bind_group(0, &bg, &[o, 0]); p.dispatch_workgroups(gx, gy, 1); }
+        for (which, pipe) in stages {
+            p.set_pipeline(pipe);
+            for &(o, own, sf) in &worlds {
+                let (x, y) = if which == 0 { own } else { sf };
+                if x == 0 || y == 0 { continue; }
+                p.set_bind_group(0, &bg, &[o, 0]);
+                p.dispatch_workgroups(x, y, 1);
+            }
         }
     }
 }
@@ -1595,13 +1936,13 @@ mod tests {
     fn world_params_match_the_wgsl_struct_size() {
         // A uniform block's size is a multiple of 16; the WGSL struct has the same fields.
         assert_eq!(std::mem::size_of::<WorldParams>() % 16, 0);
-        assert_eq!(std::mem::size_of::<WorldParams>(), 4 * 296);
+        assert_eq!(std::mem::size_of::<WorldParams>(), 4 * 304);
         assert_eq!(std::mem::size_of::<CardGpu>(), 4 * 110);
-        assert_eq!(std::mem::size_of::<GeomParams>(), 80);
+        assert_eq!(std::mem::size_of::<GeomParams>(), 96);
         assert_eq!(std::mem::size_of::<SplatGpu>(), 4 * 24);
         assert_eq!(std::mem::size_of::<AirParams>(), 80);
         assert_eq!(std::mem::size_of::<ShaftParams>(), 64);
-        assert_eq!(std::mem::size_of::<PostParams>(), 464);
+        assert_eq!(std::mem::size_of::<PostParams>(), 480);
         assert_eq!(std::mem::size_of::<SkyParams>() % 16, 0, "SkyParams is {} bytes", std::mem::size_of::<SkyParams>());
     }
 

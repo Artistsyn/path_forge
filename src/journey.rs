@@ -16,13 +16,34 @@ fn smooth(e0: f32, e1: f32, x: f32) -> f32 {
     t * t * (3.0 - 2.0 * t)
 }
 
-/// Mix `b` over `a` by `t` (0 = a).
-fn mix_images(a: &mut Image, b: &Image, t: f32) {
-    if t <= 0.0 || a.rgba.len() != b.rgba.len() { return; }
-    for (x, y) in a.rgba.iter_mut().zip(&b.rgba) {
-        *x = (*x as f32 + (*y as f32 - *x as f32) * t).round() as u8;
+/// A walk's frame while it fades: the first world alone under the walk's frame by `emerge`
+/// (1 = the walk's alone), then the world it settles in over that by `settle` (0 = none), as
+/// `mix_images` would mix them, the renders held and mixed on the GPU so the frame comes back
+/// as one (pipelined, a live road's). Its light is what the walk's frame order left: the last
+/// world alone drawn.
+fn mixed_frame(r: &mut WorldRenderer, opts: &RenderOptions, emerge: f32, settle: f32,
+    first: impl FnOnce(&mut WorldRenderer, &RenderOptions) -> Image,
+    walk: impl FnOnce(&mut WorldRenderer, &RenderOptions) -> Image,
+    last: impl FnOnce(&mut WorldRenderer, &RenderOptions) -> Image) -> Image {
+    let fading = emerge < 1.0;
+    let settling = settle > 0.0;
+    if !fading && !settling { return walk(r, opts); }
+    let held = |blend: Option<f32>, hold: bool| RenderOptions { blend, hold, ..opts.clone() };
+    let mut light = None;
+    if fading {
+        first(r, &held(None, true));
+        light = r.lighting().cloned();
     }
+    let img = walk(r, &held(fading.then_some(emerge), settling));
+    if !settling {
+        r.keep_lighting(light);
+        return img;
+    }
+    last(r, &held(Some(settle), false))
 }
+
+/// Mix `b` over `a` by `t` (0 = a).
+fn mix_images(a: &mut Image, b: &Image, t: f32) { crate::world::render::mix_rgba(&mut a.rgba, &b.rgba, t); }
 
 /// A scene taking part in a walk, with the folder its files are named relative to.
 #[derive(Clone, Copy)]
@@ -49,17 +70,29 @@ pub struct Camera {
     /// Metres the camera stands behind the walker (a swing's third-person view; 0 at the walker's
     /// eyes). Distances ahead are the walker's.
     pub back: f32,
+    /// How far past the path's edge the walls stand, in the view's scene and the one beyond
+    /// (None: no walls), for `wall_x`.
+    pub walls: [Option<f32>; 2],
 }
+
+/// How far past the path's edge `scene`'s walls stand (None: it has none).
+fn walls_of(scene: &Scene) -> Option<f32> { scene.walls.enabled.then(|| scene.walls.gap.max(0.0)) }
 
 impl Camera {
     /// The camera `distance` metres along `scene`'s loop, for a `width` x `height` frame.
     pub fn plain(scene: &Scene, distance: f32, width: u32, height: u32) -> Camera {
-        Camera { view: View::new(scene, width.max(2) as usize, height.max(2) as usize).at(distance.rem_euclid(scene.motion.loop_length.max(1.0))), beyond: None, back: 0.0 }
+        Camera { view: View::new(scene, width.max(2) as usize, height.max(2) as usize).at(distance.rem_euclid(scene.motion.loop_length.max(1.0))), beyond: None, back: 0.0, walls: [walls_of(scene), None] }
+    }
+    /// How far from the middle of the path, either way, the walls stand `d` metres ahead of the
+    /// walker (None where there are none): what stands beside the path stands within this.
+    pub fn wall_x(&self, d: f32) -> Option<f32> {
+        let d = d + self.back;
+        match self.beyond { Some((zb, b)) if d >= zb => self.walls[1].map(|g| b.path_half_width(d) + g), _ => self.walls[0].map(|g| self.view.path_half_width(d) + g) }
     }
     /// The camera partway through a swing, the walker `distance` metres along `scene`'s loop.
     pub fn swinging(scene: &Scene, pose: &crate::scene::SwingPose, distance: f32, width: u32, height: u32) -> Camera {
         let v = View::posed(scene, &pose.camera, width.max(2) as usize, height.max(2) as usize, pose.turning);
-        Camera { view: v.at((distance - pose.back).rem_euclid(scene.motion.loop_length.max(1.0))), beyond: None, back: pose.back }
+        Camera { view: v.at((distance - pose.back).rem_euclid(scene.motion.loop_length.max(1.0))), beyond: None, back: pose.back, walls: [walls_of(scene), None] }
     }
     /// Where a point `x` metres right of the path centre, `y` up and `d` ahead of the walker
     /// appears (pixels from the top left); None behind the camera.
@@ -152,7 +185,7 @@ impl CrossWalk {
         let (a2, b2) = (ahead(a, self.crossing.swing_out > 0.0), ahead(b, self.crossing.swing_in > 0.0));
         let pa = Camera::plain(&a2, sa, width, height).view;
         let pb = Camera::plain(&b2, sb, width, height).view;
-        if zb <= 0.0 { Camera { view: pb, beyond: None, back: 0.0 } } else { Camera { view: pa, beyond: Some((zb, pb)), back: 0.0 } }
+        if zb <= 0.0 { Camera { view: pb, beyond: None, back: 0.0, walls: [walls_of(b), None] } } else { Camera { view: pa, beyond: Some((zb, pb)), back: 0.0, walls: [walls_of(a), walls_of(b)] } }
     }
 
     /// The frame at `travel` metres, with each world's clock.
@@ -172,7 +205,13 @@ impl CrossWalk {
         if emerge <= 0.0 { return a.alone(r, sa, time_a, opts); }
         if settle >= 1.0 { return b.alone(r, sb, time_b, opts); }
         let worlds = [a.world(sa, time_a), b.world(sb, time_b)];
-        let mut img = r.render_layout(&worlds, Layout::Cross { crossing: &self.crossing, zb }, opts);
+        let layout = Layout::Cross { crossing: &self.crossing, zb };
+        if !(opts.pick || opts.depth || opts.stats) {
+            return mixed_frame(r, opts, emerge, settle, |r, o| a.alone(r, sa, time_a, o), |r, o| r.render_layout(&worlds, layout, o), |r, o| b.alone(r, sb, time_b, o));
+        }
+        let mixed;
+        let opts = if emerge < 1.0 || settle > 0.0 { mixed = r.unpipelined(opts); &mixed } else { opts };
+        let mut img = r.render_layout(&worlds, layout, opts);
         if emerge < 1.0 {
             let mut alone = a.alone(r, sa, time_a, opts);
             mix_images(&mut alone, &img, emerge);
@@ -192,13 +231,15 @@ pub struct ForkWalk {
     pub end: [f32; 2],
     /// The branch taken, and the travel at which it was chosen.
     pub chosen: Option<(Branch, f32)>,
+    /// What shuts each branch (left, right), if anything: ways the game has barred.
+    pub barred: [Option<crate::scene::transition::Barrier>; 2],
 }
 
 impl ForkWalk {
     /// A walk beginning `start_a` metres along the first world; taking a branch ends `end` metres
     /// along its world (0 for exported clips).
     pub fn new(plan: ForkPlan, start_a: f32, end: [f32; 2]) -> ForkWalk {
-        ForkWalk { plan, start_a, end, chosen: None }
+        ForkWalk { plan, start_a, end, chosen: None, barred: [None, None] }
     }
 
     pub fn length(&self) -> f32 { self.plan.approach + self.plan.overshoot }
@@ -242,7 +283,18 @@ impl ForkWalk {
             return p.alone(r, d, t, opts);
         }
         let worlds = [a.world(sa, times[0]), left.world(sb[0], times[1]), right.world(sb[1], times[2])];
-        let mut img = r.render_layout(&worlds, Layout::Fork { fork: &self.plan, zb: zj, chosen: taken, steer }, opts);
+        let layout = Layout::Fork { fork: &self.plan, zb: zj, chosen: taken, steer, barred: &self.barred };
+        if !(opts.pick || opts.depth || opts.stats) {
+            let settle = if taken.is_some() { settle } else { 0.0 };
+            let branch = |r: &mut WorldRenderer, o: &RenderOptions| match taken {
+                Some(Branch::Left) => left.alone(r, sb[0], times[1], o),
+                _ => right.alone(r, sb[1], times[2], o),
+            };
+            return mixed_frame(r, opts, emerge, settle, |r, o| a.alone(r, sa, times[0], o), |r, o| r.render_layout(&worlds, layout, o), branch);
+        }
+        let mixed;
+        let opts = if emerge < 1.0 || (settle > 0.0 && taken.is_some()) { mixed = r.unpipelined(opts); &mixed } else { opts };
+        let mut img = r.render_layout(&worlds, layout, opts);
         if emerge < 1.0 {
             let mut alone = a.alone(r, sa, times[0], opts);
             mix_images(&mut alone, &img, emerge);

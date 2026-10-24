@@ -102,6 +102,9 @@ pub struct Facade {
     pub height: f32,
     /// 0 = straight edges (masonry), 1 = ragged rock with a hillside profile.
     pub rough: f32,
+    /// 0 = one level top; 1 = a street front: buildings side by side, each its own height, the
+    /// ones either side of the opening as tall as the street's walls they carry on from.
+    pub skyline: f32,
 }
 
 /// A transition with every choice made: what `plan` returns and the renderer draws.
@@ -140,6 +143,48 @@ pub struct Crossing {
 
 fn roofed(s: &Scene) -> bool { s.ceiling.enabled }
 
+/// How far past a fork's junction a barred branch is shut, metres ahead (`ForkWalk::barred`):
+/// where the branches have parted, so the barrier closes one and leaves the other's mouth clear.
+pub const BAR_PAST: f32 = 7.0;
+/// The height of the wall across a barred branch with no walls of its own, metres.
+pub const BAR_OPEN_HEIGHT: f32 = 3.6;
+
+/// What shuts a fork's branch (`ForkWalk::barred`), standing in that branch's own world so it
+/// lines up with its path and walls however the fork is drawn.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
+pub struct Barrier {
+    /// Wall the branch up across its mouth: between its walls, of their material and as high as
+    /// they are (where it has none, a wall of its wall material `BAR_OPEN_HEIGHT` m high, as wide
+    /// as its path and a little more).
+    pub wall: bool,
+    /// A picture of what stands in the way (a door, a gate or a grate set in the wall's foot;
+    /// without a wall, debris or a barricade across the path): a PNG, absolute or relative to
+    /// the branch scene's folder. Empty for none.
+    pub sprite: String,
+    /// The picture's height, metres. 0: 3 m in a wall; across a path, as wide as the path.
+    pub height: f32,
+    /// Opened (a shortcut unbarred, a gate unlocked): the wall stands with a doorway through it
+    /// and the picture's two leaves swung back into the passage, and the walk goes through.
+    pub open: bool,
+    /// Where in the picture the door's (or gate's) leaves are, for swinging them open: x0 y0 x1
+    /// y1, fractions of the picture (the rest is its frame).
+    pub leaves: [f32; 4],
+}
+impl Default for Barrier {
+    fn default() -> Barrier { Barrier { wall: true, sprite: String::new(), height: 0.0, open: false, leaves: [0.0, 0.0, 1.0, 1.0] } }
+}
+
+/// The doorway through an opened barrier's wall (`Barrier::open`): half its width and its
+/// height, metres, for a path of half width `path_hw` and a wall `top` high.
+pub fn bar_doorway(path_hw: f32, top: f32) -> (f32, f32) {
+    ((path_hw * 0.85).clamp(2.0, 3.0), (top - 0.6).min(3.6).max(2.6))
+}
+
+/// Whether an open scene is a street between masonry walls too tall to see over: walking into
+/// one from anywhere else, its walls must stand in a street front, not rise out of the ground.
+fn streeted(s: &Scene) -> bool { !roofed(s) && s.walls.enabled && s.walls.height >= 2.5 && !rocky(&s.walls.material) }
+
 /// Whether a material reads as rock (a cave) rather than masonry.
 fn rocky(m: &Material) -> bool { matches!(m.pattern, Pattern::RockFace | Pattern::Ice | Pattern::Dirt | Pattern::Sand) }
 
@@ -162,6 +207,13 @@ pub fn plan(a: &Scene, b: &Scene, t: &Transition) -> Crossing {
     let threshold = match t.threshold {
         Threshold::Auto => {
             let th = match (ra, rb) {
+                // Into, out of or between walled streets that differ: a face fills the step, so
+                // the walls of the one meet the walls of the other along a building front.
+                (false, false) if streeted(a) || streeted(b) => {
+                    let same = a.walls.enabled == b.walls.enabled && (a.walls.height - b.walls.height).abs() < 1.0
+                        && (a.path.half_width + a.walls.gap - b.path.half_width - b.walls.gap).abs() < 0.3;
+                    if same { Threshold::Open } else { Threshold::Doorway }
+                }
                 (false, false) => Threshold::Open,
                 (true, true) => {
                     let same = a.walls.enabled == b.walls.enabled && (a.ceiling.height - b.ceiling.height).abs() < 0.3
@@ -172,6 +224,8 @@ pub fn plan(a: &Scene, b: &Scene, t: &Transition) -> Crossing {
                 (true, false) => if rocky(&a.walls.material) { Threshold::CaveMouth } else { Threshold::Doorway },
             };
             notes.push(match (ra, rb, th) {
+                (false, false, Threshold::Doorway) => format!("{} is a street between tall walls: {bn} begins in a street front, the walls of the one meeting the other.",
+                    if streeted(b) { bn } else { an }),
                 (false, false, _) => format!("{an} and {bn} are both open: their ground, walls and props mix over a band instead of meeting at a line."),
                 (true, true, Threshold::Open) => format!("{an} and {bn} are passages of the same size: one runs straight into the other."),
                 (true, true, _) => format!("{an} and {bn} are both roofed with different sections: a {} joins them.", th.name().to_lowercase()),
@@ -204,7 +258,10 @@ pub fn plan(a: &Scene, b: &Scene, t: &Transition) -> Crossing {
     let facade = match threshold {
         Threshold::Open | Threshold::Portal => None,
         _ => {
+            // Between open places the face is the walled street's own front.
+            let front = !ra && !rb && (streeted(a) || streeted(b));
             let material = t.facade.clone().unwrap_or_else(|| {
+                if front { return if streeted(b) { b.walls.material.clone() } else { a.walls.material.clone() }; }
                 let m = if a.walls.enabled && (ra || threshold != Threshold::CaveMouth) { a.walls.material.clone() }
                     else if b.walls.enabled { b.walls.material.clone() }
                     else { b.path.material.clone() };
@@ -212,11 +269,16 @@ pub fn plan(a: &Scene, b: &Scene, t: &Transition) -> Crossing {
                 if threshold == Threshold::CaveMouth && !rocky(&m) { Material { pattern: Pattern::RockFace, tile_size: m.tile_size.max(3.0), damage: 0.0, ..m } } else { m }
             });
             let b_top = if rb { b.ceiling.height } else if b.walls.enabled && b.walls.height > 0.0 { b.walls.height } else { 4.0 };
-            let height = if t.facade_height > 0.0 { t.facade_height } else if threshold == Threshold::CaveMouth { (b_top * 2.6).max(b_top + 5.0) } else { (b_top * 1.8).max(b_top + 2.5) };
+            let height = if t.facade_height > 0.0 { t.facade_height }
+                else if front { if streeted(b) { b.walls.height } else { a.walls.height } }
+                else if threshold == Threshold::CaveMouth { (b_top * 2.6).max(b_top + 5.0) } else { (b_top * 1.8).max(b_top + 2.5) };
+            if front {
+                notes.push(format!("Either side of the way in stand buildings of {}, {height:.0} m at the street and taller and lower beyond.", material.pattern.name().to_lowercase()));
+            }
             if !ra && rb {
                 notes.push(format!("Around the opening stands a face of {} {height:.0} m high; {an}'s sky shows above it.", material.pattern.name().to_lowercase()));
             }
-            Some(Facade { material, height, rough: if threshold == Threshold::CaveMouth { 1.0 } else { 0.0 } })
+            Some(Facade { material, height, rough: if threshold == Threshold::CaveMouth { 1.0 } else { 0.0 }, skyline: if front { 1.0 } else { 0.0 } })
         }
     };
 
@@ -469,5 +531,30 @@ mod tests {
         assert_eq!(c.sky, SkyRule::First);
         assert!(c.facade.as_ref().is_some_and(|f| f.height > preset("Stone Dungeon").ceiling.height), "a face taller than the passage hides what is behind it");
         assert!(!c.notes.is_empty());
+    }
+
+    #[test]
+    fn a_walled_street_begins_in_a_street_front_not_two_walls_out_of_the_ground() {
+        let t = Transition::default();
+        let mut alley = preset("Forest Path");
+        alley.walls.enabled = true;
+        alley.walls.height = 8.0;
+        alley.walls.gap = 0.8;
+        alley.walls.material.pattern = Pattern::Brick;
+        let lane = preset("Forest Path");
+        let c = plan(&lane, &alley, &t);
+        assert_eq!(c.threshold, Threshold::Doorway, "{:?}", c.notes);
+        let f = c.facade.as_ref().expect("a front either side of the way in");
+        assert_eq!((f.height, f.skyline, f.material.pattern), (8.0, 1.0, Pattern::Brick), "as tall as the street's walls, of their brick, with a roofline");
+        // Out of it too, and between streets of different widths; the same street goes on open.
+        assert_eq!(plan(&alley, &lane, &t).threshold, Threshold::Doorway);
+        let mut wider = alley.clone();
+        wider.walls.gap = 3.0;
+        assert_eq!(plan(&alley, &wider, &t).threshold, Threshold::Doorway);
+        assert_eq!(plan(&alley, &alley.clone(), &t).threshold, Threshold::Open);
+        // A canyon's rock walls rise from the ground as they are.
+        let mut canyon = alley.clone();
+        canyon.walls.material.pattern = Pattern::RockFace;
+        assert_eq!(plan(&lane, &canyon, &t).threshold, Threshold::Open);
     }
 }

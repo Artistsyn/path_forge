@@ -3284,6 +3284,9 @@ pub struct Post {
     /// Depth of field: what is nearer or further than the focus blurs, or (tilt-shift) all but
     /// a band across the frame does, for the look of a miniature.
     pub focus: Focus,
+    /// Left as dark as it is drawn: a game's visibility floor (`Runtime::set_visibility_floor`)
+    /// does not lift it. For a place where what hides in the dark is meant to.
+    pub keep_dark: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -3351,7 +3354,7 @@ impl FlareStyle {
 }
 impl Default for Post {
     fn default() -> Self {
-        Self { exposure: 1.0, contrast: 1.0, saturation: 1.0, bloom: 0.35, vignette: 0.35, grain: 0.0, tint: [255, 255, 255], flare: Flare::default(), focus: Focus::default() }
+        Self { exposure: 1.0, contrast: 1.0, saturation: 1.0, bloom: 0.35, vignette: 0.35, grain: 0.0, tint: [255, 255, 255], flare: Flare::default(), focus: Focus::default(), keep_dark: false }
     }
 }
 
@@ -3474,7 +3477,9 @@ pub fn revision(text: &str) -> String {
 /// Read a scene file; returns the scene and the revision of the text read.
 pub fn load_file(path: &std::path::Path) -> Result<(Scene, String), String> {
     let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
-    let scene = Scene::from_json(&text).map_err(|e| format!("{}: {e}", path.display()))?;
+    let mut scene = Scene::from_json(&text).map_err(|e| format!("{}: {e}", path.display()))?;
+    // A look test: every scene read with this painterly brush (0 = none), its file untouched.
+    if let Some(p) = std::env::var("PF_PAINT").ok().and_then(|v| v.parse::<f32>().ok()) { scene.style.paint = p; }
     Ok((scene, revision(&text)))
 }
 
