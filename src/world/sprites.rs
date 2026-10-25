@@ -445,6 +445,59 @@ impl Canvas {
         }
     }
 
+    /// Clear what would be left hanging once shapes are cut away: anything thinner than `thick`
+    /// (nominal units) is taken off, and then every piece of what stands that is much smaller than
+    /// the largest (a crumb of cornice, a corner left floating).
+    fn clear_loose(&mut self, thick: f32) {
+        let (w, h) = (self.w, self.h);
+        let r = ((thick * self.k * 0.5).round() as usize).max(1);
+        let solid: Vec<bool> = self.px.iter().map(|p| p[3] > 0.5).collect();
+        // An opening: the least over a square, then the most over it again.
+        let pass = |src: &[bool], keep_all: bool| -> Vec<bool> {
+            let mut rows = vec![false; w * h];
+            for y in 0..h {
+                for x in 0..w {
+                    let (a, b) = (x.saturating_sub(r), (x + r).min(w - 1));
+                    let row = &src[y * w + a..=y * w + b];
+                    rows[y * w + x] = if keep_all { row.iter().all(|&s| s) } else { row.iter().any(|&s| s) };
+                }
+            }
+            let mut out = vec![false; w * h];
+            for y in 0..h {
+                let (a, b) = (y.saturating_sub(r), (y + r).min(h - 1));
+                for x in 0..w {
+                    out[y * w + x] = if keep_all { (a..=b).all(|yy| rows[yy * w + x]) } else { (a..=b).any(|yy| rows[yy * w + x]) };
+                }
+            }
+            out
+        };
+        let opened = pass(&pass(&solid, true), false);
+        let mut keep: Vec<bool> = solid.iter().zip(&opened).map(|(&s, &o)| s && o).collect();
+        // The pieces of what is left, by flood fill; the small ones go.
+        let mut label = vec![0u32; w * h];
+        let mut sizes = vec![0usize];
+        for start in 0..w * h {
+            if !keep[start] || label[start] != 0 { continue; }
+            let id = sizes.len() as u32;
+            let mut stack = vec![start];
+            label[start] = id;
+            let mut n = 0;
+            while let Some(i) = stack.pop() {
+                n += 1;
+                let (x, y) = (i % w, i / w);
+                for (nx, ny) in [(x.wrapping_sub(1), y), (x + 1, y), (x, y.wrapping_sub(1)), (x, y + 1)] {
+                    if nx >= w || ny >= h { continue; }
+                    let j = ny * w + nx;
+                    if keep[j] && label[j] == 0 { label[j] = id; stack.push(j); }
+                }
+            }
+            sizes.push(n);
+        }
+        let biggest = sizes.iter().copied().max().unwrap_or(0);
+        for i in 0..w * h { if keep[i] && sizes[label[i] as usize] * 25 < biggest { keep[i] = false; } }
+        for (p, k) in self.px.iter_mut().zip(&keep) { if !k { *p = [0.0; 4]; } }
+    }
+
     /// Alpha-weighted box filter from SS× down to 2× nominal size.
     fn finish(self) -> Sprite {
         let f = SS / 2;
@@ -1726,6 +1779,28 @@ pub fn fixture_body(kind: FixtureKind) -> (f32, f32) {
 /// Nominal pixels per metre for set-pieces (the sprite holds twice this).
 const SP_PX: f32 = 40.0;
 
+/// An arch's shape around an opening `ow` x `oh` metres (`paint_set_piece`, and the solid built
+/// from it, which follows its curve): piers `pw` wide, a ring `ring` deep and `cap` of wall over it;
+/// the whole `wm` x `hm`; the opening's half width, the height it springs from, and the circle its
+/// arch is a part of (radius `r`, centre `cy` up from the ground). A narrow opening is a half round;
+/// a wide one a flatter segment, so its piers stand tall.
+#[derive(Clone, Copy, Debug)]
+pub struct Arch { pub pw: f32, pub ring: f32, pub cap: f32, pub wm: f32, pub hm: f32, pub half: f32, pub spring: f32, pub r: f32, pub cy: f32 }
+
+impl Arch {
+    /// The angle (from across, up) where the arch leaves the piers.
+    pub fn springs(&self) -> f32 { ((self.spring - self.cy) / self.r).clamp(-1.0, 1.0).asin() }
+}
+
+pub fn arch_shape(ow: f32, oh: f32) -> Arch {
+    let (ow, oh) = (ow.clamp(0.5, 30.0), oh.clamp(1.0, 20.0));
+    let (pw, ring, cap) = (0.9f32, 0.7f32, 0.5f32);
+    let half = ow * 0.5;
+    let rise = half.min((oh * 0.45).max(0.6)).min(oh - 0.3).max(0.2);
+    let r = (half * half + rise * rise) / (2.0 * rise);
+    Arch { pw, ring, cap, wm: ow + 2.0 * pw, hm: oh + ring + cap, half, spring: oh - rise, r, cy: oh - r }
+}
+
 /// Paint a set-piece around an opening `ow` x `oh` metres. Returns the sprite and its size in metres;
 /// the opening is centred at the bottom.
 pub fn paint_set_piece(kind: SetPieceKind, tint: Rgb, accent: Rgb, ow: f32, oh: f32, variant: u32) -> (Sprite, f32, f32) {
@@ -1738,10 +1813,8 @@ pub fn paint_set_piece(kind: SetPieceKind, tint: Rgb, accent: Rgb, ow: f32, oh: 
     let oh = oh.clamp(1.0, 20.0);
     match kind {
         SetPieceKind::Archway | SetPieceKind::RuinedArch => {
-            let (pw, ring, cap) = (0.9f32, 0.7f32, 0.5f32);
-            let rad = ow * 0.5;
-            let spring = (oh - rad).max(0.3); // height where the arch starts
-            let (wm, hm) = (ow + 2.0 * pw, oh + ring + cap);
+            let a = arch_shape(ow, oh);
+            let (pw, ring, cap, wm, hm) = (a.pw, a.ring, a.cap, a.wm, a.hm);
             let mut c = Canvas::new(m(wm) as usize + 1, m(hm) as usize + 1);
             let ground = m(hm);
             // Masonry block, then courses and joints.
@@ -1764,34 +1837,67 @@ pub fn paint_set_piece(kind: SetPieceKind, tint: Rgb, accent: Rgb, ow: f32, oh: 
                 y += course;
                 row += 1;
             }
-            // Arch ring: voussoirs fanning around the opening, and a keystone.
-            let (cx, cy) = (m(wm * 0.5), ground - m(spring));
-            // The ring is a half round: it springs from the piers and never runs down over them.
-            let half: Vec<[f32; 2]> = (0..=48).map(|i| { let a = std::f32::consts::PI * i as f32 / 48.0; [cx + a.cos() * m(rad + ring), cy - a.sin() * m(rad + ring)] }).collect();
-            c.poly(&half, mul(t, 1.08), 0.15);
-            let n = ((rad * std::f32::consts::PI) / 0.45).round().max(5.0) as i32;
+            // Arch ring: voussoirs fanning around the opening from where it springs off the piers,
+            // and a keystone. A wide opening is spanned by a segment of a larger circle, so its
+            // piers stand tall and it does not sag into a squat hoop.
+            let cx = m(wm * 0.5);
+            let at = |rad: f32, ph: f32| [cx + ph.cos() * m(rad), ground - m(a.cy + ph.sin() * rad)];
+            let (p0, p1) = (a.springs(), std::f32::consts::PI - a.springs());
+            let arc = |rad: f32, n: usize| -> Vec<[f32; 2]> { (0..=n).map(|i| at(rad, p0 + (p1 - p0) * i as f32 / n as f32)).collect() };
+            let mut band = arc(a.r + ring, 64);
+            band.extend(arc(a.r, 64).into_iter().rev());
+            c.poly(&band, mul(t, 1.08), 0.15);
+            let n = (((p1 - p0) * a.r) / 0.45).round().max(5.0) as i32;
             for i in 0..=n {
-                let a = std::f32::consts::PI * (i as f32 / n as f32);
-                let (ca, sa) = (a.cos(), a.sin());
-                c.line([cx + ca * m(rad), cy - sa * m(rad)], [cx + ca * m(rad + ring), cy - sa * m(rad + ring)], 2.0, mortar);
+                let ph = p0 + (p1 - p0) * (i as f32 / n as f32);
+                c.line(at(a.r, ph), at(a.r + ring, ph), 2.0, mortar);
             }
-            c.poly(&[[cx - m(0.28), cy - m(rad + ring + 0.12)], [cx + m(0.28), cy - m(rad + ring + 0.12)], [cx + m(0.18), cy - m(rad - 0.05)], [cx - m(0.18), cy - m(rad - 0.05)]], mul(t, 1.2), 0.5);
+            // The ring's outer edge picked out, and its keystone.
+            for w in arc(a.r + ring, 64).windows(2) { c.line(w[0], w[1], 2.0, mortar); }
+            let top = std::f32::consts::FRAC_PI_2;
+            c.poly(&[at(a.r + ring + 0.12, top + 0.06), at(a.r + ring + 0.12, top - 0.06), at(a.r - 0.05, top - 0.045), at(a.r - 0.05, top + 0.045)], mul(t, 1.2), 0.5);
             // Cornice along the top.
             c.rect(0.0, 0.0, m(wm), m(0.18), mul(t, 1.15), 0.3);
-            // The opening.
+            // The opening: between the piers up to where the arch springs, and the arch's segment.
             c.cut(|c| {
-                c.rect(m(pw), cy, m(pw + ow), ground + 2.0, t, 0.0);
-                c.ellipse(cx, cy, m(rad), m(rad), t, 0.0);
+                c.rect(m(pw), ground - m(a.spring), m(pw + 2.0 * a.half), ground + 2.0, t, 0.0);
+                c.poly(&arc(a.r, 96), t, 0.0);
             });
             if kind == SetPieceKind::RuinedArch {
-                // The crown has fallen: a jagged bite out of the top, off-centre.
-                let bx = cx + m(r.range(-0.3, 0.3) * rad);
-                let pts = [[bx - m(rad * 0.9), 0.0], [bx + m(rad * 0.7), 0.0], [bx + m(rad * 0.5), m(r.range(0.6, 1.0))],
-                    [bx + m(0.2), m(ring + cap + 0.4)], [bx - m(0.3), m(r.range(0.8, 1.2))], [bx - m(rad * 0.7), m(r.range(0.3, 0.6))]];
+                // The crown has fallen, block by block: a bite out of the top, off-centre, broken
+                // along the courses (each step a stone's height, its tread a stone's length).
+                let bx = wm * 0.5 + r.range(-0.25, 0.25) * a.half;
+                let deepest = (ring + cap + r.range(0.05, 0.45)).min(hm - a.spring - 0.3);
+                let (wl, wr) = (a.half * r.range(0.6, 0.85), a.half * r.range(0.5, 0.75));
+                let mut pts = vec![[m(bx - wl), 0.0]];
+                let (mut x, mut y) = (bx - wl, 0.0f32);
+                while y < deepest - 0.05 && x < bx - 0.2 {
+                    let drop = (course * r.range(0.6, 1.0)).min(deepest - y);
+                    y += drop;
+                    pts.push([m(x), m(y)]);
+                    x = (x + r.range(0.3, 0.75)).min(bx - 0.2);
+                    pts.push([m(x), m(y)]);
+                }
+                let (mut x2, mut y2) = (bx + wr, 0.0f32);
+                let mut right = vec![[m(x2), 0.0]];
+                while y2 < y - 0.05 && x2 > x + 0.2 {
+                    let drop = (course * r.range(0.6, 1.0)).min(y - y2);
+                    y2 += drop;
+                    right.push([m(x2), m(y2)]);
+                    x2 = (x2 - r.range(0.3, 0.75)).max(x + 0.2);
+                    right.push([m(x2), m(y2)]);
+                }
+                right.push([m(x2), m(y)]);
+                pts.extend(right.into_iter().rev());
                 c.cut(|c| c.poly(&pts, t, 0.0));
-                // One pier lost its top course.
-                let side = if variant % 2 == 0 { 0.0 } else { m(wm - pw) };
-                c.cut(|c| c.poly(&[[side, 0.0], [side + m(pw), 0.0], [side + m(pw), m(r.range(0.4, 0.9))], [side, m(r.range(0.9, 1.4))]], t, 0.0));
+                // One pier lost its top courses, broken along a joint.
+                let side = if variant % 2 == 0 { 0.0 } else { wm - pw };
+                let (lo, hi) = (course * (1.0 + (r.f() * 2.0).floor()), course * (2.0 + (r.f() * 2.0).floor()));
+                c.cut(|c| c.poly(&[[m(side), 0.0], [m(side + pw), 0.0], [m(side + pw), m(lo)], [m(side + pw * 0.5), m(lo)], [m(side + pw * 0.5), m(hi)], [m(side), m(hi)]], t, 0.0));
+                // Nothing left hanging: slivers of the cornice and ring at the bite's edges (and
+                // the wedge where a level break meets the ring's curve, which would taper to a
+                // spike), and pieces standing on nothing, fall with the rest.
+                c.clear_loose(m(0.2));
             }
             (c.finish(), wm, hm)
         }

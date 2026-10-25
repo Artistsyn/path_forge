@@ -8,7 +8,7 @@
 
 use super::palette::{self, PaletteLut};
 use super::raster::{self, id, GPixel, Tri, Vert};
-use super::sprites::{fixture_body, Sprite, SpriteCache};
+use super::sprites::{arch_shape, fixture_body, Arch, Sprite, SpriteCache};
 use super::texture::{rgb_lin, Texture, TextureCache};
 use super::view::{View, NEAR};
 use crate::scene::*;
@@ -447,24 +447,57 @@ const CLIFF_LIP: f32 = 18.5 / 250.0;
 struct Fall { foot: [f32; 2], base: f32, top: f32, width: f32, wi: usize, along: [f32; 2], out: [f32; 2] }
 
 /// A picture's outline on a grid of `cols` x `rows` cells (the top row first): which of them are
-/// solid, for building the picture as a solid with depth (`solid_faces`).
-struct Outline { cols: usize, rows: usize, solid: Vec<bool> }
+/// solid, for building the picture as a solid with depth (`solid_faces`); and its edges, found once
+/// (a fine outline is too many cells to walk every frame): the runs of rows where a column `c`
+/// boundary goes between clear and solid (`c`, first row, row past, solid to its left), and the
+/// runs of columns where a row boundary does (`r`, first column, column past, solid above).
+struct Outline { cols: usize, rows: usize, solid: Vec<bool>, walls: Vec<(u32, u32, u32, bool)>, tops: Vec<(u32, u32, u32, bool)> }
 
 impl Outline {
     /// A cell is solid where a third of it is opaque (sampled at nine points), so a pole or a bar
     /// thinner than a cell still stands.
     fn of(sprite: &Sprite, cols: usize, rows: usize) -> Outline {
         let mut solid = vec![false; cols * rows];
-        for r in 0..rows {
-            for c in 0..cols {
-                let mut n = 0;
-                for (i, j) in [(0.2, 0.2), (0.5, 0.2), (0.8, 0.2), (0.2, 0.5), (0.5, 0.5), (0.8, 0.5), (0.2, 0.8), (0.5, 0.8), (0.8, 0.8)] {
-                    if sprite.sample((c as f32 + i) / cols as f32, (r as f32 + j) / rows as f32, 4096.0, true)[3] > 0.5 { n += 1; }
+        // On its own texels: each cell is its texel.
+        let (tw, th, px) = (sprite.levels[0].0, sprite.levels[0].1, &sprite.levels[0].2);
+        if (tw, th) == (cols, rows) {
+            for (s, p) in solid.iter_mut().zip(px) { *s = p[3] > 0.5; }
+        } else {
+            for r in 0..rows {
+                for c in 0..cols {
+                    let mut n = 0;
+                    for (i, j) in [(0.2, 0.2), (0.5, 0.2), (0.8, 0.2), (0.2, 0.5), (0.5, 0.5), (0.8, 0.5), (0.2, 0.8), (0.5, 0.8), (0.8, 0.8)] {
+                        if sprite.sample((c as f32 + i) / cols as f32, (r as f32 + j) / rows as f32, 4096.0, true)[3] > 0.5 { n += 1; }
+                    }
+                    solid[r * cols + c] = n >= 3;
                 }
-                solid[r * cols + c] = n >= 3;
             }
         }
-        Outline { cols, rows, solid }
+        let mut o = Outline { cols, rows, solid, walls: Vec::new(), tops: Vec::new() };
+        let (ci, ri) = (cols as isize, rows as isize);
+        for c in 0..=ci {
+            let mut r = 0;
+            while r < ri {
+                let edge = |r: isize| o.at(c - 1, r) != o.at(c, r);
+                if !edge(r) { r += 1; continue; }
+                let solid_left = o.at(c - 1, r);
+                let r0 = r;
+                while r < ri && edge(r) && o.at(c - 1, r) == solid_left { r += 1; }
+                o.walls.push((c as u32, r0 as u32, r as u32, solid_left));
+            }
+        }
+        for r in 0..=ri {
+            let mut c = 0;
+            while c < ci {
+                let edge = |c: isize| o.at(c, r - 1) != o.at(c, r);
+                if !edge(c) { c += 1; continue; }
+                let solid_above = o.at(c, r - 1);
+                let c0 = c;
+                while c < ci && edge(c) && o.at(c, r - 1) == solid_above { c += 1; }
+                o.tops.push((r as u32, c0 as u32, c as u32, solid_above));
+            }
+        }
+        o
     }
     fn at(&self, c: isize, r: isize) -> bool {
         c >= 0 && r >= 0 && (c as usize) < self.cols && (r as usize) < self.rows && self.solid[r as usize * self.cols + c as usize]
@@ -481,41 +514,105 @@ impl Outline {
 fn solid_faces(o: &Outline, tl: [f32; 3], across: [f32; 3], down: [f32; 3], back: [f32; 3], inset: f32) -> Vec<(Panel, [f32; 3])> {
     let at = |s: f32, t: f32| [tl[0] + s * across[0] + t * down[0], tl[1] + s * across[1] + t * down[1], tl[2] + s * across[2] + t * down[2]];
     let scale = |v: [f32; 3], k: f32| [v[0] * k, v[1] * k, v[2] * k];
-    let (cols, rows) = (o.cols as isize, o.rows as isize);
+    let (cols, rows) = (o.cols as f32, o.rows as f32);
     let neg = |v: [f32; 3]| [-v[0], -v[1], -v[2]];
     let mut faces = vec![
         (Panel { tl, across, down, map: None, solid: false }, neg(back)),
         (Panel { tl: [tl[0] + back[0], tl[1] + back[1], tl[2] + back[2]], across, down, map: None, solid: false }, back),
     ];
     // Walls: where a row goes from clear to solid or back, between columns c - 1 and c.
-    for c in 0..=cols {
-        let mut r = 0;
-        while r < rows {
-            let edge = |r: isize| o.at(c - 1, r) != o.at(c, r);
-            if !edge(r) { r += 1; continue; }
-            let solid_left = o.at(c - 1, r);
-            let r0 = r;
-            while r < rows && edge(r) && o.at(c - 1, r) == solid_left { r += 1; }
-            let u = ((if solid_left { c as f32 - 0.5 - inset } else { c as f32 + 0.5 + inset }) / cols as f32).clamp(0.0, 1.0);
-            let (v0, v1) = (r0 as f32 / rows as f32, r as f32 / rows as f32);
-            faces.push((Panel { tl: at(c as f32 / cols as f32, v0), across: back, down: scale(down, v1 - v0), map: Some([u, 0.0, 0.0, v0, 0.0, v1 - v0]), solid: true },
-                if solid_left { across } else { neg(across) }));
-        }
+    for &(c, r0, r1, solid_left) in &o.walls {
+        let (c, r0, r1) = (c as f32, r0 as f32, r1 as f32);
+        let u = ((if solid_left { c - 0.5 - inset } else { c + 0.5 + inset }) / cols).clamp(0.0, 1.0);
+        let (v0, v1) = (r0 / rows, r1 / rows);
+        faces.push((Panel { tl: at(c / cols, v0), across: back, down: scale(down, v1 - v0), map: Some([u, 0.0, 0.0, v0, 0.0, v1 - v0]), solid: true },
+            if solid_left { across } else { neg(across) }));
     }
     // Tops and undersides: where a column goes from clear to solid or back, between rows r - 1 and r.
-    for r in 0..=rows {
-        let mut c = 0;
-        while c < cols {
-            let edge = |c: isize| o.at(c, r - 1) != o.at(c, r);
-            if !edge(c) { c += 1; continue; }
-            let solid_above = o.at(c, r - 1);
-            let c0 = c;
-            while c < cols && edge(c) && o.at(c, r - 1) == solid_above { c += 1; }
-            let v = (if solid_above { r as f32 - 0.5 } else { r as f32 + 0.5 }) / rows as f32;
-            let (u0, u1) = (c0 as f32 / cols as f32, c as f32 / cols as f32);
-            faces.push((Panel { tl: at(u0, r as f32 / rows as f32), across: scale(across, u1 - u0), down: back, map: Some([u0, u1 - u0, 0.0, v, 0.0, 0.0]), solid: true },
-                if solid_above { down } else { neg(down) }));
+    for &(r, c0, c1, solid_above) in &o.tops {
+        let (r, c0, c1) = (r as f32, c0 as f32, c1 as f32);
+        let v = (if solid_above { r - 0.5 } else { r + 0.5 }) / rows;
+        let (u0, u1) = (c0 / cols, c1 / cols);
+        faces.push((Panel { tl: at(u0, r / rows), across: scale(across, u1 - u0), down: back, map: Some([u0, u1 - u0, 0.0, v, 0.0, 0.0]), solid: true },
+            if solid_above { down } else { neg(down) }));
+    }
+    faces
+}
+
+/// A painted arch made solid (`solid_faces`), but along its opening (the piers' inner faces and the
+/// underside of its ring) faces that follow the arch's own curve (`Arch`) rather than its outline's
+/// steps, so they meet its face and back where those are painted, and the underside runs smooth.
+/// Each is there only where stone still stands behind it (a ruin's crown may have fallen).
+fn arch_faces(o: &Outline, sprite: &Sprite, a: &Arch, tl: [f32; 3], across: [f32; 3], down: [f32; 3], back: [f32; 3]) -> Vec<(Panel, [f32; 3])> {
+    let (cw, ch) = (a.wm / o.cols as f32, a.hm / o.rows as f32);
+    let (x0, x1, cx) = (a.pw, a.pw + 2.0 * a.half, 0.5 * a.wm);
+    // Metres across from the left and up from the ground, and back.
+    let met = |u: f32, v: f32| (u * a.wm, (1.0 - v) * a.hm);
+    let uv = |x: f32, y: f32| (x / a.wm, 1.0 - y / a.hm);
+    let off_edge = |x: f32, y: f32| {
+        let pier = if y <= a.spring + ch { (x - x0).abs().min((x - x1).abs()) } else { f32::MAX };
+        let arc = if y >= a.spring - ch && (x - cx).abs() <= a.half + cw { ((x - cx).hypot(y - a.cy) - a.r).abs() } else { f32::MAX };
+        pier.min(arc)
+    };
+    let reach = 1.6 * cw.max(ch);
+    // Its walls a centimetre into the stone, behind the face's edge, so no hairline of sky shows
+    // where they meet.
+    let mut faces: Vec<(Panel, [f32; 3])> = solid_faces(o, tl, across, down, back, 0.0).into_iter().filter(|(p, _)| {
+        let Some(m) = p.map else { return true };
+        let (x, y) = met(m[0] + 0.5 * (m[1] + m[2]), m[3] + 0.5 * (m[4] + m[5]));
+        off_edge(x, y) > reach
+    }).map(|(mut p, n)| {
+        if p.map.is_some() {
+            let l = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt().max(1e-6);
+            for k in 0..3 { p.tl[k] -= 0.01 * n[k] / l; }
         }
+        (p, n)
+    }).collect();
+    let world = |x: f32, y: f32| { let (u, v) = uv(x, y); [tl[0] + u * across[0] + v * down[0], tl[1] + u * across[1] + v * down[1], tl[2] + u * across[2] + v * down[2]] };
+    let stone = |x: f32, y: f32| { let (u, v) = uv(x, y); u > 0.0 && u < 1.0 && v > 0.0 && v < 1.0 && sprite.sample(u, v, 4096.0, true)[3] > 0.5 };
+    let unit = |v: [f32; 3]| { let l = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt().max(1e-6); [v[0] / l, v[1] / l, v[2] / l] };
+    let (right, up) = (unit(across), unit([-down[0], -down[1], -down[2]]));
+    // A face along the opening's edge from `p` to `q` (metres), the stone lying `into` from it.
+    // Each end that meets the next face runs a little past it (`ext`), overlapping: faces that only
+    // touched left pinholes of sky along the seam between them.
+    let mut edge = |p: [f32; 2], q: [f32; 2], into: [f32; 2], ext: [bool; 2]| {
+        let (dx, dy) = (q[0] - p[0], q[1] - p[1]);
+        let e = 0.015 / dx.hypot(dy).max(1e-6);
+        let (ep, eq) = (if ext[0] { e } else { 0.0 }, if ext[1] { e } else { 0.0 });
+        let (p, q) = ([p[0] - ep * dx, p[1] - ep * dy], [q[0] + eq * dx, q[1] + eq * dy]);
+        let (pu, pv) = uv(p[0] + 0.10 * into[0], p[1] + 0.10 * into[1]);
+        let (qu, qv) = uv(q[0] + 0.10 * into[0], q[1] + 0.10 * into[1]);
+        // Set a texel or so into the stone, behind the face: the painted edge is cut in whole
+        // texels, which stand a little proud of the curve, and a face on the curve itself left a
+        // slit of sky between them.
+        let (a0, a1) = (world(p[0] + 0.04 * into[0], p[1] + 0.04 * into[1]), world(q[0] + 0.04 * into[0], q[1] + 0.04 * into[1]));
+        let out = [-(into[0] * right[0] + into[1] * up[0]), -(into[0] * right[1] + into[1] * up[1]), -(into[0] * right[2] + into[1] * up[2])];
+        faces.push((Panel { tl: a0, across: [a1[0] - a0[0], a1[1] - a0[1], a1[2] - a0[2]], down: back, map: Some([pu, qu - pu, 0.0, pv, qv - pv, 0.0]), solid: true }, out));
+    };
+    let steps = 6;
+    for i in 0..steps {
+        let (y0, y1) = (a.spring * i as f32 / steps as f32, a.spring * (i + 1) as f32 / steps as f32);
+        if stone(x0 - 0.06, 0.5 * (y0 + y1)) { edge([x0, y1], [x0, y0], [-1.0, 0.0], [true; 2]); }
+        if stone(x1 + 0.06, 0.5 * (y0 + y1)) { edge([x1, y0], [x1, y1], [1.0, 0.0], [true; 2]); }
+    }
+    // The arch's underside, ending just where its stone does: one cut short at a ruin's break
+    // stuck out past it as a spike.
+    let (p0, p1) = (a.springs(), std::f32::consts::PI - a.springs());
+    let n = 32;
+    let on = |k: f32| { let ph = p0 + (p1 - p0) * k; [cx + a.r * ph.cos(), a.cy + a.r * ph.sin()] };
+    let dir = |k: f32| { let ph = p0 + (p1 - p0) * k; [ph.cos(), ph.sin()] };
+    let held = |k: f32| { let (o, d) = (on(k), dir(k)); stone(o[0] + 0.06 * d[0], o[1] + 0.06 * d[1]) };
+    for i in 0..n {
+        let (mut k0, mut k1) = (i as f32 / n as f32, (i + 1) as f32 / n as f32);
+        let (h0, h1) = (held(k0), held(k1));
+        if !h0 && !h1 { continue; }
+        if h0 != h1 {
+            // Where the stone gives out between them.
+            let (mut lo, mut hi) = if h0 { (k0, k1) } else { (k1, k0) };
+            for _ in 0..10 { let m = 0.5 * (lo + hi); if held(m) { lo = m } else { hi = m } }
+            if h0 { k1 = lo } else { k0 = lo }
+        }
+        edge(on(k0), on(k1), dir(0.5 * (k0 + k1)), [h0, h1]);
     }
     faces
 }
@@ -549,9 +646,15 @@ struct SolidLook { sprite: Arc<Sprite>, nearest: bool, emissive: f32, shadow: f3
 /// away what stands on its side of the path, as it does the wall: the faces that run across that
 /// cut are cut there too, and the cut face comes as what stood beyond it goes.
 fn solid_billboards(ctx: &Ctx, look: &SolidLook, o: &Outline, tl: [f32; 3], across: [f32; 3], down: [f32; 3], back: [f32; 3], bills: &mut Vec<Billboard>) {
+    solid_cards(ctx, look, o, solid_faces(o, tl, across, down, back, look.inset), tl, across, down, back, bills)
+}
+
+/// `solid_billboards` with its faces given (an arch's, `arch_faces`).
+#[allow(clippy::too_many_arguments)]
+fn solid_cards(ctx: &Ctx, look: &SolidLook, o: &Outline, faces: Vec<(Panel, [f32; 3])>, tl: [f32; 3], across: [f32; 3], down: [f32; 3], back: [f32; 3], bills: &mut Vec<Billboard>) {
     let v = &ctx.view;
     let mid = |f: &Panel| [f.tl[0] + 0.5 * (f.across[0] + f.down[0]), f.tl[1] + 0.5 * (f.across[1] + f.down[1]), f.tl[2] + 0.5 * (f.across[2] + f.down[2])];
-    let mut faces: Vec<(bool, Panel)> = solid_faces(o, tl, across, down, back, look.inset).into_iter().enumerate().filter(|(_, (f, n))| {
+    let mut faces: Vec<(bool, Panel)> = faces.into_iter().enumerate().filter(|(_, (f, n))| {
         let m = mid(f);
         let (c, e) = (v.to_cam(m[0], m[1], m[2]), v.to_cam(m[0] + 0.01 * n[0], m[1] + 0.01 * n[1], m[2] + 0.01 * n[2]));
         (e[0] - c[0]) * c[0] + (e[1] - c[1]) * c[1] + (e[2] - c[2]) * c[2] < 0.0
@@ -3044,7 +3147,12 @@ impl WorldRenderer {
     /// about `cell` metres (6 cm finds a banner's poles and a portcullis's bars; a rock needs less).
     /// Kept for the next frame.
     fn outline(&mut self, sprite: &Arc<Sprite>, wide: f32, high: f32, cell: f32) -> Arc<Outline> {
-        let (cols, rows) = (((wide / cell).round() as usize).clamp(8, 96), ((high / cell).round() as usize).clamp(8, 120));
+        self.outline_grid(sprite, ((wide / cell).round() as usize).clamp(8, 96), ((high / cell).round() as usize).clamp(8, 120))
+    }
+
+    /// A picture's outline on a grid of `cols` x `rows` cells; on its own texels, a cell is solid
+    /// just where its texel is, so the walls stand on the painted edges.
+    fn outline_grid(&mut self, sprite: &Arc<Sprite>, cols: usize, rows: usize) -> Arc<Outline> {
         let key = (Arc::as_ptr(sprite) as usize, cols, rows);
         if self.outlines.len() > 128 { self.outlines.clear(); }
         self.outlines.entry(key).or_insert_with(|| (sprite.clone(), Arc::new(Outline::of(sprite, cols, rows)))).1.clone()
@@ -3083,6 +3191,9 @@ impl WorldRenderer {
                 }
                 if ctx.view.depth_of(0.0, d) < NEAR + 0.2 { continue; }
                 let file = p.sprite.path.trim();
+                // A painted arch: its shape, to build the solid's opening along (`arch_faces`).
+                let mut arch = matches!(p.kind, SetPieceKind::Archway | SetPieceKind::RuinedArch).then(|| arch_shape((ow * 10.0).round() / 10.0, (oh * 10.0).round() / 10.0));
+                if !file.is_empty() && self.sprites.file(opts.base_dir.as_deref(), file).is_some() { arch = None; }
                 let (sprite, height) = if !file.is_empty() {
                     match self.sprites.file(opts.base_dir.as_deref(), file) {
                         Some(sp) => { let h = (ow + 1.0) / sp.aspect.max(0.05); (sp, h) }
@@ -3096,12 +3207,21 @@ impl WorldRenderer {
                 // any angle it has its piers' sides, its top and the underside of its arch.
                 let depth = (if p.depth > 0.0 { p.depth } else { p.kind.depth() }).clamp(0.02, 12.0);
                 let wide = height * sprite.aspect;
-                let outline = self.outline(&sprite, wide, height, 0.06);
+                // An arch's outline on its picture's texels: a coarser one stood its walls off the
+            // painted edges of a ruin's broken crown, with sky between.
+            let outline = match arch {
+                Some(_) => { let (cols, rows) = (sprite.levels[0].0, sprite.levels[0].1); self.outline_grid(&sprite, cols, rows) }
+                None => self.outline(&sprite, wide, height, 0.06),
+            };
                 let look = SolidLook {
                     sprite, nearest: p.sprite.pixelated, emissive: if p.kind == SetPieceKind::Portal { 0.9 } else { 0.0 },
                     shadow: p.shadow.clamp(0.0, 1.0), source: PICK_SET_PIECES | li as u16, tint: [1.0; 3], inset: 0.0,
                 };
-                solid_billboards(ctx, &look, &outline, [-0.5 * wide, height, d - 0.5 * depth], [wide, 0.0, 0.0], [0.0, -height, 0.0], [0.0, 0.0, depth], bills);
+                let (tl, across, down, back) = ([-0.5 * wide, height, d - 0.5 * depth], [wide, 0.0, 0.0], [0.0, -height, 0.0], [0.0, 0.0, depth]);
+                match arch {
+                    Some(a) => { let faces = arch_faces(&outline, &look.sprite, &a, tl, across, down, back); solid_cards(ctx, &look, &outline, faces, tl, across, down, back, bills) }
+                    None => solid_billboards(ctx, &look, &outline, tl, across, down, back, bills),
+                }
             }
         }
     }
@@ -8381,7 +8501,9 @@ mod tests {
             for ((ka, la), (kb, lb)) in sa.luma.iter().zip(&sb.luma) { assert!(ka == kb && (la - lb).abs() < 0.01, "{name}: {ka} luma {la} vs {lb}"); }
             let (pa, pb) = (a.pick.unwrap().ids, b.pick.unwrap().ids);
             let ids = pa.iter().zip(&pb).filter(|(x, y)| x != y).count();
-            let depth = a.depth.unwrap().iter().zip(b.depth.unwrap().iter()).filter(|(x, y)| x != y).count();
+            // Depth to a few ulps: a face set at a slant (an arch's underside) rounds in its last
+            // bits differently on the GPU (fused multiply-adds) than on the CPU.
+            let depth = a.depth.unwrap().iter().zip(b.depth.unwrap().iter()).filter(|(x, y)| x != y && !((*x - *y).abs() <= 1e-5 * x.abs())).count();
             assert!(ids == 0 && depth == 0, "{name}: {ids} pick ids and {depth} depths differ of {}", pa.len());
         }
     }
