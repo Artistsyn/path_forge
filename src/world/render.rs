@@ -1085,6 +1085,9 @@ const EYE_STEP: usize = 4;
 /// Metres a roofed doorway's end wall reaches past the walls' line, out of sight behind them.
 const FACADE_TUCK_M: f32 = 0.6;
 
+/// Wall vertices each side of a boundary across the taper between two worlds' path widths.
+const SPLIT_CUTS: i32 = 8;
+
 /// Metres before a doorway's end wall kept clear of the arches and gates that span the path, and
 /// of side passages.
 const THRESHOLD_CLEAR_M: f32 = 8.0;
@@ -4057,12 +4060,17 @@ fn build_geometry_parts(ctx: &Ctx, layers: &Layers) -> (Vec<Tri>, Vec<Tri>) {
             .filter(|&(_, b, _)| ctx.opening.is_none() || ctx.owns(0.0, 0.0, b + THRESHOLD_CLEAR_M)).collect(),
         _ => Vec::new(),
     };
-    let cuts: Vec<f32> = spans.iter().flat_map(|&(s, e)| [s, e]).chain(openings.iter().flat_map(|&(a, b, _)| [a, b]))
-        .filter(|&c| c > lo && c < hi).collect();
+    // Where one world gives way to the next the path narrows along a curve: a wall built straight
+    // across it and cut at the boundary stood far outside the door wall's edge (void at its corners).
+    let split_cuts = v.split.iter().flat_map(|sp| (-SPLIT_CUTS..=SPLIT_CUTS).map(move |k| sp.zb + sp.taper * k as f32 / SPLIT_CUTS as f32));
+    let mut cuts: Vec<f32> = spans.iter().flat_map(|&(s, e)| [s, e]).chain(openings.iter().flat_map(|&(a, b, _)| [a, b]))
+        .chain(split_cuts).filter(|&c| c > lo && c < hi).collect();
     if !cuts.is_empty() {
+        cuts.sort_by(f32::total_cmp);
+        cuts.dedup_by(|a, b| (*a - *b).abs() < 1e-4);
         ds.retain(|&x| x == lo || cuts.iter().all(|&c| (x - c).abs() > 0.01));
         ds.extend(&cuts);
-        ds.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        ds.sort_by(f32::total_cmp);
     }
     // Steps: every surface is cut at each riser, so a quad never spans two step heights. The quad
     // before a riser ends a hair short of it (on the lower step); the riser face fills the gap.
@@ -8484,7 +8492,8 @@ mod tests {
         let opts = RenderOptions { size: Some((432, 243)), pick: true, layers: Layers { particles: false, ..Layers::default() }, ..RenderOptions::default() };
         let w = [WorldIn { scene: &a, distance: 31.5, time: Some(0.0), base_dir: None }, WorldIn { scene: &b, distance: 0.0, time: Some(0.0), base_dir: None }];
         let mut r = WorldRenderer::default();
-        for zb in [7.0f32, 5.5, 4.5, 3.0, 2.0] {
+        // Every quarter metre: a wall cut across the taper missed the door wall at some distances only.
+        for zb in (4..=56).map(|k| k as f32 * 0.25) {
             let img = r.render_layout(&w, Layout::Cross { crossing: &c, zb }, &opts);
             let void = img.pick.expect("pick").ids.iter().filter(|&&id| id == PICK_SKY).count();
             assert_eq!(void, 0, "{zb} m from the door: {void} pixels of void beside it");
