@@ -320,7 +320,7 @@ fn palette_widget(ui: &mut Ui, v: &mut Value) -> bool {
                                 let mut rgb = [a.first().and_then(|x| x.as_u64()).unwrap_or(0) as u8, a.get(1).and_then(|x| x.as_u64()).unwrap_or(0) as u8, a.get(2).and_then(|x| x.as_u64()).unwrap_or(0) as u8];
                                 let r = ui.color_edit_button_srgb(&mut rgb);
                                 if r.changed() { *c = json!(rgb); changed = true; }
-                                r.context_menu(|ui| if ui.button("Remove colour").clicked() { remove = Some(i); ui.close_menu(); });
+                                r.context_menu(|ui| if ui.button("Remove colour").clicked() { remove = Some(i); ui.close(); });
                             }
                         }
                         if ui.small_button("+").on_hover_text("Add a colour").clicked() { list.push(json!([128, 128, 128])); changed = true; }

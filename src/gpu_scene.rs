@@ -982,15 +982,16 @@ impl GpuSceneRenderer {
     }
 
     async fn new_async() -> Result<Self, String> {
-        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
             backends: wgpu::Backends::all(),
-            ..Default::default()
+            ..wgpu::InstanceDescriptor::new_without_display_handle()
         });
         let adapter = instance
             .request_adapter(&wgpu::RequestAdapterOptions {
                 power_preference: wgpu::PowerPreference::HighPerformance,
                 compatible_surface: None,
                 force_fallback_adapter: false,
+                apply_limit_buckets: false,
             })
             .await
             .map_err(|e| format!("No GPU adapter available: {e}"))?;
@@ -1003,6 +1004,7 @@ impl GpuSceneRenderer {
                     required_limits: wgpu::Limits::default(),
                     memory_hints: wgpu::MemoryHints::Performance,
                     trace: wgpu::Trace::Off,
+                    experimental_features: wgpu::ExperimentalFeatures::disabled(),
                 },
             )
             .await
@@ -1067,8 +1069,8 @@ impl GpuSceneRenderer {
 
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("path_forge_gpu_scene_pl"),
-            bind_group_layouts: &[&bind_group_layout],
-            push_constant_ranges: &[],
+            bind_group_layouts: &[Some(&bind_group_layout)],
+            immediate_size: 0,
         });
 
         let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
@@ -1087,7 +1089,7 @@ impl GpuSceneRenderer {
             address_mode_w: wgpu::AddressMode::Repeat,
             mag_filter: wgpu::FilterMode::Nearest,
             min_filter: wgpu::FilterMode::Nearest,
-            mipmap_filter: wgpu::FilterMode::Nearest,
+            mipmap_filter: wgpu::MipmapFilterMode::Nearest,
             ..Default::default()
         });
 
@@ -1738,14 +1740,14 @@ impl GpuSceneRenderer {
         slice.map_async(wgpu::MapMode::Read, move |res| {
             let _ = tx.send(res);
         });
-        let _ = self.device.poll(wgpu::PollType::Wait);
+        let _ = self.device.poll(wgpu::PollType::wait_indefinitely());
         match rx.recv() {
             Ok(Ok(())) => {}
             Ok(Err(e)) => return Err(format!("GPU scene readback map failed: {e}")),
             Err(_) => return Err("GPU scene readback channel closed".to_owned()),
         }
 
-        let mapped = slice.get_mapped_range();
+        let mapped = slice.get_mapped_range().map_err(|e| format!("GPU scene read-back: {e}"))?;
         let mut out = vec![0u8; (output_cached.tight_bpr as usize) * (height as usize)];
         let padded_bpr_usize = output_cached.padded_bpr as usize;
         let tight_bpr_usize = output_cached.tight_bpr as usize;

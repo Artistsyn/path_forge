@@ -102,7 +102,7 @@ impl Studio {
             });
             ui.add_space(4.0);
             // The picture, as large as fits, in whole steps for small pixel art.
-            let room = Vec2::new(620.0, (ctx.screen_rect().height() - 330.0).clamp(160.0, 620.0));
+            let room = Vec2::new(620.0, (ctx.content_rect().height() - 330.0).clamp(160.0, 620.0));
             let mut scale = (room.x / m.w as f32).min(room.y / m.h as f32);
             if scale > 1.0 { scale = scale.floor(); }
             let size = Vec2::new(m.w as f32 * scale, m.h as f32 * scale);

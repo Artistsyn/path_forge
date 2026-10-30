@@ -212,7 +212,7 @@ impl Studio {
                         if !w.playing && w.travel >= w.length - 0.01 { w.travel = 0.0; }
                         w.playing = !w.playing;
                     }
-                    ui.add(egui::Slider::new(&mut w.travel, 0.0..=w.length.max(1.0)).clamp_to_range(false).text("m").fixed_decimals(1));
+                    ui.add(egui::Slider::new(&mut w.travel, 0.0..=w.length.max(1.0)).clamping(egui::SliderClamping::Never).text("m").fixed_decimals(1));
                     w.travel = w.travel.max(0.0);
                 });
                 ui.label(RichText::new(format!("{} at {:.0} m of {:.0} m walked", if w.fork { "junction" } else { "boundary" }, w.at, w.length)).weak());

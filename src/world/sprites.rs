@@ -2067,33 +2067,74 @@ pub fn paint_face(parts: &[ShapePart], width: f32, height: f32) -> Option<Sprite
 /// Pictures painted or read once for every renderer in the process (and for the thread that
 /// paints them ahead of the walk, `Runtime::set_paint_ahead`), within a budget of bytes: past it
 /// the ones longest unused are let go, one at a time. (They were cleared all at once at a count
-/// before, painted again on the road's thread the next frame they were seen.)
+/// before, painted again on the road's thread the next frame they were seen.) What is painted
+/// ahead only fills the room that is free or stale: it never pushes out a picture drawn in the
+/// last `STALE`. (It did: in the vale the next places' trees pushed out the vale's own, which
+/// were painted again in the middle of the walk, a second each on a phone.)
 struct Shared<K> {
-    map: HashMap<K, (Option<Arc<Sprite>>, u64)>,
+    /// Each picture, when it was last looked up, and when it was last drawn (None: painted ahead
+    /// and not drawn yet).
+    map: HashMap<K, (Option<Arc<Sprite>>, u64, Option<std::time::Instant>)>,
     bytes: usize,
     tick: u64,
     budget: usize,
 }
 
 impl<K: std::hash::Hash + Eq + Clone> Shared<K> {
+    /// How long a drawn picture is kept from what is painted ahead.
+    const STALE: std::time::Duration = std::time::Duration::from_secs(3);
+
     fn new(budget: usize) -> Self { Shared { map: HashMap::new(), bytes: 0, tick: 0, budget } }
+
+    /// The picture under `k`, looked up to be drawn.
     fn get(&mut self, k: &K) -> Option<Option<Arc<Sprite>>> {
         self.tick += 1;
         let tick = self.tick;
-        self.map.get_mut(k).map(|e| { e.1 = tick; e.0.clone() })
+        self.map.get_mut(k).map(|e| { (e.1, e.2) = (tick, Some(std::time::Instant::now())); e.0.clone() })
     }
-    /// Keep `v` (or, when another thread got there first, theirs: one picture per key, so the GPU
-    /// holds it once).
+
+    /// Whether `k` is held, without counting as a use.
+    fn holds(&self, k: &K) -> bool { self.map.contains_key(k) }
+
+    /// Whether a picture painted ahead could be kept: there is room, or a drawn one gone stale.
+    fn room_ahead(&self) -> bool { self.bytes < self.budget || self.map.values().any(|e| Self::stale(e.2)) }
+
+    fn stale(drawn: Option<std::time::Instant>) -> bool { drawn.is_some_and(|at| at.elapsed() > Self::STALE) }
+
+    /// Keep `v`, to be drawn (or, when another thread got there first, theirs: one picture per
+    /// key, so the GPU holds it once), letting go of the ones longest unused past the budget.
     fn put(&mut self, k: K, v: Option<Arc<Sprite>>) -> Option<Arc<Sprite>> {
         if let Some(e) = self.map.get(&k) { return e.0.clone(); }
-        self.tick += 1;
-        self.bytes += v.as_deref().map_or(0, sprite_bytes);
-        self.map.insert(k, (v.clone(), self.tick));
+        self.keep(k, v.clone(), Some(std::time::Instant::now()));
         while self.bytes > self.budget && self.map.len() > 1 {
             let Some(old) = self.map.iter().min_by_key(|e| e.1 .1).map(|e| e.0.clone()) else { break };
-            if let Some((s, _)) = self.map.remove(&old) { self.bytes -= s.as_deref().map_or(0, sprite_bytes); }
+            self.drop_key(&old);
         }
         v
+    }
+
+    /// Keep `v`, painted ahead, in what room there is: past the budget only drawn pictures gone
+    /// stale are let go for it, and it is not kept when they are not enough.
+    fn put_ahead(&mut self, k: K, v: Option<Arc<Sprite>>) {
+        if self.map.contains_key(&k) { return; }
+        self.keep(k.clone(), v, None);
+        while self.bytes > self.budget {
+            let stale = self.map.iter().filter(|e| Self::stale(e.1 .2)).min_by_key(|e| e.1 .1).map(|e| e.0.clone());
+            match stale {
+                Some(old) => self.drop_key(&old),
+                None => { self.drop_key(&k); break; }
+            }
+        }
+    }
+
+    fn keep(&mut self, k: K, v: Option<Arc<Sprite>>, drawn: Option<std::time::Instant>) {
+        self.tick += 1;
+        self.bytes += v.as_deref().map_or(0, sprite_bytes);
+        self.map.insert(k, (v, self.tick, drawn));
+    }
+
+    fn drop_key(&mut self, k: &K) {
+        if let Some((s, _, _)) = self.map.remove(k) { self.bytes -= s.as_deref().map_or(0, sprite_bytes); }
     }
 }
 
@@ -2114,7 +2155,21 @@ fn painted(key: PaintKey, paint: impl FnOnce() -> Sprite) -> Arc<Sprite> {
     PAINTED.lock().unwrap().put(key, Some(s)).unwrap()
 }
 
-/// A prop as `SpriteCache::prop` paints it, from any thread: for painting ahead of the walk.
+/// `painted`'s picture painted ahead of the walk, if there is room to keep it (`Shared::put_ahead`);
+/// false when there was none, so the rest need not be painted either.
+fn painted_ahead(key: PaintKey, paint: impl FnOnce() -> Sprite) -> bool {
+    let room = {
+        let shared = PAINTED.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        if shared.holds(&key) { return true; }
+        shared.room_ahead()
+    };
+    if !room { return false; }
+    let sprite = Arc::new(paint());
+    PAINTED.lock().unwrap_or_else(std::sync::PoisonError::into_inner).put_ahead(key, Some(sprite));
+    true
+}
+
+/// A prop as `SpriteCache::prop` paints it, from any thread.
 pub fn paint_prop_shared(kind: PropKind, tint: Rgb, variant: u32) -> Arc<Sprite> {
     painted((kind as u8, tint, variant % VARIANTS), || paint_prop(kind, tint, variant % VARIANTS))
 }
@@ -2122,6 +2177,17 @@ pub fn paint_prop_shared(kind: PropKind, tint: Rgb, variant: u32) -> Arc<Sprite>
 /// A floating rock as `SpriteCache::asteroid` paints it, from any thread.
 pub fn paint_asteroid_shared(tint: Rgb, variant: u32) -> Arc<Sprite> {
     painted((0xA5, tint, variant % VARIANTS), || paint_asteroid(tint, variant % VARIANTS))
+}
+
+/// A prop painted ahead of the walk, kept in what room there is (`painted_ahead`); false when
+/// there was none.
+pub fn paint_prop_ahead(kind: PropKind, tint: Rgb, variant: u32) -> bool {
+    painted_ahead((kind as u8, tint, variant % VARIANTS), || paint_prop(kind, tint, variant % VARIANTS))
+}
+
+/// A floating rock painted ahead of the walk (`paint_prop_ahead`).
+pub fn paint_asteroid_ahead(tint: Rgb, variant: u32) -> bool {
+    painted_ahead((0xA5, tint, variant % VARIANTS), || paint_asteroid(tint, variant % VARIANTS))
 }
 
 /// The time a file (and the mask painted for it) last changed, as `SpriteCache::file_at` keys it:

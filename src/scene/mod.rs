@@ -479,9 +479,12 @@ pub struct Fork {
     pub depth: f32,
     /// Height of a side passage, metres (between walls).
     pub height: f32,
+    /// A side passage's doorway framed in timber (the bridge deck's): jambs and a lintel this
+    /// wide, metres, standing out from the wall. 0: a bare opening.
+    pub frame: f32,
 }
 impl Default for Fork {
-    fn default() -> Self { Fork { enabled: false, spacing: 24.0, offset: 14.0, side: ForkSide::Alternate, style: ForkStyle::Side, angle: 38.0, half_width: 1.1, depth: 7.0, height: 2.6 } }
+    fn default() -> Self { Fork { enabled: false, spacing: 24.0, offset: 14.0, side: ForkSide::Alternate, style: ForkStyle::Side, angle: 38.0, half_width: 1.1, depth: 7.0, height: 2.6, frame: 0.0 } }
 }
 
 /// Which side a branch leaves on: one side, alternating from fork to fork, or both at once (the
@@ -2381,6 +2384,9 @@ impl SetPieceKind {
     }
 }
 
+/// Metres between the walking camera's eye and the underside of an arch or gate it passes under.
+pub const ARCH_CLEARANCE_M: f32 = 0.5;
+
 /// A structure spanning the path, repeated along it.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(default)]
@@ -2393,7 +2399,8 @@ pub struct SetPiece {
     pub offset: f32,
     /// Clear width of the opening, metres. 0 = fit the path (and the gap to the walls).
     pub width: f32,
-    /// Clear height of the opening, metres.
+    /// Clear height of the opening, metres. An arch or gate is never lower than the walking
+    /// camera's eye plus `ARCH_CLEARANCE_M`, so the camera passes under its stone, not through it.
     pub height: f32,
     /// How deep it is along the path, metres: it is built solid from its picture, so it has sides,
     /// tops and the underside of its arch seen from any angle. 0 = as deep as its kind usually is

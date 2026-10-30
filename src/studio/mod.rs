@@ -459,36 +459,36 @@ pub fn new(cc: &eframe::CreationContext<'_>, open: Option<PathBuf>, section: Opt
     // ── Panels ─────────────────────────────────────────────────────────────
 
     fn menu_bar(&mut self, ui: &mut egui::Ui) {
-        egui::menu::bar(ui, |ui| {
+        egui::MenuBar::new().ui(ui, |ui| {
             ui.menu_button("File", |ui| {
-                if ui.button("New from preset…").clicked() { self.gallery_open = true; ui.close_menu(); }
-                if ui.button("Open…  ⌘O").clicked() { ui.close_menu(); self.open_dialog(); }
+                if ui.button("New from preset…").clicked() { self.gallery_open = true; ui.close(); }
+                if ui.button("Open…  ⌘O").clicked() { ui.close(); self.open_dialog(); }
                 ui.separator();
-                if ui.add_enabled(true, egui::Button::new("Save  ⌘S")).clicked() { ui.close_menu(); self.save(); }
-                if ui.button("Save as…  ⇧⌘S").clicked() { ui.close_menu(); self.save_as(); }
+                if ui.add_enabled(true, egui::Button::new("Save  ⌘S")).clicked() { ui.close(); self.save(); }
+                if ui.button("Save as…  ⇧⌘S").clicked() { ui.close(); self.save_as(); }
                 if ui.button("Save as preset…").on_hover_text("Keep this scene as a starting point of your own under New from preset").clicked() {
-                    ui.close_menu();
+                    ui.close();
                     self.list_my_presets();
                     self.preset_name = Some(self.scene.name.clone());
                 }
                 ui.separator();
-                if ui.button("Export…  ⌘E").clicked() { ui.close_menu(); self.open_export(); }
+                if ui.button("Export…  ⌘E").clicked() { ui.close(); self.open_export(); }
                 if let Some(p) = self.file.clone() {
-                    if ui.button("Show in Finder").clicked() { ui.close_menu(); reveal(&p); }
+                    if ui.button("Show in Finder").clicked() { ui.close(); reveal(&p); }
                     ui.separator();
-                    if ui.button("Gather files into the scene folder").on_hover_text("Copy every image, kit and grade the scene uses from elsewhere into its folder, and name them relative to the scene").clicked() { ui.close_menu(); self.pack(None); }
+                    if ui.button("Gather files into the scene folder").on_hover_text("Copy every image, kit and grade the scene uses from elsewhere into its folder, and name them relative to the scene").clicked() { ui.close(); self.pack(None); }
                     if ui.button("Pack into folder…").on_hover_text("Write the scene and every file it uses into one folder that can be moved or shared").clicked() {
-                        ui.close_menu();
+                        ui.close();
                         if let Some(d) = rfd::FileDialog::new().set_directory(home()).pick_folder() { self.pack(Some(d)); }
                     }
                 }
             });
             ui.menu_button("Edit", |ui| {
-                if ui.add_enabled(self.history.can_undo(&self.doc), egui::Button::new("Undo  ⌘Z")).clicked() { ui.close_menu(); self.undo(); }
-                if ui.add_enabled(self.history.can_redo(), egui::Button::new("Redo  ⇧⌘Z")).clicked() { ui.close_menu(); self.redo(); }
+                if ui.add_enabled(self.history.can_undo(&self.doc), egui::Button::new("Undo  ⌘Z")).clicked() { ui.close(); self.undo(); }
+                if ui.add_enabled(self.history.can_redo(), egui::Button::new("Redo  ⇧⌘Z")).clicked() { ui.close(); self.redo(); }
                 ui.separator();
-                if ui.button("Remix…").on_hover_text("New variations: re-roll the parts you do not lock").clicked() { ui.close_menu(); self.remix.open = true; self.remix.base = Some((*self.scene).clone()); }
-                if ui.button("Transition / fork…").on_hover_text("Walk on into another scene, or to a fork where the player chooses").clicked() { ui.close_menu(); self.walk.open = true; }
+                if ui.button("Remix…").on_hover_text("New variations: re-roll the parts you do not lock").clicked() { ui.close(); self.remix.open = true; self.remix.base = Some((*self.scene).clone()); }
+                if ui.button("Transition / fork…").on_hover_text("Walk on into another scene, or to a fork where the player chooses").clicked() { ui.close(); self.walk.open = true; }
             });
             ui.menu_button("View", |ui| {
                 ui.checkbox(&mut self.guides, "Camera guides (G)");
@@ -585,13 +585,13 @@ pub fn new(cc: &eframe::CreationContext<'_>, open: Option<PathBuf>, section: Opt
                             if ui.small_button("🗑").on_hover_text(format!("Remove this {} (Undo brings it back)", one_of(label))).clicked() { action = Some(("del", i)); }
                             ui.with_layout(egui::Layout::left_to_right(egui::Align::Center).with_main_justify(false), |ui| {
                                 let text = if on { RichText::new(&summary) } else { RichText::new(&summary).weak() };
-                                let r = ui.add(egui::SelectableLabel::new(sel, text).truncate());
+                                let r = ui.add(egui::Button::selectable(sel, text).truncate());
                                 if r.clicked() { self.selection = Selection::Item(key, i); }
                                 r.context_menu(|ui| {
-                                    if ui.button("Duplicate").clicked() { action = Some(("dup", i)); ui.close_menu(); }
-                                    if ui.add_enabled(i > 0, egui::Button::new("Move up")).clicked() { action = Some(("up", i)); ui.close_menu(); }
-                                    if ui.add_enabled(i + 1 < len, egui::Button::new("Move down")).clicked() { action = Some(("down", i)); ui.close_menu(); }
-                                    if ui.button("Remove").clicked() { action = Some(("del", i)); ui.close_menu(); }
+                                    if ui.button("Duplicate").clicked() { action = Some(("dup", i)); ui.close(); }
+                                    if ui.add_enabled(i > 0, egui::Button::new("Move up")).clicked() { action = Some(("up", i)); ui.close(); }
+                                    if ui.add_enabled(i + 1 < len, egui::Button::new("Move down")).clicked() { action = Some(("down", i)); ui.close(); }
+                                    if ui.button("Remove").clicked() { action = Some(("del", i)); ui.close(); }
                                 });
                             });
                         });
@@ -965,7 +965,7 @@ pub fn new(cc: &eframe::CreationContext<'_>, open: Option<PathBuf>, section: Opt
         let mut pick_mine: Option<String> = None;
         let mut delete: Option<String> = None;
         // Never wider or taller than the app window: the thumbnails wrap into rows instead.
-        let screen = ctx.screen_rect();
+        let screen = ctx.content_rect();
         // Explicit rows sized to the app window, so the gallery is never wider than the screen.
         let cell = Vec2::new(120.0, 213.0);
         let cols = (((screen.width() - 80.0) / (cell.x + 16.0)).floor() as usize).clamp(2, 8);
@@ -981,7 +981,7 @@ pub fn new(cc: &eframe::CreationContext<'_>, open: Option<PathBuf>, section: Opt
                         for (i, p) in self.my_presets.iter().enumerate() {
                             ui.vertical(|ui| {
                                 let r = match self.my_thumbs.get(i).and_then(|t| t.as_ref()) {
-                                    Some(t) => ui.add(egui::ImageButton::new(egui::Image::new((t.id(), cell)))),
+                                    Some(t) => ui.add(egui::Button::image(egui::Image::new((t.id(), cell)))),
                                     None => ui.add_sized(cell, egui::Button::new("…")),
                                 };
                                 if r.clicked() { pick_mine = Some(p.name.clone()); }
@@ -1009,7 +1009,7 @@ pub fn new(cc: &eframe::CreationContext<'_>, open: Option<PathBuf>, section: Opt
                         ui.vertical(|ui| {
                             let frames = &self.thumbs[i];
                             let r = match frames.get(if frames.len() == THUMB_FRAMES { tick % THUMB_FRAMES } else { 0 }) {
-                                Some(t) => ui.add(egui::ImageButton::new(egui::Image::new((t.id(), cell)))),
+                                Some(t) => ui.add(egui::Button::image(egui::Image::new((t.id(), cell)))),
                                 None => ui.add_sized(cell, egui::Button::new("…")),
                             };
                             if r.clicked() { pick = Some(i); }
@@ -1269,7 +1269,8 @@ pub fn new(cc: &eframe::CreationContext<'_>, open: Option<PathBuf>, section: Opt
 }
 
 impl eframe::App for Studio {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        let ctx = &ui.ctx().clone();
         self.receive_frame(ctx);
         if let Some(rx) = &self.loop_rx {
             if let Ok(r) = rx.try_recv() { self.loop_report = Some(r); self.loop_rx = None; }
@@ -1279,8 +1280,8 @@ impl eframe::App for Studio {
         self.watch_file();
 
         let before = self.doc.clone();
-        egui::TopBottomPanel::top("menu").show(ctx, |ui| self.menu_bar(ui));
-        egui::TopBottomPanel::bottom("status").show(ctx, |ui| {
+        egui::Panel::top("menu").show(ui, |ui| self.menu_bar(ui));
+        egui::Panel::bottom("status").show(ui, |ui| {
             ui.horizontal(|ui| {
                 if self.disk_changed {
                     ui.colored_label(Color32::from_rgb(240, 170, 90), "The file changed on disk while you have unsaved edits.");
@@ -1291,10 +1292,10 @@ impl eframe::App for Studio {
                 }
             });
         });
-        egui::TopBottomPanel::bottom("timeline").show(ctx, |ui| { ui.add_space(4.0); self.timeline(ui); ui.add_space(2.0); });
-        egui::SidePanel::left("outliner").resizable(true).default_width(230.0).show(ctx, |ui| self.outliner(ui));
-        egui::SidePanel::right("inspector").resizable(true).default_width(380.0).min_width(320.0).show(ctx, |ui| self.inspector(ui));
-        egui::CentralPanel::default().frame(egui::Frame::none()).show(ctx, |ui| self.viewport(ui));
+        egui::Panel::bottom("timeline").show(ui, |ui| { ui.add_space(4.0); self.timeline(ui); ui.add_space(2.0); });
+        egui::Panel::left("outliner").resizable(true).default_size(230.0).show(ui, |ui| self.outliner(ui));
+        egui::Panel::right("inspector").resizable(true).default_size(380.0).min_size(320.0).show(ui, |ui| self.inspector(ui));
+        egui::CentralPanel::default().frame(egui::Frame::NONE).show(ui, |ui| self.viewport(ui));
         self.gallery(ctx);
         self.remix_window(ctx);
         self.preset_window(ctx);

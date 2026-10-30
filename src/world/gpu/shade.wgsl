@@ -683,7 +683,9 @@ fn on_other_branch(x: f32, d: f32, r: u32) -> bool {
     return abs(x + (own - other) * (d - zb)) < hw;
 }
 
-fn shade_px(g: GPix, i: u32, x: u32, y: u32, own: bool) -> Shaded {
+// `own`: the G-buffer's own pixel, its footprint from its neighbours' uvs; else a pixel moved in
+// from another world, its footprint `moved_fp` (soft_main works it out the same way).
+fn shade_px(g: GPix, i: u32, x: u32, y: u32, own: bool, moved_fp: f32) -> Shaded {
     var out = Shaded(vec3<f32>(0.0), 0.0, vec3<f32>(0.0), 0.0, 0.0, false);
     let w = W.width; let h = W.height;
     let id = g.idr & 0xFFu;
@@ -696,12 +698,12 @@ fn shade_px(g: GPix, i: u32, x: u32, y: u32, own: bool) -> Shaded {
     let u = suv.x; let v = suv.y;
     let tex = u32(texf);
     // Footprint from neighbouring pixels on the same surface, like GPU derivatives.
-    var fp = 0.0;
+    var fp = moved_fp;
     var js = array<u32, 2>(select(i - 1u, i + 1u, x + 1u < w), select(i - w, i + w, y + 1u < h));
     for (var k = 0; k < 2; k++) {
         let j = js[k];
         let gj = gbuf[j];
-        if (gj.idr & 0xFFu) == id && (gj.idr >> 8u) == realm {
+        if own && (gj.idr & 0xFFu) == id && (gj.idr >> 8u) == realm {
             let t2 = uvs[j * 3u + 2u];
             if t2 >= 0.0 && u32(t2) == tex { fp = max(fp, max(abs(uvs[j * 3u] - u), abs(uvs[j * 3u + 1u] - v))); }
         }
@@ -904,7 +906,7 @@ fn shade_main(@builtin(global_invocation_id) gid0: vec3<u32>) {
     let g = gbuf[i];
     if (g.idr >> 8u) != W.realm { return; }
     for (var k = 0u; k < 6u; k++) { refl[i * 6u + k] = 0.0; }
-    let s = shade_px(g, i, gid.x, gid.y, true);
+    let s = shade_px(g, i, gid.x, gid.y, true, 0.0);
     if !s.drawn {
         // A frame of several worlds mixes their skies in the sky pass.
         if W.multi != 0u { return; }
@@ -921,6 +923,31 @@ fn shade_main(@builtin(global_invocation_id) gid0: vec3<u32>) {
     }
 }
 
+// render::Ctx::moved_here: `g0`, a pixel of another world, as this one shades it: at its own place
+// across its world when `same` (render::SAME_X), else moved into this world's path frame.
+fn moved_here(g0: GPix, same: bool) -> GPix {
+    let cam_x = g0.x + bend_x(g0.d) + shear_of(g0.idr >> 8u, g0.d);
+    let gx = select(cam_x - bend_x(g0.d) - shear_x(g0.d), g0.x, same);
+    return GPix(g0.depth, gx, g0.y, g0.d, (g0.idr & 0xFFu) | (W.realm << 8u));
+}
+
+// A moved pixel's footprint (render::Uvs::Moved): its neighbours from the same world, moved the
+// same way. Left unmoved they match nothing, and the texture aliases into lines across a fork.
+fn moved_footprint(g0: GPix, i: u32, x: u32, y: u32, same: bool) -> f32 {
+    let suv = surface_uv(moved_here(g0, same));
+    if suv.z < 0.0 { return 0.0; }
+    let w = W.width;
+    var fp = 0.0;
+    var js = array<u32, 2>(select(i - 1u, i + 1u, x + 1u < w), select(i - w, i + w, y + 1u < W.height));
+    for (var k = 0; k < 2; k++) {
+        let gj = gbuf[js[k]];
+        if (gj.idr & 0xFFu) != (g0.idr & 0xFFu) || (gj.idr >> 8u) != (g0.idr >> 8u) { continue; }
+        let s2 = surface_uv(moved_here(gj, same));
+        if s2.z == suv.z { fp = max(fp, max(abs(s2.x - suv.x), abs(s2.y - suv.y))); }
+    }
+    return fp;
+}
+
 // Where a patch of this world reaches into another's pixels: a little of each (render::shade).
 @compute @workgroup_size(8, 8)
 fn soft_main(@builtin(global_invocation_id) gid0: vec3<u32>) {
@@ -933,11 +960,8 @@ fn soft_main(@builtin(global_invocation_id) gid0: vec3<u32>) {
     // 0x80 (render::SAME_X): drawn at its own place across its world, not moved into this one's.
     if k <= 0.0 || (o & 0x7Fu) != W.realm { return; }
     let g0 = gbuf[i];
-    let src = g0.idr >> 8u;
-    let cam_x = g0.x + bend_x(g0.d) + shear_of(src, g0.d);
-    let gx = select(cam_x - bend_x(g0.d) - shear_x(g0.d), g0.x, (o & 0x80u) != 0u);
-    let g = GPix(g0.depth, gx, g0.y, g0.d, (g0.idr & 0xFFu) | (W.realm << 8u));
-    let s = shade_px(g, i, gid.x, gid.y, false);
+    let same = (o & 0x80u) != 0u;
+    let s = shade_px(moved_here(g0, same), i, gid.x, gid.y, false, moved_footprint(g0, i, gid.x, gid.y, same));
     if !s.drawn { return; }
     let c = mix3(vec3<f32>(hdr[i * 3u], hdr[i * 3u + 1u], hdr[i * 3u + 2u]), s.c, k);
     hdr[i * 3u] = c.x; hdr[i * 3u + 1u] = c.y; hdr[i * 3u + 2u] = c.z;

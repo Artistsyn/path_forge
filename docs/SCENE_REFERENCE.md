@@ -89,6 +89,7 @@ How one scene gives way to the next. Every `Auto` or 0 is decided by `plan` from
 | `marker` | [Marker](#marker) | `"Auto"` | A structure at the boundary: an arch, a gate, a portal ring. Auto adds one where the threshold asks for it (a gate, a portal). |
 | `seed` | integer | `7` |  |
 | `swing` | [Swing](#swing) | (see the type) | When the scenes look from different angles (`camera.yaw`, `camera.side`: a side-scroller and a view down the path), the camera swings: out of the first scene's view to look down the path before the boundary, and round into the second's after it. `seconds` each way (0 = auto, 2.5), with its `hold`, `ease`, `overshoot`, `orbit` and `bars` (`from` is not used: the views are the scenes'). Negative seconds: no swing, the views crossfade at the end. |
+| `door` | number × 2 | `[0.0,0.0]` | A door's size where the boundary is a wall between two rooms: half its width and its height, metres. 0 each = as wide and as high as the rooms allow (the smaller room's whole end). A door narrower than the rooms leaves the first room an end wall with it in. |
 
 ### Anchor
 
@@ -605,6 +606,7 @@ gap in the path's edge, or by the road itself dividing.
 | `half_width` | number | `1.1` | Half the width of a branch path, or of a side passage's opening, metres. |
 | `depth` | number | `7.0` | How deep a side passage goes before it is lost in the dark, metres (between walls). |
 | `height` | number | `2.6` | Height of a side passage, metres (between walls). |
+| `frame` | number | `0.0` | A side passage's doorway framed in timber (the bridge deck's): jambs and a lintel this wide, metres, standing out from the wall. 0: a bare opening. |
 
 ### ForkSide
 
@@ -1204,7 +1206,7 @@ A structure spanning the path, repeated along it.
 | `spacing` | number | `24.0` | Distance between repeats, metres (snapped to divide the loop; the loop length = once per loop). |
 | `offset` | number | `12.0` | Shift along the path, metres. |
 | `width` | number | `0.0` | Clear width of the opening, metres. 0 = fit the path (and the gap to the walls). |
-| `height` | number | `3.4` | Clear height of the opening, metres. |
+| `height` | number | `3.4` | Clear height of the opening, metres. An arch or gate is never lower than the walking camera's eye plus `ARCH_CLEARANCE_M`, so the camera passes under its stone, not through it. |
 | `depth` | number | `0.0` | How deep it is along the path, metres: it is built solid from its picture, so it has sides, tops and the underside of its arch seen from any angle. 0 = as deep as its kind usually is (an arch 0.9 m, a gate 1.4 m, a portal's ring 0.35 m, banners 0.12 m). |
 | `tint` | integer × 3 | `[118,110,100]` | Stone or wood colour. |
 | `accent` | integer × 3 | `[150,30,36]` | Cloth, trim or glow colour. |

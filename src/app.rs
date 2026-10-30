@@ -418,7 +418,8 @@ impl Default for PathForgeApp {
 
 // ── eframe::App ────────────────────────────────────────────────────────────
 impl eframe::App for PathForgeApp {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        let ctx = &ui.ctx().clone();
         // --- advance animation
         let now = std::time::Instant::now();
         let dt = if let Some(prev) = self.last_instant {
@@ -698,9 +699,9 @@ impl eframe::App for PathForgeApp {
 
         // --- UI layout
         let settings_before_ui = self.settings.clone();
-        self.top_bar(ctx);
-        self.right_panel(ctx);
-        self.central_panel(ctx);
+        self.top_bar(ui);
+        self.right_panel(ui);
+        self.central_panel(ui);
         self.node_lab.ui(ctx);
         self.record_history_if_changed(&settings_before_ui);
 
@@ -950,12 +951,12 @@ impl PathForgeApp {
     }
 
     // ── Top bar ─────────────────────────────────────────────────────────────
-    fn top_bar(&mut self, ctx: &egui::Context) {
-        egui::TopBottomPanel::top("top_bar")
-            .frame(egui::Frame::none()
+    fn top_bar(&mut self, root: &mut egui::Ui) {
+        egui::Panel::top("top_bar")
+            .frame(egui::Frame::NONE
                 .fill(Color32::from_rgb(8,6,4))
                 .inner_margin(egui::Margin::symmetric(10, 5)))
-            .show(ctx, |ui| {
+            .show(root, |ui| {
                 ui.horizontal(|ui| {
                     ui.label(RichText::new("PATH").color(Color32::from_rgb(200,144,48))
                         .font(egui::FontId::proportional(14.0)).strong());
@@ -1062,14 +1063,14 @@ impl PathForgeApp {
     }
 
     // ── Right panel (parameter sections) ────────────────────────────────────
-    fn right_panel(&mut self, ctx: &egui::Context) {
-        egui::SidePanel::right("params")
-            .min_width(230.0)
-            .max_width(270.0)
-            .frame(egui::Frame::none()
+    fn right_panel(&mut self, root: &mut egui::Ui) {
+        egui::Panel::right("params")
+            .min_size(230.0)
+            .max_size(270.0)
+            .frame(egui::Frame::NONE
                 .fill(Color32::from_rgb(6,4,2))
                 .inner_margin(egui::Margin::same(4)))
-            .show(ctx, |ui| {
+            .show(root, |ui| {
                 egui::ScrollArea::vertical().show(ui, |ui| {
                     // ── CANVAS ───────────────────────────────────────────
                     let o = &mut self.open_canvas;
@@ -1908,10 +1909,10 @@ impl PathForgeApp {
     }
 
     // ── Central panel (canvas + playback controls) ───────────────────────────
-    fn central_panel(&mut self, ctx: &egui::Context) {
+    fn central_panel(&mut self, root: &mut egui::Ui) {
         egui::CentralPanel::default()
-            .frame(egui::Frame::none().fill(Color32::from_rgb(6,4,2)))
-            .show(ctx, |ui| {
+            .frame(egui::Frame::NONE.fill(Color32::from_rgb(6,4,2)))
+            .show(root, |ui| {
                 ui.vertical_centered(|ui| {
                     ui.add_space(8.0);
 
@@ -2022,14 +2023,14 @@ impl PathForgeApp {
             Color32::from_rgb(12,10,8)
         };
 
-        let frame = egui::Frame::none()
+        let frame = egui::Frame::NONE
             .fill(Color32::from_rgb(8,6,4))
             .inner_margin(egui::Margin::same(0))
             .stroke(egui::Stroke::new(1.0, Color32::from_rgb(20,18,12)));
 
         frame.show(ui, |ui| {
             // Header button
-            let hdr = egui::Frame::none()
+            let hdr = egui::Frame::NONE
                 .fill(hdr_bg)
                 .inner_margin(egui::Margin::symmetric(8, 5));
             hdr.show(ui, |ui| {
@@ -2049,7 +2050,7 @@ impl PathForgeApp {
 
             // Body
             if *open {
-                let body_frame = egui::Frame::none()
+                let body_frame = egui::Frame::NONE
                     .fill(Color32::from_rgb(8,6,4))
                     .inner_margin(egui::Margin::symmetric(8, 6));
                 body_frame.show(ui, |ui| {

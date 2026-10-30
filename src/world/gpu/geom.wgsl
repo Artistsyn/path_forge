@@ -27,12 +27,11 @@ struct Geom {
     small_off: u32, n_small: u32, fade_k: f32, fade_near: f32,
     fade_cut: f32,
     // A frame of several worlds runs shadow_main once per world (its casters, at W's dynamic
-    // offset): bit 0, ground of another world is placed by `lights` from gx_off (render::
-    // prop_shadows' `across`, worked out on the CPU); bit 1, it goes on from the masks so far; and
+    // offset): bit 0, ground of another world is placed across W's path from the worlds table in
+    // `lights` (render::prop_shadows' `across`); bit 1, it goes on from the masks so far; and
     // from bit 2, 0 for props and clouds, 1 for props only, 2 for the clouds of W's own pixels only.
     shadow_mode: u32, gx_off: u32, pad2: u32,
-    // The box lights from gx_off covers, row by row (x0, y0, width, height).
-    gx_box: vec4<u32>,
+    pad3: vec4<u32>,
 }
 
 // raster::Dissolve::hides: a swinging camera dissolving the ceiling, the wall on its side, and
@@ -54,7 +53,8 @@ fn hides(p: GPix, x: i32, y: i32) -> bool {
 @group(0) @binding(6) var<storage, read> texels: array<vec4<f32>>;
 // Per tile: a count, then up to `cap` lamp indices.
 @group(0) @binding(7) var<storage, read_write> tile_lights: array<u32>;
-// (shadow_main in a frame of several worlds: where its ground lies in each world's path, gx_off on.)
+// (A frame of several worlds, for mix_main and shadow_main: render::Ctx::gpu_worlds' table, then
+// render::Bounds::gpu_words.)
 @group(0) @binding(8) var<storage, read> lights: array<f32>;
 @group(0) @binding(9) var<uniform> G: Geom;
 // raster_main's meeting place for big and small triangles: 3 words per pixel (see raster_main).
@@ -286,15 +286,13 @@ fn ground_to(g: GPix, j: u32, s: f32) -> vec2<f32> {
     return vec2<f32>(rnd(s * (o.x - g.x)), rnd(s * (o.d - g.d)));
 }
 
+// Caster c's plane k (22: u, 25: v, 28: t; 31, 34: the contact oval) at ground (gx, gd):
+// render::Caster::on_pic and on_oval.
+fn plane_at(c: u32, k: u32, gx: f32, gd: f32) -> f32 { return rnd(rnd(rnd(cf(c, k) * gx) + rnd(cf(c, k + 1u) * gd)) + cf(c, k + 2u)); }
+
 // The (t, u, v) where the sun's ray from ground (gx, gd) meets caster c's picture.
 fn on_pic(c: u32, gx: f32, gd: f32) -> vec3<f32> {
-    let c0 = vec3<f32>(cf(c, 22u), cf(c, 23u), cf(c, 24u));
-    let nrm = vec3<f32>(cf(c, 33u), cf(c, 34u), cf(c, 35u));
-    let t = div(dot3g(nrm, vec3<f32>(c0.x - gx, c0.y, c0.z - gd)), cf(c, 36u));
-    let q = vec3<f32>(rnd(gx + rnd(G.sun_x * t)) - c0.x, rnd(G.sun_y * t) - c0.y, rnd(gd + rnd(G.sun_z * t)) - c0.z);
-    let u = rnd(dot3g(q, vec3<f32>(cf(c, 25u), cf(c, 26u), cf(c, 27u))) * cf(c, 31u));
-    let vv = rnd(dot3g(q, vec3<f32>(cf(c, 28u), cf(c, 29u), cf(c, 30u))) * cf(c, 32u));
-    return vec3<f32>(t, u, vv);
+    return vec3<f32>(plane_at(c, 28u, gx, gd), plane_at(c, 22u, gx, gd), plane_at(c, 25u, gx, gd));
 }
 
 @compute @workgroup_size(8, 8)
@@ -310,8 +308,9 @@ fn shadow_main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let part = G.shadow_mode >> 2u;
     // Across this world's path (another world's ground brought into it, as prop_shadows does).
     var gx = g.x;
-    let bx = x - G.gx_box.x; let by = y - G.gx_box.y;
-    if (G.shadow_mode & 1u) != 0u && (g.idr >> 8u) != W.realm && bx < G.gx_box.z && by < G.gx_box.w { gx = lights[G.gx_off + by * G.gx_box.z + bx]; }
+    if (G.shadow_mode & 1u) != 0u && id == ID_GROUND && (g.idr >> 8u) != W.realm {
+        gx = rnd(rnd(cam_xz_of((g.idr >> 8u) & 0xFFu, g.x, g.d).x - bend_of(W.realm, g.d)) - shear_mix(W.realm, g.d));
+    }
     let tile = (y / 16u) * G.tile_cols + x / 16u;
     let ntiles = G.tile_cols * ((W.height + 15u) / 16u);
     let b = G.cast_bins;
@@ -320,10 +319,8 @@ fn shadow_main(@builtin(global_invocation_id) gid: vec3<u32>) {
             let c = bins[b + ntiles + 1u + q];
             let shadow = cf(c, 5u);
             if cu(c, 8u) != 0u && x >= cu(c, 9u) && x <= cu(c, 11u) && y >= cu(c, 10u) && y <= cu(c, 12u) {
-                let dx = gx - cf(c, 0u); let dd = g.d - cf(c, 1u);
-                let ax = cf(c, 2u); let ad = cf(c, 3u);
-                let na = div(rnd(dx * ax) + rnd(dd * ad), cf(c, 4u));
-                let nb = div(rnd(dd * ax) - rnd(dx * ad), cf(c, 6u));
+                let na = plane_at(c, 31u, gx, g.d);
+                let nb = plane_at(c, 34u, gx, g.d);
                 // Under a prop a soft oval; along a fence's foot a soft strip.
                 var r2 = rnd(na * na) + rnd(nb * nb);
                 if cu(c, 37u) == 1u { r2 = select(1.0, rnd(nb * nb), abs(na) <= 1.0); }
@@ -331,10 +328,11 @@ fn shadow_main(@builtin(global_invocation_id) gid: vec3<u32>) {
             }
             if G.sun_on != 0u && cu(c, 13u) != 0u && x >= cu(c, 14u) && x <= cu(c, 16u) && y >= cu(c, 15u) && y <= cu(c, 17u) {
                 // Toward the sun from this bit of ground: where the ray meets the picture's plane.
-                let tuv = on_pic(c, gx, g.d);
-                if tuv.x <= 0.0 { continue; }
-                var u = tuv.y; let vv = tuv.z;
-                if !(u >= 0.0 && u < 1.0) || !(vv >= 0.0 && vv < 1.0) { continue; }
+                // u first, then v, then t: most rays miss the picture to one side.
+                var u = plane_at(c, 22u, gx, g.d);
+                if !(u >= 0.0 && u < 1.0) { continue; }
+                let vv = plane_at(c, 25u, gx, g.d);
+                if !(vv >= 0.0 && vv < 1.0) || plane_at(c, 28u, gx, g.d) <= 0.0 { continue; }
                 var a = 0.0;
                 if cu(c, 37u) == 1u {
                     // Averaged over the ground this pixel covers, so pickets far off do not shimmer.
@@ -437,4 +435,195 @@ fn tiles_main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_in
         workgroupBarrier();
     }
     if li == 0u { tile_lights[base] = count; }
+}
+
+// The worlds of a frame meeting in patches (render::RealmMix, render::Bounds::realm_mix), read
+// from `lights`: MIX_STRIDE words a world (render::Ctx::gpu_worlds: view::Bend::gpu_words, has a
+// ceiling, has walls, scroll, is there), then from MIX_HEAD render::Bounds::gpu_words' head
+// (anchor, seed, fork, strips on + 5, seams on + 4, restyle on + 4, -, where the regions, the calm
+// pieces and the edges start) and its lists.
+const MIX_STRIDE: u32 = 40u;
+const MIX_HEAD: u32 = 120u;
+const SEAM: f32 = 1.2;
+// render::SAME_X.
+const SAME_X: u32 = 0x80u;
+
+fn mw(k: u32) -> f32 { return lights[k]; }
+fn mn(k: u32) -> u32 { return u32(lights[k]); }
+
+// view::Bend::x of world r.
+fn bend_of(r: u32, d: f32) -> f32 {
+    let o = r * MIX_STRIDE;
+    var x = rnd(rnd(mw(o) * d) * d);
+    for (var k = 0u; k < mn(o + 1u); k++) {
+        let w = o + 2u + 6u * k;
+        x = x + rnd(mw(w) * rnd(rnd(sin(rnd(mw(w + 1u) * d) + mw(w + 2u)) - mw(w + 3u)) - rnd(rnd(mw(w + 5u) * d) * mw(w + 4u))));
+    }
+    return x;
+}
+// view::Bend::shear of world r.
+fn shear_mix(r: u32, d: f32) -> f32 {
+    let o = r * MIX_STRIDE;
+    if mw(o + 26u) == 0.0 { return 0.0; }
+    return rnd(mw(o + 28u) * max(d - mw(o + 27u), 0.0));
+}
+// view::Bend::cam_xz of world r.
+fn cam_xz_of(r: u32, x: f32, d: f32) -> vec2<f32> {
+    let o = r * MIX_STRIDE;
+    let cx = rnd(rnd(x + bend_of(r, d)) + shear_mix(r, d));
+    if mw(o + 29u) == 0.0 { return vec2<f32>(cx, d); }
+    let px = cx - mw(o + 30u);
+    let yc = mw(o + 31u); let ys = mw(o + 32u);
+    return vec2<f32>(rnd(rnd(yc * px) - rnd(ys * d)), rnd(rnd(ys * px) + rnd(yc * d)));
+}
+// RealmMix::has: whether world r draws surfaces like `id`.
+fn mix_has(r: u32, id: u32) -> bool {
+    let o = r * MIX_STRIDE;
+    if r >= 3u || mw(o + 36u) == 0.0 { return false; }
+    if id == ID_GROUND { return true; }
+    if id == ID_CEILING { return mw(o + 33u) != 0.0; }
+    return mw(o + 34u) != 0.0;
+}
+
+// A convex piece at k (a count, then each half-plane's a, b, c): whether (x, z) is in it.
+fn piece_in(k: u32, x: f32, z: f32) -> bool {
+    for (var h = 0u; h < mn(k); h++) {
+        let q = k + 1u + 3u * h;
+        if rnd(rnd(mw(q) * x) + rnd(mw(q + 1u) * z)) + mw(q + 2u) < 0.0 { return false; }
+    }
+    return true;
+}
+fn piece_len(k: u32) -> u32 { return 1u + 3u * mn(k); }
+
+// Bounds::region_of.
+fn region_of(x: f32, z: f32) -> u32 {
+    var k = mn(MIX_HEAD + 20u);
+    let worlds = mn(k);
+    k += 1u;
+    for (var r = 0u; r < worlds; r++) {
+        let pieces = mn(k);
+        k += 1u;
+        var inside = false;
+        for (var q = 0u; q < pieces; q++) {
+            if !inside && piece_in(k, x, z) { inside = true; }
+            k += piece_len(k);
+        }
+        if inside { return r; }
+    }
+    return 0u;
+}
+fn in_calm(x: f32, z: f32) -> bool {
+    var k = mn(MIX_HEAD + 21u);
+    let pieces = mn(k);
+    k += 1u;
+    for (var q = 0u; q < pieces; q++) {
+        if piece_in(k, x, z) { return true; }
+        k += piece_len(k);
+    }
+    return false;
+}
+// Bounds::on_branch: 1 or 2, or 0 for neither.
+fn mix_on_branch(x: f32, z: f32) -> u32 {
+    if mw(MIX_HEAD + 3u) == 0.0 { return 0u; }
+    let zb = mw(MIX_HEAD + 4u);
+    if z <= zb { return 0u; }
+    let dl = abs(x - rnd(mw(MIX_HEAD + 5u) * (z - zb)));
+    let dr = abs(x - rnd(mw(MIX_HEAD + 6u) * (z - zb)));
+    let hl = mw(MIX_HEAD + 7u); let hr = mw(MIX_HEAD + 8u);
+    var l = dl < hl - 0.45; var r = dr < hr - 0.45;
+    if !l && !r { l = dl < hl + 0.45; r = dr < hr + 0.45; }
+    if l && !r { return 1u; }
+    if r && !l { return 2u; }
+    return 0u;
+}
+
+// Bounds::realm_mix's answer: the world shown, the other world at a soft edge, and its share.
+struct Mixed { to: u32, other: u32, k: f32 }
+
+// Bounds::seam.
+fn mix_seam(r: u32, x: f32, z: f32) -> Mixed {
+    if mw(MIX_HEAD + 9u) == 0.0 { return Mixed(r, r, 0.0); }
+    let zb = mw(MIX_HEAD + 10u); let sd = mw(MIX_HEAD + 11u); let cd = mw(MIX_HEAD + 12u); let apex = mw(MIX_HEAD + 13u);
+    let split = div(x - (rnd(sd * (z - zb)) + cd), sqrt(1.0 + rnd(sd * sd)));
+    if r == 0u && z > zb - SEAM && z <= zb { return Mixed(0u, select(2u, 1u, split < 0.0), rnd(0.5 * (1.0 - div(zb - z, SEAM)))); }
+    if r != 0u && z >= zb && z < zb + SEAM { return Mixed(r, 0u, rnd(0.5 * (1.0 - div(z - zb, SEAM)))); }
+    if r != 0u && z < apex && abs(split) < SEAM * 0.6 { return Mixed(r, 3u - r, rnd(0.5 * (1.0 - div(abs(split), SEAM * 0.6)))); }
+    return Mixed(r, r, 0.0);
+}
+// The three octaves of patch noise `realm_mix` and `road_look` share.
+fn patch_noise(x: f32, w: f32, seed: f32) -> f32 {
+    return rnd(rnd(value_noise(x * 0.35 + seed * 0.37, w * 0.35) * 0.55) + rnd(value_noise(x * 1.1 + 31.0, w * 1.1 + seed) * 0.3))
+        + rnd(value_noise(x * 3.7 + 7.0, w * 3.7 - 11.0) * 0.15);
+}
+// Bounds::realm_mix.
+fn realm_mix(x: f32, z: f32) -> Mixed {
+    let b = mix_on_branch(x, z);
+    if b != 0u {
+        let zb = mw(MIX_HEAD + 4u);
+        if z < zb + SEAM { return Mixed(b, 0u, rnd(0.5 * (1.0 - div(z - zb, SEAM)))); }
+        return Mixed(b, b, 0.0);
+    }
+    let r = region_of(x, z);
+    if in_calm(x, z) { return mix_seam(r, x, z); }
+    var k = mn(MIX_HEAD + 22u);
+    let edges = mn(k);
+    k += 1u;
+    for (var e = 0u; e < edges; e++) {
+        let next = k + 6u + piece_len(k + 6u);
+        let a = mn(k + 4u); let bw = mn(k + 5u);
+        let width = mw(k + 3u);
+        let s = rnd(rnd(mw(k) * x) + rnd(mw(k + 1u) * z)) + mw(k + 2u);
+        if (r == a || r == bw) && piece_in(k + 6u, x, z) && abs(s) < width {
+            let n = patch_noise(x, z + mw(MIX_HEAD), mw(MIX_HEAD + 1u));
+            let d = rnd(div(s, width) * 0.5) + 0.5 - n;
+            return Mixed(select(a, bw, d > 0.0), select(bw, a, d > 0.0), 0.5 * (1.0 - smoothstep_r(0.0, 0.07, abs(d))));
+        }
+        k = next;
+    }
+    return Mixed(r, r, 0.0);
+}
+// Bounds::road_look.
+fn road_look(x: f32, w: f32, z: f32) -> f32 {
+    if mw(MIX_HEAD + 14u) == 0.0 { return 0.0; }
+    let past = z - mw(MIX_HEAD + 15u) - mw(MIX_HEAD + 16u);
+    let band = mw(MIX_HEAD + 17u);
+    if past <= -band { return 1.0; }
+    if past >= band * 1.1 { return 0.0; }
+    return 1.0 - smoothstep_r(-0.07, 0.07, div(past, band) - patch_noise(x, w, mw(MIX_HEAD + 18u)));
+}
+
+// render::RealmMix::mix over each pixel: its world, moved into that world's path frame, and the
+// soft patch edge's other world and share into the masks after the sun and contact shadow.
+@compute @workgroup_size(8, 8)
+fn mix_main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    if gid.x >= W.width || gid.y >= W.height { return; }
+    let n = W.width * W.height;
+    let i = gid.y * W.width + gid.x;
+    var g = gbuf[i];
+    let id = g.idr & 0xFFu;
+    var soft_o = 0u; var soft_k = 0.0;
+    if id == ID_GROUND || id == ID_WALL_L || id == ID_WALL_R || id == ID_CEILING {
+        let own = (g.idr >> 8u) & 0xFFu;
+        var realm = own;
+        let cam = cam_xz_of(own, g.x, g.d);
+        let m = realm_mix(cam.x, cam.y);
+        // A fork's walls are never handed or blended across the split between its branches.
+        let walls = mw(MIX_HEAD + 2u) != 0.0 && (id == ID_WALL_L || id == ID_WALL_R) && own > 0u;
+        let to = select(m.to, own, walls && m.to > 0u && m.to != own);
+        let other = select(m.other, own, walls && m.other > 0u && m.other != own);
+        if to != realm && mix_has(to, id) {
+            g.x = rnd(rnd(cam.x - bend_of(to, g.d)) - shear_mix(to, g.d));
+            realm = to;
+        }
+        if m.k > 0.0 && other != realm && mix_has(other, id) { soft_o = other; soft_k = m.k; }
+        // Near a fork's junction its branches' ground is drawn as the first world would draw it.
+        if id == ID_GROUND && realm != 0u {
+            let look = road_look(g.x, g.d + mw(realm * MIX_STRIDE + 35u), cam.y);
+            if look > 0.0 && look >= soft_k { soft_o = SAME_X; soft_k = look; }
+        }
+        g.idr = (g.idr & ~0xFF00u) | (realm << 8u);
+        gbuf[i] = g;
+    }
+    masks[2u * n + 2u * i] = bitcast<f32>(soft_o);
+    masks[2u * n + 2u * i + 1u] = soft_k;
 }

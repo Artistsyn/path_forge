@@ -231,6 +231,16 @@ impl Bend {
     /// `View::shear_x`.
     #[inline]
     pub fn shear(&self, d: f32) -> f32 { match self.shear { Some((z0, k)) => k * (d - z0).max(0.0), None => 0.0 } }
+    /// Its numbers as geom.wgsl's `bend_of` and `cam_xz_of` read them: the curve, the count of
+    /// waves and each wave's six, then the shear (on, z0, k) and the turn (on, cam_x, yaw cos, sin).
+    pub fn gpu_words(&self) -> [f32; 33] {
+        let mut out = [0.0; 33];
+        (out[0], out[1]) = (self.bk, self.n as f32);
+        for (k, wave) in self.wind.iter().enumerate() { out[2 + 6 * k..8 + 6 * k].copy_from_slice(wave); }
+        if let Some((z0, k)) = self.shear { out[26..29].copy_from_slice(&[1.0, z0, k]); }
+        if let Some(turn) = self.turned { out[29] = 1.0; out[30..33].copy_from_slice(&turn); }
+        out
+    }
     /// `View::to_cam`'s x and z (its height is not needed here).
     #[inline]
     pub fn cam_xz(&self, x: f32, d: f32) -> [f32; 2] {

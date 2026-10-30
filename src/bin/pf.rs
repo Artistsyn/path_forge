@@ -499,6 +499,7 @@ fn cmd_bench(args: &Args) -> Result<(), String> {
 /// `--speed` m/s (2.2) and `--size WxH` (480x270), on the GPU unless `--backend cpu`, pipelined
 /// as a live road draws unless `--sync`. Prints each stretch's frame times and, with
 /// `--stages`, where they went; `--dump DIR` writes every 40th frame (and the next) there.
+/// `--hour` and `--grade` set the time of day and the look, as a game's cutscene does.
 /// `pf walkbench --file world.journey.json --from warrens@warrens_lane --take right`
 fn cmd_walkbench(args: &Args) -> Result<(), String> {
     use path_forge::runtime::Runtime;
@@ -518,6 +519,9 @@ fn cmd_walkbench(args: &Args) -> Result<(), String> {
     // Props painted ahead of the walk, as a game's live road does (`--noahead` paints them as drawn).
     rt.set_paint_ahead(!args.opts.contains_key("noahead"));
     if !args.opts.contains_key("nofloor") { rt.set_visibility_floor(Some(0.15)); }
+    // `--hour H` and `--grade JSON`: the time of day and the look a game's cutscene sets.
+    if let Some(h) = args.opts.get("hour") { rt.set_hour(Some(h.parse().map_err(|_| "--hour: a number")?)); }
+    if let Some(g) = args.opts.get("grade") { rt.set_grade(Some(g))?; }
     let stages = args.opts.contains_key("stages");
     rt.set_profile(stages);
     // `--stages gpu`: each GPU pass timed too.
@@ -527,21 +531,27 @@ fn cmd_walkbench(args: &Args) -> Result<(), String> {
     let mut frames: Vec<(String, f32, f32)> = Vec::new();
     let mut st: Vec<(String, Vec<(&'static str, f64)>)> = Vec::new();
     let (mut walked, mut gone, mut chose, mut done_at): (f32, bool, bool, Option<f32>) = (0.0, false, false, None);
+    // `--frames N`: stop after N frames (a stretch of one place rather than the way on).
+    let most: usize = opt(args, "frames", usize::MAX)?;
+    let dump_every: usize = opt::<usize>(args, "every", 40)?.max(1);
+    // `--choose M`: the branch is taken M metres before the last moment (6; a game commits late).
+    let choose_at: f32 = opt(args, "choose", 6.0)?;
     for _ in 0..60 * 600 {
+        if frames.len() >= most { break; }
         rt.step(dt, speed);
         walked += speed * dt;
         let s = rt.state();
         if !gone && walked >= before { rt.go()?; gone = true; if let Some(b) = args.opts.get("bar") { let shut = Some(Barrier::default()); if b == "left" { rt.bar(shut, None); } else { rt.bar(None, shut); } } }
-        if gone && !chose && s.choose_within.is_some_and(|m| m < 6.0) { rt.choose(take); chose = true; }
+        if gone && !chose && s.choose_within.is_some_and(|m| m < choose_at) { rt.choose(take); chose = true; }
         if gone && done_at.is_none() && s.progress.is_none() && walked > before + 1.0 { done_at = Some(walked); }
         if done_at.is_some_and(|d| walked > d + after) { break; }
         let label = format!("{}{}", if s.progress.is_some() { "~" } else { "" }, s.stop.clone().unwrap_or_default());
         let t = Instant::now();
         let img = rt.frame(w, h);
         let ms = t.elapsed().as_secs_f32() * 1000.0;
-        // `--dump DIR`: every 40th frame and the one after it as PNGs, so a pipelined frame (the
-        // step before's) can be checked against a `--sync` run's.
-        if let Some(dir) = args.opts.get("dump").filter(|_| frames.len() % 40 <= 1) {
+        // `--dump DIR`: every 40th frame (`--every N`) and the one after it as PNGs, so a
+        // pipelined frame (the step before's) can be checked against a `--sync` run's.
+        if let Some(dir) = args.opts.get("dump").filter(|_| frames.len() % dump_every <= 1) {
             save_png(&format!("{dir}/{:05}.png", frames.len()), w as usize, h as usize, img)?;
         }
         if stages {

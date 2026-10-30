@@ -44,6 +44,8 @@ pub struct Runtime {
     /// Metres walked since the walk began (`WalkState::walked`).
     walked: f64,
     active: Option<Active>,
+    /// After `turn_into` left the walk on unstarted: metres from its start to where it hands over.
+    onward: Option<f32>,
     journey: Option<(Journey, Option<PathBuf>, String)>,
     /// Real seconds one day lasts when the game lets the days pass (`set_day_length`); 0 holds the hour.
     day_seconds: f32,
@@ -65,12 +67,17 @@ pub struct Runtime {
     lift: f32,
     /// Painting ahead of the walk (`set_paint_ahead`).
     ahead: Option<Ahead>,
+    /// `warm_order` from the stop it was worked out at (`near_stops`): every frame asks, and it
+    /// changes only as the walk reaches a stop.
+    near: Option<(String, std::sync::Arc<std::collections::HashMap<String, u32>>)>,
+    /// Where the road ends (`set_end`): the walk's metres (`walked`) at the wall, and the wall.
+    end: Option<(f64, tr::Barrier)>,
 }
 
 /// A thread of its own painting the props of the stops near the walk (`warm_next`'s), so the stop's
 /// first draw on the road's thread finds them painted: a cold stop's procedural props took up to
 /// 0.9 s to paint on a phone, in the middle of the walk. What it paints goes into the pictures
-/// every renderer shares (`sprites::paint_prop_shared`).
+/// every renderer shares (`sprites::paint_prop_ahead`).
 struct Ahead {
     tx: std::sync::mpsc::Sender<(String, Scene, Option<PathBuf>)>,
     done: std::sync::Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
@@ -126,7 +133,7 @@ impl Ahead {
 /// the current rayon pool) into the shared pictures; image files are read on the way.
 fn paint_props_of(scene: &Scene, dir: Option<&Path>, defs: &mut crate::world::propdefs::PropDefs, sprites: &mut crate::world::sprites::SpriteCache) {
     use crate::scene::PropKind;
-    use crate::world::sprites::{paint_asteroid_shared, paint_prop_shared, VARIANTS};
+    use crate::world::sprites::{paint_asteroid_ahead, paint_prop_ahead, VARIANTS};
     use rayon::prelude::*;
     let mut jobs: Vec<(PropKind, scene::Rgb, bool)> = Vec::new();
     for p in scene.props.iter().filter(|p| p.enabled) {
@@ -138,7 +145,14 @@ fn paint_props_of(scene: &Scene, dir: Option<&Path>, defs: &mut crate::world::pr
         }
     }
     let all: Vec<(PropKind, scene::Rgb, bool, u32)> = jobs.into_iter().flat_map(|(k, t, r)| (0..VARIANTS).map(move |v| (k, t, r, v))).collect();
-    all.par_iter().for_each(|&(k, t, rock, v)| { if rock { paint_asteroid_shared(t, v); } else { paint_prop_shared(k, t, v); } });
+    // Once there is no room left to keep them, the rest are not painted (the road's thread paints
+    // what it then lacks, when it draws it).
+    let full = std::sync::atomic::AtomicBool::new(false);
+    all.par_iter().for_each(|&(k, t, rock, v)| {
+        if full.load(std::sync::atomic::Ordering::Relaxed) { return; }
+        let kept = if rock { paint_asteroid_ahead(t, v) } else { paint_prop_ahead(k, t, v) };
+        if !kept { full.store(true, std::sync::atomic::Ordering::Relaxed); }
+    });
 }
 
 /// The camera swinging from one view to another at the game's asking: how, from where, to what
@@ -184,6 +198,12 @@ pub struct WalkState {
     pub progress: Option<f32>,
     /// A fork is ahead and no branch has been chosen: metres left to choose before the default is taken.
     pub choose_within: Option<f32>,
+    /// Metres walked into the transition or fork under way.
+    pub travel: Option<f32>,
+    /// Metres from the start of the transition or fork under way to where it hands over to the
+    /// next place: the crossing's boundary, the fork's junction. After `turn_into` with the walk on
+    /// not yet started, that walk's.
+    pub handover: Option<f32>,
     /// The walking speed of the scene the camera is in, m/s.
     pub speed: f32,
     /// At a journey stop that leads nowhere, with nothing under way.
@@ -235,7 +255,7 @@ impl Runtime {
     /// A scene whose files (sprites, kits, grades) are named relative to `base_dir`.
     pub fn new(scene: Scene, base_dir: Option<PathBuf>) -> Runtime {
         let home = scene.camera.clone();
-        Runtime { scene, base_dir, renderer: WorldRenderer::default(), rgba: Vec::new(), pipelined: false, distance: 0.0, time: 0.0, walked: 0.0, active: None, journey: None, day_seconds: 0.0, played: 0.0, swinging: None, home, cold: Vec::new(), wanted: Vec::new(), floor: None, lift: 1.0, probes: Vec::new(), ahead: None }
+        Runtime { scene, base_dir, renderer: WorldRenderer::default(), rgba: Vec::new(), pipelined: false, distance: 0.0, time: 0.0, walked: 0.0, active: None, onward: None, journey: None, day_seconds: 0.0, played: 0.0, swinging: None, home, cold: Vec::new(), wanted: Vec::new(), floor: None, lift: 1.0, probes: Vec::new(), ahead: None, near: None, end: None }
     }
 
     /// Draw frames on the GPU, on a device the game hands over (with wgpu 25, the same one it
@@ -336,8 +356,8 @@ impl Runtime {
     /// whole journey up front stalled the frames the game was waiting on for many seconds; the
     /// ring moves with the walk instead. False once nothing near is left (and with no journey).
     pub fn warm_next(&mut self, width: u32, height: u32) -> bool {
-        let Some((j, dir, at)) = self.journey.as_ref() else { return false };
-        let near = warm_order(j, at);
+        let Some(near) = self.near_stops() else { return false };
+        let Some((j, dir, _)) = self.journey.as_ref() else { return false };
         // With painting ahead, every near stop is asked for, and one is drawn only once painted.
         if let Some(a) = self.ahead.as_mut() {
             let mut order: Vec<(&String, u32)> = self.wanted.iter().rev().map(|s| (s, 0)).chain(self.cold.iter().filter_map(|s| near.get(s).map(|d| (s, *d)))).collect();
@@ -369,14 +389,26 @@ impl Runtime {
     /// `warm_next`'s draw of one stop (nothing more to do once it is got ready ahead: its pictures
     /// are sent to the GPU as they come into view).
     fn warm_stop(&mut self, stop: String, width: u32, height: u32) -> bool {
-        let Some((j, dir, at)) = self.journey.as_ref() else { return false };
-        if self.ahead.is_some() { return !self.wanted.is_empty() || { let near = warm_order(j, at); self.cold.iter().any(|s| near.contains_key(s)) }; }
+        let Some(near) = self.near_stops() else { return false };
+        let Some((j, dir, _)) = self.journey.as_ref() else { return false };
+        if self.ahead.is_some() { return !self.wanted.is_empty() || self.cold.iter().any(|s| near.contains_key(s)); }
         if let Ok((scene, sdir)) = j.scene_of(&stop, dir.as_deref()) {
             self.renderer.scene_mean(&scene, sdir.clone());
             let opts = RenderOptions { base_dir: sdir, ..self.opts(0.0, width, height) };
             let _ = self.renderer.render(&scene, 0.0, &opts);
         }
-        !self.wanted.is_empty() || { let near = warm_order(j, at); self.cold.iter().any(|s| near.contains_key(s)) }
+        !self.wanted.is_empty() || self.cold.iter().any(|s| near.contains_key(s))
+    }
+
+    /// The journey's stops near the walk, with how far (`warm_order`), worked out again only when
+    /// the walk is at another stop. (Worked out every frame it took a twentieth of the road's
+    /// thread on a large journey.)
+    fn near_stops(&mut self) -> Option<std::sync::Arc<std::collections::HashMap<String, u32>>> {
+        let (j, _, at) = self.journey.as_ref()?;
+        if let Some((_, near)) = self.near.as_ref().filter(|(from, _)| from == at) { return Some(near.clone()); }
+        let near = std::sync::Arc::new(warm_order(j, at));
+        self.near = Some((at.clone(), near.clone()));
+        Some(near)
     }
 
     /// Shut the fork ahead's branches (left, right) `BAR_PAST` metres past the junction, each in
@@ -390,6 +422,11 @@ impl Runtime {
         walk.barred = [left, right];
         true
     }
+
+    /// Close the road at `walked` metres of the walk (`WalkState::walked`) with a wall across it
+    /// (`Barrier`, its picture in its foot), until taken off (None): a dead end the game holds
+    /// the walk short of, seen to end.
+    pub fn set_end(&mut self, end: Option<(f64, tr::Barrier)>) { self.end = end; }
 
     /// Never let the road fall darker than `brightness` (the mean perceived brightness, 0..1, of
     /// the frame below the horizon band, where the path and what stands on it are): exposure is
@@ -520,6 +557,7 @@ impl Runtime {
             Some(Active::Fork { left, right, walk, travel, clock }) => (if walk.branch(travel).is_some_and(|(b, _)| b == Branch::Right) { *right } else { *left }, clock),
             None => return,
         };
+        self.onward = None;
         self.scene = next.scene;
         self.home = self.scene.camera.clone();
         self.base_dir = next.dir;
@@ -608,6 +646,7 @@ impl Runtime {
     /// The current frame of the runtime's own walk, `width` x `height` RGBA8.
     pub fn frame(&mut self, width: u32, height: u32) -> &[u8] {
         let opts = RenderOptions { size: Some((width.max(1), height.max(1))), probes: self.probes.clone(), pipelined: self.pipelined, ..RenderOptions::default() };
+        self.renderer.set_end(self.end.as_ref().map(|(at, wall)| ((at - self.walked) as f32, wall.clone())));
         let a = Place { scene: &self.scene, dir: self.base_dir.as_deref() };
         let img = match &self.active {
             None => {
@@ -678,6 +717,7 @@ impl Runtime {
     /// without a journey.
     pub fn go(&mut self) -> Result<Planned, String> {
         self.finish();
+        self.onward = None;
         let (j, dir, at) = self.journey.as_ref().ok_or("no journey loaded")?;
         let stop = j.stops.get(at).ok_or_else(|| format!("no stop `{at}`"))?;
         match stop.next.clone() {
@@ -706,17 +746,64 @@ impl Runtime {
         if !j.stops.contains_key(stop) { return Err(format!("no stop `{stop}`")); }
         let (scene, sdir) = j.scene_of(stop, dir.as_deref())?;
         self.set_scene_in(scene, sdir);
+        self.onward = None;
         self.distance = 0.0;
         if let Some((_, _, at)) = self.journey.as_mut() { *at = stop.to_owned(); }
         Ok(())
     }
 
     /// `warp`, but `metres` into the stop's scene: turning round partway along a place, the walk
-    /// back starts where the player stood.
+    /// back starts where the player stood. Negative metres stand short of the stop's start, on
+    /// its ground (turned round past a place's end, before the next one's boundary).
     pub fn warp_at(&mut self, stop: &str, metres: f32) -> Result<(), String> {
         self.warp(stop)?;
-        self.distance = metres.max(0.0);
+        self.distance = metres.rem_euclid(self.loop_length().max(1e-3));
         Ok(())
+    }
+
+    /// Turn round onto `stop`, `ahead` metres short of where the walk on from it hands over (the
+    /// boundary of its crossing, the junction of its fork): the walk on starts partway when it is
+    /// that close, and otherwise waits, the stop's end that much further short of it
+    /// (`WalkState::handover` says how far past the end it is). A stop that leads nowhere is
+    /// warped to.
+    pub fn turn_into(&mut self, stop: &str, ahead: f32) -> Result<(), String> {
+        self.start_on(stop, |handover| handover - ahead.max(0.0))
+    }
+
+    /// Cut to `stop` with its walk on already `travel` metres under way: turned round short of
+    /// where a place was walked into, the crossing or fork back out of it is that far along.
+    pub fn walk_on(&mut self, stop: &str, travel: f32) -> Result<(), String> {
+        self.start_on(stop, |_| travel.max(0.0))
+    }
+
+    /// Warp to `stop` and start its walk on at the travel `into` gives for its hand-over; one that
+    /// would start before its start is not started (`onward` keeps the hand-over).
+    fn start_on(&mut self, stop: &str, into: impl Fn(f32) -> f32) -> Result<(), String> {
+        self.warp(stop)?;
+        if self.go().is_err() { return Ok(()); }
+        let Some(handover) = self.handover() else { return Ok(()) };
+        let into = into(handover);
+        if into < 0.0 {
+            self.active = None;
+            self.onward = Some(handover);
+            return Ok(());
+        }
+        match &mut self.active {
+            Some(Active::Cross { travel, .. }) => *travel = into,
+            Some(Active::Fork { travel, walk, .. }) => { *travel = into; walk.begun_at(into); }
+            None => {}
+        }
+        self.distance += into;
+        Ok(())
+    }
+
+    /// Metres from the start of the walk under way to where it hands over (`WalkState::handover`).
+    fn handover(&self) -> Option<f32> {
+        match &self.active {
+            Some(Active::Cross { walk, .. }) => Some(walk.crossing.swing_out + walk.crossing.approach),
+            Some(Active::Fork { walk, .. }) => Some(walk.plan.approach),
+            None => None,
+        }
     }
 
     // ── Day and night ──────────────────────────────────────────────────────
@@ -766,7 +853,9 @@ impl Runtime {
             Some(Active::Fork { walk, travel, .. }) => (Some((travel / walk.length()).min(1.0)), walk.chosen.is_none().then(|| (walk.decide_by() - travel).max(0.0))),
         };
         let end = self.active.is_none() && self.journey.as_ref().is_some_and(|(j, _, at)| j.stops.get(at).is_some_and(|s| matches!(s.next, Next::End)));
-        WalkState { scene: self.scene.name.clone(), distance: self.distance, walked: self.walked, time: self.time, stop: self.journey.as_ref().map(|j| j.2.clone()), progress, choose_within, speed: self.scene.motion.speed, end, day: self.day(), intro_left: self.intro_left(), swing_left: self.swing_left(),
+        let travel = match &self.active { Some(Active::Cross { travel, .. } | Active::Fork { travel, .. }) => Some(*travel), None => None };
+        WalkState { scene: self.scene.name.clone(), distance: self.distance, walked: self.walked, time: self.time, stop: self.journey.as_ref().map(|j| j.2.clone()), progress, choose_within,
+            travel, handover: self.handover().or(self.onward), speed: self.scene.motion.speed, end, day: self.day(), intro_left: self.intro_left(), swing_left: self.swing_left(),
             side_paths: if self.active.is_none() { crate::world::render::side_paths(&self.scene, self.distance - 6.0, self.distance + 40.0).into_iter().map(|(w, side)| (w - self.distance, side)).collect() } else { Vec::new() } }
     }
 
@@ -1071,6 +1160,59 @@ mod tests {
         let mut bad = j.clone();
         bad.stops.insert("lost".into(), crate::journey::Stop { scene: "missing.json".into(), next: Next::Go { to: "nowhere".into(), transition: Transition::default() } });
         assert_eq!(bad.problems(Some(&dir)).len(), 3, "{:?}", bad.problems(Some(&dir)));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn turned_round_short_of_a_boundary_or_junction_the_walk_on_starts_that_far_short_of_it() {
+        let dir = std::env::temp_dir().join(format!("pf_turn_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut j = Journey { version: 1, name: "turn".into(), start: "crypt".into(), ..Journey::default() };
+        j.stops.insert("crypt".into(), crate::journey::Stop { scene: "preset:Stone Dungeon".into(), next: Next::Go { to: "woods".into(), transition: Transition::default() } });
+        j.stops.insert("woods".into(), crate::journey::Stop { scene: "preset:Forest Path".into(), next: Next::Fork { left: "crypt".into(), right: "sands".into(), fork: ForkChoice::default() } });
+        j.stops.insert("sands".into(), crate::journey::Stop { scene: "preset:Desert Canyon".into(), next: Next::End });
+        let path = dir.join("turn.journey.json");
+        j.save(&path).unwrap();
+        let mut r = Runtime::from_journey(&path).unwrap();
+        // Walking a crossing, the state says how far in it is and where its boundary is.
+        r.go().unwrap();
+        r.step(1.0, 2.5);
+        let (travel, boundary) = (r.state().travel, r.state().handover.expect("a boundary"));
+        assert_eq!(travel, Some(2.5));
+        assert!(boundary > 2.5, "{boundary}");
+        // Turned round 3 m short of the crypt's boundary: its crossing is under way, that far short.
+        r.turn_into("crypt", 3.0).unwrap();
+        let st = r.state();
+        assert_eq!(st.stop.as_deref(), Some("crypt"));
+        assert!((st.travel.unwrap() - (boundary - 3.0)).abs() < 1e-4 && st.handover == Some(boundary), "{st:?}");
+        // Further than the boundary is from the crossing's start: nothing under way yet, and the
+        // state says how far past the stop's end the boundary will be.
+        r.turn_into("crypt", boundary + 7.0).unwrap();
+        let st = r.state();
+        assert_eq!((st.stop.as_deref(), st.travel, st.handover, st.progress), (Some("crypt"), None, Some(boundary), None));
+        // Walking on again starts the crossing from its start; then the state is the crossing's.
+        r.go().unwrap();
+        assert_eq!((r.state().travel, r.state().handover), (Some(0.0), Some(boundary)));
+        // A fork's hand-over is its junction.
+        r.turn_into("woods", 5.0).unwrap();
+        let st = r.state();
+        assert!(st.choose_within.is_some(), "the fork is ahead: {st:?}");
+        assert!((st.handover.unwrap() - st.travel.unwrap() - 5.0).abs() < 1e-4, "{st:?}");
+        // Inside the last metres where the choice is made: it is made where the walk begins, the
+        // camera not yet turned onto a branch.
+        r.turn_into("woods", 3.0).unwrap();
+        assert_eq!(r.state().choose_within, Some(0.0));
+        let Some(Active::Fork { walk, travel, .. }) = &r.active else { panic!("no fork under way") };
+        assert!(walk.at(*travel).3 < 1e-4, "already turned {}", walk.at(*travel).3);
+        // Cut in with the walk on partway: the crypt's crossing 4 m along.
+        r.walk_on("crypt", 4.0).unwrap();
+        assert_eq!((r.state().stop.as_deref(), r.state().travel, r.state().handover), (Some("crypt"), Some(4.0), Some(boundary)));
+        // A stop that leads nowhere is simply warped to.
+        r.turn_into("sands", 2.0).unwrap();
+        assert_eq!((r.state().stop.as_deref(), r.state().travel, r.state().handover), (Some("sands"), None, None));
+        // Short of a stop's start, on its ground.
+        r.warp_at("crypt", -4.0).unwrap();
+        assert!((r.state().distance - (r.loop_length() - 4.0)).abs() < 1e-3);
         std::fs::remove_dir_all(&dir).ok();
     }
 

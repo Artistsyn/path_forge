@@ -47,6 +47,10 @@ pub struct Transition {
     /// (0 = auto, 2.5), with its `hold`, `ease`, `overshoot`, `orbit` and `bars` (`from` is not
     /// used: the views are the scenes'). Negative seconds: no swing, the views crossfade at the end.
     pub swing: Swing,
+    /// A door's size where the boundary is a wall between two rooms: half its width and its
+    /// height, metres. 0 each = as wide and as high as the rooms allow (the smaller room's
+    /// whole end). A door narrower than the rooms leaves the first room an end wall with it in.
+    pub door: [f32; 2],
 }
 impl Default for Transition {
     fn default() -> Self {
@@ -54,6 +58,7 @@ impl Default for Transition {
             threshold: Threshold::Auto, approach_m: 0.0, overshoot_m: 1.0, blend_m: 0.0, facade: None, facade_height: 0.0,
             light_spill: 1.0, adaptation: 1.0, camera_blend_m: 4.0, style: StyleFrom::Auto, marker: Marker::Auto, seed: 7,
             swing: Swing { hold: 0.0, ..Swing::default() },
+            door: [0.0, 0.0],
         }
     }
 }
@@ -135,6 +140,9 @@ pub struct Crossing {
     pub swing_in: f32,
     #[serde(skip)]
     pub swing: Swing,
+    /// The door's half width and height, metres; 0 for as large as the rooms allow
+    /// (`Transition::door`).
+    pub door: [f32; 2],
     /// What was chosen and why, in plain words.
     pub notes: Vec<String>,
     /// Things that will not look right, with what to change.
@@ -195,6 +203,11 @@ pub fn visibility(s: &Scene) -> f32 {
     if roofed(s) || s.walls.enabled { v = v.min(45.0); }
     v
 }
+
+/// Metres past a boundary over which the world beyond turns from the light it was seen in (the
+/// fog, sky and light of the world the camera came from) to its own: seen from a night road,
+/// a place lit by day is night at its threshold, and the day comes in as the walk goes in.
+pub const LIGHT_BLEND_M: f32 = 10.0;
 
 /// Make every choice for a transition from `a` into `b`.
 pub fn plan(a: &Scene, b: &Scene, t: &Transition) -> Crossing {
@@ -272,6 +285,8 @@ pub fn plan(a: &Scene, b: &Scene, t: &Transition) -> Crossing {
             let height = if t.facade_height > 0.0 { t.facade_height }
                 else if front { if streeted(b) { b.walls.height } else { a.walls.height } }
                 else if threshold == Threshold::CaveMouth { (b_top * 2.6).max(b_top + 5.0) } else { (b_top * 1.8).max(b_top + 2.5) };
+            // A roofed world's end wall closes it up to its own ceiling, or the next sky shows over it.
+            let height = if ra && t.facade_height <= 0.0 { height.max(a.ceiling.height) } else { height };
             if front {
                 notes.push(format!("Either side of the way in stand buildings of {}, {height:.0} m at the street and taller and lower beyond.", material.pattern.name().to_lowercase()));
             }
@@ -355,14 +370,14 @@ pub fn plan(a: &Scene, b: &Scene, t: &Transition) -> Crossing {
         notes.push("The scenes look from different angles: the views crossfade at the end (give the transition a swing to have the camera come round instead).".into());
     }
 
-    // The walk must carry on past the boundary until the camera and the sky are wholly the second
-    // world's, so a clip ends exactly on its loop.
+    // The walk must carry on past the boundary until the camera, the sky and the light are
+    // wholly the second world's, so a clip ends exactly on its loop.
     let camera_blend = t.camera_blend_m.max(0.5);
-    let settle = camera_blend.max(if sky == SkyRule::Blend { blend.max(2.0) } else { 0.0 }).max(blend) + 1.0;
+    let settle = camera_blend.max(if sky == SkyRule::Blend { blend.max(2.0) } else { 0.0 }).max(blend).max(LIGHT_BLEND_M) + 1.0;
     let overshoot = t.overshoot_m.max(settle);
     Crossing {
         threshold, approach, overshoot, blend, taper, arch, rim, facade, spill, adaptation,
-        camera_blend, style, marker, sky, seed: t.seed, swing_out, swing_in, swing, notes, warnings,
+        camera_blend, style, marker, sky, seed: t.seed, swing_out, swing_in, swing, door: t.door, notes, warnings,
     }
 }
 
@@ -524,6 +539,11 @@ mod tests {
         assert!(matches!(c.threshold, Threshold::Doorway | Threshold::CaveMouth), "a roofed place opens onto the forest: {:?}", c.threshold);
         assert_eq!(c.sky, SkyRule::Second, "through the exit only the forest sky can be seen");
         assert!(c.facade.is_some());
+        // A lofty hall's end wall reaches its vault: no strip of the next sky over the exit.
+        let mut nave = preset("Stone Dungeon");
+        nave.ceiling.height = 9.0;
+        let c = plan(&nave, &preset("Forest Path"), &t);
+        assert!(c.facade.as_ref().is_some_and(|f| f.height >= 9.0), "{:?}", c.facade.as_ref().map(|f| f.height));
         let c = plan(&preset("Forest Path"), &preset("Desert Canyon"), &t);
         assert_eq!(c.threshold, Threshold::Open);
         assert!(c.blend > 0.0 && c.facade.is_none());

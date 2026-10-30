@@ -233,19 +233,28 @@ pub struct ForkWalk {
     pub chosen: Option<(Branch, f32)>,
     /// What shuts each branch (left, right), if anything: ways the game has barred.
     pub barred: [Option<crate::scene::transition::Barrier>; 2],
+    /// Begun past where the choice is made (`begun_at`): the travel it is made at instead.
+    pub late: Option<f32>,
 }
 
 impl ForkWalk {
     /// A walk beginning `start_a` metres along the first world; taking a branch ends `end` metres
     /// along its world (0 for exported clips).
     pub fn new(plan: ForkPlan, start_a: f32, end: [f32; 2]) -> ForkWalk {
-        ForkWalk { plan, start_a, end, chosen: None, barred: [None, None] }
+        ForkWalk { plan, start_a, end, chosen: None, barred: [None, None], late: None }
+    }
+
+    /// Begun `travel` metres in (turned round short of the junction): past where the choice is
+    /// made, it is made there, so the camera starts to turn onto the branch where the walk begins
+    /// rather than already partway round.
+    pub fn begun_at(&mut self, travel: f32) {
+        if travel > self.decide_by() { self.late = Some(travel.min(self.plan.approach)); }
     }
 
     pub fn length(&self) -> f32 { self.plan.approach + self.plan.overshoot }
 
     /// The latest travel at which a choice still has room to turn the camera before the junction.
-    pub fn decide_by(&self) -> f32 { (self.plan.approach - self.plan.steer).max(0.0) }
+    pub fn decide_by(&self) -> f32 { self.late.unwrap_or((self.plan.approach - self.plan.steer).max(0.0)) }
 
     /// Take a branch at `travel` metres (a later choice turns more sharply; past the junction the
     /// default branch has already been taken and this does nothing).

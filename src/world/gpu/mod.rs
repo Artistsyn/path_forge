@@ -14,6 +14,11 @@ pub struct GpuContext {
     pub queue: wgpu::Queue,
     /// Adapter name and backend, for reports.
     pub info: String,
+    /// The adapter it was made on (headless only): what a kept pipeline cache is good for.
+    adapter: Option<wgpu::AdapterInfo>,
+    /// A cache every pipeline is compiled through, handed in by the host (`use_pipeline_cache`)
+    /// so pipelines compiled at an earlier launch come back instead of compiling again.
+    pipelines: std::sync::OnceLock<wgpu::PipelineCache>,
 }
 
 /// The process's own device, for renderers that are not handed one: made on first use. None
@@ -34,40 +39,83 @@ impl GpuContext {
     /// the studio's device), to check everything fits there.
     pub fn headless_with(plain: bool) -> Result<Arc<GpuContext>, String> {
         pollster::block_on(async {
-            let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor { backends: wgpu::Backends::PRIMARY, ..Default::default() });
+            let instance = wgpu::Instance::new(wgpu::InstanceDescriptor { backends: wgpu::Backends::PRIMARY, ..wgpu::InstanceDescriptor::new_without_display_handle() });
             let adapter = instance
-                .request_adapter(&wgpu::RequestAdapterOptions { power_preference: wgpu::PowerPreference::HighPerformance, compatible_surface: None, force_fallback_adapter: false })
+                .request_adapter(&wgpu::RequestAdapterOptions { power_preference: wgpu::PowerPreference::HighPerformance, compatible_surface: None, force_fallback_adapter: false, apply_limit_buckets: false })
                 .await
                 .map_err(|e| format!("no GPU adapter: {e}"))?;
             let ai = adapter.get_info();
-            let (device, queue) = adapter
-                .request_device(&wgpu::DeviceDescriptor {
-                    label: Some("path_forge"),
-                    // Pass timings for `--stages`, where the adapter has them.
-                    required_features: if plain { wgpu::Features::empty() } else { adapter.features() & wgpu::Features::TIMESTAMP_QUERY },
-                    // Big frames need big buffers: ask for what the adapter has (still stock wgpu).
-                    required_limits: if plain { wgpu::Limits::default() } else { wgpu::Limits { max_storage_buffer_binding_size: adapter.limits().max_storage_buffer_binding_size, max_buffer_size: adapter.limits().max_buffer_size, ..wgpu::Limits::default() } },
-                    memory_hints: wgpu::MemoryHints::Performance,
-                    trace: wgpu::Trace::Off,
-                })
-                .await
-                .map_err(|e| format!("GPU device: {e}"))?;
-            Ok(Arc::new(GpuContext { device, queue, info: format!("{} ({:?})", ai.name, ai.backend) }))
+            let desc = wgpu::DeviceDescriptor {
+                label: Some("path_forge"),
+                // Pass timings for `--stages`, where the adapter has them.
+                // A pipeline cache where the driver has one, for a host to keep between launches.
+                required_features: if plain { wgpu::Features::empty() } else { adapter.features() & (wgpu::Features::TIMESTAMP_QUERY | wgpu::Features::PIPELINE_CACHE) },
+                // Big frames need big buffers: ask for what the adapter has (still stock wgpu).
+                required_limits: if plain { wgpu::Limits::default() } else { wgpu::Limits { max_storage_buffer_binding_size: adapter.limits().max_storage_buffer_binding_size, max_buffer_size: adapter.limits().max_buffer_size, ..wgpu::Limits::default() } },
+                memory_hints: wgpu::MemoryHints::Performance,
+                trace: wgpu::Trace::Off,
+                experimental_features: wgpu::ExperimentalFeatures::disabled(),
+            };
+            #[cfg(target_os = "android")]
+            let yielding = (!plain).then(|| Self::yielding_device(&adapter, &desc)).flatten();
+            #[cfg(not(target_os = "android"))]
+            let yielding = None;
+            let (device, queue) = match yielding {
+                Some(made) => made,
+                None => adapter.request_device(&desc).await.map_err(|e| format!("GPU device: {e}"))?,
+            };
+            Ok(Arc::new(GpuContext { device, queue, info: format!("{} ({:?})", ai.name, ai.backend), adapter: Some(ai), pipelines: std::sync::OnceLock::new() }))
         })
+    }
+
+    /// On Android, a device whose queue has a low global priority (VK_KHR_global_priority), so the
+    /// host's own frames (a game's canvas, on a device of its own) are drawn ahead of the road's
+    /// work instead of queueing behind it. Measured on a Mali-G615: with the road's batches queued
+    /// ahead, the game's frames waited on the GPU and it fell to 45 updates a second. None where
+    /// the driver lacks the extension, `PF_GPU_PRIORITY=normal` asks for none, or making it fails.
+    #[cfg(target_os = "android")]
+    fn yielding_device(adapter: &wgpu::Adapter, desc: &wgpu::DeviceDescriptor) -> Option<(wgpu::Device, wgpu::Queue)> {
+        use ash::vk;
+        if std::env::var("PF_GPU_PRIORITY").is_ok_and(|p| p == "normal") { return None; }
+        let wanted = ash::khr::global_priority::NAME;
+        let mut priority = vk::DeviceQueueGlobalPriorityCreateInfoKHR::default().global_priority(vk::QueueGlobalPriorityKHR::LOW);
+        // SAFETY: wgpu-hal makes the device as its own `open` does; the callback only adds an
+        // extension the driver offers and the priority on its one queue, removing nothing.
+        let open = unsafe {
+            let hal = adapter.as_hal::<wgpu::hal::api::Vulkan>()?;
+            let offered = hal.shared_instance().raw_instance().enumerate_device_extension_properties(hal.raw_physical_device()).ok()?;
+            if !offered.iter().any(|e| e.extension_name_as_c_str() == Ok(wanted)) { return None; }
+            let yielding: Box<wgpu::hal::vulkan::CreateDeviceCallback> = Box::new(|args| {
+                args.extensions.push(wanted);
+                if let Some(queue) = args.queue_create_infos.first_mut() { *queue = queue.push_next(&mut priority); }
+            });
+            hal.open_with_callback(desc.required_features, &desc.required_limits, &desc.memory_hints, Some(yielding)).ok()?
+        };
+        // SAFETY: `open` was made from this adapter's own physical device, with `desc`'s features.
+        let made = unsafe { adapter.create_device_from_hal(open, desc) }.ok()?;
+        log::info!("path_forge: the road's GPU queue yields to the host's (low global priority)");
+        Some(made)
     }
 
     /// Use a device someone else made (the studio's window).
     pub fn from_device(device: wgpu::Device, queue: wgpu::Queue, info: String) -> Arc<GpuContext> {
-        Arc::new(GpuContext { device, queue, info })
+        Arc::new(GpuContext { device, queue, info, adapter: None, pipelines: std::sync::OnceLock::new() })
     }
+
+    /// The adapter the device was made on, where it was made here.
+    pub fn adapter_info(&self) -> Option<&wgpu::AdapterInfo> { self.adapter.as_ref() }
+
+    /// Compile every pipeline made from now on through `cache` (made on this device with
+    /// `PIPELINE_CACHE`). Only the first is kept; false when one was already in use.
+    pub fn use_pipeline_cache(&self, cache: wgpu::PipelineCache) -> bool { self.pipelines.set(cache).is_ok() }
 
     /// A shader module: `common.wgsl` followed by the pass's own source. Validation errors are
     /// caught and returned (they are only reported when a pipeline is made).
     fn module(&self, label: &str, src: &str) -> Result<wgpu::ShaderModule, String> {
         let source = format!("{}\n{}", include_str!("common.wgsl"), src);
-        self.device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let scope = self.device.push_error_scope(wgpu::ErrorFilter::Validation);
         let m = self.device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some(label), source: wgpu::ShaderSource::Wgsl(source.into()) });
-        match pollster::block_on(self.device.pop_error_scope()) {
+        match pollster::block_on(scope.pop()) {
             Some(e) => Err(format!("{label}: {e}")),
             None => Ok(m),
         }
@@ -79,13 +127,13 @@ impl GpuContext {
     /// `multi` false: the pipeline for frames of one world, with everything only several worlds
     /// need compiled out (the `MULTI` override in common.wgsl).
     fn compute_with(&self, module: &wgpu::ShaderModule, layout: &wgpu::PipelineLayout, entry: &str, multi: bool) -> Result<wgpu::ComputePipeline, String> {
-        self.device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let scope = self.device.push_error_scope(wgpu::ErrorFilter::Validation);
         let constants = [("MULTI", if multi { 1.0 } else { 0.0 })];
         let p = self.device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
             label: Some(entry), layout: Some(layout), module, entry_point: Some(entry),
-            compilation_options: wgpu::PipelineCompilationOptions { constants: &constants, ..Default::default() }, cache: None,
+            compilation_options: wgpu::PipelineCompilationOptions { constants: &constants, ..Default::default() }, cache: self.pipelines.get(),
         });
-        match pollster::block_on(self.device.pop_error_scope()) {
+        match pollster::block_on(scope.pop()) {
             Some(e) => Err(format!("{entry}: {e}")),
             None => Ok(p),
         }
@@ -139,8 +187,9 @@ pub(crate) struct WorldParams {
     pub pt_on: u32, pub pt_zb: f32, pub pt_front: u32, pub pt_rad: [f32; 3], pub pt_c: [f32; 12],
     // Opening: the face round a threshold's opening, and its texture's tile size.
     pub op_on: u32, pub op_hw: f32, pub op_top: f32, pub op_arch: f32, pub op_rim: f32, pub op_seed: u32, pub op_outer_hw: f32, pub op_outer_top: f32, pub op_hill: f32,
-    // A street front's roofline and windows (Opening::skyline), padded to keep what follows aligned.
-    pub op_skyline: f32, pub op_pad: [f32; 3],
+    // A street front's roofline and windows (Opening::skyline); FrontAir::banks; padding to keep
+    // what follows aligned.
+    pub op_skyline: f32, pub fa_banks: f32, pub op_pad: [f32; 2],
     pub fac_tile: f32,
     // Ctx::verge_beyond, and the first world's region past it (Bounds::region_of): four half-planes.
     pub vb_on: u32, pub vb_z: f32, pub wedge: [f32; 12],
@@ -209,21 +258,35 @@ pub(crate) struct SkyParams {
 pub(crate) struct SkyInput { pub params: SkyParams, pub prims: Vec<f32>, pub bins: Vec<u32> }
 
 /// Per-tile lists (16 x 16 tiles over a w x h buffer) of the boxes that touch each tile, in the
-/// boxes' order: (tiles + 1) offsets, then indices. Boxes are inclusive pixel ranges.
+/// boxes' order: (tiles + 1) offsets, then indices. Boxes are inclusive pixel ranges. Counted
+/// first, then filled in place (a list per tile was hundreds of allocations, every frame, for
+/// each world's casters and cards).
 pub(crate) fn bin_tiles(w: usize, h: usize, boxes: &[(i64, i64, i64, i64)]) -> Vec<u32> {
     let (cols, rows) = (w.div_ceil(16), h.div_ceil(16));
-    let mut lists: Vec<Vec<u32>> = vec![Vec::new(); cols * rows];
-    for (k, &(x0, y0, x1, y1)) in boxes.iter().enumerate() {
-        if x1 < 0 || y1 < 0 || x0 >= w as i64 || y0 >= h as i64 || x1 < x0 || y1 < y0 { continue; }
-        let (tx0, tx1) = (x0.max(0) as usize / 16, (x1 as usize).min(w - 1) / 16);
-        let (ty0, ty1) = (y0.max(0) as usize / 16, (y1 as usize).min(h - 1) / 16);
-        for ty in ty0..=ty1 { for tx in tx0..=tx1 { lists[ty * cols + tx].push(k as u32); } }
+    let tiles = cols * rows;
+    // Each box's tile range, or None when it falls off the buffer.
+    let spans: Vec<Option<(usize, usize, usize, usize)>> = boxes.iter().map(|&(x0, y0, x1, y1)| {
+        if x1 < 0 || y1 < 0 || x0 >= w as i64 || y0 >= h as i64 || x1 < x0 || y1 < y0 { return None; }
+        Some((x0.max(0) as usize / 16, (x1 as usize).min(w - 1) / 16, y0.max(0) as usize / 16, (y1 as usize).min(h - 1) / 16))
+    }).collect();
+    let mut out = vec![0u32; tiles + 1];
+    for &(tx0, tx1, ty0, ty1) in spans.iter().flatten() {
+        for ty in ty0..=ty1 { for tx in tx0..=tx1 { out[ty * cols + tx + 1] += 1; } }
     }
-    let mut out = Vec::with_capacity(lists.len() + 1);
-    let mut off = 0u32;
-    for l in &lists { out.push(off); off += l.len() as u32; }
-    out.push(off);
-    for l in lists { out.extend(l); }
+    for tile in 0..tiles { out[tile + 1] += out[tile]; }
+    // Where each tile's next index goes.
+    let mut next: Vec<u32> = out[..tiles].to_vec();
+    out.resize(tiles + 1 + out[tiles] as usize, 0);
+    for (k, span) in spans.iter().enumerate() {
+        let Some(&(tx0, tx1, ty0, ty1)) = span.as_ref() else { continue };
+        for ty in ty0..=ty1 {
+            for tx in tx0..=tx1 {
+                let slot = &mut next[ty * cols + tx];
+                out[tiles + 1 + *slot as usize] = k as u32;
+                *slot += 1;
+            }
+        }
+    }
     out
 }
 
@@ -404,18 +467,19 @@ pub(crate) struct GeomParams {
     pub cloud_travel: f32, pub cloud_seed: u32, pub tiles_on: u32, pub cap: u32,
     pub small_off: u32, pub n_small: u32, pub fade_k: f32, pub fade_near: f32,
     pub fade_cut: f32, pub shadow_mode: u32, pub gx_off: u32, pub pad: u32,
-    /// The box `gx_off`'s table covers (x0, y0, width, height): where this world's casters reach.
-    pub gx_box: [u32; 4],
+    pub pad3: [u32; 4],
 }
 
 /// One world of a frame of several for `Frame::shadows`: its casters and their per-tile lists (as
-/// `GeomIn`'s), the sun when it casts, its cloud shade, and where each pixel of another world's
-/// ground lies across its path (`render::prop_shadows`' `across`, row by row over `gx_box`, the box
-/// its casters reach: x0, y0, width, height; empty with one world).
+/// `GeomIn`'s), the sun when it casts, and its cloud shade.
 pub(crate) struct ShadowWorld {
     pub casters: Vec<CasterIn>, pub cast_bins: Vec<u32>, pub sun: Option<[f32; 3]>,
-    pub clouds: Option<(f32, f32, u32)>, pub gx: Vec<f32>, pub gx_box: [u32; 4],
+    pub clouds: Option<(f32, f32, u32)>,
 }
+
+/// Triangles as the raster passes take them: set up, their per-tile lists, and the small ones
+/// that run one thread each (`raster::SMALL_TRI`).
+pub(crate) struct RasterIn { pub tris: Vec<TriGpu>, pub tri_bins: Vec<u32>, pub small: Vec<u32> }
 
 /// What the geometry pass draws: the triangles and their per-tile lists, the shadow casters and
 /// theirs, the sun (when it casts), cloud shade (amount, travel, seed), and the lamps to sort into
@@ -597,12 +661,66 @@ struct PostPass {
     out: Mutex<Option<wgpu::Buffer>>,
     read: Mutex<Option<wgpu::Buffer>>,
     tables: Mutex<Option<(usize, wgpu::Buffer, u32, u32, u32)>>,
+    focus: FocusTextures,
+}
+
+/// The blur's source as textures (`post_focus_prep` writes them, `post_focus` reads them): its
+/// colour, sampled between pixels by the texture unit, and each pixel's coc and z. Made again
+/// when the frame's size changes.
+struct FocusTextures {
+    write: wgpu::BindGroupLayout,
+    read: wgpu::BindGroupLayout,
+    smooth: wgpu::Sampler,
+    made: Mutex<Option<((u32, u32), wgpu::BindGroup, wgpu::BindGroup)>>,
+}
+
+impl FocusTextures {
+    const COLOUR: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
+    const COC_Z: wgpu::TextureFormat = wgpu::TextureFormat::Rg32Float;
+
+    fn new(device: &wgpu::Device) -> FocusTextures {
+        let entry = |binding, ty| wgpu::BindGroupLayoutEntry { binding, visibility: wgpu::ShaderStages::COMPUTE, ty, count: None };
+        let stored = |format| wgpu::BindingType::StorageTexture { access: wgpu::StorageTextureAccess::WriteOnly, format, view_dimension: wgpu::TextureViewDimension::D2 };
+        let sampled = |filterable| wgpu::BindingType::Texture { sample_type: wgpu::TextureSampleType::Float { filterable }, view_dimension: wgpu::TextureViewDimension::D2, multisampled: false };
+        let write = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor { label: Some("focus write"), entries: &[entry(0, stored(Self::COLOUR)), entry(1, stored(Self::COC_Z))] });
+        let read = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("focus read"),
+            entries: &[entry(2, sampled(true)), entry(3, sampled(false)), entry(4, wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering))],
+        });
+        let smooth = device.create_sampler(&wgpu::SamplerDescriptor { label: Some("focus"), mag_filter: wgpu::FilterMode::Linear, min_filter: wgpu::FilterMode::Linear, ..Default::default() });
+        FocusTextures { write, read, smooth, made: Mutex::new(None) }
+    }
+
+    /// The groups that write and read textures for a `size` frame, made now if not already.
+    fn groups(&self, device: &wgpu::Device, size: (u32, u32)) -> (wgpu::BindGroup, wgpu::BindGroup) {
+        let mut made = self.made.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some((_, write, read)) = made.as_ref().filter(|m| m.0 == size) { return (write.clone(), read.clone()); }
+        let texture = |label, format| device.create_texture(&wgpu::TextureDescriptor {
+            label: Some(label), size: wgpu::Extent3d { width: size.0.max(1), height: size.1.max(1), depth_or_array_layers: 1 },
+            mip_level_count: 1, sample_count: 1, dimension: wgpu::TextureDimension::D2, format,
+            usage: wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::TEXTURE_BINDING, view_formats: &[],
+        }).create_view(&wgpu::TextureViewDescriptor::default());
+        let (colour, coc_z) = (texture("focus colour", Self::COLOUR), texture("focus coc z", Self::COC_Z));
+        let write = device.create_bind_group(&wgpu::BindGroupDescriptor { label: Some("focus write"), layout: &self.write, entries: &[Self::entry(0, &colour), Self::entry(1, &coc_z)] });
+        let read = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("focus read"), layout: &self.read,
+            entries: &[Self::entry(2, &colour), Self::entry(3, &coc_z), wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::Sampler(&self.smooth) }],
+        });
+        *made = Some((size, write.clone(), read.clone()));
+        (write, read)
+    }
+
+    fn entry(binding: u32, view: &wgpu::TextureView) -> wgpu::BindGroupEntry<'_> {
+        wgpu::BindGroupEntry { binding, resource: wgpu::BindingResource::TextureView(view) }
+    }
 }
 
 struct GeomPass {
     layout: wgpu::BindGroupLayout, raster_layout: wgpu::BindGroupLayout,
     small_z: wgpu::ComputePipeline, small_pick: wgpu::ComputePipeline, resolve: wgpu::ComputePipeline,
     raster: wgpu::ComputePipeline, shadow: wgpu::ComputePipeline, tiles: wgpu::ComputePipeline,
+    /// Several worlds mixed where they meet, over the G-buffer drawn here (`mix_main`).
+    mix: wgpu::ComputePipeline,
     params: wgpu::Buffer, tris: Mutex<Option<wgpu::Buffer>>, bins: Mutex<Option<wgpu::Buffer>>, casters: Mutex<Option<wgpu::Buffer>>,
     /// `Frame::shadows`' parameters, one per dispatch at the uniform offset alignment.
     shadow_params: Mutex<Option<wgpu::Buffer>>,
@@ -623,6 +741,10 @@ struct ShadePass {
 
 /// The most worlds one frame draws (a fork: the road and its two branches).
 pub(crate) const MAX_WORLDS: usize = 3;
+/// Words a world takes in geom.wgsl's worlds table (`render::Ctx::gpu_worlds`; `MIX_STRIDE` there).
+pub(crate) const MIX_STRIDE: usize = 40;
+/// Where `render::Bounds::gpu_words` starts after the worlds table (`MIX_HEAD` in geom.wgsl).
+pub(crate) const MIX_HEAD: usize = MIX_STRIDE * MAX_WORLDS;
 const AIR_STRIDE: u64 = 256;
 
 /// The air's settings for the mist pass; `Air` in shade.wgsl.
@@ -728,7 +850,7 @@ impl Gpu {
             label: Some("shade"),
             entries: &[world_uniform(0), storage(1, true), storage(2, true), storage(3, true), storage(4, true), storage(5, true), storage(6, false), storage(7, false), storage(8, false), air_uniform(9)],
         });
-        let pl = d.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: Some("shade"), bind_group_layouts: &[&layout], push_constant_ranges: &[] });
+        let pl = d.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: Some("shade"), bind_group_layouts: &[Some(&layout)], immediate_size: 0 });
         let m = ctx.module("shade.wgsl", include_str!("shade.wgsl"))?;
         let air = d.create_buffer(&wgpu::BufferDescriptor {
             label: Some("air params"), size: AIR_STRIDE * MAX_WORLDS as u64,
@@ -741,7 +863,7 @@ impl Gpu {
                 label: Some("geom"),
                 entries: &[world_uniform(0), storage(1, false), storage(2, true), storage(3, true), storage(4, false), storage(5, true), storage(6, true), storage(7, false), storage(8, true), uniform(9)],
             });
-            let pl = d.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: Some("geom"), bind_group_layouts: &[&layout], push_constant_ranges: &[] });
+            let pl = d.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: Some("geom"), bind_group_layouts: &[Some(&layout)], immediate_size: 0 });
             let m = ctx.module("geom.wgsl", include_str!("geom.wgsl"))?;
             // The raster passes on their own: the shadow and tile passes already use the eight
             // storage buffers a stage may bind by default.
@@ -749,7 +871,7 @@ impl Gpu {
                 label: Some("raster"),
                 entries: &[world_uniform(0), storage(1, false), storage(2, true), storage(3, true), uniform(9), storage(10, false)],
             });
-            let rpl = d.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: Some("raster"), bind_group_layouts: &[&raster_layout], push_constant_ranges: &[] });
+            let rpl = d.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: Some("raster"), bind_group_layouts: &[Some(&raster_layout)], immediate_size: 0 });
             let params = d.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("geom params"), size: std::mem::size_of::<GeomParams>() as u64,
                 usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false,
@@ -758,6 +880,7 @@ impl Gpu {
                 raster: ctx.compute_with(&m, &rpl, "raster_main", false)?, small_z: ctx.compute_with(&m, &rpl, "small_z_main", false)?,
                 small_pick: ctx.compute_with(&m, &rpl, "small_pick_main", false)?, resolve: ctx.compute_with(&m, &rpl, "resolve_main", false)?,
                 raster_layout, shadow: ctx.compute_with(&m, &pl, "shadow_main", false)?, tiles: ctx.compute_with(&m, &pl, "tiles_main", false)?,
+                mix: ctx.compute_with(&m, &pl, "mix_main", false)?,
                 layout, params, tris: Mutex::new(None), bins: Mutex::new(None), casters: Mutex::new(None), shadow_params: Mutex::new(None), lamps: Mutex::new(None), lists: Mutex::new(None),
             }
         };
@@ -765,7 +888,7 @@ impl Gpu {
             let layout = d.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some("sky"), entries: &[world_uniform(0), uniform(1), storage(2, true), storage(3, false), storage(4, true), storage(5, true)],
             });
-            let pl = d.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: Some("sky"), bind_group_layouts: &[&layout], push_constant_ranges: &[] });
+            let pl = d.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: Some("sky"), bind_group_layouts: &[Some(&layout)], immediate_size: 0 });
             let m = ctx.module("sky.wgsl", include_str!("sky.wgsl"))?;
             let pipe = [ctx.compute_with(&m, &pl, "sky_main", false)?, ctx.compute_with(&m, &pl, "sky_main", true)?];
             let params = d.create_buffer(&wgpu::BufferDescriptor {
@@ -778,7 +901,7 @@ impl Gpu {
             let layout = d.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some("cards"), entries: &[world_uniform(0), storage(1, false), storage(2, false), storage(3, true), storage(4, true), storage(5, true), storage(6, false), uniform(7)],
             });
-            let pl = d.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: Some("cards"), bind_group_layouts: &[&layout], push_constant_ranges: &[] });
+            let pl = d.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: Some("cards"), bind_group_layouts: &[Some(&layout)], immediate_size: 0 });
             let m = ctx.module("cards.wgsl", include_str!("cards.wgsl"))?;
             let pipe = ctx.compute(&m, &pl, "cards_main")?;
             let params = d.create_buffer(&wgpu::BufferDescriptor {
@@ -790,7 +913,7 @@ impl Gpu {
             let layout = d.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some("splats"), entries: &[world_uniform(0), storage(1, false), storage(2, false), storage(3, true), storage(4, true), uniform(5)],
             });
-            let pl = d.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: Some("splats"), bind_group_layouts: &[&layout], push_constant_ranges: &[] });
+            let pl = d.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: Some("splats"), bind_group_layouts: &[Some(&layout)], immediate_size: 0 });
             let m = ctx.module("splat.wgsl", include_str!("splat.wgsl"))?;
             let pipe = ctx.compute(&m, &pl, "splat_main")?;
             let pbuf = || d.create_buffer(&wgpu::BufferDescriptor {
@@ -802,7 +925,7 @@ impl Gpu {
             let layout = d.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some("reflect"), entries: &[world_uniform(0), storage(1, true), storage(2, false), storage(3, true), storage(4, false), storage(5, false), storage(6, false), storage(7, false), storage(8, true)],
             });
-            let pl = d.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: Some("reflect"), bind_group_layouts: &[&layout], push_constant_ranges: &[] });
+            let pl = d.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: Some("reflect"), bind_group_layouts: &[Some(&layout)], immediate_size: 0 });
             let m = ctx.module("reflect.wgsl", include_str!("reflect.wgsl"))?;
             ReflectPass { colsum_a: ctx.compute(&m, &pl, "colsum_a")?, colsum_b: ctx.compute(&m, &pl, "colsum_b")?, reflect: ctx.compute(&m, &pl, "reflect_main")?, layout }
         };
@@ -810,7 +933,7 @@ impl Gpu {
             let layout = d.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some("shafts"), entries: &[world_uniform(0), storage(1, true), storage(2, false), storage(3, true), storage(4, true), storage(5, false), uniform(6)],
             });
-            let pl = d.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: Some("shafts"), bind_group_layouts: &[&layout], push_constant_ranges: &[] });
+            let pl = d.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: Some("shafts"), bind_group_layouts: &[Some(&layout)], immediate_size: 0 });
             let m = ctx.module("shafts.wgsl", include_str!("shafts.wgsl"))?;
             let params = d.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("shaft params"), size: std::mem::size_of::<ShaftParams>() as u64,
@@ -825,18 +948,28 @@ impl Gpu {
             let layout = d.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some("post"), entries: &[world_uniform(0), uniform(1), storage(2, true), storage(3, true), storage(4, true), storage(5, false), storage(6, true), storage(7, false), storage(8, true)],
             });
-            let pl = d.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: Some("post"), bind_group_layouts: &[&layout], push_constant_ranges: &[] });
+            let pl = d.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: Some("post"), bind_group_layouts: &[Some(&layout)], immediate_size: 0 });
             let m = ctx.module("post.wgsl", include_str!("post.wgsl"))?;
             let mut pipes = std::collections::HashMap::new();
-            for e in ["post_crop", "post_shimmer", "post_focus", "post_frost_rows", "post_frost_mean", "post_lens", "post_bloom_down", "post_bh0", "post_bv0", "post_bh1", "post_bv1", "post_bh2", "post_bv2", "post_bh3", "post_bv3", "post_bh4", "post_bv4", "post_rays", "post_ghosts",
+            for e in ["post_crop", "post_shimmer", "post_frost_rows", "post_frost_mean", "post_lens", "post_bloom_down", "post_bh0", "post_bv0", "post_bh1", "post_bv1", "post_bh2", "post_bv2", "post_bh3", "post_bv3", "post_bh4", "post_bv4", "post_rays", "post_ghosts",
                       "post_finish", "post_kuw_h", "post_kuw_v", "post_grade_outline", "post_warp", "post_quant", "post_stats", "post_out", "post_blend"] {
                 pipes.insert(e, ctx.compute(&m, &pl, e)?);
             }
+            // The settings, then the blur's taps (`Post.fo_taps`): weather::FOCUS_TAPS itself, so
+            // the CPU and the GPU walk one table.
+            let taps: Vec<[f32; 4]> = crate::world::render::FOCUS_TAPS.iter().map(|t| [t[0], t[1], t[2], 0.0]).collect();
+            let settings = std::mem::size_of::<PostParams>() as u64;
             let params = d.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("post params"), size: std::mem::size_of::<PostParams>() as u64,
+                label: Some("post params"), size: settings + std::mem::size_of_val(taps.as_slice()) as u64,
                 usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false,
             });
-            PostPass { layout, pipes, params, scratch: Mutex::new(None), out: Mutex::new(None), read: Mutex::new(None), tables: Mutex::new(None) }
+            ctx.queue.write_buffer(&params, settings, bytemuck::cast_slice(&taps));
+            let focus = FocusTextures::new(d);
+            for (e, group) in [("post_focus_prep", &focus.write), ("post_focus", &focus.read)] {
+                let with = d.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: Some(e), bind_group_layouts: &[Some(&layout), Some(group)], immediate_size: 0 });
+                pipes.insert(e, ctx.compute(&m, &with, e)?);
+            }
+            PostPass { layout, pipes, params, scratch: Mutex::new(None), out: Mutex::new(None), read: Mutex::new(None), tables: Mutex::new(None), focus }
         };
         let align = d.limits().min_uniform_buffer_offset_alignment.max(16) as u64;
         let wstride = (std::mem::size_of::<WorldParams>() as u64).next_multiple_of(align);
@@ -892,7 +1025,10 @@ impl Gpu {
             *s = Some(self.buffer(label, need.next_power_of_two(), wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST));
         }
         let b = s.as_ref().unwrap().clone();
-        if !bytes.is_empty() {
+        // (Copied to pad it only when it is not whole words: a copy of every upload, every frame.)
+        if bytes.len() % 4 == 0 {
+            if !bytes.is_empty() { self.ctx.queue.write_buffer(&b, 0, bytes); }
+        } else {
             let mut padded = bytes.to_vec();
             padded.resize(bytes.len().next_multiple_of(4), 0);
             self.ctx.queue.write_buffer(&b, 0, &padded);
@@ -969,13 +1105,13 @@ impl Gpu {
         let slice = buf.slice(..len);
         let (tx, rx) = std::sync::mpsc::channel();
         slice.map_async(wgpu::MapMode::Read, move |r| { let _ = tx.send(r); });
-        let _ = self.ctx.device.poll(match after { Some(i) => wgpu::PollType::WaitForSubmissionIndex(i), None => wgpu::PollType::Wait });
+        let _ = self.ctx.device.poll(match after { Some(i) => wgpu::PollType::Wait { submission_index: Some(i), timeout: None }, None => wgpu::PollType::wait_indefinitely() });
         let got = match rx.try_recv() {
             Ok(r) => Ok(r),
-            Err(_) => { let _ = self.ctx.device.poll(wgpu::PollType::Wait); rx.recv() }
+            Err(_) => { let _ = self.ctx.device.poll(wgpu::PollType::wait_indefinitely()); rx.recv() }
         };
         if matches!(got, Ok(Ok(()))) {
-            f(&slice.get_mapped_range());
+            match slice.get_mapped_range() { Ok(view) => f(&view), Err(_) => f(&vec![0u8; len as usize]) }
             buf.unmap();
         } else {
             f(&vec![0u8; len as usize]);
@@ -983,10 +1119,10 @@ impl Gpu {
     }
     /// A pipelined frame's colours, once its copy is done (by now it nearly always is).
     fn take_late(&self, l: Late) -> Vec<u8> {
-        let _ = self.ctx.device.poll(match l.after { Some(i) => wgpu::PollType::WaitForSubmissionIndex(i), None => wgpu::PollType::Wait });
-        let got = match l.rx.try_recv() { Ok(r) => Ok(r), Err(_) => { let _ = self.ctx.device.poll(wgpu::PollType::Wait); l.rx.recv() } };
+        let _ = self.ctx.device.poll(match l.after { Some(i) => wgpu::PollType::Wait { submission_index: Some(i), timeout: None }, None => wgpu::PollType::wait_indefinitely() });
+        let got = match l.rx.try_recv() { Ok(r) => Ok(r), Err(_) => { let _ = self.ctx.device.poll(wgpu::PollType::wait_indefinitely()); l.rx.recv() } };
         if matches!(got, Ok(Ok(()))) {
-            let out = l.buf.slice(..l.bytes).get_mapped_range().to_vec();
+            let out = l.buf.slice(..l.bytes).get_mapped_range().map_or_else(|_| vec![0u8; l.bytes as usize], |view| view.to_vec());
             l.buf.unmap();
             out
         } else {
@@ -997,9 +1133,9 @@ impl Gpu {
         let slice = buf.slice(..len);
         let (tx, rx) = std::sync::mpsc::channel();
         slice.map_async(wgpu::MapMode::Read, move |r| { let _ = tx.send(r); });
-        let _ = self.ctx.device.poll(wgpu::PollType::Wait);
+        let _ = self.ctx.device.poll(wgpu::PollType::wait_indefinitely());
         let ok = matches!(rx.recv(), Ok(Ok(())));
-        let out = if ok { slice.get_mapped_range().to_vec() } else { vec![0u8; len as usize] };
+        let out = if ok { slice.get_mapped_range().map_or_else(|_| vec![0u8; len as usize], |view| view.to_vec()) } else { vec![0u8; len as usize] };
         if ok { buf.unmap(); }
         out
     }
@@ -1022,7 +1158,7 @@ pub(crate) struct Frame<'g> {
     pub profile: bool,
     passes: Vec<&'static str>,
     shade_bg: Option<wgpu::BindGroup>,
-    /// Whether `put_soft` gave this frame soft patch edges.
+    /// Whether `Frame::shadows` mixed this frame's worlds in patches with soft edges.
     soft: bool,
     /// Per-tile lamp lists made by the geometry pass, for shading to read.
     gpu_tiles: Option<wgpu::Buffer>,
@@ -1057,10 +1193,6 @@ impl<'g> Frame<'g> {
         self.g.read(&read, len)
     }
 
-    pub fn put_gbuf(&mut self, gbuf: &[super::raster::GPixel]) {
-        let b = self.bufs().gbuf.clone();
-        self.write(&b, 0, bytemuck::cast_slice(gbuf));
-    }
     pub fn get_gbuf(&mut self, gbuf: &mut [super::raster::GPixel]) {
         let b = self.bufs().gbuf.clone();
         let bytes = self.read(&b, (self.n() * 20) as u64);
@@ -1070,14 +1202,6 @@ impl<'g> Frame<'g> {
         let (b, n) = (self.bufs().masks.clone(), self.n());
         self.write(&b, 0, bytemuck::cast_slice(sun_mask));
         self.g.ctx.queue.write_buffer(&b, (n * 4) as u64, bytemuck::cast_slice(ao_mask));
-    }
-    /// Soft patch edges between worlds (render::shade's `soft`), when the frame has any.
-    pub fn put_soft(&mut self, soft: &[(u8, f32)]) {
-        if soft.is_empty() { self.soft = false; return; }
-        let words: Vec<u32> = soft.iter().flat_map(|&(o, k)| [o as u32, k.to_bits()]).collect();
-        let (b, n) = (self.bufs().masks.clone(), self.n());
-        self.write(&b, (n * 8) as u64, bytemuck::cast_slice(&words));
-        self.soft = true;
     }
     pub fn put_hdr(&mut self, hdr: &[[f32; 3]]) {
         let b = self.bufs().hdr.clone();
@@ -1159,6 +1283,59 @@ impl<'g> Frame<'g> {
         st.buf.clone().unwrap()
     }
 
+    /// The raster passes over bind group `rbg`: big triangles per pixel, then (when there are
+    /// `n_small` small ones) their depth, their winner, and the pixels they won.
+    fn dispatch_raster(&mut self, rbg: &wgpu::BindGroup, n_small: usize) {
+        let g = self.g;
+        let (gx, gy) = self.groups();
+        let sg = (n_small as u32).div_ceil(64);
+        let small = (sg.min(65535), sg.div_ceil(65535));
+        let raster = [
+            ("g.raster", &g.geom.raster, (gx, gy)),
+            ("g.raster.z", &g.geom.small_z, small),
+            ("g.raster.pick", &g.geom.small_pick, small),
+            ("g.raster.resolve", &g.geom.resolve, (gx, gy)),
+        ];
+        for (name, pipe, (x, y)) in raster.into_iter().take(if sg > 0 { 4 } else { 1 }) {
+            let mut cp = self.pass(name);
+            cp.set_bind_group(0, rbg, &[0]);
+            cp.set_pipeline(pipe);
+            cp.dispatch_workgroups(x, y, 1);
+        }
+    }
+
+    /// A frame of several worlds' G-buffer, drawn from all their triangles (`raster::rasterize`,
+    /// as `geometry` draws one world's); `Frame::shadows` mixes the worlds over it.
+    pub fn raster_tris(&mut self, ri: &RasterIn, fade: super::raster::Dissolve) {
+        let g = self.g;
+        let mut tris = ri.tris.clone();
+        if tris.is_empty() { tris.push(TriGpu { f: [0.0; 36] }); }
+        let mut bins = ri.tri_bins.clone();
+        let small_off = bins.len() as u32;
+        bins.extend_from_slice(&ri.small);
+        let p = GeomParams {
+            tile_cols: (self.w as u32).div_ceil(16), small_off, n_small: ri.small.len() as u32,
+            fade_k: fade.k, fade_near: fade.near, fade_cut: fade.cut, ..Default::default()
+        };
+        self.submit();
+        g.ctx.queue.write_buffer(&g.geom.params, 0, bytemuck::bytes_of(&p));
+        let tb = g.upload(&g.geom.tris, "triangles", bytemuck::cast_slice(&tris));
+        let bb = g.upload(&g.geom.bins, "geom bins", bytemuck::cast_slice(&bins));
+        let sz = self.bufs();
+        let rbg = g.ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("raster"), layout: &g.geom.raster_layout,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: g.world_binding() },
+                wgpu::BindGroupEntry { binding: 1, resource: sz.gbuf.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 2, resource: tb.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 3, resource: bb.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 9, resource: g.geom.params.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 10, resource: sz.racc.as_entire_binding() },
+            ],
+        });
+        self.dispatch_raster(&rbg, ri.small.len());
+    }
+
     /// The G-buffer drawn from triangles, then the shadow masks and per-tile lamp lists from it
     /// (a frame of one world; its parameters say whether shading reads those lists).
     pub fn geometry(&mut self, gi: &GeomIn) {
@@ -1236,22 +1413,7 @@ impl<'g> Frame<'g> {
         let (gx, gy) = self.groups();
         let tiles = gi.lamps.is_some();
         let th = (self.h as u32).div_ceil(16);
-        // Big triangles per pixel, then (when there are small ones) their depth, their winner,
-        // and the pixels they won.
-        let sg = (gi.small.len() as u32).div_ceil(64);
-        let small = (sg.min(65535), sg.div_ceil(65535));
-        let raster = [
-            ("g.raster", &g.geom.raster, (gx, gy)),
-            ("g.raster.z", &g.geom.small_z, small),
-            ("g.raster.pick", &g.geom.small_pick, small),
-            ("g.raster.resolve", &g.geom.resolve, (gx, gy)),
-        ];
-        for (name, pipe, (x, y)) in raster.into_iter().take(if sg > 0 { 4 } else { 1 }) {
-            let mut cp = self.pass(name);
-            cp.set_bind_group(0, &rbg, &[0]);
-            cp.set_pipeline(pipe);
-            cp.dispatch_workgroups(x, y, 1);
-        }
+        self.dispatch_raster(&rbg, gi.small.len());
         {
             let mut cp = self.pass("g.shadows");
             cp.set_bind_group(0, &bg, &[0]);
@@ -1267,16 +1429,18 @@ impl<'g> Frame<'g> {
         self.gpu_tiles = tiles.then_some(lists);
     }
 
-    /// Billboards drawn far to near (hdr, gbuf and, with `pick`, the pick ids, in place).
-    /// A frame of several worlds, its G-buffer drawn on the CPU (`put_gbuf`): the shadow masks
-    /// made here as `render::prop_shadows` makes them, one world's casters after another's (the
-    /// first always, so the masks start afresh), then the clouds over each world's own pixels.
-    /// geom.wgsl's shadow_main does both, at each world's dynamic offset (`Geom::shadow_mode`).
-    pub fn shadows(&mut self, worlds: &[ShadowWorld]) {
+    /// A frame of several worlds, its G-buffer drawn (`raster_tris`): with `mixing`, the worlds
+    /// mixed where they meet in patches (geom.wgsl's mix_main, `render::RealmMix`'s twin), then
+    /// the shadow masks made as `render::prop_shadows` makes them, one world's casters after
+    /// another's (the first always, so the masks start afresh), then the clouds over each world's
+    /// own pixels. geom.wgsl's shadow_main does both, at each world's dynamic offset
+    /// (`Geom::shadow_mode`). `mix`: `render::Ctx::gpu_worlds`' table (each world's path, for
+    /// ground of one world under another's casters), then with `mixing` `render::Bounds::gpu_words`.
+    pub fn shadows(&mut self, worlds: &[ShadowWorld], mix: &[f32], mixing: bool) {
         let g = self.g;
         let tc = (self.w as u32).div_ceil(16);
         let ntiles = (tc * (self.h as u32).div_ceil(16)) as usize;
-        let (mut cs, mut bins, mut gx): (Vec<CasterGpu>, Vec<u32>, Vec<f32>) = (Vec::new(), Vec::new(), Vec::new());
+        let (mut cs, mut bins): (Vec<CasterGpu>, Vec<u32>) = (Vec::new(), Vec::new());
         let mut runs: Vec<(GeomParams, usize)> = Vec::new();
         let texels = {
             let mut st = g.cards.store.lock().unwrap();
@@ -1295,11 +1459,9 @@ impl<'g> Frame<'g> {
                 let cast_off = bins.len() as u32;
                 if w.cast_bins.len() > ntiles { bins.extend(w.cast_bins.iter().enumerate().map(|(k, &v)| if k > ntiles { v + base } else { v })); }
                 else { bins.extend(std::iter::repeat_n(0, ntiles + 1)); }
-                let gx_off = gx.len() as u32;
-                gx.extend_from_slice(&w.gx);
-                let mut p = GeomParams { tile_cols: tc, cast_bins: cast_off, gx_off, gx_box: w.gx_box, ..Default::default() };
+                let mut p = GeomParams { tile_cols: tc, cast_bins: cast_off, ..Default::default() };
                 if let Some(l) = w.sun { (p.sun_on, p.sun) = (1, l); }
-                p.shadow_mode = (!w.gx.is_empty()) as u32 | ((!runs.is_empty() as u32) << 1) | (1 << 2);
+                p.shadow_mode = u32::from(worlds.len() > 1 && !w.casters.is_empty()) | (u32::from(!runs.is_empty()) << 1) | (1 << 2);
                 runs.push((p, r));
             }
             for (r, w) in worlds.iter().enumerate() {
@@ -1309,11 +1471,10 @@ impl<'g> Frame<'g> {
             self.sprite_texels(&mut st)
         };
         if cs.is_empty() { cs.push(CasterGpu::default()); }
-        if gx.is_empty() { gx.push(0.0); }
         self.submit();
         let cb = g.upload(&g.geom.casters, "casters", bytemuck::cast_slice(&cs));
         let bb = g.upload(&g.geom.bins, "geom bins", bytemuck::cast_slice(&bins));
-        let xb = g.upload(&g.geom.lamps, "shadow gx", bytemuck::cast_slice(&gx));
+        let xb = g.upload(&g.geom.lamps, "worlds mix", bytemuck::cast_slice(if mix.is_empty() { &[0.0f32][..] } else { mix }));
         let tb = g.upload(&g.geom.tris, "triangles", bytemuck::cast_slice(&[TriGpu { f: [0.0; 36] }]));
         let lists = {
             let mut l = g.geom.lists.lock().unwrap();
@@ -1351,6 +1512,13 @@ impl<'g> Frame<'g> {
             (bg, self.wo(*r))
         }).collect();
         let (x, y) = self.groups();
+        if let Some((bg, wo)) = groups.first().filter(|_| mixing) {
+            let mut cp = self.pass("g.mix");
+            cp.set_bind_group(0, bg, &[*wo]);
+            cp.set_pipeline(&g.geom.mix);
+            cp.dispatch_workgroups(x, y, 1);
+        }
+        self.soft = mixing;
         for (bg, wo) in &groups {
             let mut cp = self.pass("g.shadows");
             cp.set_bind_group(0, bg, &[*wo]);
@@ -1660,7 +1828,9 @@ impl<'g> Frame<'g> {
         let rows = (h as u32).div_ceil(64);
         let mut steps: Vec<(&'static str, (u32, u32))> = vec![("post_crop", full)];
         if pin.shimmer { steps.push(("post_shimmer", full)); }
-        if pin.focus { steps.push(("post_focus", full)); }
+        if pin.focus { steps.push(("post_focus_prep", full)); steps.push(("post_focus", full)); }
+        let focus = pin.focus.then(|| g.post.focus.groups(&g.ctx.device, (w as u32, h as u32)));
+        let second = |e: &str| match (e, focus.as_ref()) { ("post_focus_prep", Some(f)) => Some(&f.0), ("post_focus", Some(f)) => Some(&f.1), _ => None };
         if lens {
             if params.lens_kind == 2 { steps.push(("post_frost_rows", (rows, 1))); steps.push(("post_frost_mean", (1, 1))); }
             steps.push(("post_lens", full));
@@ -1691,6 +1861,7 @@ impl<'g> Frame<'g> {
                 for (e, (x, y)) in steps {
                     let mut cp = self.pass(e);
                     cp.set_bind_group(0, &bg, &[wo]);
+                    if let Some(group) = second(e) { cp.set_bind_group(1, group, &[]); }
                     cp.set_pipeline(&g.post.pipes[e]);
                     cp.dispatch_workgroups(x, y, 1);
                 }
@@ -1698,6 +1869,7 @@ impl<'g> Frame<'g> {
                 let mut cp = self.pass("g.post");
                 cp.set_bind_group(0, &bg, &[wo]);
                 for (e, (x, y)) in steps {
+                    if let Some(group) = second(e) { cp.set_bind_group(1, group, &[]); }
                     cp.set_pipeline(&g.post.pipes[e]);
                     cp.dispatch_workgroups(x, y, 1);
                 }
@@ -1931,6 +2103,29 @@ impl<'g> Frame<'g> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tile_bins_list_every_box_in_order() {
+        // Against one list per tile, as they were made before: boxes on, across and off the edges.
+        let (w, h) = (100usize, 70usize);
+        let mut seed = 7u32;
+        let mut next = |range: i64| { seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223); i64::from(seed >> 8) % range - 20 };
+        let boxes: Vec<(i64, i64, i64, i64)> = (0..300).map(|_| { let (x0, y0) = (next(140), next(110)); (x0, y0, x0 + next(60), y0 + next(60)) }).collect();
+        let (cols, rows) = (w.div_ceil(16), h.div_ceil(16));
+        let mut lists: Vec<Vec<u32>> = vec![Vec::new(); cols * rows];
+        for (k, &(x0, y0, x1, y1)) in boxes.iter().enumerate() {
+            if x1 < 0 || y1 < 0 || x0 >= w as i64 || y0 >= h as i64 || x1 < x0 || y1 < y0 { continue; }
+            for ty in (y0.max(0) as usize / 16)..=((y1 as usize).min(h - 1) / 16) {
+                for tx in (x0.max(0) as usize / 16)..=((x1 as usize).min(w - 1) / 16) { lists[ty * cols + tx].push(k as u32); }
+            }
+        }
+        let mut want = Vec::new();
+        let mut off = 0u32;
+        for list in &lists { want.push(off); off += list.len() as u32; }
+        want.push(off);
+        for list in lists { want.extend(list); }
+        assert_eq!(bin_tiles(w, h, &boxes), want);
+    }
 
     #[test]
     fn world_params_match_the_wgsl_struct_size() {

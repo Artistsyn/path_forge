@@ -232,50 +232,80 @@ fn raster_prepared(gbuf: &mut [GPixel], w: usize, prepared: &[Prepared], fade: D
         for t in prepared {
             if t.max_y < y0 || t.min_y > y1 { continue; }
             let inv_area = 1.0 / t.area;
-            let [a, b, c] = t.p;
             for y in t.min_y.max(y0)..=t.max_y.min(y1) {
-                let py = y as f32 + 0.5;
                 let row = &mut rows[(y - y0) as usize * w..(y - y0 + 1) as usize * w];
-                // Solve the span of this row inside the triangle from the three edges.
-                let mut xl = t.min_x as f32;
-                let mut xr = t.max_x as f32 + 1.0;
-                for (e0, e1, opp) in [(a, b, c), (b, c, a), (c, a, b)] {
-                    // Edge function E(x) = (e1-e0) x (p-e0), sign must match the opposite vertex.
-                    let ex = e1[0] - e0[0];
-                    let ey = e1[1] - e0[1];
-                    let s_opp = ex * (opp[1] - e0[1]) - ey * (opp[0] - e0[0]);
-                    // E(x) = ex*(py-e0y) - ey*(x-e0x) = k - ey*x
-                    let k = ex * (py - e0[1]) + ey * e0[0];
-                    if ey.abs() < 1e-12 {
-                        if (k) * s_opp < 0.0 { xl = f32::INFINITY; break; }
-                        continue;
-                    }
-                    let x_cross = k / ey; // where E = 0
-                    // Inside when sign(E) == sign(s_opp); E decreases in x when ey > 0.
-                    let inside_left = (ey > 0.0) == (s_opp > 0.0);
-                    if inside_left { xr = xr.min(x_cross); } else { xl = xl.max(x_cross); }
-                }
-                if !(xl < xr) { continue; }
-                let xs = (xl - 0.5).ceil().max(t.min_x as f32) as i32;
-                let xe = ((xr - 0.5).floor() as i32).min(t.max_x);
-                for x in xs..=xe {
-                    let px = x as f32 + 0.5;
-                    let b0 = ((b[0] - px) * (c[1] - py) - (c[0] - px) * (b[1] - py)) * inv_area;
-                    let b1 = ((c[0] - px) * (a[1] - py) - (a[0] - px) * (c[1] - py)) * inv_area;
-                    let b2 = 1.0 - b0 - b1;
-                    let iz = b0 * t.inv_z[0] + b1 * t.inv_z[1] + b2 * t.inv_z[2];
-                    if iz <= 0.0 { continue; }
-                    let z = 1.0 / iz;
-                    let g = &mut row[x as usize];
-                    if z >= g.depth { continue; }
-                    let wz = |k: usize| (b0 * t.w_over_z[0][k] + b1 * t.w_over_z[1][k] + b2 * t.w_over_z[2][k]) * z;
-                    let wx = wz(0);
-                    if fade.hides(t.id, wx, x as i64, y as i64) { continue; }
-                    *g = GPixel { depth: z, id: t.id, x: wx, y: wz(1), d: wz(2), realm: t.realm, pad: 0 };
-                }
+                let Some((xs, xe)) = t.row_span(y) else { continue };
+                for x in xs..=xe { t.draw_pixel(inv_area, (x, y), fade, &mut row[x as usize]); }
             }
         }
     });
+}
+
+/// `rasterize`'s pixels at every `step`th column and row, from `step / 2` (the same pixels, to
+/// the bit), as `(w / step) x (h / step)` rows: what a frame drawn on the GPU counts its worlds
+/// from on the CPU (`render`'s eye adaptation).
+pub(crate) fn sample_prepared(w: usize, h: usize, prepared: &[Prepared], fade: Dissolve, step: usize) -> Vec<GPixel> {
+    let (cols, rows) = (w / step, h / step);
+    let mut out = vec![GPixel::EMPTY; cols * rows];
+    out.par_chunks_mut(cols.max(1)).enumerate().for_each(|(j, row)| {
+        let y = (j * step + step / 2) as i32;
+        for t in prepared.iter().filter(|t| t.min_y <= y && t.max_y >= y) {
+            let Some((xs, xe)) = t.row_span(y) else { continue };
+            let inv_area = 1.0 / t.area;
+            for (i, g) in row.iter_mut().enumerate() {
+                let x = (i * step + step / 2) as i32;
+                if x >= xs && x <= xe { t.draw_pixel(inv_area, (x, y), fade, g); }
+            }
+        }
+    });
+    out
+}
+
+impl Prepared {
+    /// The pixels xs..=xe of row `y` inside the triangle (`raster_prepared`'s span), from its three edges.
+    #[inline]
+    fn row_span(&self, y: i32) -> Option<(i32, i32)> {
+        let [a, b, c] = self.p;
+        let py = y as f32 + 0.5;
+        let mut xl = self.min_x as f32;
+        let mut xr = self.max_x as f32 + 1.0;
+        for (e0, e1, opp) in [(a, b, c), (b, c, a), (c, a, b)] {
+            // Edge function E(x) = (e1-e0) x (p-e0), sign must match the opposite vertex.
+            let ex = e1[0] - e0[0];
+            let ey = e1[1] - e0[1];
+            let s_opp = ex * (opp[1] - e0[1]) - ey * (opp[0] - e0[0]);
+            // E(x) = ex*(py-e0y) - ey*(x-e0x) = k - ey*x
+            let k = ex * (py - e0[1]) + ey * e0[0];
+            if ey.abs() < 1e-12 {
+                if (k) * s_opp < 0.0 { return None; }
+                continue;
+            }
+            let x_cross = k / ey; // where E = 0
+            // Inside when sign(E) == sign(s_opp); E decreases in x when ey > 0.
+            let inside_left = (ey > 0.0) == (s_opp > 0.0);
+            if inside_left { xr = xr.min(x_cross); } else { xl = xl.max(x_cross); }
+        }
+        if !(xl < xr) { return None; }
+        Some(((xl - 0.5).ceil().max(self.min_x as f32) as i32, ((xr - 0.5).floor() as i32).min(self.max_x)))
+    }
+
+    /// The triangle at pixel (x, y) over `g`, when it is nearer and not dissolved there.
+    #[inline]
+    fn draw_pixel(&self, inv_area: f32, (x, y): (i32, i32), fade: Dissolve, g: &mut GPixel) {
+        let [a, b, c] = self.p;
+        let (px, py) = (x as f32 + 0.5, y as f32 + 0.5);
+        let b0 = ((b[0] - px) * (c[1] - py) - (c[0] - px) * (b[1] - py)) * inv_area;
+        let b1 = ((c[0] - px) * (a[1] - py) - (a[0] - px) * (c[1] - py)) * inv_area;
+        let b2 = 1.0 - b0 - b1;
+        let iz = b0 * self.inv_z[0] + b1 * self.inv_z[1] + b2 * self.inv_z[2];
+        if iz <= 0.0 { return; }
+        let z = 1.0 / iz;
+        if z >= g.depth { return; }
+        let wz = |k: usize| (b0 * self.w_over_z[0][k] + b1 * self.w_over_z[1][k] + b2 * self.w_over_z[2][k]) * z;
+        let wx = wz(0);
+        if fade.hides(self.id, wx, i64::from(x), i64::from(y)) { return; }
+        *g = GPixel { depth: z, id: self.id, x: wx, y: wz(1), d: wz(2), realm: self.realm, pad: 0 };
+    }
 }
 
 /// Two triangles for a quad given in order around its edge.

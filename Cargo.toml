@@ -32,14 +32,14 @@ studio = ["dep:eframe", "dep:egui", "dep:rfd", "gpu"]
 gpu = ["dep:wgpu", "dep:pollster", "dep:bytemuck"]
 
 [dependencies]
-eframe = { version = "0.32", features = ["wgpu"], optional = true }
-egui = { version = "0.32", optional = true }
+eframe = { version = "0.36", features = ["wgpu"], optional = true }
+egui = { version = "0.36", optional = true }
 image      = { version = "0.25", default-features = false, features = ["png"] }
 gif        = "0.13"
 serde      = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 rfd = { version = "0.14", optional = true }
-wgpu = { version = "25.0", optional = true }
+wgpu = { version = "30.0.1", optional = true }
 pollster = { version = "0.3", optional = true }
 bytemuck = { version = "1.16", features = ["derive"], optional = true }
 rayon = "1"
@@ -50,3 +50,8 @@ base64 = "0.22"
 miniz_oxide = "0.8"
 qrcode = { version = "0.14", default-features = false }
 webp-animation = "0.10"
+
+# The road's device on a low-priority queue, made through wgpu-hal (gpu::GpuContext::yielding_device).
+[target.'cfg(target_os = "android")'.dependencies]
+ash = "0.38"
+log = "0.4"

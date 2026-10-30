@@ -679,6 +679,13 @@ fn mist_glow(dist: f32, fhy: f32) -> f32 {
     0.75 * (-(dist / r1) * (dist / r1)).exp() + 0.25 * (-dist / r2).exp()
 }
 
+/// The colour of `ctx`'s mist: its own, or past a crossing it is seen across, as much of `near`'s
+/// fog colour as it borrows `near`'s light (`Ctx::lent`).
+pub(super) fn mist_color(ctx: &Ctx, near: &Ctx) -> [f32; 3] {
+    let own = rgb_lin(ctx.scene.weather.mist.color);
+    if ctx.lent <= 0.0 { own } else { add3(scale3(near.fog_col, ctx.lent), scale3(own, 1.0 - ctx.lent)) }
+}
+
 /// The sun on screen for mist's glow: (x, y) in pixels, the frame's sky height and its light.
 pub(super) fn mist_sun(ctx: &Ctx) -> Option<(f32, f32, f32, [f32; 3])> {
     let m = &ctx.scene.weather.mist;
@@ -745,7 +752,7 @@ pub(super) fn apply_mist(ctxs: &[Ctx], gbuf: &[GPixel], hdr: &mut [[f32; 3]]) {
                 let dist = ((x as f32 + 0.5 - sx).powi(2) + (row as f32 + 0.5 - sy).powi(2)).sqrt();
                 light = add3(light, scale3(sun, mist_glow(dist, fhy)));
             }
-            let col = ctx.apply_fog(mul3(rgb_lin(m.color), light), z * 0.5);
+            let col = ctx.apply_fog(mul3(mist_color(ctx, &ctxs[0]), light), z * 0.5);
             *px = mix3(*px, col, a);
         }
     });
@@ -1283,7 +1290,7 @@ impl FocusK {
 
 /// Taps of the blur: five rings filling the unit disc, 6, 12 .. 30 taps round, every other
 /// ring turned by half a step (x, y, distance from the middle).
-pub(super) const FOCUS_TAPS: [[f32; 3]; 90] = [
+pub(crate) const FOCUS_TAPS: [[f32; 3]; 90] = [
     [0.17320507764816284, 0.10000000149011612, 0.20000000298023224],
     [1.2246467698671066e-17, 0.20000000298023224, 0.20000000298023224],
     [-0.17320507764816284, 0.10000000149011612, 0.20000000298023224],

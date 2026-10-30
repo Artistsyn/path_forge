@@ -52,7 +52,7 @@ struct World {
     pt_on: u32, pt_zb: f32, pt_front: u32, pt_r: f32, pt_g: f32, pt_b: f32,
     pt0x: f32, pt0y: f32, pt0z: f32, pt1x: f32, pt1y: f32, pt1z: f32, pt2x: f32, pt2y: f32, pt2z: f32, pt3x: f32, pt3y: f32, pt3z: f32,
     op_on: u32, op_hw: f32, op_top: f32, op_arch: f32, op_rim: f32, op_seed: u32, op_outer_hw: f32, op_outer_top: f32, op_hill: f32,
-    op_skyline: f32, op_pad0: f32, op_pad1: f32, op_pad2: f32,
+    op_skyline: f32, fa_banks: f32, op_pad1: f32, op_pad2: f32,
     fac_tile: f32,
     vb_on: u32, vb_z: f32,
     wg0a: f32, wg0b: f32, wg0c: f32, wg1a: f32, wg1b: f32, wg1c: f32, wg2a: f32, wg2b: f32, wg2c: f32, wg3a: f32, wg3b: f32, wg3c: f32,
@@ -460,7 +460,12 @@ fn own_fog_t(len: f32, start: f32) -> f32 {
     return even * banks;
 }
 fn front_on() -> bool { return MULTI && W.fa_on != 0u && W.fa_zb > 0.0; }
-fn front_t(near: f32) -> f32 { if W.fa_fog_on != 0u { return exp(-near / W.fa_fog_dist); } return 1.0; }
+// FrontAir::t
+fn front_t(near: f32) -> f32 {
+    let banks = pow(max(W.fa_banks, 1e-6), near / W.fa_zb);
+    if W.fa_fog_on != 0u { return exp(-near / W.fa_fog_dist) * banks; }
+    return banks;
+}
 fn front_col() -> vec3<f32> { return vec3<f32>(W.fa_r, W.fa_g, W.fa_b) * W.fa_gain; }
 // Ctx::fog_t
 fn fog_t(z: f32) -> f32 {
@@ -487,7 +492,7 @@ fn apply_fog(c: vec3<f32>, z: f32) -> vec3<f32> {
 // render::sky_seen: a world's sky at its adaptation, through the first world's air.
 fn sky_seen(c: vec3<f32>) -> vec3<f32> {
     let g = c * W.gain;
-    if front_on() && W.fa_fog_on != 0u { return mix3(front_col(), g, exp(-W.fa_zb / W.fa_fog_dist)); }
+    if front_on() { return mix3(front_col(), g, front_t(W.fa_zb)); }
     return g;
 }
 
