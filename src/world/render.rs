@@ -1461,14 +1461,14 @@ impl<'a> Ctx<'a> {
 
     fn wall_x(&self, d: f32) -> f32 { self.view.path_half_width(d) + self.scene.walls.gap.max(0.0) }
 
-    /// Where a front reaching `half` metres either side of `d` on side `sign` stands clear of the
-    /// side passages' openings and frames: `d`, or just off the one it overlaps (None: no room).
-    fn clear_of_passages(&self, sign: f32, d: f32, half: f32) -> Option<f32> {
-        let Some(f) = self.fork.filter(|f| !f.split) else { return Some(d) };
+    /// Where a front reaching `half` metres either side of `along` on side `sign` stands clear of
+    /// the side passages' openings and frames: `along`, or just off the one it overlaps (None: no room).
+    fn clear_of_passages(&self, sign: f32, along: f32, half: f32) -> Option<f32> {
+        let Some(f) = self.fork.filter(|f| !f.split) else { return Some(along) };
         let reach = half + f.frame;
         let hits = |w: f32| f.openings(w - reach, w + reach).into_iter().filter(|&(_, _, side)| side == sign).collect::<Vec<_>>();
-        let at = self.view.scroll + d;
-        let Some(&(start, end, _)) = hits(at).first() else { return Some(d) };
+        let at = self.view.scroll + along;
+        let Some(&(start, end, _)) = hits(at).first() else { return Some(along) };
         let moved = if at - (start - reach) < end + reach - at { start - reach } else { end + reach };
         hits(moved).is_empty().then_some(moved - self.view.scroll)
     }
