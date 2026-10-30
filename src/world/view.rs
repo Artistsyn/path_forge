@@ -106,6 +106,9 @@ pub struct Split {
     pub flare_b: f32,
     /// Metres either side of the boundary over which the two path widths blend (0 = a clean step).
     pub taper: f32,
+    /// Whether this view's world lies before the boundary: with no taper it keeps its own path
+    /// width on the boundary itself, so its walls meet the end wall there without slanting in.
+    pub before: bool,
     /// Each world's stairs and where the camera stands along it.
     pub stairs_a: Option<StairProfile>,
     pub scroll_a: f32,
@@ -396,7 +399,7 @@ impl View {
         let t = if sp.taper > 0.0 {
             let u = ((d - sp.zb + sp.taper) / (2.0 * sp.taper)).clamp(0.0, 1.0);
             u * u * (3.0 - 2.0 * u)
-        } else if d < sp.zb { 0.0 } else { 1.0 };
+        } else if d < sp.zb || (sp.before && d <= sp.zb) { 0.0 } else { 1.0 };
         if t <= 0.0 { return a; }
         a + (self.flared(sp.half_width_b, sp.flare_b, d) - a) * t
     }

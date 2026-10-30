@@ -1461,6 +1461,18 @@ impl<'a> Ctx<'a> {
 
     fn wall_x(&self, d: f32) -> f32 { self.view.path_half_width(d) + self.scene.walls.gap.max(0.0) }
 
+    /// Where a front reaching `half` metres either side of `d` on side `sign` stands clear of the
+    /// side passages' openings and frames: `d`, or just off the one it overlaps (None: no room).
+    fn clear_of_passages(&self, sign: f32, d: f32, half: f32) -> Option<f32> {
+        let Some(f) = self.fork.filter(|f| !f.split) else { return Some(d) };
+        let reach = half + f.frame;
+        let hits = |w: f32| f.openings(w - reach, w + reach).into_iter().filter(|&(_, _, side)| side == sign).collect::<Vec<_>>();
+        let at = self.view.scroll + d;
+        let Some(&(start, end, _)) = hits(at).first() else { return Some(d) };
+        let moved = if at - (start - reach) < end + reach - at { start - reach } else { end + reach };
+        hits(moved).is_empty().then_some(moved - self.view.scroll)
+    }
+
     /// Whether ground at (x, d) is a fork: a branch path on open ground, or a side passage's floor.
     /// With the split style, it is ground the branch roads pave that the main road alone would not.
     fn on_fork(&self, x: f32, d: f32) -> bool {
@@ -1979,7 +1991,7 @@ impl WorldRenderer {
                 v.half_width = fa.half_width;
                 v.flare = fa.flare;
                 v.split = Some(Split {
-                    zb: plan.zb, half_width_b: fb.half_width, flare_b: fb.flare, taper: plan.taper,
+                    zb: plan.zb, half_width_b: fb.half_width, flare_b: fb.flare, taper: plan.taper, before: r == 0,
                     stairs_a: va.stairs, scroll_a: a.distance.rem_euclid(a.scene.motion.loop_length.max(1.0)),
                     stairs_b: if r == 0 { vb.stairs } else { own.stairs }, scroll_b: if r == 0 { b.distance } else { worlds[r].distance }.rem_euclid(worlds[if r == 0 { plan.next.max(1) } else { r }].scene.motion.loop_length.max(1.0)),
                 });
@@ -3590,6 +3602,11 @@ impl WorldRenderer {
                         let facing = p.facing.unwrap_or(look.facing);
                         let stands = sign != 0.0 && ring.is_none() && !hanging
                             && (facing == Facing::Path || (facing == Facing::PathWhenTurned && ctx.view.turned));
+                        // Along a wall the whole of its front stays off a side passage's opening and
+                        // frame, not only its foot: a notice board's end hung across the way in.
+                        let d = if stands && scene.walls.enabled {
+                            match ctx.clear_of_passages(sign, d, 0.5 * sprite.aspect * height) { Some(clear) => clear, None => continue }
+                        } else { d };
                         // Facing the path once the camera turns: while it swings round (`View::face_k`)
                         // the prop comes round with it about its foot, from facing the camera to
                         // facing the path. `spin` turns an offset (x, d) from its foot that way.
@@ -4060,8 +4077,8 @@ fn build_geometry_parts(ctx: &Ctx, layers: &Layers) -> (Vec<Tri>, Vec<Tri>) {
             .filter(|&(_, b, _)| ctx.opening.is_none() || ctx.owns(0.0, 0.0, b + THRESHOLD_CLEAR_M)).collect(),
         _ => Vec::new(),
     };
-    // Where one world gives way to the next the path narrows along a curve: a wall built straight
-    // across it and cut at the boundary stood far outside the door wall's edge (void at its corners).
+    // A vertex on the boundary between two worlds, and across the taper where one path width
+    // blends into the next: a wall quad straddling it, cut there, slanted toward the other width.
     let split_cuts = v.split.iter().flat_map(|sp| (-SPLIT_CUTS..=SPLIT_CUTS).map(move |k| sp.zb + sp.taper * k as f32 / SPLIT_CUTS as f32));
     let mut cuts: Vec<f32> = spans.iter().flat_map(|&(s, e)| [s, e]).chain(openings.iter().flat_map(|&(a, b, _)| [a, b]))
         .chain(split_cuts).filter(|&c| c > lo && c < hi).collect();
@@ -8498,6 +8515,59 @@ mod tests {
             let void = img.pick.expect("pick").ids.iter().filter(|&&id| id == PICK_SKY).count();
             assert_eq!(void, 0, "{zb} m from the door: {void} pixels of void beside it");
         }
+    }
+
+    #[test]
+    fn a_rooms_walls_keep_their_width_up_to_a_doorways_end_wall() {
+        let mut s = preset("Stone Dungeon");
+        s.path.fork.enabled = false;
+        (s.path.half_width, s.walls.gap, s.walls.thickness) = (2.4, 2.4, 0.0);
+        let mut r = WorldRenderer::default();
+        let cross = Bounds::cross(6.75, 0.0, 0.0, 0);
+        for zb in [6.75f32, 9.0, 3.3] {
+            let mut view = View::new(&s, 120, 214).at(3.0);
+            // The room beyond the door is narrower, with no taper between them: a door, not a road.
+            view.split = Some(Split { zb, half_width_b: 1.6, flare_b: 0.0, taper: 0.0, before: true, stairs_a: None, scroll_a: 3.0, stairs_b: None, scroll_b: 0.0 });
+            let ctx = Ctx {
+                scene: &s, view, loop_len: 24.0, tphase: 0.0, scroll: 3.0, far: 320.0, d_lo: 0.0, d_hi: 320.0, x_reach: 0.0,
+                path_tex: r.textures.get(&s.path.material), verge_tex: r.textures.get(&s.verge.material),
+                wall_tex: r.textures.get(&s.walls.material), ceil_tex: r.textures.get(&s.ceiling.material),
+                path_tile: 1.0, verge_tile: 1.0, wall_tile: 1.0, ceil_tile: 1.0,
+                bridge: None, fork: Forks::new(&s.path.fork, s.path.edge_noise, 24.0), deck_tex: r.textures.get(&s.path.bridge.deck), bottom_tex: r.textures.get(&s.verge.material),
+                deck_tile: 1.0, bottom_tile: 1.0, ambient: [0.0; 3],
+                sky_lights: vec![], lights: vec![], smokes: vec![], wire_pts: vec![], falls: vec![], fog: None, fog_col: [0.0; 3], void_lin: [0.0; 3], realm: 0,
+                bounds: Some(&cross), facade: None, opening: None, portal: None, front: None, verge_beyond: None, gain: 1.0, lent: 0.0, wx: weather::Wx::default(), water: None, cover: Vec::new(),
+            };
+            let tris = build_geometry(&ctx, &Layers::default());
+            let near: Vec<f32> = tris.iter().filter(|t| matches!(t.id, id::WALL_L | id::WALL_R))
+                .flat_map(|t| t.v.iter()).filter(|v| v.world[2] > zb - 2.0 && v.world[2] <= zb).map(|v| v.world[0].abs()).collect();
+            assert!(!near.is_empty(), "{zb}: walls reach the end wall");
+            assert!(near.iter().all(|&x| (x - 4.8).abs() < 1e-3), "{zb}: a wall slants in before the end wall: {:?}", near.iter().fold((f32::MAX, 0.0f32), |(lo, hi), &x| (lo.min(x), hi.max(x))));
+        }
+    }
+
+    #[test]
+    fn a_board_along_a_wall_stands_clear_of_a_side_passage_beside_it() {
+        let mut s = preset("Stone Dungeon");
+        let f = &mut s.path.fork;
+        (f.enabled, f.style, f.side, f.spacing, f.offset, f.half_width, f.frame) = (true, ForkStyle::Side, ForkSide::Alternate, 8.0, 6.5, 0.75, 0.2);
+        let mut r = WorldRenderer::default();
+        let ctx = Ctx {
+            scene: &s, view: View::new(&s, 120, 214), loop_len: 24.0, tphase: 0.0, scroll: 0.0, far: 320.0, d_lo: 0.0, d_hi: 320.0, x_reach: 0.0,
+            path_tex: r.textures.get(&s.path.material), verge_tex: r.textures.get(&s.verge.material),
+            wall_tex: r.textures.get(&s.walls.material), ceil_tex: r.textures.get(&s.ceiling.material),
+            path_tile: 1.0, verge_tile: 1.0, wall_tile: 1.0, ceil_tile: 1.0,
+            bridge: None, fork: Forks::new(&s.path.fork, s.path.edge_noise, 24.0), deck_tex: r.textures.get(&s.path.bridge.deck), bottom_tex: r.textures.get(&s.verge.material),
+            deck_tile: 1.0, bottom_tile: 1.0, ambient: [0.0; 3],
+            sky_lights: vec![], lights: vec![], smokes: vec![], wire_pts: vec![], falls: vec![], fog: None, fog_col: [0.0; 3], void_lin: [0.0; 3], realm: 0,
+            bounds: None, facade: None, opening: None, portal: None, front: None, verge_beyond: None, gain: 1.0, lent: 0.0, wx: weather::Wx::default(), water: None, cover: Vec::new(),
+        };
+        // The left passage opens over 6.5..8.0 m, its frame 0.2 m more: a board 2 m long at 9 m
+        // reached across its post, and moves just past it.
+        let moved = ctx.clear_of_passages(-1.0, 9.0, 1.0).expect("room past the passage");
+        assert!((moved - 9.2).abs() < 1e-4, "the board stands at {moved}");
+        assert_eq!(ctx.clear_of_passages(1.0, 9.0, 1.0), Some(9.0), "the other wall has no passage there");
+        assert_eq!(ctx.clear_of_passages(-1.0, 11.0, 1.0), Some(11.0), "clear of it, a board stays put");
     }
 
     #[test]
