@@ -204,6 +204,9 @@ pub struct WalkState {
     /// next place: the crossing's boundary, the fork's junction. After `turn_into` with the walk on
     /// not yet started, that walk's.
     pub handover: Option<f32>,
+    /// Metres from the start of the transition or fork under way to its end, where the walk
+    /// arrives at the next stop.
+    pub length: Option<f32>,
     /// The walking speed of the scene the camera is in, m/s.
     pub speed: f32,
     /// At a journey stop that leads nowhere, with nothing under way.
@@ -645,7 +648,9 @@ impl Runtime {
 
     /// The current frame of the runtime's own walk, `width` x `height` RGBA8.
     pub fn frame(&mut self, width: u32, height: u32) -> &[u8] {
-        let opts = RenderOptions { size: Some((width.max(1), height.max(1))), probes: self.probes.clone(), pipelined: self.pipelined, ..RenderOptions::default() };
+        // Arches clear the walk's eye as the scene came, not a view a swing left (a cutscene's).
+        let walk_eye = Some(self.home.eye_height);
+        let opts = RenderOptions { size: Some((width.max(1), height.max(1))), probes: self.probes.clone(), pipelined: self.pipelined, walk_eye, ..RenderOptions::default() };
         self.renderer.set_end(self.end.as_ref().map(|(at, wall)| ((at - self.walked) as f32, wall.clone())));
         let a = Place { scene: &self.scene, dir: self.base_dir.as_deref() };
         let img = match &self.active {
@@ -854,8 +859,9 @@ impl Runtime {
         };
         let end = self.active.is_none() && self.journey.as_ref().is_some_and(|(j, _, at)| j.stops.get(at).is_some_and(|s| matches!(s.next, Next::End)));
         let travel = match &self.active { Some(Active::Cross { travel, .. } | Active::Fork { travel, .. }) => Some(*travel), None => None };
+        let length = match &self.active { Some(Active::Cross { walk, .. }) => Some(walk.length()), Some(Active::Fork { walk, .. }) => Some(walk.length()), None => None };
         WalkState { scene: self.scene.name.clone(), distance: self.distance, walked: self.walked, time: self.time, stop: self.journey.as_ref().map(|j| j.2.clone()), progress, choose_within,
-            travel, handover: self.handover().or(self.onward), speed: self.scene.motion.speed, end, day: self.day(), intro_left: self.intro_left(), swing_left: self.swing_left(),
+            travel, handover: self.handover().or(self.onward), length, speed: self.scene.motion.speed, end, day: self.day(), intro_left: self.intro_left(), swing_left: self.swing_left(),
             side_paths: if self.active.is_none() { crate::world::render::side_paths(&self.scene, self.distance - 6.0, self.distance + 40.0).into_iter().map(|(w, side)| (w - self.distance, side)).collect() } else { Vec::new() } }
     }
 

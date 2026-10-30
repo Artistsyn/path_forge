@@ -70,6 +70,10 @@ pub struct RenderOptions {
     /// The camera partway through a swing a game or a transition is making, in place of the
     /// scene's own (and of a swing in).
     pub swing: Option<crate::scene::SwingPose>,
+    /// The walking camera's eye height, metres, for what must clear it (an arch's opening): the
+    /// first world's camera as its scene came, kept by a runtime while a swing has left another
+    /// view in place (a cutscene's, high over the path). None: the scene's camera.
+    pub walk_eye: Option<f32>,
     /// Points (x right of the path centre, y up, d ahead, metres) to measure the light at, for
     /// `WorldRenderer::lighting`: a game lighting its own sprites as the world is lit.
     pub probes: Vec<[f32; 3]>,
@@ -1078,7 +1082,8 @@ impl Bounds {
 /// The eye of a frame of several worlds drawn on the GPU counts every `EYE_STEP`th pixel each way.
 const EYE_STEP: usize = 4;
 
-/// Metres before a doorway's end wall kept clear of the arches and gates that span the path.
+/// Metres before a doorway's end wall kept clear of the arches and gates that span the path, and
+/// of side passages.
 const THRESHOLD_CLEAR_M: f32 = 8.0;
 
 /// The worlds of a frame mixed over a pixel where they meet (`Bounds::realm_mix`): the world it
@@ -2021,7 +2026,9 @@ impl WorldRenderer {
                 let b_hw = if b.scene.walls.enabled { b.wall_x(zb) } else if roof(b.scene).is_some() { wide } else { f32::INFINITY };
                 let b_top = roof(b.scene).unwrap_or(f32::INFINITY);
                 let door = |size: f32| if size > 0.0 { size } else { f32::INFINITY };
-                let (hw, top) = (a_hw.min(b_hw).min(door(c.door[0])), a_top.min(b_top).min(door(c.door[1])));
+                // The camera walks through the door: its head clears the eye, as an arch's does.
+                let clear = opts.walk_eye.unwrap_or(a.scene.camera.eye_height) + crate::scene::ARCH_CLEARANCE_M;
+                let (hw, top) = (a_hw.min(b_hw).min(door(c.door[0])), a_top.min(b_top).min(door(c.door[1]).max(clear)));
                 let op = Opening {
                     hw, top, arch: c.arch, rim: c.rim, seed: c.seed, outer_hw: a_hw, outer_top: a_top,
                     hill: if roof(a.scene).is_none() { c.facade.as_ref().map_or(0.0, |f| f.rough) } else { 0.0 },
@@ -2095,12 +2102,14 @@ impl WorldRenderer {
                 tris.extend(raster::clip_region(face, &b.realms[r], r as u8));
             }
         }
-        // The road's end (`set_end`), walled across in the first world.
-        if let Some((d0, bar)) = self.end.clone().filter(|(d, b)| b.wall && *d > NEAR + 0.1 && *d < ctxs[0].far) {
-            let face = self.barrier_face(&mut ctxs[0], d0, &bar);
+        // The road's end (`set_end`), walled across in the world it ends in: the first, or the
+        // second while a crossing into it is under way.
+        let ends_in = if matches!(layout, Some(Layout::Cross { .. })) { n - 1 } else { 0 };
+        if let Some((d0, bar)) = self.end.clone().filter(|(d, b)| b.wall && *d > NEAR + 0.1 && *d < ctxs[ends_in].far) {
+            let face = self.barrier_face(&mut ctxs[ends_in], d0, &bar);
             match bounds {
                 None => tris.extend(face),
-                Some(b) => tris.extend(raster::clip_region(face, &b.realms[0], 0)),
+                Some(b) => tris.extend(raster::clip_region(face, &b.realms[ends_in], ends_in as u8)),
             }
         }
         prof.mark("geometry");
@@ -2147,7 +2156,7 @@ impl WorldRenderer {
         for r in 0..n {
             let ls = strikes[r].0;
             let base = worlds[r].base_dir.clone();
-            let o = RenderOptions { base_dir: base, ..opts.clone() };
+            let o = RenderOptions { base_dir: base, walk_eye: opts.walk_eye.filter(|_| r == 0), ..opts.clone() };
             let first = bills.len();
             if layers.fixtures {
                 self.collect_fixtures(&mut ctxs[r], ls, &o, &mut bills, &mut flames);
@@ -2183,9 +2192,9 @@ impl WorldRenderer {
         // And in the foot of the wall the road ends at.
         if let (Some((d0, bar)), true) = (self.end.clone(), layers.props) {
             let z = d0 - 0.08;
-            if !bar.sprite.trim().is_empty() && z > NEAR + 0.2 && z < ctxs[0].far {
-                let dir = worlds[0].base_dir.clone();
-                bills.extend(self.barrier_pictures(&mut ctxs[0], dir.as_deref(), z, &bar, layers.fixtures));
+            if !bar.sprite.trim().is_empty() && z > NEAR + 0.2 && z < ctxs[ends_in].far {
+                let dir = worlds[ends_in].base_dir.clone();
+                bills.extend(self.barrier_pictures(&mut ctxs[ends_in], dir.as_deref(), z, &bar, layers.fixtures));
             }
         }
         // A structure standing in the threshold.
@@ -3395,7 +3404,7 @@ impl WorldRenderer {
                 };
                 // An opening the walking camera passes under clears its eye.
                 let spans = matches!(p.kind, SetPieceKind::Archway | SetPieceKind::RuinedArch | SetPieceKind::Gate);
-                let clear = if spans { scene.camera.eye_height + crate::scene::ARCH_CLEARANCE_M } else { 0.0 };
+                let clear = if spans { opts.walk_eye.unwrap_or(scene.camera.eye_height) + crate::scene::ARCH_CLEARANCE_M } else { 0.0 };
                 let oh = p.height.max(1.0).max(clear);
                 // Nothing spans a fork's mouth: there the walls stand back, and an arch sized to
                 // them would grow across the junction until the camera walked through its stone.
@@ -4037,7 +4046,9 @@ fn build_geometry_parts(ctx: &Ctx, layers: &Layers) -> (Vec<Tri>, Vec<Tri>) {
     let spans: Vec<(f32, f32)> = ctx.bridge.map(|b| b.within(v.scroll + lo.min(0.0), v.scroll + hi).into_iter().map(|(s, e)| (s - v.scroll, e - v.scroll)).collect()).unwrap_or_default();
     let walls_on = s.walls.enabled && layers.walls;
     let openings: Vec<(f32, f32, f32)> = match (&ctx.fork, walls_on) {
-        (Some(f), true) => f.openings(v.scroll + lo.min(0.0), v.scroll + hi).into_iter().map(|(a, b, side)| (a - v.scroll, b - v.scroll, side)).collect(),
+        (Some(f), true) => f.openings(v.scroll + lo.min(0.0), v.scroll + hi).into_iter().map(|(a, b, side)| (a - v.scroll, b - v.scroll, side))
+            // A doorway's end wall meets plain wall: a passage at its corner shows as a dark slot.
+            .filter(|&(_, b, _)| ctx.opening.is_none() || ctx.owns(0.0, 0.0, b + THRESHOLD_CLEAR_M)).collect(),
         _ => Vec::new(),
     };
     let cuts: Vec<f32> = spans.iter().flat_map(|&(s, e)| [s, e]).chain(openings.iter().flat_map(|&(a, b, _)| [a, b]))
@@ -4188,7 +4199,8 @@ fn build_geometry_parts(ctx: &Ctx, layers: &Layers) -> (Vec<Tri>, Vec<Tri>) {
                     }
                 };
                 let (x0, x1) = (sign * ctx.wall_x(d0), sign * ctx.wall_x(d1));
-                if let Some(f) = open.filter(|f| f.opens(mid, sign)) {
+                let local = mid - v.scroll;
+                if let Some(f) = open.filter(|_| openings.iter().any(|&(a, b, s)| s == sign && local >= a && local < b)) {
                     // A side passage: floor and ceiling run back into the dark, a lintel above.
                     let (p0, p1) = (sign * (ctx.wall_x(d0) + f.depth), sign * (ctx.wall_x(d1) + f.depth));
                     let h = ph.unwrap_or(top);
@@ -8238,6 +8250,22 @@ mod tests {
         }
     }
 
+    /// An arch is built to clear the walking camera's eye, not a view a swing left high over the
+    /// path: with the camera raised to 6 m and the walk's eye at 1.6 m, the ruins' arches stand as
+    /// built for the walk, reaching far less high in the picture than ones raised over 6 m.
+    #[test]
+    fn an_arch_clears_the_walks_eye_not_a_raised_view() {
+        let mut s = crate::scene::presets::ruins_path();
+        s.camera.eye_height = 6.0;
+        let top_row = |walk_eye: Option<f32>| {
+            let img = WorldRenderer::default().render(&s, 3.0, &RenderOptions { size: Some((96, 160)), pick: true, walk_eye, ..RenderOptions::default() });
+            let pick = img.pick.expect("pick");
+            pick.ids.iter().position(|&id| id >> 12 == PICK_SET_PIECES >> 12).map(|i| i / pick.width)
+        };
+        let (walked, raised) = (top_row(Some(1.6)), top_row(None));
+        assert!(walked.zip(raised).is_some_and(|(w, r)| w > r + 10), "top row built for the walk {walked:?}, over the raised view {raised:?}");
+    }
+
     /// A picture made solid has the faces its outline makes: an arch-shaped one (two legs under a
     /// lintel) its face and back, the outer sides of its legs and their inner sides under the
     /// lintel, its top, the lintel's underside and the legs' feet, each facing out of it.
@@ -8412,6 +8440,60 @@ mod tests {
         assert!(!ends.is_empty() && ends.iter().all(|t| t.v.iter().all(|v| (v.world[2] - 12.0).abs() < 0.05)), "each wall ends in a face where its world ends");
         let walls_past = tris.iter().filter(|t| matches!(t.id, id::WALL_L | id::WALL_R) && t.v.iter().any(|v| v.world[2] > 12.05)).count();
         assert_eq!(walls_past, 0, "no wall runs on into the next world");
+    }
+
+    #[test]
+    fn a_dead_ends_wall_stands_in_the_room_walked_into_and_its_door_clears_the_eye() {
+        use crate::scene::transition::{plan, Barrier, Threshold, Transition};
+        let (a, b) = (preset("Stone Dungeon"), preset("Stone Crypt"));
+        let c = plan(&a, &b, &Transition { threshold: Threshold::Doorway, door: [1.0, 1.0], ..Transition::default() });
+        let opts = RenderOptions { size: Some((120, 214)), layers: Layers { particles: false, ..Layers::default() }, ..RenderOptions::default() };
+        let w = [WorldIn { scene: &a, distance: 3.0, time: Some(0.0), base_dir: None }, WorldIn { scene: &b, distance: 0.0, time: Some(0.0), base_dir: None }];
+        let mut r = WorldRenderer::default();
+        let open = r.render_layout(&w, Layout::Cross { crossing: &c, zb: 4.0 }, &opts).rgba;
+        r.set_end(Some((9.0, Barrier::default())));
+        let walled = r.render_layout(&w, Layout::Cross { crossing: &c, zb: 4.0 }, &opts).rgba;
+        let changed = open.chunks(4).zip(walled.chunks(4)).filter(|(p, q)| p[..3] != q[..3]).count();
+        assert!(changed > 100, "the wall 5 m past the door shows through it ({changed} pixels)");
+        // The door was asked 1 m high, under the eye: it is drawn as one just clearing the eye.
+        r.set_end(None);
+        let clear = a.camera.eye_height + crate::scene::ARCH_CLEARANCE_M;
+        let tall = plan(&a, &b, &Transition { threshold: Threshold::Doorway, door: [1.0, clear], ..Transition::default() });
+        let low = r.render_layout(&w, Layout::Cross { crossing: &c, zb: 4.0 }, &opts).rgba;
+        let cleared = r.render_layout(&w, Layout::Cross { crossing: &tall, zb: 4.0 }, &opts).rgba;
+        assert!(low == cleared, "a door under the eye is raised to clear it");
+    }
+
+    #[test]
+    fn no_side_passage_opens_beside_a_doorways_end_wall() {
+        let mut s = preset("Stone Dungeon");
+        s.path.fork.enabled = true;
+        let mut r = WorldRenderer::default();
+        let zb = 14.0;
+        let cross = Bounds::cross(zb, 0.0, 0.0, 0);
+        // The far posts of side passages (shaded like a cliff) in the last metres before the wall.
+        let posts_at_wall = |r: &mut WorldRenderer, scroll: f32, door: bool| {
+            let op = Opening { hw: 0.65, top: 2.4, arch: 0.0, rim: 0.0, seed: 0, outer_hw: 6.0, outer_top: 5.0, hill: 0.0, skyline: 0.0 };
+            let ctx = Ctx {
+                scene: &s, view: View::new(&s, 120, 214).at(scroll), loop_len: 24.0, tphase: 0.0, scroll, far: 320.0, d_lo: 0.0, d_hi: 320.0, x_reach: 0.0,
+                path_tex: r.textures.get(&s.path.material), verge_tex: r.textures.get(&s.verge.material),
+                wall_tex: r.textures.get(&s.walls.material), ceil_tex: r.textures.get(&s.ceiling.material),
+                path_tile: 1.0, verge_tile: 1.0, wall_tile: 1.0, ceil_tile: 1.0,
+                bridge: None, fork: Forks::new(&s.path.fork, s.path.edge_noise, 24.0), deck_tex: r.textures.get(&s.path.bridge.deck), bottom_tex: r.textures.get(&s.verge.material),
+                deck_tile: 1.0, bottom_tile: 1.0, ambient: [0.0; 3],
+                sky_lights: vec![], lights: vec![], smokes: vec![], wire_pts: vec![], falls: vec![], fog: None, fog_col: [0.0; 3], void_lin: [0.0; 3], realm: 0,
+                bounds: Some(&cross), facade: None, opening: door.then_some(op), portal: None, front: None, verge_beyond: None, gain: 1.0, lent: 0.0, wx: weather::Wx::default(), water: None, cover: Vec::new(),
+            };
+            build_geometry(&ctx, &Layers::default()).iter()
+                .filter(|t| t.id == id::CLIFF && t.v.iter().all(|v| v.world[2] > zb - THRESHOLD_CLEAR_M && v.world[2] < zb)).count()
+        };
+        let mut bare = 0;
+        for k in 0..48 {
+            let scroll = k as f32 * 0.5;
+            assert_eq!(posts_at_wall(&mut r, scroll, true), 0, "scroll {scroll}: a side passage opens beside the doorway's end wall");
+            bare += posts_at_wall(&mut r, scroll, false);
+        }
+        assert!(bare > 0, "without a doorway the passages do reach the end of the world");
     }
 
     #[test]

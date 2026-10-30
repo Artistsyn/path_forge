@@ -373,7 +373,11 @@ pub fn plan(a: &Scene, b: &Scene, t: &Transition) -> Crossing {
     // The walk must carry on past the boundary until the camera, the sky and the light are
     // wholly the second world's, so a clip ends exactly on its loop.
     let camera_blend = t.camera_blend_m.max(0.5);
-    let settle = camera_blend.max(if sky == SkyRule::Blend { blend.max(2.0) } else { 0.0 }).max(blend).max(LIGHT_BLEND_M) + 1.0;
+    // A roofed room keeps its own light (no `LIGHT_BLEND_M` into it), and one camera needs no
+    // blending into itself: a door between two such rooms settles as soon as it is passed.
+    let views = if a.camera == b.camera { 0.0 } else { camera_blend };
+    let light = if rb { 0.0 } else { LIGHT_BLEND_M };
+    let settle = views.max(if sky == SkyRule::Blend { blend.max(2.0) } else { 0.0 }).max(blend).max(light) + 1.0;
     let overshoot = t.overshoot_m.max(settle);
     Crossing {
         threshold, approach, overshoot, blend, taper, arch, rim, facade, spill, adaptation,
