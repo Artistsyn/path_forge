@@ -1082,6 +1082,9 @@ impl Bounds {
 /// The eye of a frame of several worlds drawn on the GPU counts every `EYE_STEP`th pixel each way.
 const EYE_STEP: usize = 4;
 
+/// Metres a roofed doorway's end wall reaches past the walls' line, out of sight behind them.
+const FACADE_TUCK_M: f32 = 0.6;
+
 /// Metres before a doorway's end wall kept clear of the arches and gates that span the path, and
 /// of side passages.
 const THRESHOLD_CLEAR_M: f32 = 8.0;
@@ -2021,7 +2024,8 @@ impl WorldRenderer {
                 let (a, b) = (&ctxs[0], &ctxs[1]);
                 let wide = { let v = &a.view; ((v.width as f32 * 0.5) / v.focal_px * zb + v.bend_x(zb).abs()) * 1.4 + 4.0 };
                 let roof = |s: &Scene| s.ceiling.enabled.then(|| s.ceiling.height.max(0.2));
-                let a_hw = if roof(a.scene).is_some() && a.scene.walls.enabled { a.wall_x(zb) } else { wide };
+                let walled = roof(a.scene).is_some() && a.scene.walls.enabled;
+                let a_hw = if walled { a.wall_x(zb) } else { wide };
                 let a_top = roof(a.scene).unwrap_or_else(|| c.facade.as_ref().map_or(f32::INFINITY, |f| f.height));
                 let b_hw = if b.scene.walls.enabled { b.wall_x(zb) } else if roof(b.scene).is_some() { wide } else { f32::INFINITY };
                 let b_top = roof(b.scene).unwrap_or(f32::INFINITY);
@@ -2030,7 +2034,9 @@ impl WorldRenderer {
                 let clear = opts.walk_eye.unwrap_or(a.scene.camera.eye_height) + crate::scene::ARCH_CLEARANCE_M;
                 let (hw, top) = (a_hw.min(b_hw).min(door(c.door[0])), a_top.min(b_top).min(door(c.door[1]).max(clear)));
                 let op = Opening {
-                    hw, top, arch: c.arch, rim: c.rim, seed: c.seed, outer_hw: a_hw, outer_top: a_top,
+                    // Tucked in behind the walls: they run straight between their samples, so where
+                    // the path tapers they stand a little out from wall_x at the boundary itself.
+                    hw, top, arch: c.arch, rim: c.rim, seed: c.seed, outer_hw: a_hw + if walled { FACADE_TUCK_M } else { 0.0 }, outer_top: a_top,
                     hill: if roof(a.scene).is_none() { c.facade.as_ref().map_or(0.0, |f| f.rough) } else { 0.0 },
                     skyline: c.facade.as_ref().map_or(0.0, |f| f.skyline),
                 };
@@ -8462,6 +8468,27 @@ mod tests {
         let low = r.render_layout(&w, Layout::Cross { crossing: &c, zb: 4.0 }, &opts).rgba;
         let cleared = r.render_layout(&w, Layout::Cross { crossing: &tall, zb: 4.0 }, &opts).rgba;
         assert!(low == cleared, "a door under the eye is raised to clear it");
+    }
+
+    #[test]
+    fn between_two_roofed_rooms_no_void_shows_where_the_door_wall_meets_the_walls() {
+        use crate::scene::transition::{plan, Threshold, Transition};
+        // Rooms joined through a door have walls with no thickness (thick ones are a known trap).
+        let mut a = preset("Stone Dungeon");
+        a.path.fork.enabled = false;
+        assert!(a.ceiling.enabled && a.walls.enabled, "the test wants a roofed, walled room");
+        (a.path.half_width, a.walls.gap, a.walls.thickness) = (2.4, 2.4, 0.0);
+        let mut b = a.clone();
+        (b.path.half_width, b.walls.gap) = (1.6, 1.0);
+        let c = plan(&a, &b, &Transition { threshold: Threshold::Doorway, door: [1.0, 2.4], ..Transition::default() });
+        let opts = RenderOptions { size: Some((432, 243)), pick: true, layers: Layers { particles: false, ..Layers::default() }, ..RenderOptions::default() };
+        let w = [WorldIn { scene: &a, distance: 31.5, time: Some(0.0), base_dir: None }, WorldIn { scene: &b, distance: 0.0, time: Some(0.0), base_dir: None }];
+        let mut r = WorldRenderer::default();
+        for zb in [7.0f32, 5.5, 4.5, 3.0, 2.0] {
+            let img = r.render_layout(&w, Layout::Cross { crossing: &c, zb }, &opts);
+            let void = img.pick.expect("pick").ids.iter().filter(|&&id| id == PICK_SKY).count();
+            assert_eq!(void, 0, "{zb} m from the door: {void} pixels of void beside it");
+        }
     }
 
     #[test]
