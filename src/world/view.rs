@@ -126,38 +126,38 @@ impl Winding {
         Winding { waves, lo: zb - WIND_BLEND_M, inv: 1.0 / WIND_BLEND_M, c0: 0.0, c1: 0.0 }.settled(turns)
     }
 
-    /// How far into the blend `d` metres ahead is (0 before it, 1 past it), and how fast it goes.
-    fn mix(&self, d: f32) -> (f32, f32) {
-        let u = ((d - self.lo) * self.inv).clamp(0.0, 1.0);
+    /// How far into the blend `ahead` metres on is (0 before it, 1 past it), and how fast it goes.
+    fn mix(&self, ahead: f32) -> (f32, f32) {
+        let u = ((ahead - self.lo) * self.inv).clamp(0.0, 1.0);
         let rate = if u > 0.0 && u < 1.0 { 6.0 * u * (1.0 - u) * self.inv } else { 0.0 };
         (u * u * (3.0 - 2.0 * u), rate)
     }
 
-    /// A wave's share at blend `e`, by its group.
-    fn share(group: f32, e: f32) -> f32 { (if group > 0.0 { 0.0 } else { 1.0 }) + group * e }
+    /// A wave's share at blend `blend`, by its group.
+    fn share(group: f32, blend: f32) -> f32 { (if group > 0.0 { 0.0 } else { 1.0 }) + group * blend }
 
-    /// The waves summed `d` metres ahead, before the camera's place and heading are taken off.
-    fn raw(&self, d: f32) -> f32 {
-        let (e, _) = self.mix(d);
-        let mut s = 0.0;
+    /// The waves summed `ahead` metres on, before the camera's place and heading are taken off.
+    fn raw(&self, ahead: f32) -> f32 {
+        let (blend, _) = self.mix(ahead);
+        let mut sum = 0.0;
         for &[a, k, p, g] in &self.waves {
-            if a != 0.0 { s += a * (Self::share(g, e) * (k * d + p).sin()); }
+            if a != 0.0 { sum += a * (Self::share(g, blend) * (k * ahead + p).sin()); }
         }
-        s
+        sum
     }
 
     /// With the offset at the camera and its heading (as far as each wave turns it) worked out.
     fn settled(mut self, turns: [f32; 4]) -> Winding {
         self.c0 = self.raw(0.0);
-        let (e, rate) = self.mix(0.0);
+        let (blend, rate) = self.mix(0.0);
         self.c1 = self.waves.iter().zip(turns).filter(|(w, _)| w[0] != 0.0)
-            .map(|(&[a, k, p, g], turn)| turn * a * (Self::share(g, e) * k * p.cos() + g * rate * p.sin())).sum();
+            .map(|(&[a, k, p, g], turn)| turn * a * (Self::share(g, blend) * k * p.cos() + g * rate * p.sin())).sum();
         self
     }
 
-    /// How far sideways the path's centre is `d` metres ahead (`View::bend_x` without its curve).
+    /// How far sideways the path's centre is `ahead` metres on (`View::bend_x` without its curve).
     #[inline]
-    pub fn x(&self, d: f32) -> f32 { self.raw(d) - self.c0 - self.c1 * d }
+    pub fn x(&self, ahead: f32) -> f32 { self.raw(ahead) - self.c0 - self.c1 * ahead }
 }
 
 /// How far a camera's turn has gone in what it changes besides the angle (see `View::posed`):
@@ -294,7 +294,7 @@ pub struct Bend {
 impl Bend {
     /// `View::bend_x`.
     #[inline]
-    pub fn x(&self, d: f32) -> f32 { self.bk * d * d + self.wind.x(d) }
+    pub fn x(&self, ahead: f32) -> f32 { self.bk * ahead * ahead + self.wind.x(ahead) }
     /// `View::shear_x`.
     #[inline]
     pub fn shear(&self, d: f32) -> f32 { match self.shear { Some((z0, k)) => k * (d - z0).max(0.0), None => 0.0 } }
@@ -401,11 +401,11 @@ impl View {
         match &self.stairs { Some(s) => s.ground(self.scroll + d) - s.ramp(self.scroll), None => 0.0 }
     }
 
-    /// How far sideways the path's centre is `d` metres ahead: the steady bend, and the
+    /// How far sideways the path's centre is `ahead` metres on: the steady bend, and the
     /// winding, measured from where the camera stands and (as far as it turns with the path)
     /// from the way the path heads there.
     #[inline]
-    pub fn bend_x(&self, d: f32) -> f32 { self.bend * BEND_K * d * d + self.winding().x(d) }
+    pub fn bend_x(&self, ahead: f32) -> f32 { self.bend * BEND_K * ahead * ahead + self.winding().x(ahead) }
 
     /// The winding this view draws: the frame's shared one (`blend`), else its own from where it
     /// stands along its loop.
