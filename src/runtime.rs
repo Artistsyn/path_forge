@@ -870,6 +870,7 @@ impl Runtime {
     pub fn camera_now(&self, width: u32, height: u32) -> Camera {
         match &self.active {
             Some(Active::Cross { next, walk, travel, .. }) => walk.camera(&self.scene, &next.scene, *travel, width, height),
+            Some(Active::Fork { left, right, walk, travel, .. }) => walk.camera([&self.scene, &left.scene, &right.scene], *travel, width, height),
             _ => match self.swinging.as_ref().and_then(Swinging::pose).or_else(|| self.intro().and_then(|t| self.scene.camera.moves.swing_in.pose(&self.scene.camera, t))) {
                 Some(p) => Camera::swinging(&self.scene, &p, self.distance, width, height),
                 None => Camera::plain(&self.scene, self.distance, width, height),

@@ -10,7 +10,7 @@ use super::palette::{self, PaletteLut};
 use super::raster::{self, id, GPixel, Tri, Vert};
 use super::sprites::{arch_shape, fixture_body, Arch, Sprite, SpriteCache};
 use super::texture::{rgb_lin, Texture, TextureCache};
-use super::view::{View, NEAR};
+use super::view::{View, Winding, NEAR};
 use crate::scene::*;
 use crate::scene::transition::{Barrier, Branch, Crossing, ForkPlan, SkyRule, StyleFrom, LIGHT_BLEND_M};
 use super::view::Split;
@@ -1754,6 +1754,9 @@ struct Plan {
     bounds: Option<Bounds>,
     taper: f32,
     adaptation: f32,
+    /// How much of the next world's winding comes in past the boundary: all of a crossing's, a
+    /// branch's as it is taken.
+    wind_keep: f32,
 }
 
 impl WorldRenderer {
@@ -1826,7 +1829,7 @@ impl WorldRenderer {
     }
 
     fn plan(worlds: &[WorldIn], layout: Option<Layout>) -> Plan {
-        let one = Plan { zb: f32::INFINITY, next: 0, cam_t: 0.0, look: 0, sky_w: SkyW { base: vec![1.0], fork: None }, shear: vec![None], bounds: None, taper: 0.0, adaptation: 0.0 };
+        let one = Plan { zb: f32::INFINITY, next: 0, cam_t: 0.0, look: 0, sky_w: SkyW { base: vec![1.0], fork: None }, shear: vec![None], bounds: None, taper: 0.0, adaptation: 0.0, wind_keep: 0.0 };
         let Some(layout) = layout else { return one };
         let past = |zb: f32, m: f32| smoothstep(m, -m, zb);
         match layout {
@@ -1836,7 +1839,7 @@ impl WorldRenderer {
                 let u = match c.sky { SkyRule::First => 0.0, SkyRule::Second => 1.0, SkyRule::Blend => smoothstep(0.0, -LIGHT_BLEND_M, zb) };
                 Plan {
                     zb, next: 1, cam_t, look, sky_w: SkyW { base: vec![1.0 - u, u], fork: None }, shear: vec![None, None],
-                    bounds: Some(Bounds::cross(zb, c.blend, worlds[1].distance, c.seed)), taper: c.taper, adaptation: c.adaptation,
+                    bounds: Some(Bounds::cross(zb, c.blend, worlds[1].distance, c.seed)), taper: c.taper, adaptation: c.adaptation, wind_keep: 1.0,
                 }
             }
             Layout::Fork { fork: f, zb, chosen, steer, .. } => {
@@ -1859,7 +1862,7 @@ impl WorldRenderer {
                     bounds: Some(Bounds {
                         mouth: Some([zb, f.mouth, f.slope, worlds[0].scene.path.half_width]),
                         restyle: (f.hold >= 0.0).then(|| [zb, f.hold, f.blend.max(1.0), f.seed as f32]),
-                        ..Bounds::fork(zb, slopes, hw, walls, f.wedge, f.blend, worlds[next].distance, f.seed) }), taper: 0.0, adaptation: f.adaptation,
+                        ..Bounds::fork(zb, slopes, hw, walls, f.wedge, f.blend, worlds[next].distance, f.seed) }), taper: 0.0, adaptation: f.adaptation, wind_keep: taken,
                 }
             }
         }
@@ -1961,11 +1964,6 @@ impl WorldRenderer {
             cam.focal_px = mix(cam.focal_px, vn.focal_px);
             cam.eye_height = mix(cam.eye_height, vn.eye_height);
             cam.bend = mix(cam.bend, vn.bend);
-            // One scene's winding dies away as the next one's comes in.
-            for i in 0..2 {
-                cam.wind[i + 2] = [vn.wind[i][0] * t, vn.wind[i][1], vn.wind[i][2], vn.wind[i][3]];
-                cam.wind[i][0] *= 1.0 - t;
-            }
             cam.hill = mix(cam.hill, vn.hill);
             cam.near_ground = mix(cam.near_ground, vn.near_ground);
             cam.lens_curve = mix(cam.lens_curve, vn.lens_curve);
@@ -1998,6 +1996,16 @@ impl WorldRenderer {
             }
             v
         }).collect();
+        // One winding for every world of the frame, on the ground: this world's giving way to the
+        // next's before their boundary (a branch's only once it is taken), so what lies beyond
+        // stays where it is as the camera walks on, and is as the next world draws it on its own
+        // once the camera is there.
+        if n > 1 {
+            let next = plan.next.max(1);
+            let at = |r: usize| worlds[r].distance.rem_euclid(worlds[r].scene.motion.loop_length.max(1.0));
+            let blend = Winding::across((cam.wind, at(0)), (View::new(worlds[next].scene, w, h).wind, at(next)), plan.zb, plan.wind_keep);
+            for v in views.iter_mut() { v.blend = Some(blend); }
+        }
         // Glossy floors reflect what stands above and beside the frame too, so that much more of
         // the world is rendered around it and cut away before post.
         let (mut gl, mut gt) = (0, 0);
@@ -2382,7 +2390,9 @@ impl WorldRenderer {
                 f.profile = self.profile && self.profile_gpu;
                 (f.here, f.look) = (here, plan.look);
                 // Whether any pixel can reflect (shade gives gloss only to these).
-                let reflects = params.iter().any(|p| p.path_gloss > 0.0 || p.verge_gloss > 0.0 || p.deck_gloss > 0.0 || (p.bridge_on != 0 && p.br_bottom == 1) || p.wx_wet > 0.0 || p.wx_puddles > 0.0);
+                // (Water lies in a bridge's gap, or beyond low walls: `walls.beyond`.)
+                let water_beyond = worlds.iter().any(|w| w.scene.walls.enabled && w.scene.walls.beyond.is_some());
+                let reflects = params.iter().any(|p| p.path_gloss > 0.0 || p.verge_gloss > 0.0 || p.deck_gloss > 0.0 || ((p.bridge_on != 0 || water_beyond) && p.br_bottom == 1) || p.wx_wet > 0.0 || p.wx_puddles > 0.0);
                 Some((f, GpuHas { reflects, ..GpuHas::default() }, tiles))
             }
             _ => None,
@@ -4202,6 +4212,17 @@ fn build_geometry_parts(ctx: &Ctx, layers: &Layers) -> (Vec<Tri>, Vec<Tri>) {
                 }
             }
         }
+        // Land (or water) outside low walls, from their backs out to the edge of sight.
+        if let (true, true, Some(depth)) = (walls && layers.ground && topped, s.path.bridge.bottom != BridgeBottom::Void, s.walls.beyond) {
+            let far = |d: f32| if v.turned { ctx.x_reach } else { wide(d) };
+            let (o0, o1) = (ctx.wall_x(d0) + thick, ctx.wall_x(d1) + thick);
+            let (f0, f1) = (far(d0).max(o0 + 1.0), far(d1).max(o1 + 1.0));
+            let y = -depth.max(0.0);
+            for sign in [-1.0f32, 1.0] {
+                if side && sign == near_side { continue; }
+                raster::quad(&mut tris, [vert(sign * o0, y, d0), vert(sign * f0, y, d0), vert(sign * f1, y, d1), vert(sign * o1, y, d1)], id::CHASM);
+            }
+        }
         if walls {
             // Over a gap the walls carry on down to its bottom.
             let foot = span.map_or(0.0, |b| -b.floor);
@@ -5126,7 +5147,7 @@ fn gpu_params(ctx: &Ctx, layers: &Layers) -> super::gpu::WorldParams {
         ww_k1: ctx.water.map_or(0.0, |k| k.k1), ww_k2: ctx.water.map_or(0.0, |k| k.k2), ww_wet: ctx.water.map_or(0.0, |k| k.wet),
         ww_kind: ctx.water.map_or(0, |k| k.kind), ww_dens: ctx.water.map_or(0.0, |k| k.dens), ww_fcol: ctx.water.map_or([0.0; 3], |k| k.fcol),
         ww_fsize: ctx.water.map_or(1.0, |k| k.fsize), ww_period: ctx.water.map_or(1.0, |k| k.period), ww_cs: ctx.water.map_or(1.0, |k| k.cs), ww_seed: ctx.water.map_or(0, |k| k.seed),
-        br_inset: ctx.bridge.map_or(0.0, |b| b.rail_inset()), ww_frozen: ctx.water.map_or(0.0, |k| k.frozen), ww_hw: ctx.water.map_or(1.0, |k| k.hw), fence: fence_paint(s), branch_hw: ctx.bounds.and_then(|b| b.strips).map_or([0.0; 2], |s| [s[3], s[4]]), wind: v.wind_now(), gc_n: ctx.cover.len() as u32, gc_sway: ctx.wx.sway_parts().0, gc_lean: ctx.wx.sway_parts().1, gc_phase: ctx.wx.sway_parts().2, gc: { let mut a = [[0.0f32; 4]; 12]; for (i, k) in ctx.cover.iter().enumerate() { a[i * 4..i * 4 + 4].copy_from_slice(&k.rec()); } a },
+        br_inset: ctx.bridge.map_or(0.0, |b| b.rail_inset()), ww_frozen: ctx.water.map_or(0.0, |k| k.frozen), ww_hw: ctx.water.map_or(1.0, |k| k.hw), fence: fence_paint(s), branch_hw: ctx.bounds.and_then(|b| b.strips).map_or([0.0; 2], |s| [s[3], s[4]]), wind: v.wind_now().0, wind_c: v.wind_now().1, gc_n: ctx.cover.len() as u32, gc_sway: ctx.wx.sway_parts().0, gc_lean: ctx.wx.sway_parts().1, gc_phase: ctx.wx.sway_parts().2, gc: { let mut a = [[0.0f32; 4]; 12]; for (i, k) in ctx.cover.iter().enumerate() { a[i * 4..i * 4 + 4].copy_from_slice(&k.rec()); } a },
         cam_yc: v.yaw_c, cam_ys: v.yaw_s, cam_x: v.cam_x, cam_turned: v.turned as u32,
         ..bytemuck::Zeroable::zeroed()
     }
@@ -8471,6 +8492,31 @@ mod tests {
         assert!(!ends.is_empty() && ends.iter().all(|t| t.v.iter().all(|v| (v.world[2] - 12.0).abs() < 0.05)), "each wall ends in a face where its world ends");
         let walls_past = tris.iter().filter(|t| matches!(t.id, id::WALL_L | id::WALL_R) && t.v.iter().any(|v| v.world[2] > 12.05)).count();
         assert_eq!(walls_past, 0, "no wall runs on into the next world");
+    }
+
+    #[test]
+    fn land_lies_beyond_low_walls_when_asked_and_nothing_did_before() {
+        // Night Road's parapets are lower than the eye: over them, below the horizon, there was
+        // nothing. With `walls.beyond`, the ground the drop shows runs out to the edge of sight.
+        let mut r = WorldRenderer::default();
+        let night = preset("Night Road");
+        let mut land = |s: &Scene| {
+            let ctx = Ctx {
+                scene: s, view: View::new(s, 120, 214).at(0.0), loop_len: 24.0, tphase: 0.0, scroll: 0.0, far: 320.0, d_lo: 0.0, d_hi: 320.0, x_reach: 0.0,
+                path_tex: r.textures.get(&s.path.material), verge_tex: r.textures.get(&s.verge.material),
+                wall_tex: r.textures.get(&s.walls.material), ceil_tex: r.textures.get(&s.ceiling.material),
+                path_tile: 1.0, verge_tile: 1.0, wall_tile: 1.0, ceil_tile: 1.0,
+                bridge: None, fork: None, deck_tex: r.textures.get(&s.path.bridge.deck), bottom_tex: r.textures.get(&s.verge.material),
+                deck_tile: 1.0, bottom_tile: 1.0, ambient: [0.0; 3],
+                sky_lights: vec![], lights: vec![], smokes: vec![], wire_pts: vec![], falls: vec![], fog: None, fog_col: [0.0; 3], void_lin: [0.0; 3], realm: 0, bounds: None, facade: None, opening: None, portal: None, front: None, verge_beyond: None, gain: 1.0, lent: 0.0, wx: weather::Wx::default(), water: None, cover: Vec::new(),
+            };
+            build_geometry(&ctx, &Layers::default()).iter().filter(|t| t.id == id::CHASM).map(|t| t.v.iter().map(|v| v.world[0].abs()).fold(0.0, f32::max)).fold(0.0, f32::max)
+        };
+        assert_eq!(land(&night), 0.0, "nothing beyond the walls by default");
+        let low = Scene { walls: crate::scene::Walls { beyond: Some(6.0), ..night.walls.clone() }, ..night.clone() };
+        assert!(land(&low) > 20.0, "land out past the walls: {}", land(&low));
+        let tall = Scene { walls: crate::scene::Walls { height: 0.0, ..low.walls.clone() }, ..low.clone() };
+        assert_eq!(land(&tall), 0.0, "walls too tall to see over hide it, so none is drawn");
     }
 
     #[test]

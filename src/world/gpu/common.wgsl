@@ -64,8 +64,10 @@ struct World {
     // Spans::rail_inset, the waterway's ice and width, the fences' paint, a fork's branch path half
     // widths (render::on_other_branch).
     br_inset: f32, ww_frozen: f32, ww_hw: f32, fence_r: f32, fence_g: f32, fence_b: f32, fk_hl: f32, fk_hr: f32,
-    // View::wind_now: (amplitude, wave number, phase at the camera, turn) of each wave.
+    // View::wind_now: (amplitude, wave number, phase at the camera, blend group) of each wave, and
+    // the blend's start and 1 / length, the offset and slope taken off (view::Winding).
     wind: array<vec4<f32>, 4>,
+    wind_c: vec4<f32>,
     // Ground cover (render::cover): layers, the wind in them (Wx::sway_parts), CoverK::rec each.
     gc_n: u32, gc_sway: f32, gc_lean: f32, gc_phase: f32,
     gc: array<vec4<f32>, 12>,
@@ -271,15 +273,25 @@ fn lift(d: f32) -> f32 {
     if W.stairs_on == 0u { return 0.0; }
     return st_ground(W.scroll + d) - st_ramp(W.scroll);
 }
-fn wind_wave(t: vec4<f32>, d: f32) -> f32 { return t.x * (sin(t.y * d + t.z) - sin(t.z) - t.w * t.y * d * cos(t.z)); }
+// view::Winding::share and one wave's part of Winding::raw at blend e.
+fn wind_wave(t: vec4<f32>, d: f32, e: f32) -> f32 {
+    let share = select(1.0, 0.0, t.w > 0.0) + t.w * e;
+    return t.x * (share * sin(t.y * d + t.z));
+}
+// view::Winding::mix.
+fn wind_mix(lo: f32, inv: f32, d: f32) -> f32 {
+    let u = clamp((d - lo) * inv, 0.0, 1.0);
+    return u * u * (3.0 - 2.0 * u);
+}
 fn bend_x(d: f32) -> f32 {
-    var x = W.bend * 0.012 * d * d;
+    let e = wind_mix(W.wind_c.x, W.wind_c.y, d);
+    var s = 0.0;
     // (Each wave by its own number: a loop over the uniform array costs far more.)
-    if W.wind[0].x != 0.0 { x += wind_wave(W.wind[0], d); }
-    if W.wind[1].x != 0.0 { x += wind_wave(W.wind[1], d); }
-    if W.wind[2].x != 0.0 { x += wind_wave(W.wind[2], d); }
-    if W.wind[3].x != 0.0 { x += wind_wave(W.wind[3], d); }
-    return x;
+    if W.wind[0].x != 0.0 { s += wind_wave(W.wind[0], d, e); }
+    if W.wind[1].x != 0.0 { s += wind_wave(W.wind[1], d, e); }
+    if W.wind[2].x != 0.0 { s += wind_wave(W.wind[2], d, e); }
+    if W.wind[3].x != 0.0 { s += wind_wave(W.wind[3], d, e); }
+    return W.bend * 0.012 * d * d + (s - W.wind_c.z - W.wind_c.w * d);
 }
 fn hill_y(d: f32) -> f32 { return W.hill * 0.006 * d * d; }
 // View::shear_x for world r of the frame.

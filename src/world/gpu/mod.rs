@@ -203,8 +203,9 @@ pub(crate) struct WorldParams {
     /// ice and width, the fences' paint (render::fence_paint), and a fork's branch path half widths
     /// (left, right; 0 outside a fork) for render::on_other_branch.
     pub br_inset: f32, pub ww_frozen: f32, pub ww_hw: f32, pub fence: [f32; 3], pub branch_hw: [f32; 2],
-    /// View::wind_now: the path's winding.
+    /// View::wind_now: the path's winding, each wave and the blend's numbers (view::Winding).
     pub wind: [[f32; 4]; 4],
+    pub wind_c: [f32; 4],
     /// Ground cover (render::cover): how many layers, the wind in them, and each layer's record.
     pub gc_n: u32, pub gc_sway: f32, pub gc_lean: f32, pub gc_phase: f32,
     pub gc: [[f32; 4]; 12],
@@ -2131,7 +2132,7 @@ mod tests {
     fn world_params_match_the_wgsl_struct_size() {
         // A uniform block's size is a multiple of 16; the WGSL struct has the same fields.
         assert_eq!(std::mem::size_of::<WorldParams>() % 16, 0);
-        assert_eq!(std::mem::size_of::<WorldParams>(), 4 * 304);
+        assert_eq!(std::mem::size_of::<WorldParams>(), 4 * 308);
         assert_eq!(std::mem::size_of::<CardGpu>(), 4 * 110);
         assert_eq!(std::mem::size_of::<GeomParams>(), 96);
         assert_eq!(std::mem::size_of::<SplatGpu>(), 4 * 24);

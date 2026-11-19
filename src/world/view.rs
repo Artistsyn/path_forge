@@ -88,6 +88,76 @@ pub struct View {
     /// slides across the frame, in frame widths.
     #[serde(skip)]
     pub sky_turn: f32,
+    /// A frame of more than one world: the winding all of them share, one world's giving way to
+    /// the next's on the ground before their boundary (`Winding::across`). None: this view's own.
+    #[serde(skip)]
+    pub blend: Option<Winding>,
+}
+
+/// Metres of road before a boundary or junction over which one world's winding gives way to the
+/// next's, so the road beyond stays where it is on the ground while the camera walks on.
+pub const WIND_BLEND_M: f32 = 12.0;
+
+/// The path's winding as a frame draws it: each wave (amplitude, wave number, phase at the
+/// camera, and its share of a blend: 0 always, -1 giving way, 1 coming in), the blend's window
+/// (where it starts, metres ahead, and 1 / its length), and the offset and slope at the camera
+/// taken off, so the curve is measured from where the camera stands and the way it heads.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Winding { pub waves: [[f32; 4]; 4], pub lo: f32, pub inv: f32, pub c0: f32, pub c1: f32 }
+
+impl Winding {
+    /// One world's winding (`View::wind`, from `scroll` metres along its loop).
+    pub fn of(wind: [[f32; 4]; 4], scroll: f32) -> Winding {
+        let waves = wind.map(|[a, k, p0, _]| [a, k, k * scroll + p0, 0.0]);
+        Winding { waves, lo: 1e30, inv: 1.0, c0: 0.0, c1: 0.0 }.settled(wind.map(|w| w[3]))
+    }
+
+    /// Two worlds' (each a winding and its place along its loop) on one stretch of ground: the
+    /// first's to `zb - WIND_BLEND_M` metres ahead, the next's (`keep` of it) from `zb` on.
+    pub fn across(near: ([[f32; 4]; 4], f32), next: ([[f32; 4]; 4], f32), zb: f32, keep: f32) -> Winding {
+        let (a, b) = (Self::of(near.0, near.1), Self::of(next.0, next.1));
+        let mut waves = [[0.0; 4]; 4];
+        let mut turns = [0.0; 4];
+        for i in 0..2 {
+            waves[i] = [a.waves[i][0], a.waves[i][1], a.waves[i][2], -1.0];
+            waves[i + 2] = [b.waves[i][0] * keep, b.waves[i][1], b.waves[i][2], 1.0];
+            (turns[i], turns[i + 2]) = (near.0[i][3], next.0[i][3]);
+        }
+        Winding { waves, lo: zb - WIND_BLEND_M, inv: 1.0 / WIND_BLEND_M, c0: 0.0, c1: 0.0 }.settled(turns)
+    }
+
+    /// How far into the blend `d` metres ahead is (0 before it, 1 past it), and how fast it goes.
+    fn mix(&self, d: f32) -> (f32, f32) {
+        let u = ((d - self.lo) * self.inv).clamp(0.0, 1.0);
+        let rate = if u > 0.0 && u < 1.0 { 6.0 * u * (1.0 - u) * self.inv } else { 0.0 };
+        (u * u * (3.0 - 2.0 * u), rate)
+    }
+
+    /// A wave's share at blend `e`, by its group.
+    fn share(group: f32, e: f32) -> f32 { (if group > 0.0 { 0.0 } else { 1.0 }) + group * e }
+
+    /// The waves summed `d` metres ahead, before the camera's place and heading are taken off.
+    fn raw(&self, d: f32) -> f32 {
+        let (e, _) = self.mix(d);
+        let mut s = 0.0;
+        for &[a, k, p, g] in &self.waves {
+            if a != 0.0 { s += a * (Self::share(g, e) * (k * d + p).sin()); }
+        }
+        s
+    }
+
+    /// With the offset at the camera and its heading (as far as each wave turns it) worked out.
+    fn settled(mut self, turns: [f32; 4]) -> Winding {
+        self.c0 = self.raw(0.0);
+        let (e, rate) = self.mix(0.0);
+        self.c1 = self.waves.iter().zip(turns).filter(|(w, _)| w[0] != 0.0)
+            .map(|(&[a, k, p, g], turn)| turn * a * (Self::share(g, e) * k * p.cos() + g * rate * p.sin())).sum();
+        self
+    }
+
+    /// How far sideways the path's centre is `d` metres ahead (`View::bend_x` without its curve).
+    #[inline]
+    pub fn x(&self, d: f32) -> f32 { self.raw(d) - self.c0 - self.c1 * d }
 }
 
 /// How far a camera's turn has gone in what it changes besides the angle (see `View::posed`):
@@ -215,9 +285,7 @@ fn winding(scene: &Scene) -> [[f32; 4]; 4] {
 #[derive(Clone, Copy, Debug)]
 pub struct Bend {
     bk: f32,
-    /// Each wave that is there: amplitude, wave number, phase now, its sine and cosine, turn * k.
-    wind: [[f32; 6]; 4],
-    n: usize,
+    wind: Winding,
     shear: Option<(f32, f32)>,
     /// cam_x, yaw_c, yaw_s when the camera has turned.
     turned: Option<[f32; 3]>,
@@ -226,20 +294,22 @@ pub struct Bend {
 impl Bend {
     /// `View::bend_x`.
     #[inline]
-    pub fn x(&self, d: f32) -> f32 {
-        let mut x = self.bk * d * d;
-        for &[a, k, p, sp, cp, tk] in &self.wind[..self.n] { x += a * ((k * d + p).sin() - sp - tk * d * cp); }
-        x
-    }
+    pub fn x(&self, d: f32) -> f32 { self.bk * d * d + self.wind.x(d) }
     /// `View::shear_x`.
     #[inline]
     pub fn shear(&self, d: f32) -> f32 { match self.shear { Some((z0, k)) => k * (d - z0).max(0.0), None => 0.0 } }
     /// Its numbers as geom.wgsl's `bend_of` and `cam_xz_of` read them: the curve, the count of
-    /// waves and each wave's six, then the shear (on, z0, k) and the turn (on, cam_x, yaw cos, sin).
+    /// waves, the blend's start and 1 / length, the offset and slope taken off, each wave there
+    /// (`Winding::waves`), then the shear (on, z0, k) and the turn (on, cam_x, yaw cos, sin).
     pub fn gpu_words(&self) -> [f32; 33] {
         let mut out = [0.0; 33];
-        (out[0], out[1]) = (self.bk, self.n as f32);
-        for (k, wave) in self.wind.iter().enumerate() { out[2 + 6 * k..8 + 6 * k].copy_from_slice(wave); }
+        let w = &self.wind;
+        out[..6].copy_from_slice(&[self.bk, 0.0, w.lo, w.inv, w.c0, w.c1]);
+        for wave in w.waves.iter().filter(|wave| wave[0] != 0.0) {
+            let k = out[1] as usize;
+            out[6 + 4 * k..10 + 4 * k].copy_from_slice(wave);
+            out[1] += 1.0;
+        }
         if let Some((z0, k)) = self.shear { out[26..29].copy_from_slice(&[1.0, z0, k]); }
         if let Some(turn) = self.turned { out[29] = 1.0; out[30..33].copy_from_slice(&turn); }
         out
@@ -287,6 +357,7 @@ impl View {
             side_k: k.side_k.clamp(0.0, 1.0), near: if cam_x != 0.0 { cam_x.signum() } else if yaw != 0.0 { -yaw.signum() } else { 1.0 },
             cutaway: cam.cutaway.max(0.0), face_k: k.face_k.clamp(0.0, 1.0),
             sky_turn: if cam.world_sky { -yaw / 2.4 } else { 0.0 },
+            blend: None,
         }
     }
 
@@ -334,38 +405,22 @@ impl View {
     /// winding, measured from where the camera stands and (as far as it turns with the path)
     /// from the way the path heads there.
     #[inline]
-    pub fn bend_x(&self, d: f32) -> f32 {
-        let mut x = self.bend * BEND_K * d * d;
-        for [a, k, p0, turn] in self.wind {
-            if a != 0.0 {
-                let p = k * self.scroll + p0;
-                x += a * ((k * d + p).sin() - p.sin() - turn * k * d * p.cos());
-            }
-        }
-        x
-    }
+    pub fn bend_x(&self, d: f32) -> f32 { self.bend * BEND_K * d * d + self.winding().x(d) }
+
+    /// The winding this view draws: the frame's shared one (`blend`), else its own from where it
+    /// stands along its loop.
+    pub fn winding(&self) -> Winding { self.blend.unwrap_or_else(|| Winding::of(self.wind, self.scroll)) }
 
     /// `bend_x`, `shear_x` and `to_cam`'s ground plane with what stays the same across the frame
     /// worked out once (the same numbers, bit for bit): for loops over every pixel.
     pub fn bender(&self) -> Bend {
-        let mut b = Bend { bk: self.bend * BEND_K, wind: [[0.0; 6]; 4], n: 0, shear: self.shear, turned: self.turned.then_some([self.cam_x, self.yaw_c, self.yaw_s]) };
-        for [a, k, p0, turn] in self.wind {
-            if a != 0.0 {
-                let p = k * self.scroll + p0;
-                // (turn * k * d * cos p is ((turn * k) * d) * cos p.)
-                b.wind[b.n] = [a, k, p, p.sin(), p.cos(), turn * k];
-                b.n += 1;
-            }
-        }
-        b
+        Bend { bk: self.bend * BEND_K, wind: self.winding(), shear: self.shear, turned: self.turned.then_some([self.cam_x, self.yaw_c, self.yaw_s]) }
     }
 
     /// How far the camera has turned to follow the winding path, as the tangent of the angle:
     /// the far end of the path stands this far to the left of straight ahead, per metre of
     /// distance (`bend_x(d) / d` far away).
-    pub fn turn_tan(&self) -> f32 {
-        self.wind.iter().filter(|t| t[0] != 0.0).map(|&[a, k, p0, turn]| a * turn * k * (k * self.scroll + p0).cos()).sum()
-    }
+    pub fn turn_tan(&self) -> f32 { self.winding().c1 }
 
     /// How far sideways the sky stands from where the scene puts it, pixels. The sky is
     /// infinitely far, so as the camera turns with the path all of it slides across the frame
@@ -377,9 +432,9 @@ impl View {
         self.focal_px * self.wind.iter().map(|&[a, k, _, turn]| (a * turn * k).abs()).sum::<f32>() + self.pan_max + self.sky_turn.abs() * (self.width - 2 * self.left) as f32
     }
 
-    /// The winding's waves as they stand now (the phase at the camera in place of the loop's
-    /// start), for the GPU.
-    pub fn wind_now(&self) -> [[f32; 4]; 4] { self.wind.map(|[a, k, p0, turn]| [a, k, k * self.scroll + p0, turn]) }
+    /// The winding as the GPU reads it: each wave (`Winding::waves`), and the blend's start, its
+    /// 1 / length, and the offset and slope taken off.
+    pub fn wind_now(&self) -> ([[f32; 4]; 4], [f32; 4]) { let w = self.winding(); (w.waves, [w.lo, w.inv, w.c0, w.c1]) }
 
     /// The shortest of the winding's waves, metres (None when the path does not wind).
     pub fn wind_length(&self) -> Option<f32> {
@@ -528,5 +583,40 @@ mod winding_tests {
         }
         s.path.winding.enabled = false;
         assert_eq!(View::new(&s, 90, 160).wind_length(), None);
+    }
+
+    /// Across a boundary the road is one winding on the ground: what lies beyond stays where it
+    /// is as the camera walks on (it does not swing across the far view), the next world's winding
+    /// has taken over by the boundary, and once past it the frame's winding is the next world's own
+    /// (nothing jumps when the next world is drawn alone).
+    #[test]
+    fn across_a_boundary_the_road_beyond_stays_on_the_ground_and_is_the_next_worlds() {
+        let wavy = |amplitude, length, phase| {
+            let mut s = Scene::default();
+            s.motion.loop_length = 24.0;
+            s.path.winding = crate::scene::Winding { enabled: true, amplitude, length, turn: 0.6, irregular: 0.4, phase };
+            View::new(&s, 90, 160).wind
+        };
+        let (a, b) = (wavy(1.4, 24.0, 0.1), wavy(2.0, 40.0, 0.7));
+        // On the ground: X at a ground point, the camera's place and heading added back.
+        let ground = |w: Winding, d: f32| w.x(d) + w.c0 + w.c1 * d;
+        let at = |step: f32| Winding::across((a, 5.0 + step), (b, 17.0 + step), 30.0 - step, 1.0);
+        for step in [0.0, 0.7, 3.2, 9.5] {
+            for g in [20.0, 31.0, 45.0, 70.0] {
+                assert!((ground(at(step), g - step) - ground(at(0.0), g)).abs() < 1e-3, "step {step} ground {g}");
+            }
+        }
+        // Before the blend it is this world's road; from the boundary on, the next world's.
+        let one = |w: [[f32; 4]; 4], scroll| Winding::of(w, scroll);
+        let w = at(0.0);
+        for d in [0.0, 8.0, 17.9] { assert!((ground(w, d) - ground(one(a, 5.0), d)).abs() < 1e-4, "{d}"); }
+        for d in [30.0, 44.0, 90.0] { assert!((ground(w, d) - ground(one(b, 17.0), d)).abs() < 1e-4, "{d}"); }
+        // Past the boundary: the next world's winding as it draws it alone.
+        let past = Winding::across((a, 40.0), (b, 52.0), -0.5, 1.0);
+        for d in [0.0, 6.0, 25.0, 60.0] { assert!((past.x(d) - one(b, 52.0).x(d)).abs() < 1e-4, "{d}"); }
+        // A branch not yet taken: straight beyond the junction.
+        let untaken = Winding::across((a, 5.0), (b, 17.0), 30.0, 0.0);
+        let (g1, g2) = (ground(untaken, 40.0), ground(untaken, 60.0));
+        assert!((g1 - ground(untaken, 30.0)).abs() < 1e-4 && (g2 - g1).abs() < 1e-4);
     }
 }

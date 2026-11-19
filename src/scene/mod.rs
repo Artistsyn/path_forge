@@ -750,11 +750,16 @@ pub struct Walls {
     /// 0 = a sheet with no thickness.
     pub thickness: f32,
     pub material: Material,
+    /// What lies outside low walls, so a walled road does not hang over nothing: land running
+    /// to the horizon this many metres below the path (0 = level with it), showing what a bridge's
+    /// gap shows (`path.bridge.bottom` and `bottom_color`: ground, or water far below). None (or a
+    /// Void bottom, or walls too tall to see over): the void colour, as before.
+    pub beyond: Option<f32>,
 }
 impl Default for Walls {
     fn default() -> Self {
         Self {
-            enabled: true, gap: 0.25, height: 4.5, base_shadow: 0.55, thickness: 0.5,
+            enabled: true, gap: 0.25, height: 4.5, base_shadow: 0.55, thickness: 0.5, beyond: None,
             material: Material { pattern: Pattern::StoneBlock, ..Material::default() },
         }
     }

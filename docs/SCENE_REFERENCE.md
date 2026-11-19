@@ -1590,6 +1590,7 @@ Ground beside the path. Disabled = void beyond the path edge (walls usually cove
 | `base_shadow` | number | `0.55` | Darkening where the wall meets the ground (0..1). |
 | `thickness` | number | `0.5` | How thick the wall is, metres: its top, its back and its ends show this much stone wherever they are seen (from above, from a turned camera, where a fork or crossing ends it). 0 = a sheet with no thickness. |
 | `material` | [Material](#material) | (see the type) |  |
+| `beyond` | number or null | `null` | What lies outside low walls, so a walled road does not hang over nothing: land running to the horizon this many metres below the path (0 = level with it), showing what a bridge's gap shows (`path.bridge.bottom` and `bottom_color`: ground, or water far below). None (or a Void bottom, or walls too tall to see over): the void colour, as before. |
 
 ### Waterfall
 

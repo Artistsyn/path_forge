@@ -8,7 +8,7 @@
 
 use crate::scene::transition::{Branch, Crossing, ForkPlan};
 use crate::scene::Scene;
-use crate::world::{Image, Layout, RenderOptions, View, WorldIn, WorldRenderer};
+use crate::world::{Image, Layout, RenderOptions, View, Winding, WorldIn, WorldRenderer};
 use std::path::PathBuf;
 
 fn smooth(e0: f32, e1: f32, x: f32) -> f32 {
@@ -183,8 +183,10 @@ impl CrossWalk {
         // Crossing, both looking down the path (when either scene looks from an angle).
         let ahead = |s: &Scene, turned: bool| if turned { crate::scene::transition::looking_ahead(s) } else { s.clone() };
         let (a2, b2) = (ahead(a, self.crossing.swing_out > 0.0), ahead(b, self.crossing.swing_in > 0.0));
-        let pa = Camera::plain(&a2, sa, width, height).view;
-        let pb = Camera::plain(&b2, sb, width, height).view;
+        let (mut pa, mut pb) = (Camera::plain(&a2, sa, width, height).view, Camera::plain(&b2, sb, width, height).view);
+        // The road's one winding across the boundary, as the frame draws it (`render_worlds`).
+        let blend = Some(Winding::across((pa.wind, pa.scroll), (pb.wind, pb.scroll), zb, 1.0));
+        (pa.blend, pb.blend) = (blend, blend);
         if zb <= 0.0 { Camera { view: pb, beyond: None, back: 0.0, walls: [walls_of(b), None] } } else { Camera { view: pa, beyond: Some((zb, pb)), back: 0.0, walls: [walls_of(a), walls_of(b)] } }
     }
 
@@ -277,6 +279,27 @@ impl ForkWalk {
         };
         let back = travel - self.length();
         (zj, self.start_a + travel, [self.end[0] + back, self.end[1] + back], steer)
+    }
+
+    /// The camera at `travel` metres, for a `width` x `height` frame (`scenes`: the first world,
+    /// then the left and right branches'): the first world's to the junction, with the winding
+    /// the frame draws; past it turned the way everything there swings as the camera turns onto
+    /// the branch taken, so the island where the branches part stays between them.
+    pub fn camera(&self, scenes: [&Scene; 3], travel: f32, width: u32, height: u32) -> Camera {
+        let (zj, sa, sb, steer) = self.at(travel);
+        let taken = self.branch(travel).map(|(b, _)| b);
+        let settled = smooth(self.length() - 1.0, self.length(), travel) >= 1.0;
+        if let (true, Some(b)) = (settled, taken) { return Camera::plain(scenes[b.realm()], sb[b.realm() - 1], width, height); }
+        let mut near = Camera::plain(scenes[0], sa, width, height);
+        if smooth(0.0, (self.plan.approach * 0.3).clamp(1.0, 8.0), travel) <= 0.0 { return near; }
+        let next = taken.unwrap_or(self.plan.default_branch).realm();
+        let turned = if taken.is_some() { steer.clamp(0.0, 1.0) } else { 0.0 };
+        let there = Camera::plain(scenes[next], sb[next - 1], width, height).view;
+        near.view.blend = Some(Winding::across((near.view.wind, near.view.scroll), (there.wind, there.scroll), zj, turned));
+        // Past the junction, the middle of the two branches (`WorldRenderer::plan`'s slopes).
+        let base = [0.0, -self.plan.slope, self.plan.slope];
+        let beyond = View { shear: Some((zj, -turned * base[next])), ..near.view };
+        Camera { beyond: Some((zj, beyond)), walls: [near.walls[0], near.walls[0]], ..near }
     }
 
     pub fn frame(&self, r: &mut WorldRenderer, a: Place, left: Place, right: Place, travel: f32, times: [f32; 3], opts: &RenderOptions) -> Image {

@@ -454,12 +454,16 @@ fn mn(k: u32) -> u32 { return u32(lights[k]); }
 // view::Bend::x of world r.
 fn bend_of(r: u32, d: f32) -> f32 {
     let o = r * MIX_STRIDE;
-    var x = rnd(rnd(mw(o) * d) * d);
+    // view::Winding::mix and raw: the blend at d, then each wave's share of it.
+    let u = clamp(rnd(rnd(d - mw(o + 2u)) * mw(o + 3u)), 0.0, 1.0);
+    let e = rnd(rnd(u * u) * rnd(3.0 - rnd(2.0 * u)));
+    var s = 0.0;
     for (var k = 0u; k < mn(o + 1u); k++) {
-        let w = o + 2u + 6u * k;
-        x = x + rnd(mw(w) * rnd(rnd(sin(rnd(mw(w + 1u) * d) + mw(w + 2u)) - mw(w + 3u)) - rnd(rnd(mw(w + 5u) * d) * mw(w + 4u))));
+        let w = o + 6u + 4u * k;
+        let share = rnd(select(1.0, 0.0, mw(w + 3u) > 0.0) + rnd(mw(w + 3u) * e));
+        s = rnd(s + rnd(mw(w) * rnd(share * sin(rnd(rnd(mw(w + 1u) * d) + mw(w + 2u))))));
     }
-    return x;
+    return rnd(rnd(rnd(mw(o) * d) * d) + rnd(rnd(s - mw(o + 4u)) - rnd(mw(o + 5u) * d)));
 }
 // view::Bend::shear of world r.
 fn shear_mix(r: u32, d: f32) -> f32 {

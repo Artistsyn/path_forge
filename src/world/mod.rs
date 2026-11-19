@@ -15,4 +15,4 @@ pub mod render;
 pub mod gpu;
 
 pub use render::{lightning_times, Image, Layers, Layout, RenderOptions, WorldIn, WorldRenderer};
-pub use view::View;
+pub use view::{View, Winding};
