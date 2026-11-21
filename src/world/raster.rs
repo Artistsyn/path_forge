@@ -17,6 +17,8 @@ pub mod id {
     pub const CHASM: u8 = 6;
     /// The far wall of a bridge's gap, facing the camera.
     pub const CLIFF: u8 = 7;
+    /// The rock bank where sunken land or water beyond low walls meets higher ground at a crossing.
+    pub const BANK: u8 = 8;
     pub const PROP: u8 = 10;
     pub const FIXTURE: u8 = 11;
     pub const TUFT: u8 = 12;

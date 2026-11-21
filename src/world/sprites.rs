@@ -8,9 +8,21 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+/// One texel of a sprite: linear RGBA as half floats (the range and precision its colours
+/// and glow need, at half the memory and upload of `f32`).
+pub type Texel = [half::f16; 4];
+
+/// A texel as it is drawn.
+#[inline]
+pub fn unpack(t: Texel) -> [f32; 4] { [t[0].to_f32(), t[1].to_f32(), t[2].to_f32(), t[3].to_f32()] }
+
+/// A texel as a sprite keeps it.
+#[inline]
+pub fn pack(p: [f32; 4]) -> Texel { p.map(half::f16::from_f32) }
+
 /// A linear-colour RGBA image with mip levels. The anchor is the bottom centre.
 pub struct Sprite {
-    pub levels: Vec<(usize, usize, Vec<[f32; 4]>)>,
+    pub levels: Vec<(usize, usize, Vec<Texel>)>,
     /// Width / height.
     pub aspect: f32,
     /// How much each texel lights itself, in the red channel of a sprite of the same size (drawn
@@ -135,6 +147,7 @@ impl Sprite {
             }
             levels.push((nw, nh, next));
         }
+        let levels = levels.into_iter().map(|(lw, lh, px)| (lw, lh, px.into_iter().map(pack).collect())).collect();
         Sprite { aspect: w as f32 / h as f32, levels, glow: None, casts: false, lamp: None }
     }
 
@@ -177,7 +190,7 @@ impl Sprite {
             for y in 0..mh {
                 for x in 0..mw {
                     let m = mask.get_pixel((x0 + x) as u32, (y0 + y) as u32);
-                    let p = src[y * mw + x];
+                    let p = unpack(src[y * mw + x]);
                     let glow = m[0] as f32 / 255.0;
                     g.push([glow * MASK_GLOW, m[1] as f32 / 255.0, 0.0, p[3]]);
                     let wgt = glow * p[3];
@@ -214,14 +227,14 @@ impl Sprite {
         if nearest {
             let x = ((u * w as f32) as usize).min(w - 1);
             let y = ((v * h as f32) as usize).min(h - 1);
-            return data[y * w + x];
+            return unpack(data[y * w + x]);
         }
         let fx = (u * w as f32 - 0.5).clamp(0.0, w as f32 - 1.0);
         let fy = (v * h as f32 - 0.5).clamp(0.0, h as f32 - 1.0);
         let (x0, y0) = (fx as usize, fy as usize);
         let (x1, y1) = ((x0 + 1).min(w - 1), (y0 + 1).min(h - 1));
         let (tx, ty) = (fx - x0 as f32, fy - y0 as f32);
-        let p = [data[y0 * w + x0], data[y0 * w + x1], data[y1 * w + x0], data[y1 * w + x1]];
+        let p = [data[y0 * w + x0], data[y0 * w + x1], data[y1 * w + x0], data[y1 * w + x1]].map(unpack);
         let wts = [(1.0 - tx) * (1.0 - ty), tx * (1.0 - ty), (1.0 - tx) * ty, tx * ty];
         let mut acc = [0.0f32; 4];
         for k in 0..4 {
@@ -2139,12 +2152,15 @@ impl<K: std::hash::Hash + Eq + Clone> Shared<K> {
 }
 
 fn sprite_bytes(s: &Sprite) -> usize {
-    s.levels.iter().map(|l| l.2.len() * 16).sum::<usize>() + s.glow.as_deref().map_or(0, sprite_bytes)
+    s.levels.iter().map(|l| l.2.len() * std::mem::size_of::<Texel>()).sum::<usize>() + s.glow.as_deref().map_or(0, sprite_bytes)
 }
 
 type PaintKey = (u8, Rgb, u32);
-/// Painted props, rocks and water (by kind, colour and variant).
-static PAINTED: std::sync::LazyLock<std::sync::Mutex<Shared<PaintKey>>> = std::sync::LazyLock::new(|| std::sync::Mutex::new(Shared::new(128 << 20)));
+/// Painted props, rocks and water (by kind, colour and variant). The budget holds the places a
+/// walk shows at a crossing with the next ones painted ahead (Hollow Road's longest measured
+/// stretch, four places, came to 185 MB); at 128 MB they pushed each other out, and the next
+/// place was painted again on the road's thread, a third of a second in one frame.
+static PAINTED: std::sync::LazyLock<std::sync::Mutex<Shared<PaintKey>>> = std::sync::LazyLock::new(|| std::sync::Mutex::new(Shared::new(192 << 20)));
 /// Image files, by path, trim and the file's time when it was read (a changed file is another).
 static FILES: std::sync::LazyLock<std::sync::Mutex<Shared<(PathBuf, bool, Option<std::time::SystemTime>)>>> = std::sync::LazyLock::new(|| std::sync::Mutex::new(Shared::new(320 << 20)));
 /// The shared picture under `key`, painted (outside the lock, so another thread waits only for a
@@ -2207,8 +2223,8 @@ pub struct SpriteCache {
     posts: HashMap<u8, Arc<Sprite>>,
     /// Images with a glow layer from their lightest texels, with the image they were made from.
     glowing: HashMap<(PathBuf, bool, u32, u32), (Arc<Sprite>, Arc<Sprite>)>,
-    /// Drawn props by the text of their parts, with their height in metres.
-    shapes: HashMap<String, Option<(Arc<Sprite>, f32)>>,
+    /// Drawn props by their parts (`SpriteCache::shape_key`), with their height in metres.
+    shapes: HashMap<u64, Option<(Arc<Sprite>, f32)>>,
 }
 
 pub const VARIANTS: u32 = 6;
@@ -2275,6 +2291,7 @@ pub fn set_piece(&mut self, kind: SetPieceKind, tint: Rgb, accent: Rgb, ow: f32,
         let key = (full.to_path_buf(), trim, (from * 1000.0) as u32, (strength * 1000.0) as u32);
         if let Some((b, s)) = self.glowing.get(&key) { if Arc::ptr_eq(b, &base) { return Some(s.clone()); } }
         let (w, h, px) = &base.levels[0];
+        let px: Vec<[f32; 4]> = px.iter().copied().map(unpack).collect();
         let mask: Vec<[f32; 4]> = px.iter().map(|p| {
             let light = (0.2126 * p[0] + 0.7152 * p[1] + 0.0722 * p[2]).max(0.0).powf(1.0 / 2.2);
             let t = ((light - from) / 0.08).clamp(0.0, 1.0);
@@ -2283,7 +2300,7 @@ pub fn set_piece(&mut self, kind: SetPieceKind, tint: Rgb, accent: Rgb, ow: f32,
         }).collect();
         // (A painted mask says what glows; the lightness rule is for images without one.)
         if base.casts { return Some(base); }
-        let mut s = Sprite::from_rgba_lin(*w, *h, base.levels[0].2.clone());
+        let mut s = Sprite::clone_levels(&base);
         s.glow = Some(Arc::new(Sprite::from_rgba_lin(*w, *h, mask)));
         let s = Arc::new(s);
         if self.glowing.len() > 64 { self.glowing.clear(); }
@@ -2293,14 +2310,36 @@ pub fn set_piece(&mut self, kind: SetPieceKind, tint: Rgb, accent: Rgb, ow: f32,
 
     /// A prop face's picture (`paint_face`), kept by its parts and size.
     pub fn face(&mut self, parts: &[ShapePart], width: f32, height: f32) -> Option<Arc<Sprite>> {
-        let key = format!("{width}x{height}:{}", serde_json::to_string(parts).unwrap_or_default());
+        let key = Self::shape_key(parts, Some([width, height]));
         if self.shapes.len() > 512 { self.shapes.clear(); }
         self.shapes.entry(key).or_insert_with(|| paint_face(parts, width, height).map(|s| (Arc::new(s), height))).clone().map(|(s, _)| s)
     }
 
     pub fn shape(&mut self, parts: &[ShapePart]) -> Option<(Arc<Sprite>, f32)> {
-        let key = serde_json::to_string(parts).unwrap_or_default();
+        let key = Self::shape_key(parts, None);
         if self.shapes.len() > 512 { self.shapes.clear(); }
         self.shapes.entry(key).or_insert_with(|| paint_shape(parts).map(|(s, h)| (Arc::new(s), h))).clone()
+    }
+
+    /// Drawn parts (and a face's size) hashed bit for bit. Every prop face of every world looks
+    /// its picture up each frame; keyed by the parts' JSON text that was most of a fork's frame.
+    fn shape_key(parts: &[ShapePart], size: Option<[f32; 2]>) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut words: Vec<u32> = size.map_or(vec![0], |[w, h]| vec![1, w.to_bits(), h.to_bits()]);
+        for part in parts {
+            let (tag, floats): (u32, Vec<f32>) = match &part.shape {
+                Shape::Ellipse { center, radius } => (0, vec![center[0], center[1], radius[0], radius[1]]),
+                Shape::Rect { min, max } => (1, vec![min[0], min[1], max[0], max[1]]),
+                Shape::Poly { points } => (2, points.iter().flatten().copied().collect()),
+                Shape::Line { from, to, width } => (3, vec![from[0], from[1], to[0], to[1], *width]),
+            };
+            words.extend([tag, u32::try_from(floats.len()).unwrap_or(u32::MAX)]);
+            words.extend(floats.iter().map(|v| v.to_bits()));
+            let [red, green, blue] = part.color;
+            words.extend([u32::from_le_bytes([red, green, blue, u8::from(part.cut)]), part.shade.to_bits(), part.glow.to_bits()]);
+        }
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        words.hash(&mut hasher);
+        hasher.finish()
     }
 }

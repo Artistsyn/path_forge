@@ -675,13 +675,16 @@ pub struct Verge {
     pub tuft_color: Rgb,
     pub tuft_density: f32,
     pub tuft_height: f32,
+    /// With a Water verge: how strongly the path's edge reads as a shore, 0..1 (the path's edge
+    /// wet and dark, a pale line where the water laps it, the bank's dark reflection beyond).
+    pub shore: f32,
 }
 impl Default for Verge {
     fn default() -> Self {
         Self {
             enabled: false,
             material: Material { pattern: Pattern::Grass, base: [42, 70, 30], mortar: [26, 46, 18], ..Material::default() },
-            tufts: false, tuft_color: [44, 100, 30], tuft_density: 1.0, tuft_height: 0.25,
+            tufts: false, tuft_color: [44, 100, 30], tuft_density: 1.0, tuft_height: 0.25, shore: 1.0,
         }
     }
 }
@@ -3047,6 +3050,9 @@ pub struct PropDef {
     pub trim: bool,
     /// Smoke rising from it: a chimney, a campfire, a smouldering ruin.
     pub smoke: PropSmoke,
+    /// How far round its foot the place's own grass (reeds beside water, moss in a street) grows
+    /// up against it, metres (0: none), so it stands in the ground there and not on it.
+    pub footing: f32,
     /// Which way its picture faces (see `Facing`): the camera (a tree, a rock: the same from every
     /// side), or the path (a building's front, a fence, a stall), seen at an angle when the camera
     /// is turned.
@@ -3116,7 +3122,7 @@ impl Default for PropDef {
     fn default() -> Self {
         Self {
             description: String::new(), sprite: SpriteRef::default(), shape: Vec::new(), kind: PropKind::Rock, tint: None,
-            height: 0.0, anchor: Anchor::Ground, glow: 0.0, glow_from: 0.0, light: PropLight::default(), trim: true, smoke: PropSmoke::default(),
+            height: 0.0, anchor: Anchor::Ground, glow: 0.0, glow_from: 0.0, light: PropLight::default(), trim: true, smoke: PropSmoke::default(), footing: 0.0,
             facing: Facing::Camera, depth: 0.0, faces: Vec::new(), tubes: Vec::new(), pick: Vec::new(),
         }
     }

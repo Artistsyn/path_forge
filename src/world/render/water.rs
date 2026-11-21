@@ -6,6 +6,40 @@
 use super::*;
 use crate::scene::Floating;
 
+/// A water verge's shore (`verge.shore`) at one ground pixel: the albedo kept, the share of the
+/// pale line (`line_col`) mixed over it, the water's gloss kept and the wet gloss added.
+/// `shade.wgsl` repeats `at` step for step.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct Shore {
+    pub keep: f32,
+    pub line: f32,
+    pub gloss_k: f32,
+    pub wet: f32,
+}
+
+impl Shore {
+    /// How far in the path's edge is wet, and how far out the bank's reflection reaches, metres.
+    const WET: f32 = 0.3;
+    const BANK: f32 = 0.35;
+
+    /// The shore `out` metres out from the path's edge (negative on the path), `w` metres along
+    /// the world where a pixel covers `px` metres; `lap` is the lapping's phase and wave number.
+    pub fn at(strength: f32, out: f32, (w, px): (f32, f32), lap: (f32, f32)) -> Self {
+        if out < 0.0 {
+            let wet = strength * (1.0 - smoothstep(0.0, Self::WET, -out));
+            return Self { keep: 1.0 - 0.4 * wet, line: 0.0, gloss_k: 1.0, wet: 0.4 * wet };
+        }
+        let width = 0.05 + 0.03 * (lap.0 + w * lap.1).sin();
+        let seen = width.max(px);
+        let line = strength * 0.6 * (width / seen) * (-out / seen).exp();
+        let bank = strength * (-out / Self::BANK).exp();
+        Self { keep: 1.0 - 0.6 * bank, line, gloss_k: (1.0 - 0.65 * bank) * (1.0 - line), wet: 0.0 }
+    }
+
+    /// The line's colour: the sky's horizon, paled.
+    pub fn line_col(sky_hor: [f32; 3]) -> [f32; 3] { sky_hor.map(|c| 0.5 * c + 0.28) }
+}
+
 /// A waterway for one frame, as both renderers draw it.
 #[derive(Clone, Copy, Debug)]
 pub(super) struct WaterK {

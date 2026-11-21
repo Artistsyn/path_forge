@@ -28,7 +28,7 @@
 use crate::journey::{Camera, CrossWalk, ForkWalk, Journey, Next, Place, Stop};
 use crate::scene::transition::{self as tr, Branch, Crossing, ForkChoice, ForkPlan, Transition};
 use crate::scene::{self, Scene};
-use crate::world::{RenderOptions, View, WorldRenderer};
+use crate::world::{Quality, RenderOptions, View, WorldRenderer};
 use std::path::{Path, PathBuf};
 
 pub struct Runtime {
@@ -72,6 +72,12 @@ pub struct Runtime {
     near: Option<(String, std::sync::Arc<std::collections::HashMap<String, u32>>)>,
     /// Where the road ends (`set_end`): the walk's metres (`walked`) at the wall, and the wall.
     end: Option<(f64, tr::Barrier)>,
+    /// What the game has stood in the world, each at `walked` metres of the walk (`set_placed`).
+    placed: Vec<(f64, crate::world::render::Placed)>,
+    /// Light the game gives off now, each at `walked` metres of the walk (`set_flashes`).
+    flashes: Vec<(f64, crate::world::render::Flash)>,
+    /// How many warps the walk has made (`WalkState::warps`).
+    warps: u32,
 }
 
 /// A thread of its own painting the props of the stops near the walk (`warm_next`'s), so the stop's
@@ -221,6 +227,13 @@ pub struct WalkState {
     /// Side paths (`path.fork`) opening off the path near the walker, outside a transition:
     /// (metres ahead, -1 left or 1 right), from 6 m behind to 40 m ahead.
     pub side_paths: Vec<(f32, f32)>,
+    /// How many warps the walk has made: a game waits for this to move on after sending one,
+    /// since a warp to the stop already shown changes nothing else it can see.
+    pub warps: u32,
+    /// The branch the fork under way takes, once that is settled: chosen, or leaned toward (else
+    /// the default) when the walk reached the point of choosing. A game follows this, not what
+    /// it asked for: a choice sent too late is not taken.
+    pub taken: Option<Branch>,
 }
 
 /// How many stops out from the walk `warm_next` gets ready: the next ones each way. Each warm
@@ -258,7 +271,7 @@ impl Runtime {
     /// A scene whose files (sprites, kits, grades) are named relative to `base_dir`.
     pub fn new(scene: Scene, base_dir: Option<PathBuf>) -> Runtime {
         let home = scene.camera.clone();
-        Runtime { scene, base_dir, renderer: WorldRenderer::default(), rgba: Vec::new(), pipelined: false, distance: 0.0, time: 0.0, walked: 0.0, active: None, onward: None, journey: None, day_seconds: 0.0, played: 0.0, swinging: None, home, cold: Vec::new(), wanted: Vec::new(), floor: None, lift: 1.0, probes: Vec::new(), ahead: None, near: None, end: None }
+        Runtime { scene, base_dir, renderer: WorldRenderer::default(), rgba: Vec::new(), pipelined: false, distance: 0.0, time: 0.0, walked: 0.0, active: None, onward: None, journey: None, day_seconds: 0.0, played: 0.0, swinging: None, home, cold: Vec::new(), wanted: Vec::new(), floor: None, lift: 1.0, probes: Vec::new(), ahead: None, near: None, end: None, warps: 0, placed: Vec::new(), flashes: Vec::new() }
     }
 
     /// Draw frames on the GPU, on a device the game hands over (with wgpu 25, the same one it
@@ -339,7 +352,7 @@ impl Runtime {
     pub fn canvas(&self) -> (u32, u32) { (self.scene.canvas.width, self.scene.canvas.height) }
 
     fn opts(&self, time: f32, width: u32, height: u32) -> RenderOptions {
-        RenderOptions { size: Some((width.max(1), height.max(1))), base_dir: self.base_dir.clone(), time: Some(time), ..RenderOptions::default() }
+        RenderOptions { size: Some((width.max(1), height.max(1))), base_dir: self.base_dir.clone(), time: Some(time), endless: true, ..RenderOptions::default() }
     }
 
     /// The view `distance` metres along the path at `time` seconds, as RGBA8 rows of `width` pixels.
@@ -430,6 +443,13 @@ impl Runtime {
     /// (`Barrier`, its picture in its foot), until taken off (None): a dead end the game holds
     /// the walk short of, seen to end.
     pub fn set_end(&mut self, end: Option<(f64, tr::Barrier)>) { self.end = end; }
+
+    /// Stand these in the world until the next call (none: an empty list), each at `walked` metres
+    /// of the walk (`WalkState::walked`; its `d` is not used): a game's shrine or signpost, drawn
+    /// and lit as the place's own props are, in whichever world of a crossing or fork it is in.
+    pub fn set_placed(&mut self, placed: Vec<(f64, crate::world::render::Placed)>) { self.placed = placed; }
+    /// The light the game gives off now (`RenderOptions::flashes`), each at metres of the walk.
+    pub fn set_flashes(&mut self, flashes: Vec<(f64, crate::world::render::Flash)>) { self.flashes = flashes; }
 
     /// Never let the road fall darker than `brightness` (the mean perceived brightness, 0..1, of
     /// the frame below the horizon band, where the path and what stands on it are): exposure is
@@ -526,7 +546,8 @@ impl Runtime {
         let floor = match &self.active {
             None => None,
             Some(Active::Cross { travel, .. }) => Some((*travel, 0.0)),
-            Some(Active::Fork { walk, travel, .. }) => Some((*travel, walk.branch(*travel).map_or(0.0, |(_, at)| at))),
+            // A fork begun short of its start (`start_on`) is walked back along the first world.
+            Some(Active::Fork { walk, travel, .. }) => Some((*travel, walk.branch(*travel).map_or(if *travel < 0.0 { f32::MIN } else { 0.0 }, |(_, at)| at))),
         };
         if let Some((travel, floor)) = floor { if ds < 0.0 { ds = ds.max((floor - travel).min(0.0)); } }
         self.played += dt.max(0.0);
@@ -576,9 +597,9 @@ impl Runtime {
     /// Swing the camera from where it is now (partway through another swing or the intro, even)
     /// to view `to` (its `back` is not used: the walk's camera stands at the walker), the way
     /// `style` says (its `from` is not used; 0 seconds is 2.5). The view stays once it lands:
-    /// the scene's camera becomes it. Not while a transition is under way.
+    /// the scene's camera becomes it. In a crossing or fork the walk's camera swings too, except
+    /// while the transition makes a swing of its own.
     pub fn swing_to(&mut self, to: scene::SwingView, style: scene::Swing) -> Result<(), String> {
-        if self.active.is_some() { return Err("a transition is under way: swing once it has ended".into()); }
         let from = self.view_now();
         let mut style = style;
         if style.seconds <= 0.0 { style.seconds = 2.5; }
@@ -650,21 +671,23 @@ impl Runtime {
     pub fn frame(&mut self, width: u32, height: u32) -> &[u8] {
         // Arches clear the walk's eye as the scene came, not a view a swing left (a cutscene's).
         let walk_eye = Some(self.home.eye_height);
-        let opts = RenderOptions { size: Some((width.max(1), height.max(1))), probes: self.probes.clone(), pipelined: self.pipelined, walk_eye, ..RenderOptions::default() };
+        let placed = self.placed.iter().map(|(at, p)| crate::world::render::Placed { d: (at - self.walked) as f32, ..p.clone() }).collect();
+        let flashes = self.flashes.iter().map(|(at, f)| crate::world::render::Flash { d: (at - self.walked) as f32, ..*f }).collect();
+        let opts = RenderOptions { size: Some((width.max(1), height.max(1))), probes: self.probes.clone(), pipelined: self.pipelined, walk_eye, placed, flashes, endless: true, ..RenderOptions::default() };
         self.renderer.set_end(self.end.as_ref().map(|(at, wall)| ((at - self.walked) as f32, wall.clone())));
         let a = Place { scene: &self.scene, dir: self.base_dir.as_deref() };
+        let swing = self.swinging.as_ref().and_then(Swinging::pose);
         let img = match &self.active {
             None => {
-                let swing = self.swinging.as_ref().and_then(Swinging::pose);
                 let o = RenderOptions { base_dir: self.base_dir.clone(), time: Some(self.time), intro: self.intro(), swing, ..opts };
                 self.renderer.render(&self.scene, self.distance, &o)
             }
             Some(Active::Cross { next, walk, travel, clock }) => {
-                walk.frame(&mut self.renderer, a, Place { scene: &next.scene, dir: next.dir.as_deref() }, *travel, self.time, *clock, &opts)
+                walk.frame(&mut self.renderer, a, Place { scene: &next.scene, dir: next.dir.as_deref() }, *travel, self.time, *clock, &RenderOptions { swing, ..opts })
             }
             Some(Active::Fork { left, right, walk, travel, clock }) => {
                 let (l, r) = (Place { scene: &left.scene, dir: left.dir.as_deref() }, Place { scene: &right.scene, dir: right.dir.as_deref() });
-                walk.frame(&mut self.renderer, a, l, r, *travel, [self.time, *clock, *clock], &opts)
+                walk.frame(&mut self.renderer, a, l, r, *travel, [self.time, *clock, *clock], &RenderOptions { swing, ..opts })
             }
         };
         self.rgba = img.rgba;
@@ -672,12 +695,19 @@ impl Runtime {
         &self.rgba
     }
 
+    /// `frame`, handed over by value: the same pixels, kept by the caller without a copy. The
+    /// runtime keeps none of its own afterwards; the next `frame` draws a new one either way.
+    pub fn take_frame(&mut self, width: u32, height: u32) -> Vec<u8> {
+        self.frame(width, height);
+        std::mem::take(&mut self.rgba)
+    }
+
     /// Walk from here into `next` (files relative to `dir`). Returns the plan: what stands at the
     /// boundary and why, and anything that will not look right. A transition already under way
     /// is finished first (it cuts to its end).
     pub fn transition_to(&mut self, next: Scene, dir: Option<PathBuf>, t: &Transition) -> Crossing {
         self.finish();
-        let c = tr::plan(&self.scene, &next, t);
+        let c = self.from_home(|scene| tr::plan(scene, &next, t));
         let walk = CrossWalk::new(c.clone(), self.distance, 0.0);
         self.active = Some(Active::Cross { next: Box::new(Bound { scene: next, dir, stop: None }), walk, travel: 0.0, clock: 0.0 });
         c
@@ -687,7 +717,7 @@ impl Runtime {
     /// otherwise the fork's default branch is taken.
     pub fn fork(&mut self, left: (Scene, Option<PathBuf>), right: (Scene, Option<PathBuf>), f: &ForkChoice) -> ForkPlan {
         self.finish();
-        let p = tr::plan_fork(&self.scene, &left.0, &right.0, f);
+        let p = self.from_home(|scene| tr::plan_fork(scene, &left.0, &right.0, f));
         let walk = ForkWalk::new(p.clone(), self.distance, [0.0, 0.0]);
         self.active = Some(Active::Fork {
             left: Box::new(Bound { scene: left.0, dir: left.1, stop: None }), right: Box::new(Bound { scene: right.0, dir: right.1, stop: None }),
@@ -696,8 +726,28 @@ impl Runtime {
         p
     }
 
+    /// `plan` read from the scene as it came, with its own camera: a view the game swung to for a
+    /// moment (a turn's side-on look, a fight's) leaves no mark on where a crossing or fork hands
+    /// over. The walk swings the game's view by itself (`swing_to`).
+    fn from_home<T>(&mut self, plan: impl FnOnce(&Scene) -> T) -> T {
+        let swung = std::mem::replace(&mut self.scene.camera, self.home.clone());
+        let planned = plan(&self.scene);
+        self.scene.camera = swung;
+        planned
+    }
+
+    /// Lean toward `branch` of the fork ahead (None: neither): taken when the walk reaches the
+    /// point of choosing with nothing chosen. Changes nothing once the branch is settled; returns
+    /// whether it was in time.
+    pub fn lean(&mut self, branch: Option<Branch>) -> bool {
+        match &mut self.active {
+            Some(Active::Fork { walk, travel, .. }) if walk.chosen.is_none() && *travel <= walk.decide_by() => { walk.lean = branch; true }
+            _ => false,
+        }
+    }
+
     /// Take a branch of the fork ahead. Returns false when there is no fork, or the choice came too
-    /// late (the default branch has already been taken).
+    /// late (the branch leaned toward, else the default, has already been taken).
     pub fn choose(&mut self, branch: Branch) -> bool {
         match &mut self.active {
             Some(Active::Fork { walk, travel, .. }) if walk.chosen.is_none() && *travel <= walk.decide_by() => { walk.choose(branch, *travel); true }
@@ -747,6 +797,8 @@ impl Runtime {
     /// shrine the player wakes at, a fast travel. `walked` carries on, so things a game keeps by it
     /// stay where they were. Fails without a journey or for a stop it does not have.
     pub fn warp(&mut self, stop: &str) -> Result<(), String> {
+        // Counted when asked, so a warp that fails is not waited for.
+        self.warps = self.warps.wrapping_add(1);
         let (j, dir, _) = self.journey.as_ref().ok_or("no journey loaded")?;
         if !j.stops.contains_key(stop) { return Err(format!("no stop `{stop}`")); }
         let (scene, sdir) = j.scene_of(stop, dir.as_deref())?;
@@ -781,14 +833,16 @@ impl Runtime {
         self.start_on(stop, |_| travel.max(0.0))
     }
 
-    /// Warp to `stop` and start its walk on at the travel `into` gives for its hand-over; one that
-    /// would start before its start is not started (`onward` keeps the hand-over).
+    /// Warp to `stop` and start its walk on at the travel `into` gives for its hand-over. A
+    /// crossing that would start before its start is not started (`onward` keeps the hand-over); a
+    /// fork is, short of its start, so its junction is drawn where it stands from the first frame
+    /// rather than showing up once the walk reaches its approach.
     fn start_on(&mut self, stop: &str, into: impl Fn(f32) -> f32) -> Result<(), String> {
         self.warp(stop)?;
         if self.go().is_err() { return Ok(()); }
         let Some(handover) = self.handover() else { return Ok(()) };
         let into = into(handover);
-        if into < 0.0 {
+        if into < 0.0 && !matches!(self.active, Some(Active::Fork { .. })) {
             self.active = None;
             self.onward = Some(handover);
             return Ok(());
@@ -818,6 +872,9 @@ impl Runtime {
     /// with the scene's own settings if it was off). None gives each scene back its own hour.
     /// Scenes without an open sky (dungeons, space, tunnels) are not touched.
     pub fn set_hour(&mut self, hour: Option<f32>) { self.renderer.set_hour(hour); }
+    /// Draw less of each scene's bloom, ground cover and particles from here on, for a slower
+    /// device (`Quality::High`, the default, draws all of it).
+    pub fn set_quality(&mut self, quality: Quality) { self.renderer.set_quality(quality); }
 
     /// Lay a grade over every scene the runtime draws, transitions and forks included, until it
     /// is taken off (None): JSON merging into the scenes' `post` (exposure, contrast, saturation,
@@ -855,19 +912,27 @@ impl Runtime {
         let (progress, choose_within) = match &self.active {
             None => (None, None),
             Some(Active::Cross { walk, travel, .. }) => (Some((travel / walk.length()).min(1.0)), None),
-            Some(Active::Fork { walk, travel, .. }) => (Some((travel / walk.length()).min(1.0)), walk.chosen.is_none().then(|| (walk.decide_by() - travel).max(0.0))),
+            Some(Active::Fork { walk, travel, .. }) => (Some((travel / walk.length()).clamp(0.0, 1.0)), walk.chosen.is_none().then(|| (walk.decide_by() - travel).max(0.0))),
         };
         let end = self.active.is_none() && self.journey.as_ref().is_some_and(|(j, _, at)| j.stops.get(at).is_some_and(|s| matches!(s.next, Next::End)));
         let travel = match &self.active { Some(Active::Cross { travel, .. } | Active::Fork { travel, .. }) => Some(*travel), None => None };
         let length = match &self.active { Some(Active::Cross { walk, .. }) => Some(walk.length()), Some(Active::Fork { walk, .. }) => Some(walk.length()), None => None };
+        let taken = match &self.active { Some(Active::Fork { walk, travel, .. }) => walk.branch(*travel).map(|(b, _)| b), _ => None };
         WalkState { scene: self.scene.name.clone(), distance: self.distance, walked: self.walked, time: self.time, stop: self.journey.as_ref().map(|j| j.2.clone()), progress, choose_within,
             travel, handover: self.handover().or(self.onward), length, speed: self.scene.motion.speed, end, day: self.day(), intro_left: self.intro_left(), swing_left: self.swing_left(),
-            side_paths: if self.active.is_none() { crate::world::render::side_paths(&self.scene, self.distance - 6.0, self.distance + 40.0).into_iter().map(|(w, side)| (w - self.distance, side)).collect() } else { Vec::new() } }
+            side_paths: if self.active.is_none() { crate::world::render::side_paths(&self.scene, self.distance - 6.0, self.distance + 40.0).into_iter().map(|(w, side)| (w - self.distance, side)).collect() } else { Vec::new() }, warps: self.warps, taken }
     }
 
     /// The camera of the runtime's own walk now, for a `width` x `height` frame. In a transition,
     /// points past the boundary are placed by the next scene's camera.
     pub fn camera_now(&self, width: u32, height: u32) -> Camera {
+        // A swing the game makes in a crossing or fork: the camera it has, at the walker.
+        let swing = self.swinging.as_ref().and_then(Swinging::pose);
+        match (&self.active, swing) {
+            (Some(Active::Cross { walk, travel, .. }), Some(p)) => return Camera::swinging(&self.scene, &p, walk.at(*travel).1, width, height),
+            (Some(Active::Fork { walk, travel, .. }), Some(p)) => return Camera::swinging(&self.scene, &p, walk.at(*travel).1, width, height),
+            _ => {}
+        }
         match &self.active {
             Some(Active::Cross { next, walk, travel, .. }) => walk.camera(&self.scene, &next.scene, *travel, width, height),
             Some(Active::Fork { left, right, walk, travel, .. }) => walk.camera([&self.scene, &left.scene, &right.scene], *travel, width, height),
@@ -1127,6 +1192,30 @@ mod tests {
     }
 
     #[test]
+    fn a_fork_takes_the_way_leaned_when_the_choice_comes_too_late() {
+        let mut r = rt("Forest Path");
+        let ways = || ((rt("Mountain Pass").scene().clone(), None), (rt("Desert Canyon").scene().clone(), None));
+        let (left, right) = ways();
+        r.fork(left, right, &ForkChoice::default());
+        // Leaned right early, then the choice itself arrives only once the walk is past choosing
+        // (a game reading frames shown late): the walk has already taken the way leaned.
+        assert!(r.lean(Some(Branch::Right)));
+        assert_eq!(r.state().taken, None, "nothing settled before the point of choosing");
+        while r.state().choose_within.is_some_and(|m| m > 0.0) { r.step(0.25, 4.0); }
+        r.step(0.25, 4.0);
+        assert_eq!(r.state().taken, Some(Branch::Right));
+        assert!(!r.choose(Branch::Left) && !r.lean(Some(Branch::Left)), "too late to change");
+        r.finish();
+        assert_eq!(r.scene().name, "Desert Canyon");
+        // Not leaned: the default, said as taken just the same.
+        let (left, right) = ways();
+        r.fork(left, right, &ForkChoice::default());
+        while r.state().choose_within.is_some_and(|m| m > 0.0) { r.step(0.25, 4.0); }
+        r.step(0.25, 4.0);
+        assert_eq!(r.state().taken, Some(ForkChoice::default().default_branch));
+    }
+
+    #[test]
     fn a_journey_says_where_each_place_leads() {
         let dir = std::env::temp_dir().join(format!("pf_journey_{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -1205,6 +1294,14 @@ mod tests {
         let st = r.state();
         assert!(st.choose_within.is_some(), "the fork is ahead: {st:?}");
         assert!((st.handover.unwrap() - st.travel.unwrap() - 5.0).abs() < 1e-4, "{st:?}");
+        // Further from the junction than the fork's approach: the fork is under way already, its
+        // junction drawn that far ahead from the first frame, and walked up to as any other.
+        let junction = r.state().handover.expect("the fork's junction");
+        r.turn_into("woods", junction + 9.0).unwrap();
+        let st = r.state();
+        assert!(st.travel.is_some_and(|t| (t + 9.0).abs() < 1e-4) && st.choose_within.is_some() && st.taken.is_none(), "{st:?}");
+        r.step(1.0, -2.0);
+        assert!(r.state().travel.is_some_and(|t| (t + 11.0).abs() < 1e-4), "walked back short of its start: {:?}", r.state().travel);
         // Inside the last metres where the choice is made: it is made where the walk begins, the
         // camera not yet turned onto a branch.
         r.turn_into("woods", 3.0).unwrap();
@@ -1220,6 +1317,34 @@ mod tests {
         // Short of a stop's start, on its ground.
         r.warp_at("crypt", -4.0).unwrap();
         assert!((r.state().distance - (r.loop_length() - 4.0)).abs() < 1e-3);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_view_the_game_swung_to_leaves_the_hand_over_where_the_scene_puts_it() {
+        let dir = std::env::temp_dir().join(format!("pf_home_plan_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut j = Journey { version: 1, name: "home".into(), start: "crypt".into(), ..Journey::default() };
+        j.stops.insert("crypt".into(), crate::journey::Stop { scene: "preset:Stone Dungeon".into(), next: Next::Go { to: "woods".into(), transition: Transition::default() } });
+        j.stops.insert("woods".into(), crate::journey::Stop { scene: "preset:Forest Path".into(), next: Next::Fork { left: "crypt".into(), right: "sands".into(), fork: ForkChoice::default() } });
+        j.stops.insert("sands".into(), crate::journey::Stop { scene: "preset:Desert Canyon".into(), next: Next::End });
+        let path = dir.join("home.journey.json");
+        j.save(&path).unwrap();
+        let mut r = Runtime::from_journey(&path).unwrap();
+        r.go().unwrap();
+        let boundary = r.state().handover.expect("a boundary");
+        r.warp("woods").unwrap();
+        r.go().unwrap();
+        let junction = r.state().handover.expect("a junction");
+        // Swung side-on (as a game does for a moment when the hero turns round), then planned.
+        for (stop, was) in [("crypt", boundary), ("woods", junction)] {
+            r.warp(stop).unwrap();
+            r.swing("side").unwrap();
+            r.step(3.0, 0.0);
+            assert!(r.scene().camera.turned(), "the swing landed");
+            r.go().unwrap();
+            assert_eq!(r.state().handover, Some(was), "{stop}: planned from the swung view");
+        }
         std::fs::remove_dir_all(&dir).ok();
     }
 

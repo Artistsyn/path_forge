@@ -103,13 +103,13 @@ pub const WIND_BLEND_M: f32 = 12.0;
 /// (where it starts, metres ahead, and 1 / its length), and the offset and slope at the camera
 /// taken off, so the curve is measured from where the camera stands and the way it heads.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Winding { pub waves: [[f32; 4]; 4], pub lo: f32, pub inv: f32, pub c0: f32, pub c1: f32 }
+pub struct Winding { pub waves: [[f32; 4]; 4], pub lo: f32, pub inv: f32, pub c0: f32, pub c1: f32, pub tail: [f32; 2] }
 
 impl Winding {
     /// One world's winding (`View::wind`, from `scroll` metres along its loop).
     pub fn of(wind: [[f32; 4]; 4], scroll: f32) -> Winding {
         let waves = wind.map(|[a, k, p0, _]| [a, k, k * scroll + p0, 0.0]);
-        Winding { waves, lo: 1e30, inv: 1.0, c0: 0.0, c1: 0.0 }.settled(wind.map(|w| w[3]))
+        Winding { waves, lo: 1e30, inv: 1.0, c0: 0.0, c1: 0.0, tail: [0.0; 2] }.settled(wind.map(|w| w[3]))
     }
 
     /// Two worlds' (each a winding and its place along its loop) on one stretch of ground: the
@@ -123,7 +123,17 @@ impl Winding {
             waves[i + 2] = [b.waves[i][0] * keep, b.waves[i][1], b.waves[i][2], 1.0];
             (turns[i], turns[i + 2]) = (near.0[i][3], next.0[i][3]);
         }
-        Winding { waves, lo: zb - WIND_BLEND_M, inv: 1.0 / WIND_BLEND_M, c0: 0.0, c1: 0.0 }.settled(turns)
+        // The next world's road lined up with this one's where the blend begins (`tail`), so it
+        // bends away from it there rather than jumping across to wherever its own waves put it.
+        let lo = zb - WIND_BLEND_M;
+        let (here, there) = (Self::sum_at(&waves[..2], lo), Self::sum_at(&waves[2..], lo));
+        let tail = [here[0] - there[0], here[1] - there[1]];
+        Winding { waves, lo, inv: 1.0 / WIND_BLEND_M, c0: 0.0, c1: 0.0, tail }.settled(turns)
+    }
+
+    /// `waves` summed `ahead` metres on, each whole: where they put the road, and its slope.
+    fn sum_at(waves: &[[f32; 4]], ahead: f32) -> [f32; 2] {
+        waves.iter().fold([0.0; 2], |[at, slope], &[a, k, p, _]| [at + a * (k * ahead + p).sin(), slope + a * k * (k * ahead + p).cos()])
     }
 
     /// How far into the blend `ahead` metres on is (0 before it, 1 past it), and how fast it goes.
@@ -143,7 +153,7 @@ impl Winding {
         for &[a, k, p, g] in &self.waves {
             if a != 0.0 { sum += a * (Self::share(g, blend) * (k * ahead + p).sin()); }
         }
-        sum
+        sum + blend * (self.tail[0] + self.tail[1] * (ahead - self.lo))
     }
 
     /// With the offset at the camera and its heading (as far as each wave turns it) worked out.
@@ -151,13 +161,28 @@ impl Winding {
         self.c0 = self.raw(0.0);
         let (blend, rate) = self.mix(0.0);
         self.c1 = self.waves.iter().zip(turns).filter(|(w, _)| w[0] != 0.0)
-            .map(|(&[a, k, p, g], turn)| turn * a * (Self::share(g, blend) * k * p.cos() + g * rate * p.sin())).sum();
+            .map(|(&[a, k, p, g], turn)| turn * a * (Self::share(g, blend) * k * p.cos() + g * rate * p.sin())).sum::<f32>();
+        // The lining up is taken off whole, so past the blend the road is the next world's own.
+        self.c1 += rate * (self.tail[0] - self.tail[1] * self.lo) + blend * self.tail[1];
         self
     }
 
     /// How far sideways the path's centre is `ahead` metres on (`View::bend_x` without its curve).
     #[inline]
     pub fn x(&self, ahead: f32) -> f32 { self.raw(ahead) - self.c0 - self.c1 * ahead }
+
+    /// How fast `x` changes `ahead` metres on, sideways metres per metre ahead.
+    pub fn slope(&self, ahead: f32) -> f32 {
+        let (blend, rate) = self.mix(ahead);
+        let mut sum = 0.0;
+        for &[a, k, p, g] in &self.waves {
+            if a != 0.0 {
+                let phase = k * ahead + p;
+                sum += a * (Self::share(g, blend) * k * phase.cos() + g * rate * phase.sin());
+            }
+        }
+        sum + rate * (self.tail[0] + self.tail[1] * (ahead - self.lo)) + blend * self.tail[1] - self.c1
+    }
 }
 
 /// How far a camera's turn has gone in what it changes besides the angle (see `View::posed`):
@@ -298,13 +323,20 @@ impl Bend {
     /// `View::shear_x`.
     #[inline]
     pub fn shear(&self, d: f32) -> f32 { match self.shear { Some((z0, k)) => k * (d - z0).max(0.0), None => 0.0 } }
+    /// How fast `cam_xz` moves the ground sideways at `d` (bend, winding and shear), per metre ahead.
+    pub fn slope(&self, d: f32) -> f32 {
+        let shear = match self.shear { Some((z0, k)) if d > z0 => k, _ => 0.0 };
+        2.0 * self.bk * d + self.wind.slope(d) + shear
+    }
     /// Its numbers as geom.wgsl's `bend_of` and `cam_xz_of` read them: the curve, the count of
     /// waves, the blend's start and 1 / length, the offset and slope taken off, each wave there
-    /// (`Winding::waves`), then the shear (on, z0, k) and the turn (on, cam_x, yaw cos, sin).
+    /// (`Winding::waves`), its tail at 22 (`Winding::tail`), then the shear (on, z0, k) and the
+    /// turn (on, cam_x, yaw cos, sin).
     pub fn gpu_words(&self) -> [f32; 33] {
         let mut out = [0.0; 33];
         let w = &self.wind;
         out[..6].copy_from_slice(&[self.bk, 0.0, w.lo, w.inv, w.c0, w.c1]);
+        out[22..24].copy_from_slice(&w.tail);
         for wave in w.waves.iter().filter(|wave| wave[0] != 0.0) {
             let k = out[1] as usize;
             out[6 + 4 * k..10 + 4 * k].copy_from_slice(wave);
@@ -318,9 +350,16 @@ impl Bend {
     #[inline]
     pub fn cam_xz(&self, x: f32, d: f32) -> [f32; 2] {
         let cx = x + self.x(d) + self.shear(d);
-        let Some([cam_x, yc, ys]) = self.turned else { return [cx, d] };
+        self.turn([cx, d])
+    }
+    /// `View::flat_xz`: camera space with the path's bend and winding taken off.
+    #[inline]
+    pub fn flat_xz(&self, x: f32, ahead: f32) -> [f32; 2] { self.turn([x + self.shear(ahead), ahead]) }
+    #[inline]
+    fn turn(&self, [cx, ahead]: [f32; 2]) -> [f32; 2] {
+        let Some([cam_x, yc, ys]) = self.turned else { return [cx, ahead] };
         let px = cx - cam_x;
-        [yc * px - ys * d, ys * px + yc * d]
+        [yc * px - ys * ahead, ys * px + yc * ahead]
     }
 }
 
@@ -411,6 +450,32 @@ impl View {
     /// stands along its loop.
     pub fn winding(&self) -> Winding { self.blend.unwrap_or_else(|| Winding::of(self.wind, self.scroll)) }
 
+    /// Sunlight `light` as it falls on the path's ground `ahead` metres on. The bend draws that
+    /// ground sheared sideways, so light cast along it is sheared back first: a shadow there then
+    /// keeps the sun's way on screen wherever the curve takes it, the sun fixed in the world.
+    pub fn light_on_path(&self, light: [f32; 3], ahead: f32) -> [f32; 3] { Self::sheared_back(light, self.path_slope(ahead)) }
+
+    /// `Bend::slope` `ahead` metres on; 0 at once on a straight path.
+    pub fn path_slope(&self, ahead: f32) -> f32 {
+        let straight = self.bend == 0.0 && self.shear.is_none() && self.blend.is_none() && self.wind.iter().all(|w| w[0] == 0.0);
+        if straight { 0.0 } else { self.bender().slope(ahead) }
+    }
+
+    /// `light` with the bend's shear at `slope` taken back (`light_on_path`).
+    pub fn sheared_back(light: [f32; 3], slope: f32) -> [f32; 3] {
+        if slope == 0.0 { return light; }
+        [light[0] - slope * light[2], light[1], light[2]]
+    }
+
+    /// How squarely `light` (`sheared_back` at `slope`) meets a surface of normal `n` as the bend
+    /// draws it: the normal is sheared too, the other way, so its length is taken off.
+    pub fn facing(n: [f32; 3], light: [f32; 3], slope: f32) -> f32 {
+        let ndl = n[0] * light[0] + n[1] * light[1] + n[2] * light[2];
+        if slope == 0.0 { return ndl; }
+        let drawn_z = n[2] - slope * n[0];
+        ndl / (n[0] * n[0] + n[1] * n[1] + drawn_z * drawn_z).sqrt().max(1e-6)
+    }
+
     /// `bend_x`, `shear_x` and `to_cam`'s ground plane with what stays the same across the frame
     /// worked out once (the same numbers, bit for bit): for loops over every pixel.
     pub fn bender(&self) -> Bend {
@@ -434,7 +499,7 @@ impl View {
 
     /// The winding as the GPU reads it: each wave (`Winding::waves`), and the blend's start, its
     /// 1 / length, and the offset and slope taken off.
-    pub fn wind_now(&self) -> ([[f32; 4]; 4], [f32; 4]) { let w = self.winding(); (w.waves, [w.lo, w.inv, w.c0, w.c1]) }
+    pub fn wind_now(&self) -> ([[f32; 4]; 4], [f32; 4], [f32; 4]) { let w = self.winding(); (w.waves, [w.lo, w.inv, w.c0, w.c1], [w.tail[0], w.tail[1], 0.0, 0.0]) }
 
     /// The shortest of the winding's waves, metres (None when the path does not wind).
     pub fn wind_length(&self) -> Option<f32> {
@@ -473,6 +538,17 @@ impl View {
         // Turned: from where the camera stands, round the vertical by the yaw.
         let px = c[0] - self.cam_x;
         [self.yaw_c * px - self.yaw_s * c[2], c[1], self.yaw_s * px + self.yaw_c * c[2]]
+    }
+
+    /// Where a frame of several worlds keeps its bounds (`render::Bounds`): `to_cam`'s x and z
+    /// with the path's bend and winding taken off. A fork's branches part along straight lines
+    /// there; every world in the frame winds alike, so its paths lie on them wherever they wind.
+    #[inline]
+    pub fn flat_xz(&self, x: f32, ahead: f32) -> [f32; 2] {
+        let cx = x + self.shear_x(ahead);
+        if !self.turned { return [cx, ahead]; }
+        let px = cx - self.cam_x;
+        [self.yaw_c * px - self.yaw_s * ahead, self.yaw_s * px + self.yaw_c * ahead]
     }
 
     /// A direction the camera sees, back in the world (x, y, d): `rot_dir` undone.
@@ -606,17 +682,69 @@ mod winding_tests {
                 assert!((ground(at(step), g - step) - ground(at(0.0), g)).abs() < 1e-3, "step {step} ground {g}");
             }
         }
-        // Before the blend it is this world's road; from the boundary on, the next world's.
+        // Before the blend it is this world's road; from the boundary on, the next world's,
+        // lined up with this one's (an offset and a slope, which the camera takes off once there).
         let one = |w: [[f32; 4]; 4], scroll| Winding::of(w, scroll);
         let w = at(0.0);
         for d in [0.0, 8.0, 17.9] { assert!((ground(w, d) - ground(one(a, 5.0), d)).abs() < 1e-4, "{d}"); }
-        for d in [30.0, 44.0, 90.0] { assert!((ground(w, d) - ground(one(b, 17.0), d)).abs() < 1e-4, "{d}"); }
+        let off = |d: f32| ground(w, d) - ground(one(b, 17.0), d);
+        assert!(((off(44.0) - off(30.0)) / 14.0 - (off(90.0) - off(44.0)) / 46.0).abs() < 1e-4, "beyond, the next world's shape");
+        // No jog where one gives way to the other: it bends no harder there than either does.
+        let bendiest = |w: Winding| (1..90).map(|i| { let d = i as f32; (w.x(d + 1.0) - 2.0 * w.x(d) + w.x(d - 1.0)).abs() }).fold(0.0, f32::max);
+        let worst = bendiest(one(a, 5.0)).max(bendiest(one(b, 17.0)));
+        assert!(bendiest(w) <= 2.0 * worst + 1e-3, "a jog in the blend: {} against {worst}", bendiest(w));
         // Past the boundary: the next world's winding as it draws it alone.
         let past = Winding::across((a, 40.0), (b, 52.0), -0.5, 1.0);
         for d in [0.0, 6.0, 25.0, 60.0] { assert!((past.x(d) - one(b, 52.0).x(d)).abs() < 1e-4, "{d}"); }
         // A branch not yet taken: straight beyond the junction.
         let untaken = Winding::across((a, 5.0), (b, 17.0), 30.0, 0.0);
-        let (g1, g2) = (ground(untaken, 40.0), ground(untaken, 60.0));
-        assert!((g1 - ground(untaken, 30.0)).abs() < 1e-4 && (g2 - g1).abs() < 1e-4);
+        let (g0, g1, g2) = (ground(untaken, 30.0), ground(untaken, 40.0), ground(untaken, 60.0));
+        assert!(((g1 - g0) / 10.0 - (g2 - g1) / 20.0).abs() < 1e-4, "straight on");
+    }
+
+    /// The sun stays put in the world on a winding path: a shadow cast with `light_on_path` at
+    /// any distance ahead, once the bend has drawn it, falls the sun's own way, wherever the
+    /// curve takes the ground there and however far along the loop the camera has walked.
+    #[test]
+    fn a_shadow_falls_the_suns_way_wherever_the_path_curves() {
+        let mut s = Scene::default();
+        (s.motion.loop_length, s.path.bend) = (48.0, 0.4);
+        s.path.winding = crate::scene::Winding { enabled: true, amplitude: 2.2, length: 24.0, turn: 0.6, irregular: 0.4, phase: 0.2 };
+        let sun = [0.55f32, 0.6, -0.58];
+        let flat = |l: [f32; 3]| { let k = l[0].hypot(l[2]); [l[0] / k, l[2] / k] };
+        for scroll in [0.0, 6.5, 19.0, 33.0] {
+            let v = View::new(&s, 480, 270).at(scroll);
+            let b = v.bender();
+            // The slope is the bend's own: its change over a short step.
+            for d in [2.0, 9.0, 23.0, 41.0] {
+                let numeric = (b.x(d + 1e-2) - b.x(d - 1e-2)) / 2e-2;
+                assert!((b.slope(d) - numeric).abs() < 2e-3, "scroll {scroll} d {d}: slope {} against {numeric}", b.slope(d));
+                // A shadow a short way from a caster at (1.5, d), as the picture draws it.
+                let l = v.light_on_path(sun, d);
+                let t = 1e-2;
+                let (from, to) = (b.cam_xz(1.5, d), b.cam_xz(1.5 + l[0] * t, d + l[2] * t));
+                let drawn = flat([to[0] - from[0], 0.0, to[1] - from[1]]);
+                let want = flat(sun);
+                assert!((drawn[0] - want[0]).abs() < 2e-3 && (drawn[1] - want[1]).abs() < 2e-3, "scroll {scroll} d {d}: {drawn:?} against {want:?}");
+            }
+        }
+        // A straight path keeps the light exactly as it was.
+        (s.path.bend, s.path.winding.enabled) = (0.0, false);
+        assert_eq!(View::new(&s, 480, 270).light_on_path(sun, 12.0), sun);
+    }
+
+    #[test]
+    fn the_slope_across_a_blend_is_the_blended_roads() {
+        let wavy = |amplitude, length, phase| {
+            let mut s = Scene::default();
+            s.motion.loop_length = 24.0;
+            s.path.winding = crate::scene::Winding { enabled: true, amplitude, length, turn: 0.6, irregular: 0.4, phase };
+            View::new(&s, 90, 160).wind
+        };
+        let w = Winding::across((wavy(1.4, 24.0, 0.1), 5.0), (wavy(2.0, 40.0, 0.7), 17.0), 30.0, 1.0);
+        for d in [3.0, 19.0, 24.0, 29.0, 40.0] {
+            let numeric = (w.x(d + 1e-2) - w.x(d - 1e-2)) / 2e-2;
+            assert!((w.slope(d) - numeric).abs() < 2e-3, "d {d}: {} against {numeric}", w.slope(d));
+        }
     }
 }

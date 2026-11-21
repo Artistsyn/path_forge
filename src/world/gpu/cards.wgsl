@@ -26,7 +26,10 @@ struct Pass { tile_cols: u32, pick: u32, n_cards: u32, pad: u32 }
 
 @group(0) @binding(1) var<storage, read_write> gbuf: array<GPix>;
 @group(0) @binding(2) var<storage, read_write> hdr: array<f32>;
-@group(0) @binding(3) var<storage, read> texels: array<vec4<f32>>;
+// Sprite texels as four half floats (sprites::Texel), read through `texel`.
+@group(0) @binding(3) var<storage, read> texels: array<vec2<u32>>;
+
+fn texel(i: u32) -> vec4<f32> { let t = texels[i]; return vec4<f32>(unpack2x16float(t.x), unpack2x16float(t.y)); }
 @group(0) @binding(4) var<storage, read> cards: array<Card>;
 @group(0) @binding(5) var<storage, read> bins: array<u32>;
 @group(0) @binding(6) var<storage, read_write> pick: array<u32>;
@@ -161,7 +164,7 @@ fn sprite_sample(off: u32, w: u32, h: u32, u: f32, v: f32, nearest: bool) -> vec
     if nearest {
         let x = min(u32(max(u * f32(w), 0.0)), w - 1u);
         let y = min(u32(max(v * f32(h), 0.0)), h - 1u);
-        return texels[off + y * w + x];
+        return texel(off + y * w + x);
     }
     let fx = clamp(rnd(u * f32(w)) - 0.5, 0.0, f32(w) - 1.0);
     let fy = clamp(rnd(v * f32(h)) - 0.5, 0.0, f32(h) - 1.0);
@@ -169,8 +172,8 @@ fn sprite_sample(off: u32, w: u32, h: u32, u: f32, v: f32, nearest: bool) -> vec
     let x1 = min(x0 + 1u, w - 1u); let y1 = min(y0 + 1u, h - 1u);
     let tx = fx - f32(x0); let ty = fy - f32(y0);
     var p: array<vec4<f32>, 4>;
-    p[0] = texels[off + y0 * w + x0]; p[1] = texels[off + y0 * w + x1];
-    p[2] = texels[off + y1 * w + x0]; p[3] = texels[off + y1 * w + x1];
+    p[0] = texel(off + y0 * w + x0); p[1] = texel(off + y0 * w + x1);
+    p[2] = texel(off + y1 * w + x0); p[3] = texel(off + y1 * w + x1);
     var wts = array<f32, 4>(rnd((1.0 - tx) * (1.0 - ty)), rnd(tx * (1.0 - ty)), rnd((1.0 - tx) * ty), rnd(tx * ty));
     var acc = vec4<f32>(0.0);
     for (var k = 0; k < 4; k++) {

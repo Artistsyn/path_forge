@@ -737,7 +737,7 @@ fn post_stats(@builtin(global_invocation_id) gid: vec3<u32>) {
         let id = g.idr & 0xFFu;
         var k = 10u;
         if id == ID_NONE { k = select(1u, 0u, P.sky_enabled != 0u); }
-        else if id == ID_CHASM || id == ID_CLIFF { k = 2u; }
+        else if id == ID_CHASM || id == ID_CLIFF || id == ID_BANK { k = 2u; }
         else if is_rail(id) { k = 3u; }
         else if id == ID_GROUND || id == ID_RISER { k = select(5u, 4u, P.verge_enabled == 0u || abs(g.x) < path_edge(g.d) || on_fork(g.x, g.d)); }
         else if id == ID_WALL_L || id == ID_WALL_R { k = 6u; }

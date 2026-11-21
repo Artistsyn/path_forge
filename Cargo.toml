@@ -43,6 +43,8 @@ wgpu = { version = "30.0.1", optional = true }
 pollster = { version = "0.3", optional = true }
 bytemuck = { version = "1.16", features = ["derive"], optional = true }
 rayon = "1"
+# Sprite texels as half floats: half the memory and upload of f32, the same colours.
+half = { version = "2.4", features = ["bytemuck"] }
 png = "0.18"
 schemars = "1"
 base64 = "0.22"

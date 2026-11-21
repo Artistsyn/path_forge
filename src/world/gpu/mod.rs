@@ -187,9 +187,9 @@ pub(crate) struct WorldParams {
     pub pt_on: u32, pub pt_zb: f32, pub pt_front: u32, pub pt_rad: [f32; 3], pub pt_c: [f32; 12],
     // Opening: the face round a threshold's opening, and its texture's tile size.
     pub op_on: u32, pub op_hw: f32, pub op_top: f32, pub op_arch: f32, pub op_rim: f32, pub op_seed: u32, pub op_outer_hw: f32, pub op_outer_top: f32, pub op_hill: f32,
-    // A street front's roofline and windows (Opening::skyline); FrontAir::banks; padding to keep
-    // what follows aligned.
-    pub op_skyline: f32, pub fa_banks: f32, pub op_pad: [f32; 2],
+    // A street front's roofline and windows (Opening::skyline); FrontAir::banks; a water verge's
+    // shore (Ctx::shore); padding to keep what follows aligned.
+    pub op_skyline: f32, pub fa_banks: f32, pub shore: f32, pub bank_tile: f32,
     pub fac_tile: f32,
     // Ctx::verge_beyond, and the first world's region past it (Bounds::region_of): four half-planes.
     pub vb_on: u32, pub vb_z: f32, pub wedge: [f32; 12],
@@ -206,6 +206,7 @@ pub(crate) struct WorldParams {
     /// View::wind_now: the path's winding, each wave and the blend's numbers (view::Winding).
     pub wind: [[f32; 4]; 4],
     pub wind_c: [f32; 4],
+    pub wind_k: [f32; 4],
     /// Ground cover (render::cover): how many layers, the wind in them, and each layer's record.
     pub gc_n: u32, pub gc_sway: f32, pub gc_lean: f32, pub gc_phase: f32,
     pub gc: [[f32; 4]; 12],
@@ -358,7 +359,8 @@ struct CardPassParams { tile_cols: u32, pick: u32, n_cards: u32, pad: u32 }
 
 /// Every sprite level the cards have used, as RGBA texels in one buffer; sprites are kept alive
 /// here so their pointers stay unique. Grows when a new sprite appears; past `SPRITE_BUDGET` the
-/// ones longest unused are let go (`compact`, between frames).
+/// ones longest unused are let go (`compact`, between frames). A level is sent from the sprite
+/// itself: the store keeps no copy of the texels on the CPU (it kept one, as big as the buffer).
 #[derive(Default)]
 struct SpriteStore {
     held: Vec<Arc<Sprite>>,
@@ -366,11 +368,13 @@ struct SpriteStore {
     at: std::collections::HashMap<usize, (Vec<u32>, u64)>,
     /// Frames begun (`compact` counts them).
     gen: u64,
-    texels: Vec<[f32; 4]>,
+    /// Texels placed in the buffer, sent or not.
+    len: usize,
+    /// Levels placed and not sent yet: the sprite, its level and its first texel.
+    pending: Vec<(Arc<Sprite>, usize, usize)>,
     buf: Option<wgpu::Buffer>,
-    /// How many of `texels` are on the GPU already (a new sprite's are added after them).
+    /// The texels before this are on the GPU; the rest are `pending`.
     sent: usize,
-    dirty: bool,
 }
 
 impl SpriteStore {
@@ -385,9 +389,9 @@ impl SpriteStore {
         });
         *last = gen;
         if offs[lod] == u32::MAX {
-            offs[lod] = self.texels.len() as u32;
-            self.texels.extend_from_slice(&s.levels[lod].2);
-            self.dirty = true;
+            offs[lod] = self.len as u32;
+            self.pending.push((s.clone(), lod, self.len));
+            self.len += s.levels[lod].2.len();
         }
         (*w as u32, *h as u32, offs[lod])
     }
@@ -397,27 +401,28 @@ impl SpriteStore {
     /// at least), so a walk through many places neither grows without end nor repacks every frame.
     fn compact(&mut self, budget: usize) {
         self.gen += 1;
-        if self.texels.len() * 16 <= budget { return; }
+        if self.len * TEXEL <= budget { return; }
         let last = |s: &Arc<Sprite>, at: &std::collections::HashMap<usize, (Vec<u32>, u64)>| at.get(&(Arc::as_ptr(s) as usize)).map_or(0, |a| a.1);
         let mut held = std::mem::take(&mut self.held);
         held.sort_by_key(|s| std::cmp::Reverse(last(s, &self.at)));
         let old = std::mem::take(&mut self.at);
-        self.texels.clear();
+        (self.len, self.sent) = (0, 0);
+        self.pending.clear();
         for s in held {
             let used = last(&s, &old);
             let had = &old[&(Arc::as_ptr(&s) as usize)].0;
             let size: usize = s.levels.iter().zip(had).filter(|(_, o)| **o != u32::MAX).map(|(l, _)| l.2.len()).sum();
-            if used + 1 < self.gen && (self.texels.len() + size) * 16 > budget / 2 { break; }
+            if used + 1 < self.gen && (self.len + size) * TEXEL > budget / 2 { break; }
             // (Only the levels it had: the others are sent when drawn.)
-            let offs = s.levels.iter().zip(had).map(|((_, _, data), o)| if *o == u32::MAX { u32::MAX } else {
-                let at = self.texels.len() as u32;
-                self.texels.extend_from_slice(data);
-                at
+            let offs = s.levels.iter().zip(had).enumerate().map(|(lod, ((_, _, data), o))| if *o == u32::MAX { u32::MAX } else {
+                let at = self.len;
+                self.pending.push((s.clone(), lod, at));
+                self.len += data.len();
+                at as u32
             }).collect();
             self.at.insert(Arc::as_ptr(&s) as usize, (offs, used));
             self.held.push(s);
         }
-        (self.sent, self.dirty) = (0, true);
     }
 }
 
@@ -508,7 +513,7 @@ pub(crate) struct Down<'a> {
 /// What the shading pass reads besides the G-buffer and masks.
 pub(crate) struct ShadeInput<'a> {
     /// Path, verge, wall, ceiling, deck, bottom, facade.
-    pub textures: [&'a Arc<Texture>; 7],
+    pub textures: [&'a Arc<Texture>; 8],
     /// Point lights: pos (camera space), radius, colour.
     pub lights: Vec<[f32; 8]>,
     /// Sky lights: direction, colour.
@@ -764,6 +769,8 @@ pub(crate) struct AirParams {
 /// start in the texel data (offset in floats, side), `used` of `cap` words taken.
 struct TexStore { buf: wgpu::Buffer, cap: u64, used: u64, held: Vec<(Arc<Texture>, Vec<(u32, u32)>)> }
 
+/// Bytes a sprite texel takes in the store (four half floats: the shaders' `texel`).
+const TEXEL: usize = std::mem::size_of::<crate::world::sprites::Texel>();
 /// How many bytes of sprite texels the GPU keeps before the longest unused are let go.
 const SPRITE_BUDGET: usize = 192 << 20;
 
@@ -811,6 +818,8 @@ pub struct Gpu {
     textures: Mutex<Option<TexStore>>,
     lights: Mutex<Option<wgpu::Buffer>>,
     tiles: Mutex<Option<wgpu::Buffer>>,
+    /// Staging memory reused frame after frame for the frame's small writes (`Frame::write`).
+    belt: Mutex<wgpu::util::StagingBelt>,
 }
 
 fn storage(binding: u32, read_only: bool) -> wgpu::BindGroupLayoutEntry {
@@ -984,7 +993,8 @@ impl Gpu {
             resolve: d.create_buffer(&wgpu::BufferDescriptor { label: Some("pass times"), size: (TS_PASSES * 16) as u64, usage: wgpu::BufferUsages::QUERY_RESOLVE | wgpu::BufferUsages::COPY_SRC, mapped_at_creation: false }),
             read: d.create_buffer(&wgpu::BufferDescriptor { label: Some("pass times read"), size: (TS_PASSES * 16) as u64, usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false }),
         });
-        Ok(Gpu { ctx, geom, shade, sky, cards, splat, reflect, shafts, post, ts, params, wstride, sized: Mutex::new(None), textures: Mutex::new(None), lights: Mutex::new(None), tiles: Mutex::new(None) })
+        let belt = Mutex::new(wgpu::util::StagingBelt::new(d.clone(), Self::BELT_CHUNK));
+        Ok(Gpu { ctx, geom, shade, sky, cards, splat, reflect, shafts, post, ts, params, wstride, sized: Mutex::new(None), textures: Mutex::new(None), lights: Mutex::new(None), tiles: Mutex::new(None), belt })
     }
 
     fn buffer(&self, label: &str, size: u64, usage: wgpu::BufferUsages) -> wgpu::Buffer {
@@ -1018,23 +1028,18 @@ impl Gpu {
         s
     }
 
-    /// A storage buffer kept between frames, grown when the data no longer fits.
-    fn upload(&self, slot: &Mutex<Option<wgpu::Buffer>>, label: &str, bytes: &[u8]) -> wgpu::Buffer {
-        let mut s = slot.lock().unwrap();
-        let need = (bytes.len() as u64).max(16).next_multiple_of(4);
-        if !s.as_ref().is_some_and(|b| b.size() >= need) {
-            *s = Some(self.buffer(label, need.next_power_of_two(), wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST));
-        }
-        let b = s.as_ref().unwrap().clone();
-        // (Copied to pad it only when it is not whole words: a copy of every upload, every frame.)
-        if bytes.len() % 4 == 0 {
-            if !bytes.is_empty() { self.ctx.queue.write_buffer(&b, 0, bytes); }
-        } else {
-            let mut padded = bytes.to_vec();
-            padded.resize(bytes.len().next_multiple_of(4), 0);
-            self.ctx.queue.write_buffer(&b, 0, &padded);
-        }
-        b
+    /// Bytes in one staging chunk. A bigger write is sent through the queue on its own, so the
+    /// belt never keeps a chunk sized for a rare large upload.
+    const BELT_CHUNK: u64 = 1 << 20;
+
+    /// A storage buffer kept between frames, grown when `len` bytes no longer fit.
+    fn slot_buffer(&self, slot: &Mutex<Option<wgpu::Buffer>>, label: &str, len: usize) -> wgpu::Buffer {
+        let need = (len as u64).max(16).next_multiple_of(4);
+        let mut held = slot.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(buf) = held.as_ref().filter(|b| b.size() >= need) { return buf.clone(); }
+        let buf = self.buffer(label, need.next_power_of_two(), wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST);
+        *held = Some(buf.clone());
+        buf
     }
 
     fn world_binding(&self) -> wgpu::BindingResource<'_> {
@@ -1042,10 +1047,10 @@ impl Gpu {
     }
 
     /// Every world's textures in one texel buffer: a header of (offset, side) per slot (8 per
-    /// world, 7 used) and level, and the level counts, then the textures' levels as linear RGB.
+    /// world) and level, and the level counts, then the textures' levels as linear RGB.
     /// Textures stay in the buffer once added (held, so their pointers stay theirs), so frames that
     /// change which worlds they draw only rewrite the header.
-    fn texel_buffer(&self, worlds: &[[&Arc<Texture>; 7]]) -> wgpu::Buffer {
+    fn texel_buffer(&self, worlds: &[[&Arc<Texture>; 8]]) -> (wgpu::Buffer, Vec<u32>) {
         let mut guard = self.textures.lock().unwrap();
         // Words this frame adds (a texture in two slots counted twice: room to spare).
         let all: u64 = worlds.iter().flatten().map(|t| TexStore::words(t)).sum();
@@ -1085,8 +1090,7 @@ impl Gpu {
                 header[(slot * 8 + l) * 2 + 1] = side;
             }
         }
-        self.ctx.queue.write_buffer(&st.buf, 0, bytemuck::cast_slice(&header));
-        st.buf.clone()
+        (st.buf.clone(), header)
     }
 
     /// Start a frame on the GPU: its buffers, and each world's parameters (one for most frames).
@@ -1096,8 +1100,9 @@ impl Gpu {
         let sz = self.sized(w, h);
         let max = self.ctx.device.limits().max_storage_buffer_binding_size as usize;
         self.cards.store.lock().unwrap().compact(SPRITE_BUDGET.min(max));
-        for (r, p) in worlds.iter().enumerate() { self.ctx.queue.write_buffer(&self.params, r as u64 * self.wstride, bytemuck::bytes_of(p)); }
-        Frame { g: self, sz, w, h, worlds: worlds.len(), here: 0, look: 0, enc: None, profile: false, passes: Vec::new(), shade_bg: None, soft: false, gpu_tiles: None, last: None, regions: Vec::new() }
+        let mut frame = Frame { g: self, sz, w, h, worlds: worlds.len(), here: 0, look: 0, enc: None, profile: false, passes: Vec::new(), shade_bg: None, soft: false, gpu_tiles: None, last: None, regions: Vec::new() };
+        for (r, p) in worlds.iter().enumerate() { frame.write(&self.params, r as u64 * self.wstride, bytemuck::bytes_of(p)); }
+        frame
     }
 
         /// Map `buf` and hand its first `len` bytes to `f` (zeros if the map failed).
@@ -1143,8 +1148,8 @@ impl Gpu {
 }
 
 /// One frame's work on the GPU. Passes are recorded in order; the frame's buffers stay on the
-/// GPU between them, and the CPU waits only when it reads one back (`get_*`). Uploads made after
-/// a pass first send what was recorded, so they never overtake it.
+/// GPU between them, and the CPU waits only when it reads one back (`get_*`). Uploads are copies
+/// recorded in order with the passes, so they never overtake one.
 pub(crate) struct Frame<'g> {
     g: &'g Gpu,
     sz: std::sync::MutexGuard<'g, Option<Sized>>,
@@ -1180,11 +1185,32 @@ impl<'g> Frame<'g> {
     }
     /// Send what has been recorded (without waiting for it).
     fn submit(&mut self) {
-        if let Some(e) = self.enc.take() { self.last = Some(self.g.ctx.queue.submit([e.finish()])); }
+        let Some(enc) = self.enc.take() else { return };
+        self.g.belt.lock().unwrap_or_else(std::sync::PoisonError::into_inner).finish_and_recall_on_submit(&enc);
+        self.last = Some(self.g.ctx.queue.submit([enc.finish()]));
     }
-    fn write(&mut self, buf: &wgpu::Buffer, offset: u64, data: &[u8]) {
-        self.submit();
-        self.g.ctx.queue.write_buffer(buf, offset, data);
+    /// Put `bytes` (padded to whole words) at `offset` in `buf`, after every pass recorded so far.
+    fn write(&mut self, buf: &wgpu::Buffer, offset: u64, bytes: &[u8]) {
+        let padded: Vec<u8>;
+        let words = if bytes.len() % 4 == 0 { bytes } else {
+            padded = bytes.iter().copied().chain(std::iter::repeat(0)).take(bytes.len().next_multiple_of(4)).collect();
+            &padded
+        };
+        let Some(size) = wgpu::BufferSize::new(words.len() as u64) else { return };
+        if size.get() > Gpu::BELT_CHUNK {
+            self.submit();
+            self.g.ctx.queue.write_buffer(buf, offset, words);
+            return;
+        }
+        let g = self.g;
+        let enc = self.enc();
+        g.belt.lock().unwrap_or_else(std::sync::PoisonError::into_inner).write_buffer(enc, buf, offset, size).copy_from_slice(words);
+    }
+    /// A storage buffer kept in `slot` between frames, holding `bytes` from here on in the frame.
+    fn upload(&mut self, slot: &Mutex<Option<wgpu::Buffer>>, label: &str, bytes: &[u8]) -> wgpu::Buffer {
+        let buf = self.g.slot_buffer(slot, label, bytes.len());
+        self.write(&buf, 0, bytes);
+        buf
     }
     /// Copy `len` bytes of `src` back to the CPU (waits for everything recorded before).
     fn read(&mut self, src: &wgpu::Buffer, len: u64) -> Vec<u8> {
@@ -1202,7 +1228,7 @@ impl<'g> Frame<'g> {
     pub fn put_masks(&mut self, sun_mask: &[f32], ao_mask: &[f32]) {
         let (b, n) = (self.bufs().masks.clone(), self.n());
         self.write(&b, 0, bytemuck::cast_slice(sun_mask));
-        self.g.ctx.queue.write_buffer(&b, (n * 4) as u64, bytemuck::cast_slice(ao_mask));
+        self.write(&b, (n * 4) as u64, bytemuck::cast_slice(ao_mask));
     }
     pub fn put_hdr(&mut self, hdr: &[[f32; 3]]) {
         let b = self.bufs().hdr.clone();
@@ -1254,11 +1280,11 @@ impl<'g> Frame<'g> {
 
     /// The sprite store's texels on the GPU, uploaded again if sprites were added since.
     fn sprite_texels(&mut self, st: &mut SpriteStore) -> wgpu::Buffer {
-        if st.dirty || st.buf.is_none() {
+        if !st.pending.is_empty() || st.buf.is_none() {
             // Only the new sprites' texels are sent; the buffer doubles when they no longer fit
             // (sending everything, then, as a new buffer starts empty). Sending the whole store
             // for each new sprite took 100 ms a time on a phone once it held 40 MB.
-            let need = (st.texels.len().max(1) * 16) as u64;
+            let need = (st.len.max(1) * TEXEL) as u64;
             if !st.buf.as_ref().is_some_and(|b| b.size() >= need) {
                 let max = self.g.ctx.device.limits().max_storage_buffer_binding_size as u64;
                 let cap = need.next_power_of_two().max(16 << 20).min(max.max(need));
@@ -1267,7 +1293,7 @@ impl<'g> Frame<'g> {
                 match st.buf.take().filter(|_| st.sent > 0) {
                     Some(old) => {
                         let mut enc = self.g.ctx.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("sprites grow") });
-                        enc.copy_buffer_to_buffer(&old, 0, &b, 0, (st.sent * 16) as u64);
+                        enc.copy_buffer_to_buffer(&old, 0, &b, 0, (st.sent * TEXEL) as u64);
                         self.submit();
                         self.g.ctx.queue.submit([enc.finish()]);
                     }
@@ -1275,11 +1301,11 @@ impl<'g> Frame<'g> {
                 }
                 st.buf = Some(b);
             }
-            if st.sent < st.texels.len() {
-                self.g.ctx.queue.write_buffer(st.buf.as_ref().unwrap(), (st.sent * 16) as u64, bytemuck::cast_slice(&st.texels[st.sent..]));
-                st.sent = st.texels.len();
+            let buf = st.buf.as_ref().unwrap();
+            for (s, lod, at) in st.pending.drain(..) {
+                self.g.ctx.queue.write_buffer(buf, (at * TEXEL) as u64, bytemuck::cast_slice(&s.levels[lod].2));
             }
-            st.dirty = false;
+            st.sent = st.len;
         }
         st.buf.clone().unwrap()
     }
@@ -1318,10 +1344,9 @@ impl<'g> Frame<'g> {
             tile_cols: (self.w as u32).div_ceil(16), small_off, n_small: ri.small.len() as u32,
             fade_k: fade.k, fade_near: fade.near, fade_cut: fade.cut, ..Default::default()
         };
-        self.submit();
-        g.ctx.queue.write_buffer(&g.geom.params, 0, bytemuck::bytes_of(&p));
-        let tb = g.upload(&g.geom.tris, "triangles", bytemuck::cast_slice(&tris));
-        let bb = g.upload(&g.geom.bins, "geom bins", bytemuck::cast_slice(&bins));
+        self.write(&g.geom.params, 0, bytemuck::bytes_of(&p));
+        let tb = self.upload(&g.geom.tris, "triangles", bytemuck::cast_slice(&tris));
+        let bb = self.upload(&g.geom.bins, "geom bins", bytemuck::cast_slice(&bins));
         let sz = self.bufs();
         let rbg = g.ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("raster"), layout: &g.geom.raster_layout,
@@ -1370,14 +1395,13 @@ impl<'g> Frame<'g> {
         if let Some(l) = gi.sun { (p.sun_on, p.sun) = (1, l); }
         if let Some((k, t, seed)) = gi.clouds { (p.clouds, p.cloud_travel, p.cloud_seed) = (k, t, seed); }
         (p.fade_k, p.fade_near, p.fade_cut) = (gi.fade.k, gi.fade.near, gi.fade.cut);
-        self.submit();
-        g.ctx.queue.write_buffer(&g.geom.params, 0, bytemuck::bytes_of(&p));
-        let tb = g.upload(&g.geom.tris, "triangles", bytemuck::cast_slice(&tris));
-        let bb = g.upload(&g.geom.bins, "geom bins", bytemuck::cast_slice(&bins));
-        let cb = g.upload(&g.geom.casters, "casters", bytemuck::cast_slice(&cs));
+        self.write(&g.geom.params, 0, bytemuck::bytes_of(&p));
+        let tb = self.upload(&g.geom.tris, "triangles", bytemuck::cast_slice(&tris));
+        let bb = self.upload(&g.geom.bins, "geom bins", bytemuck::cast_slice(&bins));
+        let cb = self.upload(&g.geom.casters, "casters", bytemuck::cast_slice(&cs));
         let mut lw: Vec<f32> = lamps.iter().flat_map(|l| l.iter().copied()).collect();
         if lw.is_empty() { lw.push(0.0); }
-        let lb = g.upload(&g.geom.lamps, "geom lamps", bytemuck::cast_slice(&lw));
+        let lb = self.upload(&g.geom.lamps, "geom lamps", bytemuck::cast_slice(&lw));
         let lists = {
             let mut l = g.geom.lists.lock().unwrap();
             let need = (ntiles as u64 * (cap as u64 + 1) * 4).max(16);
@@ -1472,11 +1496,10 @@ impl<'g> Frame<'g> {
             self.sprite_texels(&mut st)
         };
         if cs.is_empty() { cs.push(CasterGpu::default()); }
-        self.submit();
-        let cb = g.upload(&g.geom.casters, "casters", bytemuck::cast_slice(&cs));
-        let bb = g.upload(&g.geom.bins, "geom bins", bytemuck::cast_slice(&bins));
-        let xb = g.upload(&g.geom.lamps, "worlds mix", bytemuck::cast_slice(if mix.is_empty() { &[0.0f32][..] } else { mix }));
-        let tb = g.upload(&g.geom.tris, "triangles", bytemuck::cast_slice(&[TriGpu { f: [0.0; 36] }]));
+        let cb = self.upload(&g.geom.casters, "casters", bytemuck::cast_slice(&cs));
+        let bb = self.upload(&g.geom.bins, "geom bins", bytemuck::cast_slice(&bins));
+        let xb = self.upload(&g.geom.lamps, "worlds mix", bytemuck::cast_slice(if mix.is_empty() { &[0.0f32][..] } else { mix }));
+        let tb = self.upload(&g.geom.tris, "triangles", bytemuck::cast_slice(&[TriGpu { f: [0.0; 36] }]));
         let lists = {
             let mut l = g.geom.lists.lock().unwrap();
             if l.is_none() { *l = Some(g.buffer("tile lamps", 16, wgpu::BufferUsages::STORAGE)); }
@@ -1492,7 +1515,7 @@ impl<'g> Frame<'g> {
         };
         let mut bytes = vec![0u8; (stride * runs.len() as u64) as usize];
         for (k, (p, _)) in runs.iter().enumerate() { bytes[k * stride as usize..][..size as usize].copy_from_slice(bytemuck::bytes_of(p)); }
-        g.ctx.queue.write_buffer(&pb, 0, &bytes);
+        self.write(&pb, 0, &bytes);
         let sz = self.bufs();
         let groups: Vec<(wgpu::BindGroup, u32)> = runs.iter().enumerate().map(|(k, (_, r))| {
             let bg = g.ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -1542,11 +1565,10 @@ impl<'g> Frame<'g> {
             self.sprite_texels(&mut st)
         };
         if cs.is_empty() { cs.push(CardGpu::default()); }
-        self.submit();
         let pp = CardPassParams { tile_cols: (self.w as u32).div_ceil(16), pick: pick as u32, n_cards: list.len() as u32, pad: 0 };
-        g.ctx.queue.write_buffer(&g.cards.params, 0, bytemuck::bytes_of(&pp));
-        let cards = g.upload(&g.cards.cards, "cards", bytemuck::cast_slice(&cs));
-        let bins = g.upload(&g.cards.bins, "card bins", bytemuck::cast_slice(bins));
+        self.write(&g.cards.params, 0, bytemuck::bytes_of(&pp));
+        let cards = self.upload(&g.cards.cards, "cards", bytemuck::cast_slice(&cs));
+        let bins = self.upload(&g.cards.bins, "card bins", bytemuck::cast_slice(bins));
         let sz = self.bufs();
         let (gb, hd, pk) = (sz.gbuf.clone(), sz.hdr.clone(), sz.pick.clone());
         let bg = g.ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -1576,11 +1598,10 @@ impl<'g> Frame<'g> {
     pub fn splats(&mut self, slot: usize, list: &[SplatGpu], bins: &[u32]) {
         if list.is_empty() { return; }
         let g = self.g;
-        self.submit();
         let pp = SplatPassParams { tile_cols: (self.w as u32).div_ceil(16), n: list.len() as u32, pad: [0; 2] };
-        g.ctx.queue.write_buffer(&g.splat.params[slot], 0, bytemuck::bytes_of(&pp));
-        let sp = g.upload(&g.splat.splats[slot], "splats", bytemuck::cast_slice(list));
-        let bn = g.upload(&g.splat.bins[slot], "splat bins", bytemuck::cast_slice(bins));
+        self.write(&g.splat.params[slot], 0, bytemuck::bytes_of(&pp));
+        let sp = self.upload(&g.splat.splats[slot], "splats", bytemuck::cast_slice(list));
+        let bn = self.upload(&g.splat.bins[slot], "splat bins", bytemuck::cast_slice(bins));
         let sz = self.bufs();
         let (gb, hd) = (sz.gbuf.clone(), sz.hdr.clone());
         let bg = g.ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -1649,9 +1670,8 @@ impl<'g> Frame<'g> {
         let g = self.g;
         let Some(bg) = self.shade_bg.clone() else { return };
         if airs.iter().all(|a| a.is_none()) { return; }
-        self.submit();
         for (r, a) in airs.iter().enumerate() {
-            if let Some(a) = a { g.ctx.queue.write_buffer(&g.shade.air, r as u64 * AIR_STRIDE, bytemuck::bytes_of(a)); }
+            if let Some(a) = a { self.write(&g.shade.air, r as u64 * AIR_STRIDE, bytemuck::bytes_of(a)); }
         }
         let (gx, gy) = self.groups();
         let offs: Vec<(u32, u32)> = airs.iter().enumerate().filter(|(_, a)| a.is_some()).map(|(r, _)| (self.wo(r), (r as u64 * AIR_STRIDE) as u32)).collect();
@@ -1668,14 +1688,13 @@ impl<'g> Frame<'g> {
     /// the lamps (indices into `lamps`: every world's point lights) that can light it.
     pub fn shafts(&mut self, sp: &ShaftParams, lists: &[Vec<u16>], lamps: &[[f32; 8]]) {
         let g = self.g;
-        self.submit();
-        g.ctx.queue.write_buffer(&g.shafts.params, 0, bytemuck::bytes_of(sp));
+        self.write(&g.shafts.params, 0, bytemuck::bytes_of(sp));
         let mut lw: Vec<u32> = Vec::new();
         let mut off = 0u32;
         for l in lists { lw.push(off); off += l.len() as u32; }
         lw.push(off);
         for l in lists { lw.extend(l.iter().map(|&k| k as u32)); }
-        let lists = g.upload(&g.shafts.lists, "shaft lists", bytemuck::cast_slice(&lw));
+        let lists = self.upload(&g.shafts.lists, "shaft lists", bytemuck::cast_slice(&lw));
         let cells = {
             let mut c = g.shafts.cells.lock().unwrap();
             let need = (sp.mw * sp.mh * 4 * 4) as u64;
@@ -1684,7 +1703,7 @@ impl<'g> Frame<'g> {
             }
             c.clone().unwrap()
         };
-        let lights = g.upload(&g.shafts.lamps, "shaft lamps", bytemuck::cast_slice(lamps));
+        let lights = self.upload(&g.shafts.lamps, "shaft lamps", bytemuck::cast_slice(lamps));
         let sz = self.bufs();
         let bg = g.ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("shafts"), layout: &g.shafts.layout,
@@ -1795,18 +1814,17 @@ impl<'g> Frame<'g> {
         let scratch = sized(&g.post.scratch, "post scratch", (words * 4) as u64, U::STORAGE | U::COPY_DST | U::COPY_SRC);
         let out_bytes = (params.out_w * params.out_h * 4) as u64;
         let outb = sized(&g.post.out, "post out", out_bytes, U::STORAGE | U::COPY_SRC);
-        self.submit();
-        g.ctx.queue.write_buffer(&g.post.params, 0, bytemuck::bytes_of(&params));
-        if !pin.drops.is_empty() { g.ctx.queue.write_buffer(&scratch, (t_drops * 4) as u64, bytemuck::cast_slice(&pin.drops)); }
+        self.write(&g.post.params, 0, bytemuck::bytes_of(&params));
+        if !pin.drops.is_empty() { self.write(&scratch, (t_drops * 4) as u64, bytemuck::cast_slice(&pin.drops)); }
         // The frame held: one the CPU drew put there first; mixed over when it is this size.
         let size = (params.out_w, params.out_h);
         let heldb = sized(&pipe.held, "post held", out_bytes.max(16), U::STORAGE | U::COPY_DST | U::COPY_SRC);
         if let Some((bytes, s)) = pin.base.filter(|(b, _)| b.len() as u64 <= heldb.size()) {
-            g.ctx.queue.write_buffer(&heldb, 0, bytes);
+            self.write(&heldb, 0, bytes);
             *pipe.held_size.lock().unwrap() = Some(s);
         }
         let mixing = pin.blend.is_some() && *pipe.held_size.lock().unwrap() == Some(size);
-        if mixing { (params.mix_on, params.mix_t) = (1, pin.blend.unwrap_or(0.0)); g.ctx.queue.write_buffer(&g.post.params, 0, bytemuck::bytes_of(&params)); }
+        if mixing { (params.mix_on, params.mix_t) = (1, pin.blend.unwrap_or(0.0)); self.write(&g.post.params, 0, bytemuck::bytes_of(&params)); }
         // Mixed over, the frame held is used up (unless this one is held in its place, below).
         if pin.blend.is_some() { *pipe.held_size.lock().unwrap() = None; }
         let sz = self.bufs();
@@ -2000,14 +2018,13 @@ impl<'g> Frame<'g> {
     /// The sky over every pixel where nothing is drawn (hdr in place), as world `r` sees it.
     pub fn sky(&mut self, input: &SkyInput, r: usize) {
         let g = self.g;
-        self.submit();
-        g.ctx.queue.write_buffer(&g.sky.params, 0, bytemuck::bytes_of(&input.params));
+        self.write(&g.sky.params, 0, bytemuck::bytes_of(&input.params));
         let mut pw = input.prims.clone();
         if pw.is_empty() { pw.push(0.0); }
-        let prims = g.upload(&g.sky.prims, "sky prims", bytemuck::cast_slice(&pw));
+        let prims = self.upload(&g.sky.prims, "sky prims", bytemuck::cast_slice(&pw));
         let mut bw = input.bins.clone();
         if bw.is_empty() { bw.push(0); }
-        let bins = g.upload(&g.sky.bins, "sky bins", bytemuck::cast_slice(&bw));
+        let bins = self.upload(&g.sky.bins, "sky bins", bytemuck::cast_slice(&bw));
         let sz = self.bufs();
         let bg = g.ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("sky"), layout: &g.sky.layout,
@@ -2033,12 +2050,12 @@ impl<'g> Frame<'g> {
     /// `light_base` counts), then the soft patch edges between them.
     pub fn shade(&mut self, inputs: &[ShadeInput]) {
         let g = self.g;
-        let texs: Vec<[&Arc<Texture>; 7]> = inputs.iter().map(|i| i.textures).collect();
-        let texels = g.texel_buffer(&texs);
+        let texs: Vec<[&Arc<Texture>; 8]> = inputs.iter().map(|i| i.textures).collect();
+        let (texels, header) = g.texel_buffer(&texs);
+        self.write(&texels, 0, bytemuck::cast_slice(&header));
         let mut lw: Vec<f32> = inputs.iter().flat_map(|i| i.lights.iter().chain(i.sky.iter())).flat_map(|l| l.iter().copied()).collect();
         if lw.is_empty() { lw.push(0.0); }
-        self.submit();
-        let lights = g.upload(&g.lights, "lights", bytemuck::cast_slice(&lw));
+        let lights = self.upload(&g.lights, "lights", bytemuck::cast_slice(&lw));
         let mut tw: Vec<u32> = Vec::new();
         if let Some(t) = inputs.first().and_then(|i| i.tiles.as_ref()) {
             let mut off = 0u32;
@@ -2047,7 +2064,7 @@ impl<'g> Frame<'g> {
             for l in t { tw.extend(l.iter().map(|&k| k as u32)); }
         }
         if tw.is_empty() { tw.push(0); }
-        let tiles = match self.gpu_tiles.clone() { Some(t) => t, None => g.upload(&g.tiles, "tiles", bytemuck::cast_slice(&tw)) };
+        let tiles = match self.gpu_tiles.clone() { Some(t) => t, None => self.upload(&g.tiles, "tiles", bytemuck::cast_slice(&tw)) };
         let sz = self.bufs();
         let bg = g.ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("shade"), layout: &g.shade.layout,
@@ -2132,7 +2149,7 @@ mod tests {
     fn world_params_match_the_wgsl_struct_size() {
         // A uniform block's size is a multiple of 16; the WGSL struct has the same fields.
         assert_eq!(std::mem::size_of::<WorldParams>() % 16, 0);
-        assert_eq!(std::mem::size_of::<WorldParams>(), 4 * 308);
+        assert_eq!(std::mem::size_of::<WorldParams>(), 4 * 312);
         assert_eq!(std::mem::size_of::<CardGpu>(), 4 * 110);
         assert_eq!(std::mem::size_of::<GeomParams>(), 96);
         assert_eq!(std::mem::size_of::<SplatGpu>(), 4 * 24);

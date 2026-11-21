@@ -3,11 +3,12 @@
 //! draws with. Folders in a sprite pool stand for every PNG inside them.
 
 use super::sprites::{Sprite, SpriteCache};
-use crate::scene::{Anchor, Kit, PropDef, PropKind, PropLayer, PropLight, Rgb, Scene};
-use std::collections::HashMap;
+use crate::scene::{Anchor, Kit, PropDef, PropKind, PropLayer, PropLight, Rgb, Scene, SpriteRef};
+use std::collections::hash_map::Entry;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::SystemTime;
+use std::time::{Duration, Instant, SystemTime};
 
 /// What a prop layer draws.
 pub struct ResolvedProp {
@@ -22,6 +23,8 @@ pub struct ResolvedProp {
     pub light: Option<PropLight>,
     /// Smoke rising from it.
     pub smoke: Option<crate::scene::PropSmoke>,
+    /// How far round its foot the place's own growth rises against it, metres (PropDef::footing).
+    pub footing: f32,
     pub pixelated: bool,
     /// Mirror every image; drawn and built-in props are mirrored at random instead.
     pub flip_x: bool,
@@ -59,6 +62,35 @@ pub struct Face {
 pub struct PropDefs {
     kits: HashMap<PathBuf, (Option<SystemTime>, Result<Kit, String>)>,
     dirs: HashMap<PathBuf, (Option<SystemTime>, Vec<PathBuf>)>,
+    /// What `resolve_shared` handed out, by the layer's `def`.
+    kept: HashMap<String, Vec<KeptProp>>,
+    /// When `kept` was last cleared of props no layer asked for.
+    swept: Option<Instant>,
+    /// Whether anything since `resolve_shared` cleared it looked at a file or folder on disk.
+    read_files: bool,
+}
+
+/// A layer's resolved prop kept between frames (`PropDefs::resolve_shared`), with everything
+/// `resolve` read to make it: the layer's own fields, the folder, and the scene's definitions when
+/// the layer names one of them. One made from files on disk is made again once `RECHECK` old.
+struct KeptProp {
+    kind: PropKind,
+    tint: Rgb,
+    sprite: SpriteRef,
+    base: Option<PathBuf>,
+    scene_defs: Option<BTreeMap<String, PropDef>>,
+    used: Instant,
+    made: Instant,
+    from_files: bool,
+    prop: Option<Arc<ResolvedProp>>,
+}
+
+impl KeptProp {
+    /// Whether it was resolved from what `layer` (whose `def` it was kept under) would read now.
+    fn is_for(&self, scene: &Scene, base: Option<&Path>, layer: &PropLayer, reads_scene: bool) -> bool {
+        self.kind == layer.kind && self.tint == layer.tint && self.sprite == layer.sprite && self.base.as_deref() == base
+            && (!reads_scene || self.scene_defs.as_ref() == Some(&scene.prop_defs))
+    }
 }
 
 /// Kits compiled in, used as `def: "@<name>#<prop>"`: drawn from shapes, so they need no files.
@@ -116,19 +148,34 @@ pub fn find_kit(base: Option<&Path>, kit: &str) -> PathBuf {
 impl PropDefs {
     /// Read a kit (cached until kit.json changes).
     pub fn kit(&mut self, path: &Path) -> Result<Kit, String> {
-        if let Some(name) = path.to_str().and_then(|p| p.strip_prefix('@')) {
+        self.kit_ref(path).cloned()
+    }
+
+    /// The cached kit at `path`, read again only when its kit.json changes. A built-in kit is
+    /// parsed once: every prop layer of every world looks its kit up each frame, and parsing
+    /// (and copying) a whole kit there was a third of a fork's frame.
+    fn kit_ref(&mut self, path: &Path) -> Result<&Kit, String> {
+        let builtin = path.to_str().and_then(|p| p.strip_prefix('@'));
+        let file = if builtin.is_some() { path.to_path_buf() } else { kit_file(path) };
+        let stamp = if builtin.is_some() { None } else { mtime(&file) };
+        let slot = match self.kits.entry(file) {
+            Entry::Occupied(cached) if builtin.is_some() || cached.get().0 == stamp => cached.into_mut(),
+            Entry::Occupied(mut cached) => { *cached.get_mut() = (stamp, Self::read_kit(builtin, cached.key())); cached.into_mut() }
+            Entry::Vacant(empty) => { let read = Self::read_kit(builtin, empty.key()); empty.insert((stamp, read)) }
+        };
+        slot.1.as_ref().map_err(Clone::clone)
+    }
+
+    /// A kit parsed from its built-in text (`builtin` names it) or from its kit.json.
+    fn read_kit(builtin: Option<&str>, file: &Path) -> Result<Kit, String> {
+        if let Some(name) = builtin {
             let text = BUILTIN_KITS.iter().find(|k| k.0 == name).map(|k| k.1).ok_or_else(|| {
                 format!("no built-in kit '@{name}' (there is {})", BUILTIN_KITS.iter().map(|k| format!("@{}", k.0)).collect::<Vec<_>>().join(", "))
             })?;
             return serde_json::from_str(text).map_err(|e| format!("@{name}: {e}"));
         }
-        let file = kit_file(path);
-        let t = mtime(&file);
-        if let Some((ct, k)) = self.kits.get(&file) { if *ct == t { return k.clone(); } }
-        let k = std::fs::read_to_string(&file).map_err(|e| format!("{}: {e}", file.display()))
-            .and_then(|text| serde_json::from_str::<Kit>(&text).map_err(|e| format!("{}: {e}", file.display())));
-        self.kits.insert(file, (t, k.clone()));
-        k
+        std::fs::read_to_string(file).map_err(|e| format!("{}: {e}", file.display()))
+            .and_then(|text| serde_json::from_str::<Kit>(&text).map_err(|e| format!("{}: {e}", file.display())))
     }
 
     /// The definition a layer's `def` names, and the folder its relative paths start from.
@@ -138,8 +185,8 @@ impl PropDefs {
             None => scene.prop_defs.get(def.trim()).cloned().map(|d| (d, here))
                 .ok_or_else(|| format!("no prop definition '{}' in this scene's prop_defs", def.trim())),
             Some((kit, name)) => {
-                let dir = if kit.trim().starts_with('@') { PathBuf::from(kit.trim()) } else { find_kit(base, kit) };
-                let k = self.kit(&dir)?;
+                let dir = if kit.trim().starts_with('@') { PathBuf::from(kit.trim()) } else { self.read_files = true; find_kit(base, kit) };
+                let k = self.kit_ref(&dir)?;
                 let dir = kit_file(&dir).parent().map(Path::to_path_buf).unwrap_or_default();
                 let d = k.props.get(name.trim()).cloned().ok_or_else(|| {
                     let names: Vec<&String> = k.props.keys().collect();
@@ -152,6 +199,7 @@ impl PropDefs {
 
     /// Image files a pool names, folders expanded to the PNGs inside them in name order.
     pub fn pool(&mut self, base: &Path, path: &str, pool: &[String]) -> Vec<PathBuf> {
+        self.read_files = true;
         let mut entries: Vec<&str> = pool.iter().map(|p| p.trim()).filter(|p| !p.is_empty()).collect();
         if entries.is_empty() && !path.trim().is_empty() { entries.push(path.trim()); }
         let mut out = Vec::new();
@@ -180,9 +228,51 @@ impl PropDefs {
         self.resolve_in(scene, base, layer, sprites, true)
     }
 
+    /// How long a kept prop no layer asks for is held.
+    const IDLE: Duration = Duration::from_secs(10);
+
+    /// How long a prop made from files on disk is handed out before its files are looked at
+    /// again: an image or kit.json saved shows this soon. Looking every frame cost a dozen file
+    /// system calls per layer per frame on the road's thread, a stall where the disk is slow.
+    const RECHECK: Duration = Duration::from_millis(500);
+
+    /// `resolve`'s prop for a layer drawn every frame, kept and handed out again while what it
+    /// was made from stays the same (and, for one read from files, for `RECHECK`). Warnings are
+    /// left out: `resolve` gives them.
+    pub fn resolve_shared(&mut self, scene: &Scene, base: Option<&Path>, layer: &PropLayer, sprites: &mut SpriteCache) -> Option<Arc<ResolvedProp>> {
+        let now = Instant::now();
+        self.sweep_kept(now);
+        let reads_scene = !layer.def.trim().is_empty() && !layer.def.contains('#');
+        let found = self.kept.get_mut(layer.def.as_str()).and_then(|kept| kept.iter_mut().find(|k| k.is_for(scene, base, layer, reads_scene)));
+        if let Some(kept) = found {
+            kept.used = now;
+            if !kept.from_files || now.duration_since(kept.made) < Self::RECHECK { return kept.prop.clone(); }
+        }
+        self.read_files = false;
+        let prop = self.resolve(scene, base, layer, sprites).0.map(Arc::new);
+        let fresh = KeptProp {
+            kind: layer.kind, tint: layer.tint, sprite: layer.sprite.clone(), base: base.map(Path::to_path_buf),
+            scene_defs: reads_scene.then(|| scene.prop_defs.clone()), used: now, made: now, from_files: self.read_files, prop: prop.clone(),
+        };
+        let bucket = self.kept.entry(layer.def.clone()).or_default();
+        match bucket.iter_mut().find(|k| k.is_for(scene, base, layer, reads_scene)) {
+            Some(stale) => *stale = fresh,
+            None => bucket.push(fresh),
+        }
+        prop
+    }
+
+    /// Let go of kept props no layer has asked for in `IDLE`, at most once per `IDLE`.
+    fn sweep_kept(&mut self, now: Instant) {
+        if self.swept.is_some_and(|at| now.duration_since(at) < Self::IDLE) { return; }
+        self.swept = Some(now);
+        for bucket in self.kept.values_mut() { bucket.retain(|k| now.duration_since(k.used) < Self::IDLE); }
+        self.kept.retain(|_, bucket| !bucket.is_empty());
+    }
+
     fn resolve_in(&mut self, scene: &Scene, base: Option<&Path>, layer: &PropLayer, sprites: &mut SpriteCache, group: bool) -> (Option<ResolvedProp>, Option<String>) {
         let builtin = |kind: PropKind, tint: Rgb| ResolvedProp {
-            sprites: Vec::new(), kind, tint, height: kind.height_m(), hanging: kind.hangs(), glow: kind.glow(), light: None, smoke: None, facing: crate::scene::Facing::Camera, depth: 0.0, faces: Vec::new(), natural: kind.height_m(), alts: Vec::new(), tubes: Vec::new(),
+            sprites: Vec::new(), kind, tint, height: kind.height_m(), hanging: kind.hangs(), glow: kind.glow(), light: None, smoke: None, footing: 0.0, facing: crate::scene::Facing::Camera, depth: 0.0, faces: Vec::new(), natural: kind.height_m(), alts: Vec::new(), tubes: Vec::new(),
             pixelated: false, flip_x: false, from_files: false,
         };
         let here = base.map(Path::to_path_buf).unwrap_or_default();
@@ -222,6 +312,7 @@ impl PropDefs {
         r.glow = d.glow.max(0.0);
         r.light = d.light.enabled.then(|| d.light.clone());
         r.smoke = (d.smoke.enabled && d.smoke.amount > 0.0).then(|| d.smoke.clone());
+        r.footing = d.footing.max(0.0);
         (r.facing, r.depth) = (d.facing, d.depth.max(0.0));
         r.pixelated = d.sprite.pixelated;
         r.flip_x = d.sprite.flip_x;
@@ -253,6 +344,7 @@ impl PropDefs {
         for f in &d.faces {
             let [tl, tr, bl] = f.corners;
             let sprite = if !f.image.trim().is_empty() {
+                self.read_files = true;
                 sprites.file_at(&join(Some(&dir), &f.image), false)
             } else {
                 sprites.face(&f.shape, dist(tl, tr), dist(tl, bl))
@@ -412,6 +504,34 @@ mod tests {
     }
 
     #[test]
+    fn a_prop_from_files_is_kept_between_frames_and_a_changed_image_still_shows() {
+        let root = std::env::temp_dir().join(format!("pf_kept_test_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let kit = root.join("kits/fen");
+        std::fs::create_dir_all(&kit).unwrap();
+        let block = |w: u32, h: u32| {
+            let mut img = image::RgbaImage::new(40, 40);
+            for y in 0..h { for x in 0..w { img.put_pixel(x, y, image::Rgba([90, 120, 60, 255])); } }
+            img.save(kit.join("reed.png")).unwrap();
+        };
+        block(10, 20);
+        std::fs::write(kit.join("kit.json"), r#"{"name": "Fen", "props": {"reed": {"description": "reed", "sprite": {"path": "reed.png"}, "height": 1}}}"#).unwrap();
+        let mut s = crate::review::kit_backdrop();
+        s.props = vec![layer("kits/fen#reed")];
+        let (mut defs, mut sprites, base) = (PropDefs::default(), SpriteCache::default(), Some(root.as_path()));
+        let first = defs.resolve_shared(&s, base, &s.props[0], &mut sprites).unwrap();
+        assert!((first.sprites[0].aspect - 0.5).abs() < 1e-4);
+        block(20, 10);
+        let again = defs.resolve_shared(&s, base, &s.props[0], &mut sprites).unwrap();
+        assert!(Arc::ptr_eq(&first, &again), "the next frame hands out the kept prop without reading its files");
+        for kept in defs.kept.values_mut().flatten() { kept.made -= PropDefs::RECHECK; }
+        let changed = defs.resolve_shared(&s, base, &s.props[0], &mut sprites).unwrap();
+        assert!((changed.sprites[0].aspect - 2.0).abs() < 1e-4, "the saved image shows once its files are looked at again");
+        assert_eq!(defs.kept.values().flatten().count(), 1, "made again in its place, not kept twice");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
     fn a_group_draws_one_of_its_definitions_per_prop_and_says_when_one_is_missing() {
         let mut s = crate::review::kit_backdrop();
         let one = |w: f32| PropDef { shape: vec![crate::scene::ShapePart { shape: crate::scene::Shape::Rect { min: [-w, 0.0], max: [w, 1.0] }, ..Default::default() }], ..PropDef::default() };
@@ -445,7 +565,7 @@ mod probe_tmp {
         let x = w * 30 / 100;
         let mut prev = 1.0f32;
         for y in 0..*h {
-            let p = data[y * w + x];
+            let p = crate::world::sprites::unpack(data[y * w + x]);
             let l = p[0] + p[1] + p[2];
             if l < 0.06 && prev >= 0.06 { println!("dark row {y} -> metres from bottom {:.3}", (*h - y) as f32 / *h as f32 * r.height); }
             prev = l;

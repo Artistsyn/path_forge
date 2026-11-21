@@ -43,7 +43,8 @@ impl CoverK {
     }
 }
 
-pub(super) fn plan(scene: &Scene, loop_len: f32) -> Vec<CoverK> {
+/// The ground-cover layers to draw, `keep` of each one's tufts kept (`Quality::cover`).
+pub(super) fn plan(scene: &Scene, loop_len: f32, keep: f32) -> Vec<CoverK> {
     scene.ground_cover.iter().filter(|c| c.enabled && c.density > 0.0).take(MAX).map(|c| {
         let height = c.height.clamp(0.02, 1.5);
         let cs0 = match c.kind {
@@ -56,7 +57,7 @@ pub(super) fn plan(scene: &Scene, loop_len: f32) -> Vec<CoverK> {
         CoverK {
             kind: match c.kind { CoverKind::Grass => 1, CoverKind::TallGrass => 2, CoverKind::Wildflowers => 3, CoverKind::Moss => 4 },
             on: match c.on { CoverOn::Verge => 1, CoverOn::Path => 2, CoverOn::Both => 3 },
-            density: c.density.clamp(0.0, 1.0), height,
+            density: c.density.clamp(0.0, 1.0) * keep.clamp(0.0, 1.0), height,
             col: rgb_lin(c.color), patch: c.patchiness.clamp(0.0, 1.0), col2: rgb_lin(c.color2),
             // (Small enough to be a whole number in a float.)
             seed: c.seed % 60_000,

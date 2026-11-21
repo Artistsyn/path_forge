@@ -581,4 +581,29 @@ mod tests {
         canyon.walls.material.pattern = Pattern::RockFace;
         assert_eq!(plan(&lane, &canyon, &t).threshold, Threshold::Open);
     }
+
+    /// Turned onto a branch, the road walked runs on as the branch drawn does (things on it, the
+    /// hero, stay on it), and the island where the branches part stands beside it.
+    #[test]
+    fn past_a_fork_the_road_walked_is_the_branch_taken_and_the_island_beside_it() {
+        let a = preset("Forest Path");
+        let f = ForkChoice { approach_m: 30.0, ..ForkChoice::default() };
+        let plan = plan_fork(&a, &a, &a, &f);
+        let mut walk = crate::journey::ForkWalk::new(plan.clone(), 0.0, [0.0, 0.0]);
+        walk.choose(Branch::Right, 0.0);
+        // 8 m past the junction, long after the turn.
+        let cam = walk.camera([&a, &a, &a], plan.approach + 8.0, 320, 180);
+        let alone = crate::journey::Camera::plain(&a, plan.approach + 8.0, 320, 180);
+        for d in [2.0, 6.0, 12.0] {
+            let (on, off) = (cam.project(0.0, 0.0, d).unwrap(), alone.project(0.0, 0.0, d).unwrap());
+            assert!((on[0] - off[0]).abs() < 0.5, "the road walked {d} m on: {on:?} against {off:?}");
+            assert!((cam.island_x(d) + plan.slope * (d + 8.0)).abs() < 1e-3, "the island beside it");
+        }
+        // Short of the junction, before the turn: the signpost's island dead ahead.
+        let mut late = crate::journey::ForkWalk::new(plan.clone(), 0.0, [0.0, 0.0]);
+        late.choose(Branch::Right, plan.approach);
+        let up = late.camera([&a, &a, &a], plan.approach - 10.0, 320, 180);
+        let at = |d: f32| up.project(up.island_x(d), 0.0, d).unwrap()[0];
+        assert!((at(14.0) - up.project(0.0, 0.0, 9.0).unwrap()[0]).abs() < 2.0, "the island in the middle");
+    }
 }

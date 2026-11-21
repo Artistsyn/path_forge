@@ -32,7 +32,7 @@ struct Air {
 }
 @group(0) @binding(9) var<uniform> A: Air;
 
-// 32 slots (8 per world: path, verge, wall, ceiling, deck, bottom, facade) x 8 levels x
+// 32 slots (8 per world: path, verge, wall, ceiling, deck, bottom, facade, bank) x 8 levels x
 // (offset, side), then 32 level counts.
 const TEX_HEADER: u32 = 544u;
 // render::GLOW_K: a texel glowing 1 shines this many times its colour.
@@ -211,6 +211,8 @@ fn cover_at(g: GPix, tex: u32, jitter: f32) -> vec4<f32> {
     let xt = abs(xc * ft - bend_x(g.d * ft));
     var known = 0u;
     if min(xt, abs(g.x)) > hw + en + 0.05 { known = 1u; } else if max(xt, abs(g.x)) < hw - en - 0.05 { known = 2u; }
+    // A fork island's rounded nose is road, wherever across its world it lies.
+    if nosed(flat_xz(g.x, g.d)) { known = 2u; }
     var steps = 8;
     if known != 0u && (sides & known) == 0u { steps = 0; }
     if steps == 0 && known == here { return acc; }
@@ -231,6 +233,7 @@ fn cover_at(g: GPix, tex: u32, jitter: f32) -> vec4<f32> {
             side = 2u;
             // (Nested, not `&&`: a call on the right of `&&` is made whether or not the left holds.)
             if abs(xj) > hw + en { side = 1u; } else if abs(xj) >= hw - en { if abs(xj) > path_edge(dj) { side = 1u; } }
+            if nosed(flat_xz(xj, dj)) { side = 2u; }
         }
         if water && side == 2u { continue; }
         for (var i = 0u; i < W.gc_n; i++) {
@@ -357,6 +360,7 @@ fn surface_uv(g: GPix) -> vec3<f32> {
         return vec3<f32>(rot(16u, div(g.x, W.deck_tile), div(dw, W.deck_tile)), 4.0);
     }
     if id == ID_CHASM { return vec3<f32>(div(g.x, W.bottom_tile), div(dw, W.bottom_tile), 5.0); }
+    if id == ID_BANK { return vec3<f32>(div(g.x, W.bank_tile), div(-g.y, W.bank_tile), 8.0); }
     if id == ID_CLIFF {
         if W.walls_on != 0u { return vec3<f32>(div(g.x + dw, W.wall_tile), div(-g.y, W.wall_tile), 2.0); }
         if W.verge_on != 0u { return vec3<f32>(div(g.x, W.verge_tile), div(-g.y, W.verge_tile), 1.0); }
@@ -382,8 +386,9 @@ fn surface_uv(g: GPix) -> vec3<f32> {
         var along = dw;
         if id == ID_RISER { along = dw + g.y; }
         // Only the ground left between a fork's branches turns to verge.
-        let between = MULTI && W.verge_on != 0u && W.vb_on != 0u && g.d > W.vb_z && in_wedge(to_cam(g.x, g.y, g.d).x, g.d);
-        let on_path = !between && (W.verge_on == 0u || abs(g.x) < path_edge(g.d) || on_fork(g.x, g.d));
+        let flat = flat_xz(g.x, g.d);
+        let between = MULTI && W.verge_on != 0u && W.vb_on != 0u && g.d > W.vb_z && in_wedge(flat.x, flat.y);
+        let on_path = nosed(flat) || (!between && (W.verge_on == 0u || abs(g.x) < path_edge(g.d) || on_fork(g.x, g.d)));
         // A waterway's current carries its pattern towards the camera.
         if on_path { return vec3<f32>(rot(1u, div(g.x, W.path_tile), div(along + select(0.0, W.ww_shift, W.ww_on != 0u), W.path_tile)), 0.0); }
         return vec3<f32>(rot(2u, div(g.x, W.verge_tile), div(along, W.verge_tile)), 1.0);
@@ -437,6 +442,16 @@ fn ripple_slope(x: f32, w: f32, ripples: f32, footprint: f32) -> vec2<f32> {
         s2 += vec2<f32>(s * dx, s * dz);
     }
     return s2;
+}
+
+// render::Glitter::spread: the mean square slope of the ripples a pixel cannot draw.
+fn ripple_spread(ripples: f32, footprint: f32) -> f32 {
+    if ripples <= 0.0 { return 0.0; }
+    let lambdas = vec4<f32>(1.9, 1.15, 0.62, 0.37);
+    let amp = 0.13 * ripples;
+    var unseen = 0.0;
+    for (var k = 0; k < 4; k++) { unseen += 1.0 - clamp((lambdas[k] / max(footprint, 1e-3) - 3.0) / 6.0, 0.0, 1.0); }
+    return 0.5 * amp * amp * unseen + 0.02 * ripples;
 }
 
 // weather::rain_rings
@@ -501,7 +516,7 @@ fn weather_surface(g: GPix, id: u32, tex: u32, albedo: vec3<f32>, gloss: f32, ri
                     if W.wx_rings > 0.0 { o.rings = rain_rings(g.x, w) * pm; }
                 }
             }
-        } else if id == ID_WALL_L || id == ID_WALL_R || id == ID_FACADE || id == ID_CLIFF || is_rail(id) {
+        } else if id == ID_WALL_L || id == ID_WALL_R || id == ID_FACADE || id == ID_CLIFF || id == ID_BANK || is_rail(id) {
             o.albedo = o.albedo * (1.0 - 0.18 * W.wx_wet);
         }
     }
@@ -615,9 +630,11 @@ fn light_index(k: u32) -> u32 {
 // Ctx::light_among for a surface with normal n (the portal is a crossing's, not one world's).
 fn light_at(x: f32, y: f32, d: f32, n: vec3<f32>, skip: u32, sun_mask: f32, px: u32, py: u32) -> vec3<f32> {
     var l = vec3<f32>(W.amb_r, W.amb_g, W.amb_b);
+    var slope = 0.0;
+    if W.n_sky > 0u { slope = path_slope(d); }
     for (var k = 0u; k < W.n_sky; k++) {
-        let dir = sky_dir(k);
-        let ndl = max(dot(n, dir), 0.0);
+        let dir = sheared_back(sky_dir(k), slope);
+        let ndl = max(facing(n, dir, slope), 0.0);
         if ndl <= 0.0 { continue; }
         let vis = sky_visibility(x, y, d, dir, skip) * sun_mask;
         if vis > 0.0 { l += sky_col(k) * (ndl * vis); }
@@ -708,7 +725,7 @@ fn shade_px(g: GPix, i: u32, x: u32, y: u32, own: bool, moved_fp: f32) -> Shaded
             if t2 >= 0.0 && u32(t2) == tex { fp = max(fp, max(abs(uvs[j * 3u] - u), abs(uvs[j * 3u + 1u] - v))); }
         }
     }
-    let slot = select(tex, 4u, tex == 7u);
+    let slot = select(select(tex, 4u, tex == 7u), 7u, tex == 8u);
     // (The facade's texture is slot 6, like its tex.)
     let ts = tex_sample(slot, u, v, min(fp, 4.0));
     var albedo = ts.xyz;
@@ -748,6 +765,28 @@ fn shade_px(g: GPix, i: u32, x: u32, y: u32, own: bool, moved_fp: f32) -> Shaded
             albedo = albedo * (1.0 - 0.45 * wetness(g.y));
         }
     }
+    // A water verge: the path's edge as a shore (render::water::Shore::at).
+    if W.shore > 0.0 && id == ID_GROUND && tex <= 1u && !on_fork(g.x, g.d) {
+        let out = abs(g.x) - path_edge(g.d);
+        if (tex == 0u) == (out < 0.0) {
+            var keep = 1.0; var line = 0.0; var sk = 1.0; var wet = 0.0;
+            if out < 0.0 {
+                wet = W.shore * (1.0 - smoothstep_r(0.0, 0.3, -out));
+                keep = 1.0 - 0.4 * wet; wet = 0.4 * wet;
+            } else {
+                let lap_k = TAU * max(rround(W.loop_len / 3.5), 1.0) / W.loop_len;
+                let width = 0.05 + 0.03 * sin(TAU * 3.0 * W.tphase + (W.scroll + g.d) * lap_k);
+                let seen = max(width, g.depth / W.focal_px);
+                line = W.shore * 0.6 * (width / seen) * exp(-out / seen);
+                let bank = W.shore * exp(-out / 0.35);
+                keep = 1.0 - 0.6 * bank; sk = (1.0 - 0.65 * bank) * (1.0 - line);
+            }
+            let hor = vec3<f32>(W.sky_hor_r, W.sky_hor_g, W.sky_hor_b);
+            albedo = mix3(albedo * keep, 0.5 * hor + vec3<f32>(0.28), line);
+            gloss_k *= sk;
+            wet_g = max(wet_g, wet);
+        }
+    }
     // What grows on the ground hides it.
     if W.gc_n != 0u && id == ID_GROUND && tex <= 1u {
         let cv = cover_at(g, tex, h32f(0x6Cu, i32(i)));
@@ -766,7 +805,10 @@ fn shade_px(g: GPix, i: u32, x: u32, y: u32, own: bool, moved_fp: f32) -> Shaded
             ao *= split_edge_dark(g.x, g.d);
         } else if tex == 0u && !on_fork(g.x, g.d) && !on_other_branch(g.x, g.d, gbuf[i].idr >> 8u) {
             let edge = max(path_edge(g.d), 0.05);
-            ao *= 1.0 - clamp(W.edge_dark, 0.0, 1.0) * smoothstep_r(0.5, 1.0, abs(g.x) / edge);
+            // Beside a fork's rounded island nose the road wears towards its edge instead.
+            let gap = island_gap(flat_xz(g.x, g.d));
+            let worn = select(abs(g.x) / edge, 1.0 - gap / edge, gap >= 0.0);
+            ao *= 1.0 - clamp(W.edge_dark, 0.0, 1.0) * smoothstep_r(0.5, 1.0, worn);
         }
         if W.walls_on != 0u {
             let dist = max(wall_x(g.d) - abs(g.x), 0.0);
@@ -801,6 +843,9 @@ fn shade_px(g: GPix, i: u32, x: u32, y: u32, own: bool, moved_fp: f32) -> Shaded
     } else if id == ID_CLIFF {
         ao *= 0.85 * passage_dark(g.x, g.d);
         normal = vec3<f32>(0.0, 0.0, -1.0); skip = 0u;
+    } else if id == ID_BANK {
+        ao *= 0.9 * (0.55 + 0.45 * smoothstep(-3.0, 0.0, g.y));
+        normal = vec3<f32>(0.0, 0.482, -0.876); skip = 0u;
     } else if is_rail(id) {
         let out = select(-1.0, 1.0, g.x > 0.0);
         ao *= 1.0 - 0.3 * exp(-max(g.y, 0.0) / 0.25);
@@ -862,7 +907,7 @@ fn shade_px(g: GPix, i: u32, x: u32, y: u32, own: bool, moved_fp: f32) -> Shaded
             env = vec3<f32>(W.amb_r, W.amb_g, W.amb_b) * 0.3;
             if W.env_fog != 0u { env += fog_col() * 0.5; }
         }
-        let e = clamp(2.0 / (rough * rough) - 2.0, 4.0, 600.0);
+        let e = clamp(2.0 / (rough * rough + ripple_spread(s.ripples, footprint)) - 2.0, 4.0, 600.0);
         let norm = (e + 8.0) / (8.0 * PI);
         var spec = vec3<f32>(0.0);
         let rng = tile_range(x, y);
@@ -881,8 +926,12 @@ fn shade_px(g: GPix, i: u32, x: u32, y: u32, own: bool, moved_fp: f32) -> Shaded
             let hv = (l + vv) / max(length(l + vv), 1e-5);
             spec += light_col(li) * (norm * pow(max(dot(n, hv), 0.0), e) * fres(max(dot(hv, vv), 0.0)) * ndl * gloss * (wgt * wgt / (1.0 + 0.3 * d2)));
         }
+        var slope = 0.0;
+        if W.n_sky > 0u { slope = path_slope(g.d); }
         for (var k = 0u; k < W.n_sky; k++) {
-            let l = rot_dir(sky_dir(k));
+            var lw = sheared_back(sky_dir(k), slope);
+            if slope != 0.0 { lw = normalize(lw); }
+            let l = rot_dir(lw);
             let ndl = dot(n, l);
             if ndl <= 0.0 { continue; }
             let hv = (l + vv) / max(length(l + vv), 1e-5);

@@ -359,6 +359,10 @@ fn layer(ctx: &Ctx, cl: &Clouds, kind: CloudKind, li: usize, span: f32, uc: f32,
     // A whole number of drifts a loop brings the pattern round to where it began. At any other
     // speed, two copies half a loop apart each form, drift and dissolve, never both gone.
     let drift = cl.drift.max(0.0);
+    // Endless, there is no loop to close: every speed drifts on unbroken.
+    if let Some(loops) = ctx.loops {
+        return made.into_iter().map(|k| CloudK { scroll: (drift * loops).rem_euclid(1.0), ..k }).collect();
+    }
     if (drift - drift.round()).abs() < 1e-3 {
         return made.into_iter().map(|k| CloudK { scroll: drift.round() * ctx.tphase, ..k }).collect();
     }

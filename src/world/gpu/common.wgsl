@@ -52,7 +52,7 @@ struct World {
     pt_on: u32, pt_zb: f32, pt_front: u32, pt_r: f32, pt_g: f32, pt_b: f32,
     pt0x: f32, pt0y: f32, pt0z: f32, pt1x: f32, pt1y: f32, pt1z: f32, pt2x: f32, pt2y: f32, pt2z: f32, pt3x: f32, pt3y: f32, pt3z: f32,
     op_on: u32, op_hw: f32, op_top: f32, op_arch: f32, op_rim: f32, op_seed: u32, op_outer_hw: f32, op_outer_top: f32, op_hill: f32,
-    op_skyline: f32, fa_banks: f32, op_pad1: f32, op_pad2: f32,
+    op_skyline: f32, fa_banks: f32, shore: f32, bank_tile: f32,
     fac_tile: f32,
     vb_on: u32, vb_z: f32,
     wg0a: f32, wg0b: f32, wg0c: f32, wg1a: f32, wg1b: f32, wg1c: f32, wg2a: f32, wg2b: f32, wg2c: f32, wg3a: f32, wg3b: f32, wg3c: f32,
@@ -68,6 +68,8 @@ struct World {
     // the blend's start and 1 / length, the offset and slope taken off (view::Winding).
     wind: array<vec4<f32>, 4>,
     wind_c: vec4<f32>,
+    // Winding::tail (offset, slope), 0, 0.
+    wind_k: vec4<f32>,
     // Ground cover (render::cover): layers, the wind in them (Wx::sway_parts), CoverK::rec each.
     gc_n: u32, gc_sway: f32, gc_lean: f32, gc_phase: f32,
     gc: array<vec4<f32>, 12>,
@@ -95,6 +97,7 @@ const ID_CEILING: u32 = 4u;
 const ID_RISER: u32 = 5u;
 const ID_CHASM: u32 = 6u;
 const ID_CLIFF: u32 = 7u;
+const ID_BANK: u32 = 8u;
 const ID_PROP: u32 = 10u;
 const ID_FIXTURE: u32 = 11u;
 const ID_TUFT: u32 = 12u;
@@ -291,9 +294,46 @@ fn bend_x(d: f32) -> f32 {
     if W.wind[1].x != 0.0 { s += wind_wave(W.wind[1], d, e); }
     if W.wind[2].x != 0.0 { s += wind_wave(W.wind[2], d, e); }
     if W.wind[3].x != 0.0 { s += wind_wave(W.wind[3], d, e); }
+    s += e * (W.wind_k.x + W.wind_k.y * (d - W.wind_c.x));
     return W.bend * 0.012 * d * d + (s - W.wind_c.z - W.wind_c.w * d);
 }
 fn hill_y(d: f32) -> f32 { return W.hill * 0.006 * d * d; }
+// view::Winding::slope for one wave at blend e, rising at `rate` per metre.
+fn wind_slope(t: vec4<f32>, d: f32, e: f32, rate: f32) -> f32 {
+    let share = select(1.0, 0.0, t.w > 0.0) + t.w * e;
+    let ph = t.y * d + t.z;
+    return t.x * (share * t.y * cos(ph) + t.w * rate * sin(ph));
+}
+// View::path_slope: how fast bend_x and shear_x move the ground sideways d metres on.
+fn path_slope(d: f32) -> f32 {
+    let u = clamp((d - W.wind_c.x) * W.wind_c.y, 0.0, 1.0);
+    let e = u * u * (3.0 - 2.0 * u);
+    let rate = select(0.0, 6.0 * u * (1.0 - u) * W.wind_c.y, u > 0.0 && u < 1.0);
+    var s = 0.0;
+    if W.wind[0].x != 0.0 { s += wind_slope(W.wind[0], d, e, rate); }
+    if W.wind[1].x != 0.0 { s += wind_slope(W.wind[1], d, e, rate); }
+    if W.wind[2].x != 0.0 { s += wind_slope(W.wind[2], d, e, rate); }
+    if W.wind[3].x != 0.0 { s += wind_slope(W.wind[3], d, e, rate); }
+    s += rate * (W.wind_k.x + W.wind_k.y * (d - W.wind_c.x)) + e * W.wind_k.y;
+    var sh = 0.0;
+    if MULTI {
+        var z0 = W.sh_z0_0; var k = W.sh_k_0;
+        if W.realm == 1u { z0 = W.sh_z0_1; k = W.sh_k_1; } else if W.realm == 2u { z0 = W.sh_z0_2; k = W.sh_k_2; }
+        sh = select(0.0, k, d > z0);
+    }
+    return 2.0 * W.bend * 0.012 * d + (s - W.wind_c.w) + sh;
+}
+// View::sheared_back.
+fn sheared_back(l: vec3<f32>, slope: f32) -> vec3<f32> {
+    if slope == 0.0 { return l; }
+    return vec3<f32>(l.x - slope * l.z, l.y, l.z);
+}
+// View::facing.
+fn facing(n: vec3<f32>, l: vec3<f32>, slope: f32) -> f32 {
+    let ndl = dot(n, l);
+    if slope == 0.0 { return ndl; }
+    return ndl / max(length(vec3<f32>(n.x, n.y, n.z - slope * n.x)), 1e-6);
+}
 // View::shear_x for world r of the frame.
 fn shear_of(r: u32, d: f32) -> f32 {
     var z0 = W.sh_z0_0; var k = W.sh_k_0;
@@ -320,6 +360,13 @@ fn path_half_width(d: f32) -> f32 {
 fn rot_dir(v: vec3<f32>) -> vec3<f32> {
     if W.cam_turned == 0u { return v; }
     return vec3<f32>(rnd(W.cam_yc * v.x) - rnd(W.cam_ys * v.z), v.y, rnd(W.cam_ys * v.x) + rnd(W.cam_yc * v.z));
+}
+// View::flat_xz: where the bounds of a frame of several worlds lie, the path's winding taken off.
+fn flat_xz(x: f32, d: f32) -> vec2<f32> {
+    let cx = x + shear_x(d);
+    if W.cam_turned == 0u { return vec2<f32>(cx, d); }
+    let px = cx - W.cam_x;
+    return vec2<f32>(rnd(W.cam_yc * px) - rnd(W.cam_ys * d), rnd(W.cam_ys * px) + rnd(W.cam_yc * d));
 }
 fn to_cam(x: f32, y: f32, d: f32) -> vec3<f32> {
     let c = vec3<f32>(x + bend_x(d) + shear_x(d), y - W.eye_height + hill_y(d) + lift(d), d);
@@ -437,6 +484,37 @@ fn split_edge_dark(x: f32, d: f32) -> f32 {
     let rm = 0.5 * edge; let rb = 0.5 * W.fk_hw;
     let n = smin(f.x / rm, f.y / rb, W.fk_hw / min(rm, rb));
     return 1.0 - clamp(W.edge_dark, 0.0, 1.0) * (1.0 - smoothstep_r(0.0, 1.0, -n));
+}
+// render::NoseRow: one row of a fork's island nose (`round` < 0 before the round starts), across
+// camera space less the winding (flat_xz); the branches' strips are the shears of worlds 1 and 2.
+struct NoseRow { ok: bool, mid: f32, cl: f32, cr: f32, half: f32, round: f32, band: f32 }
+// render::Bounds::nose_row, with NOSE_R = 1.6.
+fn nose_row(z: f32) -> NoseRow {
+    var row = NoseRow(false, 0.0, 0.0, 0.0, 0.0, -1.0, 0.0);
+    if !MULTI || W.fk_hl <= 0.0 { return row; }
+    let along = z - W.sh_z0_1; let open = 0.5 * (W.sh_k_2 - W.sh_k_1);
+    if along <= 0.0 || open <= 1e-3 { return row; }
+    let left = W.sh_k_1 * along + W.fk_hl; let right = W.sh_k_2 * along - W.fk_hr;
+    let half = 0.5 * (right - left);
+    let past = half / open; let first = 1.6 / (2.0 * open * open); let last = 1.6 / (open * open);
+    if past >= last { return row; }
+    row = NoseRow(true, 0.5 * (left + right), W.sh_k_1 * along, W.sh_k_2 * along, half, -1.0, 1.0 - clamp((past - first) / (last - first), 0.0, 1.0));
+    if past > first { row.round = sqrt(2.0 * 1.6 * (past - first)); }
+    return row;
+}
+// render::Bounds::nosed, the band as wide as this world's edge noise.
+fn nosed(at: vec2<f32>) -> bool {
+    let row = nose_row(at.y);
+    if !row.ok { return false; }
+    let off = abs(at.x - row.mid);
+    return off < row.half + (abs(W.edge_noise) + 0.05) * row.band && off >= max(row.round, 0.0);
+}
+// render::Bounds::island_gap (-1 for None; 1e9 before the round starts).
+fn island_gap(at: vec2<f32>) -> f32 {
+    let row = nose_row(at.y);
+    if !row.ok || at.x <= row.cl || at.x >= row.cr { return -1.0; }
+    if row.round < 0.0 { return 1e9; }
+    return abs(at.x - row.mid) - row.round;
 }
 fn on_fork(x: f32, d: f32) -> bool {
     if W.fork_on == 0u { return false; }

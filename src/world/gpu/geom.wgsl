@@ -50,7 +50,10 @@ fn hides(p: GPix, x: i32, y: i32) -> bool {
 @group(0) @binding(3) var<storage, read> bins: array<u32>;
 @group(0) @binding(4) var<storage, read_write> masks: array<f32>;
 @group(0) @binding(5) var<storage, read> casters: array<Caster>;
-@group(0) @binding(6) var<storage, read> texels: array<vec4<f32>>;
+// Sprite texels as four half floats (sprites::Texel); only their alpha is read here.
+@group(0) @binding(6) var<storage, read> texels: array<vec2<u32>>;
+
+fn texel_alpha(i: u32) -> f32 { return unpack2x16float(texels[i].y).y; }
 // Per tile: a count, then up to `cap` lamp indices.
 @group(0) @binding(7) var<storage, read_write> tile_lights: array<u32>;
 // (A frame of several worlds, for mix_main and shadow_main: render::Ctx::gpu_worlds' table, then
@@ -208,10 +211,10 @@ fn sprite_alpha(off: u32, w: u32, h: u32, u: f32, v: f32) -> f32 {
     let x0 = u32(fx); let y0 = u32(fy);
     let x1 = min(x0 + 1u, w - 1u); let y1 = min(y0 + 1u, h - 1u);
     let tx = fx - f32(x0); let ty = fy - f32(y0);
-    var acc = rnd(texels[off + y0 * w + x0].w * rnd((1.0 - tx) * (1.0 - ty)));
-    acc = rnd(acc + rnd(texels[off + y0 * w + x1].w * rnd(tx * (1.0 - ty))));
-    acc = rnd(acc + rnd(texels[off + y1 * w + x0].w * rnd((1.0 - tx) * ty)));
-    acc = rnd(acc + rnd(texels[off + y1 * w + x1].w * rnd(tx * ty)));
+    var acc = rnd(texel_alpha(off + y0 * w + x0) * rnd((1.0 - tx) * (1.0 - ty)));
+    acc = rnd(acc + rnd(texel_alpha(off + y0 * w + x1) * rnd(tx * (1.0 - ty))));
+    acc = rnd(acc + rnd(texel_alpha(off + y1 * w + x0) * rnd((1.0 - tx) * ty)));
+    acc = rnd(acc + rnd(texel_alpha(off + y1 * w + x1) * rnd(tx * ty)));
     if acc > 1e-6 { return acc; }
     return 0.0;
 }
@@ -463,6 +466,8 @@ fn bend_of(r: u32, d: f32) -> f32 {
         let share = rnd(select(1.0, 0.0, mw(w + 3u) > 0.0) + rnd(mw(w + 3u) * e));
         s = rnd(s + rnd(mw(w) * rnd(share * sin(rnd(rnd(mw(w + 1u) * d) + mw(w + 2u))))));
     }
+    // Winding::tail: the next world's waves lined up with this one's where the blend begins.
+    s = rnd(s + rnd(e * rnd(mw(o + 22u) + rnd(mw(o + 23u) * rnd(d - mw(o + 2u))))));
     return rnd(rnd(rnd(mw(o) * d) * d) + rnd(rnd(s - mw(o + 4u)) - rnd(mw(o + 5u) * d)));
 }
 // view::Bend::shear of world r.
@@ -475,6 +480,15 @@ fn shear_mix(r: u32, d: f32) -> f32 {
 fn cam_xz_of(r: u32, x: f32, d: f32) -> vec2<f32> {
     let o = r * MIX_STRIDE;
     let cx = rnd(rnd(x + bend_of(r, d)) + shear_mix(r, d));
+    if mw(o + 29u) == 0.0 { return vec2<f32>(cx, d); }
+    let px = cx - mw(o + 30u);
+    let yc = mw(o + 31u); let ys = mw(o + 32u);
+    return vec2<f32>(rnd(rnd(yc * px) - rnd(ys * d)), rnd(rnd(ys * px) + rnd(yc * d)));
+}
+// Bend::flat_xz: cam_xz_of with the world's bend and winding taken off.
+fn flat_xz_of(r: u32, x: f32, d: f32) -> vec2<f32> {
+    let o = r * MIX_STRIDE;
+    let cx = rnd(x + shear_mix(r, d));
     if mw(o + 29u) == 0.0 { return vec2<f32>(cx, d); }
     let px = cx - mw(o + 30u);
     let yc = mw(o + 31u); let ys = mw(o + 32u);
@@ -578,7 +592,9 @@ fn realm_mix(x: f32, z: f32) -> Mixed {
         let width = mw(k + 3u);
         let s = rnd(rnd(mw(k) * x) + rnd(mw(k + 1u) * z)) + mw(k + 2u);
         if (r == a || r == bw) && piece_in(k + 6u, x, z) && abs(s) < width {
-            let n = patch_noise(x, z + mw(MIX_HEAD), mw(MIX_HEAD + 1u));
+            // (Across the ground as it lies: a turn onto a branch, `Bounds::shift`, taken off.)
+            let gx = x + rnd(mw(MIX_HEAD + 19u) * max(z - mw(MIX_HEAD + 4u), 0.0));
+            let n = patch_noise(gx, z + mw(MIX_HEAD), mw(MIX_HEAD + 1u));
             let d = rnd(div(s, width) * 0.5) + 0.5 - n;
             return Mixed(select(a, bw, d > 0.0), select(bw, a, d > 0.0), 0.5 * (1.0 - smoothstep_r(0.0, 0.07, abs(d))));
         }
@@ -609,8 +625,10 @@ fn mix_main(@builtin(global_invocation_id) gid: vec3<u32>) {
     if id == ID_GROUND || id == ID_WALL_L || id == ID_WALL_R || id == ID_CEILING {
         let own = (g.idr >> 8u) & 0xFFu;
         var realm = own;
+        // The bounds lie flat (View::flat_xz); a pixel moved to another world keeps its place.
         let cam = cam_xz_of(own, g.x, g.d);
-        let m = realm_mix(cam.x, cam.y);
+        let flat = flat_xz_of(own, g.x, g.d);
+        let m = realm_mix(flat.x, flat.y);
         // A fork's walls are never handed or blended across the split between its branches.
         let walls = mw(MIX_HEAD + 2u) != 0.0 && (id == ID_WALL_L || id == ID_WALL_R) && own > 0u;
         let to = select(m.to, own, walls && m.to > 0u && m.to != own);
@@ -622,7 +640,7 @@ fn mix_main(@builtin(global_invocation_id) gid: vec3<u32>) {
         if m.k > 0.0 && other != realm && mix_has(other, id) { soft_o = other; soft_k = m.k; }
         // Near a fork's junction its branches' ground is drawn as the first world would draw it.
         if id == ID_GROUND && realm != 0u {
-            let look = road_look(g.x, g.d + mw(realm * MIX_STRIDE + 35u), cam.y);
+            let look = road_look(g.x, g.d + mw(realm * MIX_STRIDE + 35u), flat.y);
             if look > 0.0 && look >= soft_k { soft_o = SAME_X; soft_k = look; }
         }
         g.idr = (g.idr & ~0xFF00u) | (realm << 8u);

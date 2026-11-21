@@ -1029,6 +1029,7 @@ parts. Lives in `scene.prop_defs` or in a kit (a folder holding kit.json and its
 | `light` | [PropLight](#proplight) | (see the type) | Light it gives off, like a lamp. |
 | `trim` | boolean | `true` | Cut away transparent margins of images, so a sprite stands on its lowest visible pixel. |
 | `smoke` | [PropSmoke](#propsmoke) | (see the type) | Smoke rising from it: a chimney, a campfire, a smouldering ruin. |
+| `footing` | number | `0.0` | How far round its foot the place's own grass (reeds beside water, moss in a street) grows up against it, metres (0: none), so it stands in the ground there and not on it. |
 | `facing` | [Facing](#facing) | `"Camera"` | Which way its picture faces (see `Facing`): the camera (a tree, a rock: the same from every side), or the path (a building's front, a fence, a stall), seen at an angle when the camera is turned. |
 | `depth` | number | `0.0` | Facing the path: how deep it is behind its front, metres. Its ends are drawn as walls that deep (from the edges of its picture), so seen at an angle it reads as a solid block; 0 is a flat front. |
 | `faces` | list of [PropFace](#propface) |  | Facing the path: the rest of it, as flat faces with pictures of their own (a cottage's side walls and the slopes of its roof, a chimney's sides), drawn in place of plain end walls. |
@@ -1579,6 +1580,7 @@ Ground beside the path. Disabled = void beyond the path edge (walls usually cove
 | `tuft_color` | integer × 3 | `[44,100,30]` |  |
 | `tuft_density` | number | `1.0` |  |
 | `tuft_height` | number | `0.25` |  |
+| `shore` | number | `1.0` | With a Water verge: how strongly the path's edge reads as a shore, 0..1 (the path's edge wet and dark, a pale line where the water laps it, the bank's dark reflection beyond). |
 
 ### Walls
 

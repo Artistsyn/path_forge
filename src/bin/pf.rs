@@ -881,6 +881,7 @@ fn cmd_transition(args: &Args) -> Result<(), String> {
     let opts = RenderOptions { size: Some(size), ..RenderOptions::default() };
     let mut r = world_for(args)?;
     r.profile = args.opts.contains_key("stages");
+    r.profile_gpu = r.profile;
     let t0 = Instant::now();
     let mut imgs = Vec::new();
     let say = |notes: &[String], warnings: &[String]| {

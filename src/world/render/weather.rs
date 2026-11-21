@@ -245,7 +245,7 @@ pub(super) fn surface(ctx: &Ctx, g: &GPixel, tex: u8, albedo: [f32; 3], gloss: f
                     }
                 }
             }
-        } else if matches!(g.id, id::WALL_L | id::WALL_R | id::FACADE | id::CLIFF) || id::is_rail(g.id) {
+        } else if matches!(g.id, id::WALL_L | id::WALL_R | id::FACADE | id::CLIFF | id::BANK) || id::is_rail(g.id) {
             a = scale3(a, 1.0 - 0.18 * wx.wet);
         }
     }
@@ -433,7 +433,7 @@ pub(super) fn draw_precip(ctx: &Ctx, out: &mut Vec<Splat>) {
             let x = (x0 + wind * f * fall_t + wob + lat).rem_euclid(2.0 * lat) - lat;
             for cpy in 0..copies {
                 let d = wlo + (d0 - ctx.scroll - wlo).rem_euclid(ctx.loop_len) + cpy as f32 * ctx.loop_len;
-                if (if ctx.view.turned { d > whi } else { d < 0.25 || d > range }) || !ctx.owns(x, y, d) { continue; }
+                if (if ctx.view.turned { d > whi } else { d < 0.25 || d > range }) || !ctx.owns(x, d) { continue; }
                 let c0 = v.to_cam(x, y, d);
                 if c0[2] < 0.2 { continue; }
                 let Some([sx, sy]) = v.project(c0) else { continue };
@@ -482,7 +482,7 @@ pub(super) fn draw_precip(ctx: &Ctx, out: &mut Vec<Splat>) {
             let key = k * 1031 + (tt.floor() as i64).rem_euclid(cs as i64);
             let x = (hf(p.seed ^ 0x22, key) * 2.0 - 1.0) * near_lat;
             let d = (hf(p.seed ^ 0x23, key) * ctx.loop_len - ctx.scroll).rem_euclid(ctx.loop_len);
-            if !(0.4..=20.0).contains(&d) || !ctx.owns(x, 0.0, d) || ctx.on_bridge(d) && x.abs() > ctx.path_edge(d) { continue; }
+            if !(0.4..=20.0).contains(&d) || !ctx.owns(x, d) || ctx.on_bridge(d) && x.abs() > ctx.path_edge(d) { continue; }
             // Only on open ground the camera can see.
             let c = v.to_cam(x, 0.0, d);
             let Some([sx, sy]) = v.project(c) else { continue };
@@ -537,7 +537,7 @@ pub(super) fn draw_drips(ctx: &Ctx, out: &mut Vec<Splat>) {
         let a = (hf(dr.seed ^ 0xD3, k) + cd * ctx.tphase).rem_euclid(1.0);
         for cpy in 0..copies {
             let d = wlo + (d0 - ctx.scroll - wlo).rem_euclid(ctx.loop_len) + cpy as f32 * ctx.loop_len;
-            if (if ctx.view.turned { d > whi } else { d < 0.3 || d > range }) || !ctx.owns(x, 0.0, d) { continue; }
+            if (if ctx.view.turned { d > whi } else { d < 0.3 || d > range }) || !ctx.owns(x, d) { continue; }
             let z = v.to_cam(x, 0.0, d)[2];
             // Wet drops catch the light: a little brighter than what lights them.
             let light = |y: f32| ctx.apply_fog(scale3(mul3(air_light(ctx, x, y, d), col), 1.4), z);
@@ -589,7 +589,7 @@ pub(super) fn draw_sandstorm(ctx: &Ctx, out: &mut Vec<Splat>) {
         let alpha = (std::f32::consts::PI * a).sin() * 0.45;
         for cpy in 0..copies {
             let d = wlo + (d0 - ctx.scroll - wlo).rem_euclid(ctx.loop_len) + cpy as f32 * ctx.loop_len;
-            if (if ctx.view.turned { d > whi } else { d < 0.3 || d > range }) || !ctx.owns(x, y, d) { continue; }
+            if (if ctx.view.turned { d > whi } else { d < 0.3 || d > range }) || !ctx.owns(x, d) { continue; }
             let c0 = v.to_cam(x, y, d);
             let (Some(s0), Some(s1)) = (v.project(c0), v.project(v.to_cam(x - dir * speed * 0.03, y, d))) else { continue };
             if s0[0] < -60.0 || s0[0] > w as f32 + 60.0 || s0[1] < 0.0 || s0[1] > h as f32 { continue; }
@@ -627,7 +627,7 @@ pub(super) fn draw_wisps(ctx: &Ctx, out: &mut Vec<Splat>) {
         let alpha = 0.22 * m.wisps.min(1.0) * (std::f32::consts::PI * a).sin();
         for cpy in 0..copies {
             let d = wlo + (d0 - ctx.scroll - wlo).rem_euclid(ctx.loop_len) + cpy as f32 * ctx.loop_len;
-            if (if ctx.view.turned { d > whi } else { d < 0.8 || d > range }) || !ctx.owns(x, y, d) { continue; }
+            if (if ctx.view.turned { d > whi } else { d < 0.8 || d > range }) || !ctx.owns(x, d) { continue; }
             let c = v.to_cam(x, y, d);
             let Some([sx, sy]) = v.project(c) else { continue };
             let r = v.px_per_m(c[2]) * size;
