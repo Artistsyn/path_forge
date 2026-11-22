@@ -361,7 +361,8 @@ fn layer(ctx: &Ctx, cl: &Clouds, kind: CloudKind, li: usize, span: f32, uc: f32,
     let drift = cl.drift.max(0.0);
     // Endless, there is no loop to close: every speed drifts on unbroken.
     if let Some(loops) = ctx.loops {
-        return made.into_iter().map(|k| CloudK { scroll: (drift * loops).rem_euclid(1.0), ..k }).collect();
+        let scroll = (f64::from(drift) * loops).rem_euclid(1.0) as f32;
+        return made.into_iter().map(|k| CloudK { scroll, ..k }).collect();
     }
     if (drift - drift.round()).abs() < 1e-3 {
         return made.into_iter().map(|k| CloudK { scroll: drift.round() * ctx.tphase, ..k }).collect();

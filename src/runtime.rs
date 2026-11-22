@@ -51,6 +51,8 @@ pub struct Runtime {
     day_seconds: f32,
     /// Seconds since play began (not wrapped by the loop), for the camera's flight in.
     played: f32,
+    /// Seconds the walk has run, never wrapped (`time` wraps with each loop): sky drift reads it.
+    clock: f64,
     /// A swing the game started (`swing_to`) under way.
     swinging: Option<Swinging>,
     /// The camera the current scene came with, for swinging back to (`swing("home")`).
@@ -271,7 +273,7 @@ impl Runtime {
     /// A scene whose files (sprites, kits, grades) are named relative to `base_dir`.
     pub fn new(scene: Scene, base_dir: Option<PathBuf>) -> Runtime {
         let home = scene.camera.clone();
-        Runtime { scene, base_dir, renderer: WorldRenderer::default(), rgba: Vec::new(), pipelined: false, distance: 0.0, time: 0.0, walked: 0.0, active: None, onward: None, journey: None, day_seconds: 0.0, played: 0.0, swinging: None, home, cold: Vec::new(), wanted: Vec::new(), floor: None, lift: 1.0, probes: Vec::new(), ahead: None, near: None, end: None, warps: 0, placed: Vec::new(), flashes: Vec::new() }
+        Runtime { scene, base_dir, renderer: WorldRenderer::default(), rgba: Vec::new(), pipelined: false, distance: 0.0, time: 0.0, walked: 0.0, active: None, onward: None, journey: None, day_seconds: 0.0, played: 0.0, clock: 0.0, swinging: None, home, cold: Vec::new(), wanted: Vec::new(), floor: None, lift: 1.0, probes: Vec::new(), ahead: None, near: None, end: None, warps: 0, placed: Vec::new(), flashes: Vec::new() }
     }
 
     /// Draw frames on the GPU, on a device the game hands over (with wgpu 25, the same one it
@@ -551,6 +553,7 @@ impl Runtime {
         };
         if let Some((travel, floor)) = floor { if ds < 0.0 { ds = ds.max((floor - travel).min(0.0)); } }
         self.played += dt.max(0.0);
+        self.clock += f64::from(dt.max(0.0));
         if let Some(sw) = &mut self.swinging {
             sw.t += dt.max(0.0);
             if sw.t >= sw.style.length() { self.scene.camera = sw.to.clone(); self.swinging = None; }
@@ -673,7 +676,7 @@ impl Runtime {
         let walk_eye = Some(self.home.eye_height);
         let placed = self.placed.iter().map(|(at, p)| crate::world::render::Placed { d: (at - self.walked) as f32, ..p.clone() }).collect();
         let flashes = self.flashes.iter().map(|(at, f)| crate::world::render::Flash { d: (at - self.walked) as f32, ..*f }).collect();
-        let opts = RenderOptions { size: Some((width.max(1), height.max(1))), probes: self.probes.clone(), pipelined: self.pipelined, walk_eye, placed, flashes, endless: true, ..RenderOptions::default() };
+        let opts = RenderOptions { size: Some((width.max(1), height.max(1))), probes: self.probes.clone(), pipelined: self.pipelined, walk_eye, placed, flashes, endless: true, clock: Some(self.clock), ..RenderOptions::default() };
         self.renderer.set_end(self.end.as_ref().map(|(at, wall)| ((at - self.walked) as f32, wall.clone())));
         let a = Place { scene: &self.scene, dir: self.base_dir.as_deref() };
         let swing = self.swinging.as_ref().and_then(Swinging::pose);
@@ -1358,5 +1361,32 @@ mod tests {
         let before = w.distance;
         w.advance(0.5, 0.0, &r);
         assert_eq!(w.distance, before, "speed 0 stands still");
+    }
+
+    /// A slow cloud drift carries on across the loop's wrap: the sky changes no more from the
+    /// last frame of one loop to the first of the next than between any other two frames (the
+    /// runtime's `time` wraps, so drift read from it snapped every cloud back once a loop).
+    #[test]
+    fn slow_clouds_drift_on_across_the_loops_wrap() {
+        let mut scene = scene::presets::ALL.iter().find(|p| p.0 == "Desert Canyon").map(|p| (p.1)()).unwrap();
+        scene.sky.clouds = scene::Clouds { enabled: true, kind: scene::CloudKind::Cumulus, drift: 0.13, opacity: 1.0, ..scene::Clouds::default() };
+        let mut r = Runtime::new(scene, None);
+        let (w, h) = (96u32, 160u32);
+        let sky = |r: &mut Runtime| r.frame(w, h)[..(w * h * 4 / 3) as usize].to_vec();
+        let secs = r.loop_seconds();
+        let dt = secs / 24.0;
+        let mut before = sky(&mut r);
+        let mut steps = Vec::new();
+        for _ in 0..60 {
+            r.step(dt, 0.0);
+            let now = sky(&mut r);
+            steps.push(before.iter().zip(&now).map(|(a, b)| (f32::from(*a) - f32::from(*b)).abs()).sum::<f32>() / now.len() as f32);
+            before = now;
+        }
+        let mut sorted = steps.clone();
+        sorted.sort_by(f32::total_cmp);
+        let (median, most) = (sorted[sorted.len() / 2], sorted[sorted.len() - 1]);
+        assert!(median > 0.0, "the clouds move");
+        assert!(most <= 3.0 * median + 0.2, "a step jumps: {most:.3} against a usual {median:.3} ({steps:?})");
     }
 }

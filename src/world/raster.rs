@@ -183,33 +183,61 @@ impl Dissolve {
 }
 
 /// Set up every triangle that shows (`rasterize`'s first half; the GPU rasterises from these too).
-/// A triangle cut where it passes behind the camera's near plane: none, one or two triangles,
-/// the cut vertices placed (in camera space and in the world alike) where each edge crosses it.
-fn clip_near(t: &Tri) -> Vec<Tri> {
-    let z = |v: &Vert| v.cam[2];
-    let n = super::view::NEAR;
-    if t.v.iter().all(|v| z(v) >= n) { return vec![*t]; }
-    if t.v.iter().all(|v| z(v) < n) { return Vec::new(); }
-    let mut poly: Vec<Vert> = Vec::with_capacity(4);
-    for i in 0..3 {
-        let (a, b) = (t.v[i], t.v[(i + 1) % 3]);
-        if z(&a) >= n { poly.push(a); }
-        if (z(&a) >= n) != (z(&b) >= n) {
-            let k = (n - z(&a)) / (z(&b) - z(&a));
-            let lerp = |p: [f32; 3], q: [f32; 3]| [p[0] + (q[0] - p[0]) * k, p[1] + (q[1] - p[1]) * k, p[2] + (q[2] - p[2]) * k];
-            let mut cam = lerp(a.cam, b.cam);
-            cam[2] = n;
-            poly.push(Vert { cam, world: lerp(a.world, b.world) });
+/// How far outside the frame a cut triangle may still reach, in frame half-sizes: past it a
+/// corner lies so far off screen that interpolating across the triangle loses precision.
+const GUARD: f32 = 4.0;
+
+impl Tri {
+    /// This triangle cut to what a camera can show: where it passes behind the near plane, and at
+    /// a band `guard` (the tangents across and up or down) well outside the frame. None, one or
+    /// more triangles, cut corners placed (in camera space and in the world alike) where each
+    /// edge crosses; a triangle wholly inside comes back as it is.
+    fn clipped(&self, guard: [f32; 2]) -> Vec<Tri> {
+        let near = super::view::NEAR;
+        // Each plane as (a, b, c, e): a point is kept where a x + b y + c z + e >= 0.
+        let planes = [[0.0, 0.0, 1.0, -near], [-1.0, 0.0, guard[0], 0.0], [1.0, 0.0, guard[0], 0.0], [0.0, -1.0, guard[1], 0.0], [0.0, 1.0, guard[1], 0.0]];
+        if planes.iter().all(|plane| self.v.iter().all(|vert| Self::side(plane, vert) >= 0.0)) { return vec![*self]; }
+        let mut poly: Vec<Vert> = self.v.to_vec();
+        for (k, plane) in planes.iter().enumerate() {
+            poly = Self::cut(&poly, plane, (k == 0).then_some(near));
+            if poly.len() < 3 { return Vec::new(); }
         }
+        (1..poly.len() - 1).map(|k| Tri { v: [poly[0], poly[k], poly[k + 1]], ..*self }).collect()
     }
-    (1..poly.len().saturating_sub(1)).map(|k| Tri { v: [poly[0], poly[k], poly[k + 1]], ..*t }).collect()
+
+    fn side(plane: &[f32; 4], vert: &Vert) -> f32 { plane[0] * vert.cam[0] + plane[1] * vert.cam[1] + plane[2] * vert.cam[2] + plane[3] }
+
+    /// `poly` with what lies on the far side of `plane` cut off; `depth`: the plane is the near
+    /// one, at that depth, and cut corners are put exactly on it.
+    fn cut(poly: &[Vert], plane: &[f32; 4], depth: Option<f32>) -> Vec<Vert> {
+        let mut out = Vec::with_capacity(poly.len() + 1);
+        for (i, &from) in poly.iter().enumerate() {
+            let to = poly[(i + 1) % poly.len()];
+            let (sa, sb) = (Self::side(plane, &from), Self::side(plane, &to));
+            if sa >= 0.0 { out.push(from); }
+            if (sa >= 0.0) != (sb >= 0.0) {
+                let k = sa / (sa - sb);
+                let lerp = |p: [f32; 3], q: [f32; 3]| [p[0] + (q[0] - p[0]) * k, p[1] + (q[1] - p[1]) * k, p[2] + (q[2] - p[2]) * k];
+                let mut cam = lerp(from.cam, to.cam);
+                if let Some(z) = depth { cam[2] = z; }
+                out.push(Vert { cam, world: lerp(from.world, to.world) });
+            }
+        }
+        out
+    }
 }
 
 pub(crate) fn prepare(w: usize, h: usize, tris: &[Tri], view: &super::view::View) -> Vec<Prepared> {
-    // A turned camera sees surfaces that pass behind it; they are cut at its near plane. (Looking
-    // down the path nothing is built behind the camera, and the frame stays exactly as it was.)
+    // A turned camera (or one turning with a winding road) sees surfaces that pass behind it;
+    // they are cut at its near plane. (Looking straight down a straight path nothing is built
+    // behind the camera, and the frame stays exactly as it was.)
     let clipped: Vec<Tri>;
-    let tris = if view.turned { clipped = tris.iter().flat_map(clip_near).collect(); &clipped[..] } else { tris };
+    let tris = if view.has_yaw() {
+        let half = [view.center_px.max(view.width as f32 - view.center_px), view.horizon_px.max(view.height as f32 - view.horizon_px)];
+        let guard = half.map(|px| GUARD * px / view.focal_px.max(1e-3));
+        clipped = tris.iter().flat_map(|t| t.clipped(guard)).collect();
+        &clipped[..]
+    } else { tris };
     tris.par_iter().filter_map(|t| {
         let mut p = [[0.0f32; 2]; 3];
         for i in 0..3 { p[i] = view.project(t.v[i].cam)?; }

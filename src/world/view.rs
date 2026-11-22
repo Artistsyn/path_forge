@@ -101,15 +101,18 @@ pub const WIND_BLEND_M: f32 = 12.0;
 /// The path's winding as a frame draws it: each wave (amplitude, wave number, phase at the
 /// camera, and its share of a blend: 0 always, -1 giving way, 1 coming in), the blend's window
 /// (where it starts, metres ahead, and 1 / its length), and the offset and slope at the camera
-/// taken off, so the curve is measured from where the camera stands and the way it heads.
+/// taken off, so the curve is measured from where the camera stands and the way it heads; and
+/// `yaw`, the part of that slope the camera really turns by (`View::yawed`): the road's own turn,
+/// without the line lining one world's road up with the next's, which stays a shear (so a frame
+/// past a boundary turns exactly as the next world drawn alone).
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Winding { pub waves: [[f32; 4]; 4], pub lo: f32, pub inv: f32, pub c0: f32, pub c1: f32, pub tail: [f32; 2] }
+pub struct Winding { pub waves: [[f32; 4]; 4], pub lo: f32, pub inv: f32, pub c0: f32, pub c1: f32, pub tail: [f32; 2], pub yaw: f32 }
 
 impl Winding {
     /// One world's winding (`View::wind`, from `scroll` metres along its loop).
     pub fn of(wind: [[f32; 4]; 4], scroll: f32) -> Winding {
         let waves = wind.map(|[a, k, p0, _]| [a, k, k * scroll + p0, 0.0]);
-        Winding { waves, lo: 1e30, inv: 1.0, c0: 0.0, c1: 0.0, tail: [0.0; 2] }.settled(wind.map(|w| w[3]))
+        Winding { waves, lo: 1e30, inv: 1.0, c0: 0.0, c1: 0.0, tail: [0.0; 2], yaw: 0.0 }.settled(wind.map(|w| w[3]))
     }
 
     /// Two worlds' (each a winding and its place along its loop) on one stretch of ground: the
@@ -128,7 +131,7 @@ impl Winding {
         let lo = zb - WIND_BLEND_M;
         let (here, there) = (Self::sum_at(&waves[..2], lo), Self::sum_at(&waves[2..], lo));
         let tail = [here[0] - there[0], here[1] - there[1]];
-        Winding { waves, lo, inv: 1.0 / WIND_BLEND_M, c0: 0.0, c1: 0.0, tail }.settled(turns)
+        Winding { waves, lo, inv: 1.0 / WIND_BLEND_M, c0: 0.0, c1: 0.0, tail, yaw: 0.0 }.settled(turns)
     }
 
     /// `waves` summed `ahead` metres on, each whole: where they put the road, and its slope.
@@ -160,10 +163,10 @@ impl Winding {
     fn settled(mut self, turns: [f32; 4]) -> Winding {
         self.c0 = self.raw(0.0);
         let (blend, rate) = self.mix(0.0);
-        self.c1 = self.waves.iter().zip(turns).filter(|(w, _)| w[0] != 0.0)
+        self.yaw = self.waves.iter().zip(turns).filter(|(w, _)| w[0] != 0.0)
             .map(|(&[a, k, p, g], turn)| turn * a * (Self::share(g, blend) * k * p.cos() + g * rate * p.sin())).sum::<f32>();
         // The lining up is taken off whole, so past the blend the road is the next world's own.
-        self.c1 += rate * (self.tail[0] - self.tail[1] * self.lo) + blend * self.tail[1];
+        self.c1 = self.yaw + (rate * (self.tail[0] - self.tail[1] * self.lo) + blend * self.tail[1]);
         self
     }
 
@@ -328,6 +331,9 @@ impl Bend {
         let shear = match self.shear { Some((z0, k)) if d > z0 => k, _ => 0.0 };
         2.0 * self.bk * d + self.wind.slope(d) + shear
     }
+    /// `slope` in the world the road lies still in: with the camera's turn (`Winding::yaw`, a
+    /// real yaw in `View::to_cam`) added back.
+    pub fn heading(&self, ahead: f32) -> f32 { self.slope(ahead) + self.wind.yaw }
     /// Its numbers as geom.wgsl's `bend_of` and `cam_xz_of` read them: the curve, the count of
     /// waves, the blend's start and 1 / length, the offset and slope taken off, each wave there
     /// (`Winding::waves`), its tail at 22 (`Winding::tail`), then the shear (on, z0, k) and the
@@ -346,7 +352,7 @@ impl Bend {
         if let Some(turn) = self.turned { out[29] = 1.0; out[30..33].copy_from_slice(&turn); }
         out
     }
-    /// `View::to_cam`'s x and z (its height is not needed here).
+    /// `View::to_sheared_cam`'s x and z (its height is not needed here): the frame worlds share.
     #[inline]
     pub fn cam_xz(&self, x: f32, d: f32) -> [f32; 2] {
         let cx = x + self.x(d) + self.shear(d);
@@ -450,15 +456,17 @@ impl View {
     /// stands along its loop.
     pub fn winding(&self) -> Winding { self.blend.unwrap_or_else(|| Winding::of(self.wind, self.scroll)) }
 
-    /// Sunlight `light` as it falls on the path's ground `ahead` metres on. The bend draws that
-    /// ground sheared sideways, so light cast along it is sheared back first: a shadow there then
-    /// keeps the sun's way on screen wherever the curve takes it, the sun fixed in the world.
+    /// Sunlight `light` (in the world the road lies still in: the camera's turn is in `to_cam`)
+    /// as it falls on the path's ground `ahead` metres on. The road there runs across that world
+    /// at `path_slope`, so light cast along it is sheared back first: a shadow there then keeps
+    /// the sun's way on the ground wherever the road winds.
     pub fn light_on_path(&self, light: [f32; 3], ahead: f32) -> [f32; 3] { Self::sheared_back(light, self.path_slope(ahead)) }
 
-    /// `Bend::slope` `ahead` metres on; 0 at once on a straight path.
+    /// How far sideways the road runs per metre ahead `ahead` metres on, in the world it lies
+    /// still in (`Bend::heading`); 0 at once on a straight path.
     pub fn path_slope(&self, ahead: f32) -> f32 {
         let straight = self.bend == 0.0 && self.shear.is_none() && self.blend.is_none() && self.wind.iter().all(|w| w[0] == 0.0);
-        if straight { 0.0 } else { self.bender().slope(ahead) }
+        if straight { 0.0 } else { self.bender().heading(ahead) }
     }
 
     /// `light` with the bend's shear at `slope` taken back (`light_on_path`).
@@ -490,7 +498,7 @@ impl View {
     /// How far sideways the sky stands from where the scene puts it, pixels. The sky is
     /// infinitely far, so as the camera turns with the path all of it slides across the frame
     /// together, the way the far end of the path does.
-    pub fn sky_dx(&self) -> f32 { -self.focal_px * self.turn_tan() + self.pan_px + self.sky_turn * (self.width - 2 * self.left) as f32 }
+    pub fn sky_dx(&self) -> f32 { -self.focal_px * self.yaw_tan() + self.pan_px + self.sky_turn * (self.width - 2 * self.left) as f32 }
 
     /// The furthest the sky slides either way over the loop, pixels (0 when the camera never turns).
     pub fn sky_swing(&self) -> f32 {
@@ -499,7 +507,7 @@ impl View {
 
     /// The winding as the GPU reads it: each wave (`Winding::waves`), and the blend's start, its
     /// 1 / length, and the offset and slope taken off.
-    pub fn wind_now(&self) -> ([[f32; 4]; 4], [f32; 4], [f32; 4]) { let w = self.winding(); (w.waves, [w.lo, w.inv, w.c0, w.c1], [w.tail[0], w.tail[1], 0.0, 0.0]) }
+    pub fn wind_now(&self) -> ([[f32; 4]; 4], [f32; 4], [f32; 4]) { let w = self.winding(); (w.waves, [w.lo, w.inv, w.c0, w.c1], [w.tail[0], w.tail[1], w.yaw, 0.0]) }
 
     /// The shortest of the winding's waves, metres (None when the path does not wind).
     pub fn wind_length(&self) -> Option<f32> {
@@ -530,15 +538,51 @@ impl View {
         half_width * (d.max(self.near_ground) / self.near_ground).powf(flare)
     }
 
-    /// World (x sideways, y up, d ahead) to camera space.
+    /// World (x sideways, y up, d ahead) to camera space: the road sheared across the camera's
+    /// way (`to_sheared_cam`), then the camera turned with the winding road (`yawed`).
     #[inline]
-    pub fn to_cam(&self, x: f32, y: f32, d: f32) -> [f32; 3] {
-        let c = [x + self.bend_x(d) + self.shear_x(d), y - self.eye_height + self.hill_y(d) + self.lift(d), d];
-        if !self.turned { return c; }
-        // Turned: from where the camera stands, round the vertical by the yaw.
-        let px = c[0] - self.cam_x;
-        [self.yaw_c * px - self.yaw_s * c[2], c[1], self.yaw_s * px + self.yaw_c * c[2]]
+    pub fn to_cam(&self, x: f32, y: f32, ahead: f32) -> [f32; 3] {
+        let wind = self.winding();
+        let bend = self.bend * BEND_K * ahead * ahead + wind.x(ahead);
+        let sheared = [x + bend + self.shear_x(ahead), y - self.eye_height + self.hill_y(ahead) + self.lift(ahead), ahead];
+        self.turned_cam(Self::yawed(sheared, wind.yaw))
     }
+
+    /// `to_cam` with the winding road's camera turn left as the old shear (`turn_tan` metres
+    /// sideways per metre ahead): the frame worlds share, for moving a pixel from one into
+    /// another (as `Bend::cam_xz`). It is not where anything is drawn.
+    #[inline]
+    pub fn to_sheared_cam(&self, x: f32, y: f32, ahead: f32) -> [f32; 3] {
+        self.turned_cam([x + self.bend_x(ahead) + self.shear_x(ahead), y - self.eye_height + self.hill_y(ahead) + self.lift(ahead), ahead])
+    }
+
+    /// Turned (`camera.yaw`): from where the camera stands, round the vertical by the yaw.
+    #[inline]
+    fn turned_cam(&self, cam: [f32; 3]) -> [f32; 3] {
+        if !self.turned { return cam; }
+        let px = cam[0] - self.cam_x;
+        [self.yaw_c * px - self.yaw_s * cam[2], cam[1], self.yaw_s * px + self.yaw_c * cam[2]]
+    }
+
+    /// `sheared` (camera space with the camera's turn along a winding road drawn as a shear,
+    /// `turn_tan` metres sideways per metre ahead) as a camera really turned that way sees it.
+    /// The road then keeps still in the world: ground, props and their shadows turn together.
+    /// Far away it is where the shear put it (the sky slides as before); the map is linear, so a
+    /// ray from the camera in one is a ray from the camera in the other.
+    #[inline]
+    pub fn yawed(sheared: [f32; 3], turn_tan: f32) -> [f32; 3] {
+        if turn_tan == 0.0 { return sheared; }
+        let secant = (1.0 + turn_tan * turn_tan).sqrt();
+        [sheared[0] / secant, sheared[1], turn_tan * sheared[0] / secant + sheared[2] * secant]
+    }
+
+    /// Whether the camera turns at all (`camera.yaw`, or with a winding road), so that surfaces
+    /// built beside the camera can pass behind it.
+    pub fn has_yaw(&self) -> bool { self.turned || self.yaw_tan() != 0.0 }
+
+    /// How far the camera really turns with the winding road (`Winding::yaw`), as the tangent of
+    /// the angle; `turn_tan` with the line lining one world's road up with the next's left out.
+    pub fn yaw_tan(&self) -> f32 { self.winding().yaw }
 
     /// Where a frame of several worlds keeps its bounds (`render::Bounds`): `to_cam`'s x and z
     /// with the path's bend and winding taken off. A fork's branches part along straight lines
@@ -554,13 +598,25 @@ impl View {
     /// A direction the camera sees, back in the world (x, y, d): `rot_dir` undone.
     #[inline]
     pub fn unrot_dir(&self, v: [f32; 3]) -> [f32; 3] {
-        if !self.turned { return v; }
-        [self.yaw_c * v[0] + self.yaw_s * v[2], v[1], -self.yaw_s * v[0] + self.yaw_c * v[2]]
+        let v = if self.turned { [self.yaw_c * v[0] + self.yaw_s * v[2], v[1], -self.yaw_s * v[0] + self.yaw_c * v[2]] } else { v };
+        let (cos, sin) = Self::wind_yaw(self.yaw_tan());
+        if sin == 0.0 { return v; }
+        [cos * v[0] + sin * v[2], v[1], -sin * v[0] + cos * v[2]]
+    }
+
+    /// The cosine and sine of the camera's turn with a winding road whose tangent is `turn_tan`.
+    #[inline]
+    fn wind_yaw(turn_tan: f32) -> (f32, f32) {
+        if turn_tan == 0.0 { return (1.0, 0.0); }
+        let secant = (1.0 + turn_tan * turn_tan).sqrt();
+        (1.0 / secant, turn_tan / secant)
     }
 
     /// A direction in the world (x, y, d) as the camera sees it (turned with it).
     #[inline]
     pub fn rot_dir(&self, v: [f32; 3]) -> [f32; 3] {
+        let (cos, sin) = Self::wind_yaw(self.yaw_tan());
+        let v = if sin == 0.0 { v } else { [cos * v[0] - sin * v[2], v[1], sin * v[0] + cos * v[2]] };
         if !self.turned { return v; }
         [self.yaw_c * v[0] - self.yaw_s * v[2], v[1], self.yaw_s * v[0] + self.yaw_c * v[2]]
     }
@@ -578,7 +634,7 @@ impl View {
     /// How far ahead of the camera (its depth) a point on the ground at (x, d) is: `d` itself for
     /// a camera looking down the path.
     #[inline]
-    pub fn depth_of(&self, x: f32, d: f32) -> f32 { if self.turned { self.to_cam(x, 0.0, d)[2] } else { d } }
+    pub fn depth_of(&self, x: f32, ahead: f32) -> f32 { if self.has_yaw() { self.to_cam(x, 0.0, ahead)[2] } else { ahead } }
 
     /// The stretch of the path (metres ahead of where the camera stands, from .. to) and how far
     /// out to either side a turned camera can see out to `far`, with `margin` more all round.
@@ -703,8 +759,9 @@ mod winding_tests {
     }
 
     /// The sun stays put in the world on a winding path: a shadow cast with `light_on_path` at
-    /// any distance ahead, once the bend has drawn it, falls the sun's own way, wherever the
-    /// curve takes the ground there and however far along the loop the camera has walked.
+    /// any distance ahead, once the bend has drawn it, falls the sun's own way in the world the
+    /// road lies still in (the camera's turn is a real yaw, `View::yawed`), wherever the curve
+    /// takes the ground there and however far along the loop the camera has walked.
     #[test]
     fn a_shadow_falls_the_suns_way_wherever_the_path_curves() {
         let mut s = Scene::default();
@@ -722,7 +779,8 @@ mod winding_tests {
                 // A shadow a short way from a caster at (1.5, d), as the picture draws it.
                 let l = v.light_on_path(sun, d);
                 let t = 1e-2;
-                let (from, to) = (b.cam_xz(1.5, d), b.cam_xz(1.5 + l[0] * t, d + l[2] * t));
+                let still = |p: [f32; 2]| [p[0] + v.yaw_tan() * p[1], p[1]];
+                let (from, to) = (still(b.cam_xz(1.5, d)), still(b.cam_xz(1.5 + l[0] * t, d + l[2] * t)));
                 let drawn = flat([to[0] - from[0], 0.0, to[1] - from[1]]);
                 let want = flat(sun);
                 assert!((drawn[0] - want[0]).abs() < 2e-3 && (drawn[1] - want[1]).abs() < 2e-3, "scroll {scroll} d {d}: {drawn:?} against {want:?}");
@@ -731,6 +789,89 @@ mod winding_tests {
         // A straight path keeps the light exactly as it was.
         (s.path.bend, s.path.winding.enabled) = (0.0, false);
         assert_eq!(View::new(&s, 480, 270).light_on_path(sun, 12.0), sun);
+    }
+
+    /// What a game casts through its frame's camera (`journey::Camera::light_on_path`) falls the
+    /// sun's way as the props' own shadows do, on either side of a crossing's boundary.
+    #[test]
+    fn a_shadow_cast_through_the_games_camera_falls_the_suns_way() {
+        let wavy = |amplitude: f32, length: f32| {
+            let mut s = Scene::default();
+            s.motion.loop_length = 48.0;
+            s.path.winding = crate::scene::Winding { enabled: true, amplitude, length, turn: 0.6, irregular: 0.4, phase: 0.2 };
+            s
+        };
+        let (near, far) = (wavy(1.4, 24.0), wavy(2.0, 16.0));
+        let sun = [0.55f32, 0.6, -0.58];
+        let flat = |l: [f32; 3]| { let k = l[0].hypot(l[2]); [l[0] / k, l[2] / k] };
+        for scroll in [0.0, 7.0, 19.0, 31.0] {
+            let mut camera = crate::journey::Camera::plain(&near, scroll, 480, 270);
+            camera.beyond = Some((20.0, View::new(&far, 480, 270).at(scroll + 3.0)));
+            for d in [1.0, 6.0, 14.0, 26.0, 37.0] {
+                let view = if d >= 20.0 { camera.beyond.map_or(camera.view, |b| b.1) } else { camera.view };
+                let b = view.bender();
+                let l = camera.light_on_path(sun, d);
+                let t = 1e-2;
+                let still = |p: [f32; 2]| [p[0] + view.yaw_tan() * p[1], p[1]];
+                let (from, to) = (still(b.cam_xz(1.5, d)), still(b.cam_xz(1.5 + l[0] * t, d + l[2] * t)));
+                let drawn = flat([to[0] - from[0], 0.0, to[1] - from[1]]);
+                let want = flat(sun);
+                assert!((drawn[0] - want[0]).abs() < 2e-3 && (drawn[1] - want[1]).abs() < 2e-3, "scroll {scroll} d {d}: {drawn:?} against {want:?}");
+            }
+        }
+    }
+
+    /// A winding road turns the camera as a real camera turns: `to_cam` is a rigid turn of the
+    /// world the road lies still in, so lengths on the ground keep and the near ground turns with
+    /// the far; and far away everything stands where the old shear put it, so the sky slides as
+    /// before. A straight road is untouched.
+    #[test]
+    fn a_winding_road_turns_the_camera_as_a_real_yaw() {
+        let mut s = Scene::default();
+        s.motion.loop_length = 48.0;
+        s.path.winding = crate::scene::Winding { enabled: true, amplitude: 2.2, length: 24.0, turn: 0.6, irregular: 0.4, phase: 0.2 };
+        let points = [(-6.0f32, 1.0f32), (3.0, 2.5), (0.0, 9.0), (8.0, 15.0), (-2.0, 40.0)];
+        let mut turned = 0;
+        for scroll in [0.0, 5.0, 13.0, 29.0, 37.5] {
+            let v = View::new(&s, 480, 270).at(scroll);
+            let yaw = v.yaw_tan();
+            if yaw.abs() > 0.05 { turned += 1; }
+            let still = |x: f32, d: f32| { let c = v.to_sheared_cam(x, 0.0, d); [c[0] + yaw * c[2], c[2]] };
+            let seen = |x: f32, d: f32| { let c = v.to_cam(x, 0.0, d); [c[0], c[2]] };
+            for (i, &(xa, da)) in points.iter().enumerate() {
+                for &(xb, db) in &points[i + 1..] {
+                    let (p, q) = (still(xa, da), still(xb, db));
+                    let (e, f) = (seen(xa, da), seen(xb, db));
+                    let (on_ground, on_screen) = ((p[0] - q[0]).hypot(p[1] - q[1]), (e[0] - f[0]).hypot(e[1] - f[1]));
+                    assert!((on_ground - on_screen).abs() < 1e-4 * on_ground.max(1.0), "scroll {scroll}: {on_ground} against {on_screen}");
+                }
+            }
+            let far = 1.0e5;
+            let (old, new) = (v.project(v.to_sheared_cam(0.0, 0.0, far)).unwrap(), v.project(v.to_cam(0.0, 0.0, far)).unwrap());
+            assert!((old[0] - new[0]).abs() < 0.05, "scroll {scroll}: the far road at {} against {}", new[0], old[0]);
+            assert!((v.center_px + v.sky_dx() - new[0]).abs() < 0.05, "scroll {scroll}: the sky slides with the far road");
+        }
+        assert!(turned >= 3, "the camera turns along the loop ({turned})");
+        s.path.winding.enabled = false;
+        let v = View::new(&s, 480, 270).at(7.0);
+        assert!(!v.has_yaw() && v.to_cam(1.0, 2.0, 7.0) == v.to_sheared_cam(1.0, 2.0, 7.0));
+    }
+
+    /// Past a boundary a frame of two worlds turns its camera exactly as the next world drawn
+    /// alone does: the line lining one road up with the next stays a shear, out of the yaw.
+    #[test]
+    fn past_a_boundary_the_camera_turns_as_the_next_world_alone() {
+        let wavy = |amplitude, length, phase| {
+            let mut s = Scene::default();
+            s.motion.loop_length = 24.0;
+            s.path.winding = crate::scene::Winding { enabled: true, amplitude, length, turn: 0.6, irregular: 0.4, phase };
+            View::new(&s, 90, 160).wind
+        };
+        let (a, b) = (wavy(1.4, 24.0, 0.1), wavy(2.0, 40.0, 0.7));
+        let past = Winding::across((a, 40.0), (b, 52.0), -0.5, 1.0);
+        let alone = Winding::of(b, 52.0);
+        assert!((past.yaw - alone.yaw).abs() < 1e-5, "{} against {}", past.yaw, alone.yaw);
+        assert!((past.c1 - alone.c1).abs() > 1e-3, "the lining up is in the slope taken off");
     }
 
     #[test]

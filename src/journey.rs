@@ -103,6 +103,13 @@ impl Camera {
         let d = d + self.back;
         match self.beyond { Some((zb, b)) if d >= zb => b.world_to_px(x, y, d), _ => self.view.world_to_px(x, y, d) }
     }
+    /// Sunlight `light` as it falls on the ground `d` metres ahead of the walker
+    /// (`View::light_on_path`): a shadow cast there along it keeps the sun's way in the world
+    /// wherever the winding takes the road, as the props' own shadows do.
+    pub fn light_on_path(&self, light: [f32; 3], d: f32) -> [f32; 3] {
+        let d = d + self.back;
+        match self.beyond { Some((zb, b)) if d >= zb => b.light_on_path(light, d), _ => self.view.light_on_path(light, d) }
+    }
     /// How far sideways of the road walked the middle of a fork's island stands `d` metres
     /// ahead of the walker (0 short of the junction, and away from a fork).
     pub fn island_x(&self, d: f32) -> f32 { self.island.map_or(0.0, |(zj, k)| k * (d + self.back - zj).max(0.0)) }

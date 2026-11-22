@@ -304,7 +304,8 @@ fn wind_slope(t: vec4<f32>, d: f32, e: f32, rate: f32) -> f32 {
     let ph = t.y * d + t.z;
     return t.x * (share * t.y * cos(ph) + t.w * rate * sin(ph));
 }
-// View::path_slope: how fast bend_x and shear_x move the ground sideways d metres on.
+// View::path_slope: how far sideways the road runs per metre ahead d metres on, in the world it
+// lies still in (Bend::heading: the camera's turn, W.wind_k.z, is a real yaw in to_cam).
 fn path_slope(d: f32) -> f32 {
     let u = clamp((d - W.wind_c.x) * W.wind_c.y, 0.0, 1.0);
     let e = u * u * (3.0 - 2.0 * u);
@@ -321,7 +322,7 @@ fn path_slope(d: f32) -> f32 {
         if W.realm == 1u { z0 = W.sh_z0_1; k = W.sh_k_1; } else if W.realm == 2u { z0 = W.sh_z0_2; k = W.sh_k_2; }
         sh = select(0.0, k, d > z0);
     }
-    return 2.0 * W.bend * 0.012 * d + (s - W.wind_c.w) + sh;
+    return 2.0 * W.bend * 0.012 * d + (s - W.wind_c.w + W.wind_k.z) + sh;
 }
 // View::sheared_back.
 fn sheared_back(l: vec3<f32>, slope: f32) -> vec3<f32> {
@@ -356,10 +357,26 @@ fn path_half_width(d: f32) -> f32 {
     if t <= 0.0 { return a; }
     return a + (flared(W.sp_hw_b, W.sp_flare_b, d) - a) * t;
 }
-// View::rot_dir: a world direction as the turned camera sees it.
-fn rot_dir(v: vec3<f32>) -> vec3<f32> {
+// View::rot_dir: a world direction as the camera sees it, turned with a winding road (W.wind_k.z,
+// View::wind_yaw) and by its own yaw.
+fn rot_dir(w: vec3<f32>) -> vec3<f32> {
+    var v = w;
+    let tw = W.wind_k.z;
+    if tw != 0.0 {
+        let sec = sqrt(1.0 + tw * tw);
+        let wc = 1.0 / sec; let ws = tw / sec;
+        v = vec3<f32>(wc * v.x - ws * v.z, v.y, ws * v.x + wc * v.z);
+    }
     if W.cam_turned == 0u { return v; }
     return vec3<f32>(rnd(W.cam_yc * v.x) - rnd(W.cam_ys * v.z), v.y, rnd(W.cam_ys * v.x) + rnd(W.cam_yc * v.z));
+}
+// View::yawed: camera space with the camera's turn along a winding road drawn as a shear, as a
+// camera really turned that way (tan W.wind_k.z, Winding::yaw) sees it.
+fn yawed(c: vec3<f32>) -> vec3<f32> {
+    let tw = W.wind_k.z;
+    if tw == 0.0 { return c; }
+    let sec = sqrt(1.0 + tw * tw);
+    return vec3<f32>(c.x / sec, c.y, tw * c.x / sec + c.z * sec);
 }
 // View::flat_xz: where the bounds of a frame of several worlds lie, the path's winding taken off.
 fn flat_xz(x: f32, d: f32) -> vec2<f32> {
@@ -369,7 +386,7 @@ fn flat_xz(x: f32, d: f32) -> vec2<f32> {
     return vec2<f32>(rnd(W.cam_yc * px) - rnd(W.cam_ys * d), rnd(W.cam_ys * px) + rnd(W.cam_yc * d));
 }
 fn to_cam(x: f32, y: f32, d: f32) -> vec3<f32> {
-    let c = vec3<f32>(x + bend_x(d) + shear_x(d), y - W.eye_height + hill_y(d) + lift(d), d);
+    let c = yawed(vec3<f32>(x + bend_x(d) + shear_x(d), y - W.eye_height + hill_y(d) + lift(d), d));
     if W.cam_turned == 0u { return c; }
     let px = c.x - W.cam_x;
     return vec3<f32>(rnd(W.cam_yc * px) - rnd(W.cam_ys * c.z), c.y, rnd(W.cam_ys * px) + rnd(W.cam_yc * c.z));

@@ -65,6 +65,9 @@ pub struct RenderOptions {
     /// Drawn for a game that walks on for ever, never played back as a loop: what drifts across
     /// the sky (clouds) moves on unbroken at any speed instead of closing the loop.
     pub endless: bool,
+    /// With `endless`: seconds the walk has run, never wrapped, which sky drift is measured on.
+    /// `time` wraps with the loop, so drift read from it snaps back once a loop. None: `time`.
+    pub clock: Option<f64>,
     /// Also return which part of the scene each pixel shows (see `Pick`), for clicking to select.
     pub pick: bool,
     /// Seconds since play began, for the camera's flight in and swing in (`camera.moves.fly_in`,
@@ -880,7 +883,7 @@ struct Ctx<'a> {
     /// Phase of time in the loop's period (loop_seconds): drives everything that moves on its own.
     tphase: f32,
     /// Loops of the clock gone by, unwrapped, in an endless frame (`RenderOptions::endless`).
-    loops: Option<f32>,
+    loops: Option<f64>,
     scroll: f32,
     far: f32,
     /// A turned camera (View::turned): the stretch of the path it can see (metres from where it
@@ -1610,7 +1613,7 @@ impl<'a> Ctx<'a> {
         let across = if same {
             pixel.x
         } else {
-            let cam = from.view.to_cam(pixel.x, pixel.y, pixel.d);
+            let cam = from.view.to_sheared_cam(pixel.x, pixel.y, pixel.d);
             cam[0] - self.view.bend_x(pixel.d) - self.view.shear_x(pixel.d)
         };
         GPixel { x: across, realm: self.realm, ..*pixel }
@@ -2293,7 +2296,10 @@ impl WorldRenderer {
         let mut strikes = Vec::with_capacity(n);
         for r in 0..n {
             let (mut ctx, ls, strike, flash) = self.world_ctx(&worlds[r], views[r], r as u8, bounds);
-            if opts.endless { ctx.loops = worlds[r].time.map(|t| t / worlds[r].scene.motion.loop_seconds().max(1e-3)); }
+            if opts.endless {
+                let secs = f64::from(worlds[r].scene.motion.loop_seconds().max(1e-3));
+                ctx.loops = opts.clock.or(worlds[r].time.map(f64::from)).map(|t| t / secs);
+            }
             ctxs.push(ctx);
             strikes.push((ls, strike, flash));
         }
@@ -4653,10 +4659,11 @@ fn letterbox(img: &mut Image, share: f32) {
 
 /// Where the light of a sun or moon at `pos` in the picture comes from, in the world: the
 /// picture is 2.4 radians of sky across, and the sky turns with the camera (less what it slides
-/// back across the frame when it stays in the world, `View::sky_turn`).
+/// back across the frame when it stays in the world, `View::sky_turn`). A winding road turns the
+/// camera in a world that keeps still (`View::yawed`), so that turn leaves the sun where it is.
 fn sky_light_dir(view: &View, pos: [f32; 2]) -> [f32; 3] {
     let yaw = if view.turned { view.yaw_s.atan2(view.yaw_c) } else { 0.0 };
-    let az = (pos[0] + view.sky_turn - 0.5) * 2.4 - view.turn_tan().atan() + yaw;
+    let az = (pos[0] + view.sky_turn - 0.5) * 2.4 + yaw;
     let el = (1.0 - pos[1].clamp(0.0, 1.0)) * 1.15 + 0.08;
     [az.sin() * el.cos(), el.sin(), az.cos() * el.cos()]
 }
@@ -6380,7 +6387,7 @@ fn prop_shadows(ctx: &Ctx, all: &[Ctx], bills: &[Billboard], gbuf: &[GPixel], su
     let w = ctx.view.width;
     // Across from this world's path centre, for a bit of ground of any world.
     let across = |g: &GPixel| match all.get(g.realm as usize) {
-        Some(f) if g.realm != ctx.realm => f.view.to_cam(g.x, g.y, g.d)[0] - ctx.view.bend_x(g.d) - ctx.view.shear_x(g.d),
+        Some(f) if g.realm != ctx.realm => f.view.to_sheared_cam(g.x, g.y, g.d)[0] - ctx.view.bend_x(g.d) - ctx.view.shear_x(g.d),
         _ => g.x,
     };
     let (sun, casters) = shadow_casters(ctx, bills);
@@ -6846,7 +6853,7 @@ fn cloud_list(ctx: &Ctx) -> Option<CloudSet> {
         let base = hf(cl.seed ^ 0x11, i) * span;
         let speed = drift * (1.0 + (hash(cl.seed ^ 0x22, i) % 2) as f32);
         let (travel, life) = if let Some(loops) = ctx.loops {
-            ((speed * loops).rem_euclid(1.0) * span, 1.0)
+            ((f64::from(speed) * loops).rem_euclid(1.0) as f32 * span, 1.0)
         } else if whole {
             (speed * span * ctx.tphase, 1.0)
         } else {
@@ -8446,7 +8453,7 @@ mod tests {
         let mut r = WorldRenderer::default();
         let layers_at = |r: &mut WorldRenderer, t: f32| {
             let (mut ctx, ..) = r.world_ctx(&WorldIn { scene: &s, distance: 0.0, time: Some(t), base_dir: None }, View::new(&s, 90, 160).at(0.0), 0, None);
-            ctx.loops = Some(t / secs);
+            ctx.loops = Some(f64::from(t / secs));
             clouds::layers(&ctx)
         };
         let (a, b, c) = (layers_at(&mut r, 0.0), layers_at(&mut r, 0.5 * secs), layers_at(&mut r, secs));
@@ -9862,8 +9869,10 @@ mod tests {
         let near = s.camera.side.signum();
         // A point on the path ahead of the camera is in front of it; the ground behind it is not.
         assert!(v.to_cam(0.0, 0.0, 0.0)[2] > 4.0 && v.to_cam(near * 12.0, 0.0, 0.0)[2] < 0.0);
-        // Looking down the path changes nothing: the view is the one it always was.
-        let d = View::new(&preset("Village Evening"), 96, 96);
+        // Looking down a straight path changes nothing: the view is the one it always was.
+        let mut evening = preset("Village Evening");
+        evening.path.winding.enabled = false;
+        let d = View::new(&evening, 96, 96);
         assert!(!d.turned && d.to_cam(1.0, 2.0, 7.0)[2] == 7.0);
     }
 
