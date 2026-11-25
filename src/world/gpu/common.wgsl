@@ -378,9 +378,14 @@ fn yawed(c: vec3<f32>) -> vec3<f32> {
     let sec = sqrt(1.0 + tw * tw);
     return vec3<f32>(c.x / sec, c.y, tw * c.x / sec + c.z * sec);
 }
-// View::flat_xz: where the bounds of a frame of several worlds lie, the path's winding taken off.
+// The world whose path a pixel being shaded lies across, when not this one's (0xFF): a fork
+// branch's pixel drawn here at its own place (render::SAME_X; shade.wgsl's soft_main sets it).
+var<private> frame_realm: u32 = 0xFFu;
+// View::flat_xz: where the bounds of a frame of several worlds lie, the path's winding taken off,
+// of `frame_realm`'s view (render::shade_px's `frame`).
 fn flat_xz(x: f32, d: f32) -> vec2<f32> {
-    let cx = x + shear_x(d);
+    var cx = x + shear_x(d);
+    if MULTI && frame_realm != 0xFFu { cx = x + shear_of(frame_realm, d); }
     if W.cam_turned == 0u { return vec2<f32>(cx, d); }
     let px = cx - W.cam_x;
     return vec2<f32>(rnd(W.cam_yc * px) - rnd(W.cam_ys * d), rnd(W.cam_ys * px) + rnd(W.cam_yc * d));

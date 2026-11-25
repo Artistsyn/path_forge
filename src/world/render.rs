@@ -76,6 +76,10 @@ pub struct RenderOptions {
     /// The camera partway through a swing a game or a transition is making, in place of the
     /// scene's own (and of a swing in).
     pub swing: Option<crate::scene::SwingPose>,
+    /// In a frame of several worlds, a game's swing as each world past the first takes it from
+    /// its own camera (the next world, or a fork's left and right branches), as `swing` is the
+    /// first world's. The frame's camera becomes the next world's through it.
+    pub swing_beyond: [Option<crate::scene::SwingPose>; 2],
     /// The walking camera's eye height, metres, for what must clear it (an arch's opening): the
     /// first world's camera as its scene came, kept by a runtime while a swing has left another
     /// view in place (a cutscene's, high over the path). None: the scene's camera.
@@ -1661,16 +1665,17 @@ impl<'a> Ctx<'a> {
         hits(moved).is_empty().then_some(moved - self.view.scroll)
     }
 
-    /// Whether ground at (x, d), across this world's own path, is road a fork's rounded island
-    /// nose leaves to its branches (`Bounds::nosed`, with this path's edge noise).
-    fn nosed(&self, x: f32, d: f32) -> bool {
-        let c = self.view.flat_xz(x, d);
-        self.bounds.is_some_and(|b| b.nosed(c[0], c[1], self.scene.path.edge_noise.abs() + 0.05))
+    /// Whether ground at (x, d), across `frame`'s path, is road a fork's rounded island nose
+    /// leaves to its branches (`Bounds::nosed`, with this path's edge noise). `frame` is this
+    /// world's view, or another world's for its pixel drawn here at its own place (`SAME_X`).
+    fn nosed(&self, frame: &View, x: f32, ahead: f32) -> bool {
+        let flat = frame.flat_xz(x, ahead);
+        self.bounds.is_some_and(|b| b.nosed(flat[0], flat[1], self.scene.path.edge_noise.abs() + 0.05))
     }
-    /// `Bounds::island_gap` at ground (x, d), across this world's own path.
-    fn island_gap(&self, x: f32, d: f32) -> Option<f32> {
-        let c = self.view.flat_xz(x, d);
-        self.bounds.and_then(|b| b.island_gap(c[0], c[1]))
+    /// `Bounds::island_gap` at ground (x, ahead), across `frame`'s path (as `nosed`).
+    fn island_gap(&self, frame: &View, x: f32, ahead: f32) -> Option<f32> {
+        let flat = frame.flat_xz(x, ahead);
+        self.bounds.and_then(|b| b.island_gap(flat[0], flat[1]))
     }
     /// Whether ground at (x, d) is a fork: a branch path on open ground, or a side passage's floor.
     /// With the split style, it is ground the branch roads pave that the main road alone would not.
@@ -2226,7 +2231,11 @@ impl WorldRenderer {
             None => View::new(worlds[0].scene, w, h),
         };
         if plan.next > 0 {
-            let vn = View::new(worlds[plan.next].scene, w, h);
+            let next = worlds[plan.next].scene;
+            let vn = match &opts.swing_beyond[plan.next - 1] {
+                Some(s) => View::posed(next, &s.camera, w, h, s.turning),
+                None => View::new(next, w, h),
+            };
             let t = plan.cam_t;
             let mix = |a: f32, b: f32| a + (b - a) * t;
             cam.horizon_px = mix(cam.horizon_px, vn.horizon_px);
@@ -4958,9 +4967,10 @@ fn on_other_branch(ctx: &Ctx, x: f32, d: f32, realm: u8) -> bool {
     (x + (own - other) * (d - zb)).abs() < hw
 }
 
-/// Texture coordinates (in repeats) and which texture a G-buffer pixel uses.
+/// Texture coordinates (in repeats) and which texture a G-buffer pixel uses, `g.x` across
+/// `frame`'s path (`Ctx::nosed`).
 #[inline]
-fn surface_uv(ctx: &Ctx, g: &GPixel) -> Option<(f32, f32, u8)> {
+fn surface_uv(ctx: &Ctx, frame: &View, g: &GPixel) -> Option<(f32, f32, u8)> {
     let dw = g.d + ctx.scroll;
     let rot = |m: &Material, u: f32, v: f32| if m.rotate { (v, -u) } else { (u, v) };
     match g.id {
@@ -5001,10 +5011,10 @@ fn surface_uv(ctx: &Ctx, g: &GPixel) -> Option<(f32, f32, u8)> {
             // Only the ground left between a fork's branches turns to verge; patches of this world's
             // path mixing into the branches keep their surface.
             let between = ctx.scene.verge.enabled && ctx.verge_beyond.is_some_and(|z| g.d > z) && ctx.bounds.is_some_and(|b| {
-                let c = ctx.view.flat_xz(g.x, g.d);
-                b.region_of(c[0], c[1]) == 0
+                let flat = frame.flat_xz(g.x, g.d);
+                b.region_of(flat[0], flat[1]) == 0
             });
-            let on_path = ctx.nosed(g.x, g.d) || (!between && (!ctx.scene.verge.enabled || g.x.abs() < ctx.path_edge(g.d) || ctx.on_fork(g.x, g.d)));
+            let on_path = ctx.nosed(frame, g.x, g.d) || (!between && (!ctx.scene.verge.enabled || g.x.abs() < ctx.path_edge(g.d) || ctx.on_fork(g.x, g.d)));
             if on_path {
                 // A waterway's current carries its pattern towards the camera.
                 let along = along + ctx.water.map_or(0.0, |k| k.shift);
@@ -5135,14 +5145,17 @@ fn shade_px(ctx: &Ctx, g: &GPixel, gbuf: &[GPixel], i: usize, x: usize, y: usize
     let (sky_top, sky_hor) = (rgb_lin(ctx.scene.sky.top), rgb_lin(ctx.scene.sky.horizon));
     let mut rf = Refl::default();
     let scene = ctx.scene;
-    let (u, v, tex) = match uvs { Uvs::Own(b) => b[i]?, Uvs::Moved { .. } => surface_uv(ctx, g)? };
+    // Whose path `g.x` runs across: a pixel drawn here from another world at its own place lies
+    // on that world's ground, so a fork's bounds are found from there.
+    let frame = match uvs { Uvs::Moved { from, same: true } => &from.view, _ => &ctx.view };
+    let (u, v, tex) = match uvs { Uvs::Own(b) => b[i]?, Uvs::Moved { .. } => surface_uv(ctx, frame, g)? };
     // Footprint from neighbouring pixels on the same surface, like GPU derivatives.
     let mut fp = 0.0f32;
     for j in [if x + 1 < w { i + 1 } else { i - 1 }, if y + 1 < h { i + w } else { i - w }] {
         let n = &gbuf[j];
         let near = match uvs {
             Uvs::Own(b) => (n.id == g.id && n.realm == g.realm).then(|| b[j]).flatten(),
-            Uvs::Moved { from, same } => (n.id == g.id && n.realm == gbuf[i].realm).then(|| surface_uv(ctx, &ctx.moved_here(from, n, same))).flatten(),
+            Uvs::Moved { from, same } => (n.id == g.id && n.realm == gbuf[i].realm).then(|| surface_uv(ctx, frame, &ctx.moved_here(from, n, same))).flatten(),
         };
         if let Some((u2, v2, _)) = near.filter(|n| n.2 == tex) { fp = fp.max((u2 - u).abs().max((v2 - v).abs())); }
     }
@@ -5198,7 +5211,7 @@ fn shade_px(ctx: &Ctx, g: &GPixel, gbuf: &[GPixel], i: usize, x: usize, y: usize
     }
     // What grows on the ground hides it.
     if !ctx.cover.is_empty() && g.id == id::GROUND && tex <= 1 {
-        let (c, a) = cover::at(ctx, &ctx.cover, g, tex, cover::jitter(i));
+        let (c, a) = cover::at(ctx, frame, g, tex, cover::jitter(i));
         if a > 0.0 {
             albedo = mix3(albedo, c, a);
             gloss_k *= 1.0 - a;
@@ -5214,7 +5227,7 @@ fn shade_px(ctx: &Ctx, g: &GPixel, gbuf: &[GPixel], i: usize, x: usize, y: usize
             } else if tex == 0 && !ctx.on_fork(g.x, g.d) && !on_other_branch(ctx, g.x, g.d, gbuf[i].realm) {
                 let edge = ctx.path_edge(g.d).max(0.05);
                 // Beside a fork's rounded island nose the road wears towards its edge instead.
-                let worn = ctx.island_gap(g.x, g.d).map_or(g.x.abs() / edge, |gap| 1.0 - gap / edge);
+                let worn = ctx.island_gap(frame, g.x, g.d).map_or(g.x.abs() / edge, |gap| 1.0 - gap / edge);
                 ao *= 1.0 - scene.path.edge_dark.clamp(0.0, 1.0) * smoothstep(0.5, 1.0, worn);
             }
             if scene.walls.enabled {
@@ -5918,7 +5931,7 @@ fn shade(ctxs: &[Ctx], sky_w: &SkyW, soft: &[(u8, f32)], gbuf: &[GPixel], sun_ma
     };
     let tiles = tile_lights(ctxs, gbuf);
     // Each pixel's texture coordinates once, for itself and for its neighbours' footprints.
-    let uvs: Vec<Option<(f32, f32, u8)>> = gbuf.par_iter().map(|g| surface_uv(&ctxs[(g.realm as usize).min(ctxs.len() - 1)], g)).collect();
+    let uvs: Vec<Option<(f32, f32, u8)>> = gbuf.par_iter().map(|g| { let own = &ctxs[(g.realm as usize).min(ctxs.len() - 1)]; surface_uv(own, &own.view, g) }).collect();
     hdr.par_chunks_mut(w).zip(refl.par_chunks_mut(w)).enumerate().for_each(|(y, (row, rrow))| {
         for x in 0..w {
             let i = y * w + x;
@@ -7868,7 +7881,7 @@ fn draw_tufts(ctx: &Ctx, out: &mut Vec<Splat>) {
             if hf(0x7A, ikey) > 0.85 { continue; }
             if ctx.on_bridge(d) { continue; }
             let x = sign * (ctx.path_edge(d) + (hf(0x7B, ikey) - 0.3) * 0.18);
-            if ctx.on_fork(x, d) || ctx.nosed(x, d) || !ctx.owns(x, d) { continue; }
+            if ctx.on_fork(x, d) || ctx.nosed(&ctx.view, x, d) || !ctx.owns(x, d) { continue; }
             let c = v.to_cam(x, 0.0, d);
             if c[2] < NEAR { continue; }
             let Some([sx, sy]) = v.project(c) else { continue };

@@ -158,8 +158,10 @@ fn over(col: &mut [f32; 3], a: &mut f32, c: [f32; 3], m: f32) {
 
 /// The cover over the ground pixel `g` (`tex` 0 the path, 1 the verge): its colour, and how much
 /// of the ground it hides. `jitter` (0..1, the pixel's own) shifts where along its line of sight
-/// the pixel looks, so the steps do not show as bands.
-pub(super) fn at(ctx: &Ctx, layers: &[CoverK], g: &GPixel, tex: u8, jitter: f32) -> ([f32; 3], f32) {
+/// the pixel looks, so the steps do not show as bands. `g.x` runs across `frame`'s path, for a
+/// fork's nose (`Ctx::nosed`).
+pub(super) fn at(ctx: &Ctx, frame: &View, g: &GPixel, tex: u8, jitter: f32) -> ([f32; 3], f32) {
+    let layers = &ctx.cover;
     let v = &ctx.view;
     let w0 = ctx.scroll + g.d;
     let here = if tex == 1 { 1 } else { 2 };
@@ -194,6 +196,8 @@ pub(super) fn at(ctx: &Ctx, layers: &[CoverK], g: &GPixel, tex: u8, jitter: f32)
     let ft = (1.0 - hmax / e).max(0.02);
     let xt = (xc * ft - v.bend_x(g.d * ft)).abs();
     let known = if xt.min(g.x.abs()) > hw + en + 0.05 { 1 } else if xt.max(g.x.abs()) < hw - en - 0.05 { 2 } else { 0 };
+    // A fork island's rounded nose is road, wherever across its world it lies (`Ctx::nosed`).
+    let known = if ctx.nosed(frame, g.x, g.d) { 2 } else { known };
     // (Nothing stands on that side: nothing to march through. Most of the path's pixels end here.)
     let steps = if known != 0 && sides & known == 0 { 0 } else { STEPS };
     if steps == 0 && known == here { return (col, a); }
@@ -209,7 +213,7 @@ pub(super) fn at(ctx: &Ctx, layers: &[CoverK], g: &GPixel, tex: u8, jitter: f32)
         let dj = g.d * f;
         if ctx.on_bridge(dj) { continue; }
         let xj = xc * f - v.bend_x(dj);
-        let side = if known != 0 { known } else if xj.abs() > hw + en { 1 } else if xj.abs() < hw - en { 2 } else if xj.abs() > ctx.path_edge(dj) { 1 } else { 2 };
+        let side = if known != 0 { known } else if ctx.nosed(frame, xj, dj) { 2 } else if xj.abs() > hw + en { 1 } else if xj.abs() < hw - en { 2 } else if xj.abs() > ctx.path_edge(dj) { 1 } else { 2 };
         if water && side == 2 { continue; }
         for (i, k) in layers.iter().enumerate() {
             if k.kind == 4 || k.on & side == 0 || h >= k.height { continue; }

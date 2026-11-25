@@ -352,12 +352,10 @@ impl Bend {
         if let Some(turn) = self.turned { out[29] = 1.0; out[30..33].copy_from_slice(&turn); }
         out
     }
-    /// `View::to_sheared_cam`'s x and z (its height is not needed here): the frame worlds share.
+    /// `View::to_sheared_cam`'s x and z (its height is not needed here): the frame worlds share,
+    /// unturned, since every world turns alike.
     #[inline]
-    pub fn cam_xz(&self, x: f32, d: f32) -> [f32; 2] {
-        let cx = x + self.x(d) + self.shear(d);
-        self.turn([cx, d])
-    }
+    pub fn cam_xz(&self, x: f32, ahead: f32) -> [f32; 2] { [x + self.x(ahead) + self.shear(ahead), ahead] }
     /// `View::flat_xz`: camera space with the path's bend and winding taken off.
     #[inline]
     pub fn flat_xz(&self, x: f32, ahead: f32) -> [f32; 2] { self.turn([x + self.shear(ahead), ahead]) }
@@ -549,11 +547,13 @@ impl View {
     }
 
     /// `to_cam` with the winding road's camera turn left as the old shear (`turn_tan` metres
-    /// sideways per metre ahead): the frame worlds share, for moving a pixel from one into
-    /// another (as `Bend::cam_xz`). It is not where anything is drawn.
+    /// sideways per metre ahead) and the camera's own turn (`camera.yaw`) left off: the frame
+    /// worlds share, for moving a pixel from one into another (as `Bend::cam_xz`). Every world
+    /// of a frame turns alike, so a pixel moved through a turned frame would land metres off.
+    /// It is not where anything is drawn.
     #[inline]
     pub fn to_sheared_cam(&self, x: f32, y: f32, ahead: f32) -> [f32; 3] {
-        self.turned_cam([x + self.bend_x(ahead) + self.shear_x(ahead), y - self.eye_height + self.hill_y(ahead) + self.lift(ahead), ahead])
+        [x + self.bend_x(ahead) + self.shear_x(ahead), y - self.eye_height + self.hill_y(ahead) + self.lift(ahead), ahead]
     }
 
     /// Turned (`camera.yaw`): from where the camera stands, round the vertical by the yaw.

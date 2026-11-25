@@ -57,6 +57,9 @@ pub struct Runtime {
     swinging: Option<Swinging>,
     /// The camera the current scene came with, for swinging back to (`swing("home")`).
     home: scene::Camera,
+    /// The view the game last swung to (`swing_to`), as a change from each scene's own camera:
+    /// on every world's camera, the current scene's and those a transition heads into.
+    look: Look,
     /// Journey stops `warm_next` has still to get ready.
     cold: Vec<String>,
     /// Stops the game has asked for ahead of the rest (`warm`): a cut it is about to make.
@@ -163,19 +166,72 @@ fn paint_props_of(scene: &Scene, dir: Option<&Path>, defs: &mut crate::world::pr
     });
 }
 
-/// The camera swinging from one view to another at the game's asking: how, from where, to what
-/// camera, and seconds since it began.
-struct Swinging { style: scene::Swing, from: scene::SwingView, to: scene::Camera, t: f32 }
+/// A view the game swung to, held as a change from a scene's own camera: the angle, the place,
+/// the height and the horizon added to it, the zoom times it, and how far back it stands. Every
+/// world of a crossing or fork takes the same change from its own camera, so the view goes on
+/// into the next place, and `home` (no change) gives each world its own camera back.
+/// Held as the view and the camera it was measured from, so that camera gets the view back
+/// exactly, with no rounding.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Look { own: scene::SwingView, view: scene::SwingView }
 
-impl Swinging {
-    fn pose(&self) -> Option<scene::SwingPose> {
-        let u = (self.t - self.style.hold.max(0.0)) / self.style.seconds.max(1e-3);
-        (self.t < self.style.length()).then(|| self.style.between(&self.from, &scene::SwingView::of(&self.to), &self.to, u))
+impl Default for Look {
+    fn default() -> Look {
+        let none = scene::SwingView { back: 0.0, ..scene::SwingView::default() };
+        Look { own: none, view: none }
     }
 }
 
-/// A scene the walk is heading into.
-struct Bound { scene: Scene, dir: Option<PathBuf>, stop: Option<String> }
+impl Look {
+    /// The change that takes camera `own` to `view`.
+    fn from_view(own: &scene::Camera, view: &scene::SwingView) -> Look { Look { own: scene::SwingView::of(own), view: *view } }
+    /// The view camera `own` has with this change made.
+    fn view_on(&self, own: &scene::Camera) -> scene::SwingView {
+        let base = scene::SwingView::of(own);
+        if base == self.own { return self.view; }
+        let (from, to) = (&self.own, &self.view);
+        scene::SwingView {
+            yaw: (base.yaw + (to.yaw - from.yaw)).clamp(-90.0, 90.0), side: base.side + (to.side - from.side), back: to.back,
+            eye_height: base.eye_height + (to.eye_height - from.eye_height), horizon: base.horizon + (to.horizon - from.horizon),
+            zoom: base.zoom * (to.zoom / from.zoom.max(1e-3)),
+        }
+    }
+    /// Camera `own` with this change made (`back` aside: a camera stands at the walker).
+    fn camera_on(&self, own: &scene::Camera) -> scene::Camera {
+        let view = self.view_on(own);
+        scene::Camera { yaw: view.yaw, side: view.side, eye_height: view.eye_height, horizon: view.horizon, zoom: view.zoom, ..own.clone() }
+    }
+}
+
+/// The camera swinging from one view to another at the game's asking: how, from where and to
+/// where (each a `Look` from a scene's own camera), and seconds since it began.
+struct Swinging { style: scene::Swing, from: Look, to: Look, t: f32 }
+
+impl Swinging {
+    /// The camera partway through the swing for a world whose own camera is `own` and whose
+    /// camera is `now` (its own with the view last landed on); None once it has ended.
+    fn pose(&self, own: &scene::Camera, now: &scene::Camera) -> Option<scene::SwingPose> {
+        let u = (self.t - self.style.hold.max(0.0)) / self.style.seconds.max(1e-3);
+        (self.t < self.style.length()).then(|| self.style.between(&self.from.view_on(own), &self.to.view_on(own), now, u))
+    }
+}
+
+/// A scene the walk is heading into, and the camera it came with (its own: `scene.camera` has
+/// the game's view on it, `Runtime::aim`).
+struct Bound { scene: Scene, dir: Option<PathBuf>, stop: Option<String>, home: scene::Camera }
+
+impl Bound {
+    fn new(scene: Scene, dir: Option<PathBuf>, look: &Look) -> Bound {
+        let home = scene.camera.clone();
+        let mut bound = Bound { scene, dir, stop: None, home };
+        bound.aim(look);
+        bound
+    }
+    /// Put the game's view on the scene's own camera.
+    fn aim(&mut self, look: &Look) { self.scene.camera = look.camera_on(&self.home); }
+    /// The game's swing under way as this world takes it.
+    fn pose(&self, swinging: Option<&Swinging>) -> Option<scene::SwingPose> { swinging.and_then(|s| s.pose(&self.home, &self.scene.camera)) }
+}
 
 /// A transition or fork under way.
 enum Active {
@@ -273,7 +329,7 @@ impl Runtime {
     /// A scene whose files (sprites, kits, grades) are named relative to `base_dir`.
     pub fn new(scene: Scene, base_dir: Option<PathBuf>) -> Runtime {
         let home = scene.camera.clone();
-        Runtime { scene, base_dir, renderer: WorldRenderer::default(), rgba: Vec::new(), pipelined: false, distance: 0.0, time: 0.0, walked: 0.0, active: None, onward: None, journey: None, day_seconds: 0.0, played: 0.0, clock: 0.0, swinging: None, home, cold: Vec::new(), wanted: Vec::new(), floor: None, lift: 1.0, probes: Vec::new(), ahead: None, near: None, end: None, warps: 0, placed: Vec::new(), flashes: Vec::new() }
+        Runtime { scene, base_dir, renderer: WorldRenderer::default(), rgba: Vec::new(), pipelined: false, distance: 0.0, time: 0.0, walked: 0.0, active: None, onward: None, journey: None, day_seconds: 0.0, played: 0.0, clock: 0.0, swinging: None, home, look: Look::default(), cold: Vec::new(), wanted: Vec::new(), floor: None, lift: 1.0, probes: Vec::new(), ahead: None, near: None, end: None, warps: 0, placed: Vec::new(), flashes: Vec::new() }
     }
 
     /// Draw frames on the GPU, on a device the game hands over (with wgpu 25, the same one it
@@ -339,7 +395,8 @@ impl Runtime {
 
     /// Change the scene (another biome, a tweak); caches that depend on it are rebuilt as needed.
     /// This cuts; `transition_to` walks.
-    pub fn set_scene(&mut self, scene: Scene) { self.home = scene.camera.clone(); self.scene = scene; self.active = None; self.swinging = None; }
+    /// The scene comes with its own camera: a view the game swung to is left behind.
+    pub fn set_scene(&mut self, scene: Scene) { self.home = scene.camera.clone(); self.scene = scene; self.active = None; self.swinging = None; self.look = Look::default(); }
 
     /// `set_scene` for a scene whose files are named relative to `dir`.
     pub fn set_scene_in(&mut self, scene: Scene, dir: Option<PathBuf>) { self.set_scene(scene); self.base_dir = dir; }
@@ -556,7 +613,7 @@ impl Runtime {
         self.clock += f64::from(dt.max(0.0));
         if let Some(sw) = &mut self.swinging {
             sw.t += dt.max(0.0);
-            if sw.t >= sw.style.length() { self.scene.camera = sw.to.clone(); self.swinging = None; }
+            if sw.t >= sw.style.length() { self.land(); }
         }
         self.time = (self.time + dt).rem_euclid(self.loop_seconds().max(1e-3));
         self.distance += ds;
@@ -586,7 +643,7 @@ impl Runtime {
         };
         self.onward = None;
         self.scene = next.scene;
-        self.home = self.scene.camera.clone();
+        self.home = next.home;
         self.base_dir = next.dir;
         self.distance = distance.rem_euclid(self.loop_length());
         self.time = clock;
@@ -600,20 +657,40 @@ impl Runtime {
     /// Swing the camera from where it is now (partway through another swing or the intro, even)
     /// to view `to` (its `back` is not used: the walk's camera stands at the walker), the way
     /// `style` says (its `from` is not used; 0 seconds is 2.5). The view stays once it lands:
-    /// the scene's camera becomes it. In a crossing or fork the walk's camera swings too, except
-    /// while the transition makes a swing of its own.
+    /// the scene's camera becomes it. In a crossing or fork every world's camera swings alike
+    /// from its own (`Look`), and the view goes on into the place walked into; the crossing's
+    /// own swings out of and into a side-on scene take its place while they last.
     pub fn swing_to(&mut self, to: scene::SwingView, style: scene::Swing) -> Result<(), String> {
-        let from = self.view_now();
+        let from = Look::from_view(&self.home, &self.view_now());
         let mut style = style;
         if style.seconds <= 0.0 { style.seconds = 2.5; }
-        let c = &self.scene.camera;
-        let to = scene::Camera { yaw: to.yaw.clamp(-90.0, 90.0), side: to.side, eye_height: to.eye_height, horizon: to.horizon, zoom: to.zoom, ..c.clone() };
+        let to = Look::from_view(&self.home, &scene::SwingView { yaw: to.yaw.clamp(-90.0, 90.0), back: 0.0, ..to });
         // (Any intro still playing ends here: the swing takes the camera on from where it is.)
-        let m = &c.moves;
+        let m = &self.scene.camera.moves;
         self.played = self.played.max(m.fly_in.max(0.0).max(m.swing_in.length()));
         self.swinging = Some(Swinging { style, from, to, t: 0.0 });
         Ok(())
     }
+
+    /// The game's swing lands: its view stays, on every world's camera.
+    fn land(&mut self) {
+        if let Some(sw) = self.swinging.take() { self.look = sw.to; }
+        self.aim();
+    }
+
+    /// Put the game's view (`look`) on the camera of every world the walk shows.
+    fn aim(&mut self) {
+        let look = self.look;
+        self.scene.camera = look.camera_on(&self.home);
+        match &mut self.active {
+            Some(Active::Cross { next, .. }) => next.aim(&look),
+            Some(Active::Fork { left, right, .. }) => { left.aim(&look); right.aim(&look); }
+            None => {}
+        }
+    }
+
+    /// The game's swing under way as the current scene takes it.
+    fn pose(&self) -> Option<scene::SwingPose> { self.swinging.as_ref().and_then(|s| s.pose(&self.home, &self.scene.camera)) }
 
     /// `swing_to` as a game names it: a view by name (`home`: the camera the scene came with;
     /// `ahead`: looking down the path; `side` / `side_left`: a side-scroller's view from the right
@@ -641,7 +718,7 @@ impl Runtime {
 
     /// The camera's view now: the scene's own, or where a swing has it.
     pub fn view_now(&self) -> scene::SwingView {
-        let pose = self.swinging.as_ref().and_then(Swinging::pose).or_else(|| self.intro().and_then(|t| self.scene.camera.moves.swing_in.pose(&self.scene.camera, t)));
+        let pose = self.pose().or_else(|| self.intro().and_then(|t| self.scene.camera.moves.swing_in.pose(&self.scene.camera, t)));
         match pose {
             Some(p) => scene::SwingView { back: p.back, ..scene::SwingView::of(&p.camera) },
             None => scene::SwingView::of(&self.scene.camera),
@@ -679,18 +756,20 @@ impl Runtime {
         let opts = RenderOptions { size: Some((width.max(1), height.max(1))), probes: self.probes.clone(), pipelined: self.pipelined, walk_eye, placed, flashes, endless: true, clock: Some(self.clock), ..RenderOptions::default() };
         self.renderer.set_end(self.end.as_ref().map(|(at, wall)| ((at - self.walked) as f32, wall.clone())));
         let a = Place { scene: &self.scene, dir: self.base_dir.as_deref() };
-        let swing = self.swinging.as_ref().and_then(Swinging::pose);
+        let (swing, swinging) = (self.pose(), self.swinging.as_ref());
         let img = match &self.active {
             None => {
                 let o = RenderOptions { base_dir: self.base_dir.clone(), time: Some(self.time), intro: self.intro(), swing, ..opts };
                 self.renderer.render(&self.scene, self.distance, &o)
             }
             Some(Active::Cross { next, walk, travel, clock }) => {
-                walk.frame(&mut self.renderer, a, Place { scene: &next.scene, dir: next.dir.as_deref() }, *travel, self.time, *clock, &RenderOptions { swing, ..opts })
+                let walk_opts = RenderOptions { swing, swing_beyond: [next.pose(swinging), None], ..opts };
+                walk.frame(&mut self.renderer, a, Place { scene: &next.scene, dir: next.dir.as_deref() }, *travel, self.time, *clock, &walk_opts)
             }
             Some(Active::Fork { left, right, walk, travel, clock }) => {
                 let (l, r) = (Place { scene: &left.scene, dir: left.dir.as_deref() }, Place { scene: &right.scene, dir: right.dir.as_deref() });
-                walk.frame(&mut self.renderer, a, l, r, *travel, [self.time, *clock, *clock], &RenderOptions { swing, ..opts })
+                let walk_opts = RenderOptions { swing, swing_beyond: [left.pose(swinging), right.pose(swinging)], ..opts };
+                walk.frame(&mut self.renderer, a, l, r, *travel, [self.time, *clock, *clock], &walk_opts)
             }
         };
         self.rgba = img.rgba;
@@ -712,7 +791,7 @@ impl Runtime {
         self.finish();
         let c = self.from_home(|scene| tr::plan(scene, &next, t));
         let walk = CrossWalk::new(c.clone(), self.distance, 0.0);
-        self.active = Some(Active::Cross { next: Box::new(Bound { scene: next, dir, stop: None }), walk, travel: 0.0, clock: 0.0 });
+        self.active = Some(Active::Cross { next: Box::new(Bound::new(next, dir, &self.look)), walk, travel: 0.0, clock: 0.0 });
         c
     }
 
@@ -723,7 +802,7 @@ impl Runtime {
         let p = self.from_home(|scene| tr::plan_fork(scene, &left.0, &right.0, f));
         let walk = ForkWalk::new(p.clone(), self.distance, [0.0, 0.0]);
         self.active = Some(Active::Fork {
-            left: Box::new(Bound { scene: left.0, dir: left.1, stop: None }), right: Box::new(Bound { scene: right.0, dir: right.1, stop: None }),
+            left: Box::new(Bound::new(left.0, left.1, &self.look)), right: Box::new(Bound::new(right.0, right.1, &self.look)),
             walk, travel: 0.0, clock: 0.0,
         });
         p
@@ -731,7 +810,7 @@ impl Runtime {
 
     /// `plan` read from the scene as it came, with its own camera: a view the game swung to for a
     /// moment (a turn's side-on look, a fight's) leaves no mark on where a crossing or fork hands
-    /// over. The walk swings the game's view by itself (`swing_to`).
+    /// over. The walk carries the game's view on into the next place by itself (`Look`).
     fn from_home<T>(&mut self, plan: impl FnOnce(&Scene) -> T) -> T {
         let swung = std::mem::replace(&mut self.scene.camera, self.home.clone());
         let planned = plan(&self.scene);
@@ -761,7 +840,7 @@ impl Runtime {
     /// End a transition under way at once (cut to the next scene).
     pub fn finish(&mut self) {
         // A swing the game started lands at once.
-        if let Some(sw) = self.swinging.take() { self.scene.camera = sw.to; }
+        if self.swinging.is_some() { self.land(); }
         let end = match &self.active {
             Some(Active::Cross { walk, .. }) => Some(walk.at(walk.length()).2),
             Some(Active::Fork { walk, .. }) => { let (_, _, sb, _) = walk.at(walk.length()); Some(match walk.branch(walk.length()) { Some((Branch::Right, _)) => sb[1], _ => sb[0] }) }
@@ -929,17 +1008,13 @@ impl Runtime {
     /// The camera of the runtime's own walk now, for a `width` x `height` frame. In a transition,
     /// points past the boundary are placed by the next scene's camera.
     pub fn camera_now(&self, width: u32, height: u32) -> Camera {
-        // A swing the game makes in a crossing or fork: the camera it has, at the walker.
-        let swing = self.swinging.as_ref().and_then(Swinging::pose);
-        match (&self.active, swing) {
-            (Some(Active::Cross { walk, travel, .. }), Some(p)) => return Camera::swinging(&self.scene, &p, walk.at(*travel).1, width, height),
-            (Some(Active::Fork { walk, travel, .. }), Some(p)) => return Camera::swinging(&self.scene, &p, walk.at(*travel).1, width, height),
-            _ => {}
-        }
+        let (swing, swinging) = (self.pose(), self.swinging.as_ref());
         match &self.active {
-            Some(Active::Cross { next, walk, travel, .. }) => walk.camera(&self.scene, &next.scene, *travel, width, height),
-            Some(Active::Fork { left, right, walk, travel, .. }) => walk.camera([&self.scene, &left.scene, &right.scene], *travel, width, height),
-            _ => match self.swinging.as_ref().and_then(Swinging::pose).or_else(|| self.intro().and_then(|t| self.scene.camera.moves.swing_in.pose(&self.scene.camera, t))) {
+            Some(Active::Cross { next, walk, travel, .. }) => walk.camera_swung(&self.scene, &next.scene, *travel, (width, height), &[swing, next.pose(swinging)]),
+            Some(Active::Fork { left, right, walk, travel, .. }) => {
+                walk.camera_swung([&self.scene, &left.scene, &right.scene], *travel, (width, height), &[swing, left.pose(swinging), right.pose(swinging)])
+            }
+            None => match swing.or_else(|| self.intro().and_then(|t| self.scene.camera.moves.swing_in.pose(&self.scene.camera, t))) {
                 Some(p) => Camera::swinging(&self.scene, &p, self.distance, width, height),
                 None => Camera::plain(&self.scene, self.distance, width, height),
             },
@@ -1348,6 +1423,57 @@ mod tests {
             r.go().unwrap();
             assert_eq!(r.state().handover, Some(was), "{stop}: planned from the swung view");
         }
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_game_swings_in_a_crossing_or_fork_and_the_view_goes_on_into_the_next_place() {
+        let dir = std::env::temp_dir().join(format!("pf_swing_cross_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut j = Journey { version: 1, name: "swing".into(), start: "crypt".into(), ..Journey::default() };
+        j.stops.insert("crypt".into(), crate::journey::Stop { scene: "preset:Stone Dungeon".into(), next: Next::Go { to: "woods".into(), transition: Transition::default() } });
+        j.stops.insert("woods".into(), crate::journey::Stop { scene: "preset:Forest Path".into(), next: Next::Fork { left: "crypt".into(), right: "sands".into(), fork: ForkChoice::default() } });
+        j.stops.insert("sands".into(), crate::journey::Stop { scene: "preset:Desert Canyon".into(), next: Next::End });
+        let path = dir.join("swing.journey.json");
+        j.save(&path).unwrap();
+        let mut r = Runtime::from_journey(&path).unwrap();
+        let (w, h) = (160, 90);
+        // How far the walk's camera looks to the side: 0 down the path, 1 side-on.
+        let sideways = |r: &Runtime| r.camera_now(w, h).view.yaw_s.abs();
+        r.go().unwrap();
+        r.step(1.0, r.state().speed);
+        assert!(r.state().travel.is_some(), "in the crossing");
+        let ahead = sideways(&r);
+        // Swung side-on in the crossing: the camera the game places things by swings with it.
+        r.swing(r#"{"view":"side","seconds":2.0}"#).unwrap();
+        r.step(1.0, 0.0);
+        let mid = sideways(&r);
+        assert!(mid > ahead + 0.1 && mid < 0.99, "partway round in the crossing ({ahead} to {mid})");
+        assert_eq!(r.frame(w, h).len(), (w * h * 4) as usize);
+        r.step(1.5, 0.0);
+        assert_eq!(r.state().swing_left, None);
+        assert!(sideways(&r) > 0.99, "side-on in the crossing: {}", sideways(&r));
+        // Walked on through it, the place beyond is seen side-on too, and then walked side-on.
+        for _ in 0..2000 {
+            if r.state().travel.is_none() { break; }
+            r.step(0.1, r.state().speed);
+            assert!(sideways(&r) > 0.9, "the view held at {:?} m: {}", r.state().travel, sideways(&r));
+        }
+        assert_eq!(r.state().stop.as_deref(), Some("woods"));
+        assert!(r.scene().camera.side_view(), "the view goes on into the next place");
+        // A fork walked into side-on stays side-on; swung home in it, every world comes back to
+        // its own camera, the one the woods came with among them.
+        r.go().unwrap();
+        r.step(0.5, r.state().speed);
+        assert!(sideways(&r) > 0.9, "the fork's worlds take the view: {}", sideways(&r));
+        r.swing(r#"{"view":"home","seconds":1.0}"#).unwrap();
+        r.step(0.5, 0.0);
+        let mid = sideways(&r);
+        assert!(mid > 0.05 && mid < 0.95, "partway home in the fork: {mid}");
+        r.step(1.0, 0.0);
+        let (own, _) = j.scene_of("woods", Some(&dir)).unwrap();
+        assert_eq!(r.scene().camera, own.camera, "home is the woods' own camera");
+        assert!(sideways(&r) < 0.5, "looking down the path again: {}", sideways(&r));
         std::fs::remove_dir_all(&dir).ok();
     }
 

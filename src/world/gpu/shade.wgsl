@@ -1010,6 +1010,8 @@ fn soft_main(@builtin(global_invocation_id) gid0: vec3<u32>) {
     if k <= 0.0 || (o & 0x7Fu) != W.realm { return; }
     let g0 = gbuf[i];
     let same = (o & 0x80u) != 0u;
+    // At its own place the pixel lies across its own world's path: the bounds are found there.
+    if same { frame_realm = g0.idr >> 8u; }
     let s = shade_px(moved_here(g0, same), i, gid.x, gid.y, false, moved_footprint(g0, i, gid.x, gid.y, same));
     if !s.drawn { return; }
     let c = mix3(vec3<f32>(hdr[i * 3u], hdr[i * 3u + 1u], hdr[i * 3u + 2u]), s.c, k);

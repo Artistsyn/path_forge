@@ -423,6 +423,23 @@ fn parity_walks(args: &Args) -> Result<(), String> {
             check(&name, travel / len, &ci, &gi)?;
         }
     }
+    // A game's swing in a crossing: each world's camera halfway round to a side view, from its own.
+    let (sa, sb) = (preset("Forest Path")?, preset("Mountain Pass")?);
+    let walk = CrossWalk::new(tr::plan(&sa, &sb, &Transition::default()), 0.0, 0.0);
+    let half_side = |s: &Scene| {
+        let own = scene::SwingView::of(&s.camera);
+        scene::Swing::default().between(&own, &scene::SwingView { yaw: -90.0, side: 6.0, ..own }, &s.camera, 0.5)
+    };
+    let swung = RenderOptions { swing: Some(half_side(&sa)), swing_beyond: [Some(half_side(&sb)), None], ..RenderOptions::default() };
+    let len = walk.length();
+    for i in 0..frames {
+        let travel = len * i as f32 / (frames - 1) as f32;
+        let t = travel / sa.motion.speed.max(0.01);
+        let (pa, pb) = (Place { scene: &sa, dir: None }, Place { scene: &sb, dir: None });
+        let ci = walk.frame(&mut cpu, pa, pb, travel, t, t, &swung);
+        let gi = walk.frame(&mut gpu, pa, pb, travel, t, t, &swung);
+        check("Forest Path > Mountain Pass (swung halfway)", travel / len, &ci, &gi)?;
+    }
     let forks = [("Forest Path", "Mountain Pass", "Desert Canyon", Branch::Left), ("Forest Path", "Mountain Pass", "Desert Canyon", Branch::Right),
                  ("Ruins Path", "Haunted Forest", "Night Road", Branch::Right)];
     for (a, l, r, take) in forks {

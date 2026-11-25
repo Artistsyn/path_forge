@@ -7,7 +7,8 @@
 //! cut from a loop into the walk and out of it again without a seam.
 
 use crate::scene::transition::{Branch, Crossing, ForkPlan};
-use crate::scene::Scene;
+use crate::scene::{Scene, SwingPose};
+use crate::world::view::Turning;
 use crate::world::{Image, Layout, RenderOptions, View, Winding, WorldIn, WorldRenderer};
 use std::path::PathBuf;
 
@@ -56,8 +57,10 @@ impl<'a> Place<'a> {
     fn world(&self, distance: f32, time: f32) -> WorldIn<'a> {
         WorldIn { scene: self.scene, distance, time: Some(time), base_dir: self.dir.map(|d| d.to_path_buf()) }
     }
-    fn alone(&self, r: &mut WorldRenderer, distance: f32, time: f32, opts: &RenderOptions) -> Image {
-        r.render(self.scene, distance, &RenderOptions { time: Some(time), base_dir: self.dir.map(PathBuf::from), ..opts.clone() })
+    /// This world drawn by itself, its camera partway through `swing` when one is under way.
+    fn alone(&self, renderer: &mut WorldRenderer, distance: f32, time: f32, opts: &RenderOptions, swing: Option<&SwingPose>) -> Image {
+        let own = RenderOptions { time: Some(time), base_dir: self.dir.map(PathBuf::from), swing: swing.cloned(), swing_beyond: [None, None], ..opts.clone() };
+        renderer.render(self.scene, distance, &own)
     }
 }
 
@@ -96,6 +99,21 @@ impl Camera {
     pub fn swinging(scene: &Scene, pose: &crate::scene::SwingPose, distance: f32, width: u32, height: u32) -> Camera {
         let v = View::posed(scene, &pose.camera, width.max(2) as usize, height.max(2) as usize, pose.turning);
         Camera { view: v.at((distance - pose.back).rem_euclid(scene.motion.loop_length.max(1.0))), beyond: None, back: pose.back, walls: [walls_of(scene), None], island: None }
+    }
+    /// The camera of one world drawn by itself: partway through `swing` when one is under way,
+    /// else its own.
+    pub fn alone(scene: &Scene, swing: Option<&SwingPose>, distance: f32, width: u32, height: u32) -> Camera {
+        match swing {
+            Some(pose) => Camera::swinging(scene, pose, distance, width, height),
+            None => Camera::plain(scene, distance, width, height),
+        }
+    }
+    /// One world's view in a frame of several, posed by `swing` when one is under way. Such a
+    /// frame stands no world back from the walker (`back` is drawn with one world only).
+    fn view_among(scene: &Scene, swing: Option<&SwingPose>, distance: f32, width: u32, height: u32) -> View {
+        let Some(pose) = swing else { return Camera::plain(scene, distance, width, height).view };
+        let posed = View::posed(scene, &pose.camera, width.max(2) as usize, height.max(2) as usize, pose.turning);
+        posed.at(distance.rem_euclid(scene.motion.loop_length.max(1.0)))
     }
     /// Where a point `x` metres right of the path centre, `y` up and `d` ahead of the walker
     /// appears (pixels from the top left); None behind the camera.
@@ -186,53 +204,76 @@ impl CrossWalk {
 
     /// The camera at `travel` metres, for a `width` x `height` frame.
     pub fn camera(&self, a: &Scene, b: &Scene, travel: f32, width: u32, height: u32) -> Camera {
+        self.camera_swung(a, b, travel, (width, height), &[None, None])
+    }
+
+    /// `camera` while a game swings the walk's camera: `swung` is each world's camera partway
+    /// through that swing (the first world's, then the next's; None: its own), as `frame` takes
+    /// them in `RenderOptions::swing` and `swing_beyond`.
+    pub fn camera_swung(&self, first: &Scene, next: &Scene, travel: f32, size: (u32, u32), swung: &[Option<SwingPose>; 2]) -> Camera {
+        let (width, height) = size;
         let (zb, sa, sb) = self.at(travel);
-        match self.phase(a, b, travel) {
-            Phase::Out(p) => return Camera::swinging(a, &p, sa, width, height),
-            Phase::In(Some(p)) => return Camera::swinging(b, &p, sb, width, height),
-            Phase::In(None) => return Camera::plain(b, sb, width, height),
+        match self.phase(first, next, travel) {
+            Phase::Out(p) => return Camera::swinging(first, &p, sa, width, height),
+            Phase::In(Some(p)) => return Camera::swinging(next, &p, sb, width, height),
+            Phase::In(None) => return Camera::alone(next, swung[1].as_ref(), sb, width, height),
             Phase::Cross => {}
         }
         // Crossing, both looking down the path (when either scene looks from an angle).
         let ahead = |s: &Scene, turned: bool| if turned { crate::scene::transition::looking_ahead(s) } else { s.clone() };
-        let (a2, b2) = (ahead(a, self.crossing.swing_out > 0.0), ahead(b, self.crossing.swing_in > 0.0));
-        let (mut pa, mut pb) = (Camera::plain(&a2, sa, width, height).view, Camera::plain(&b2, sb, width, height).view);
+        let (a2, b2) = (ahead(first, self.crossing.swing_out > 0.0), ahead(next, self.crossing.swing_in > 0.0));
+        let [ga, gb] = self.game_poses([swung[0].as_ref(), swung[1].as_ref()]);
+        let (mut pa, mut pb) = (Camera::view_among(&a2, ga.as_ref(), sa, width, height), Camera::view_among(&b2, gb.as_ref(), sb, width, height));
         // The road's one winding across the boundary, as the frame draws it (`render_worlds`).
         let blend = Some(Winding::across((pa.wind, pa.scroll), (pb.wind, pb.scroll), zb, 1.0));
         (pa.blend, pb.blend) = (blend, blend);
-        if zb <= 0.0 { Camera { view: pb, beyond: None, back: 0.0, walls: [walls_of(b), None], island: None } } else { Camera { view: pa, beyond: Some((zb, pb)), back: 0.0, walls: [walls_of(a), walls_of(b)], island: None } }
+        if zb <= 0.0 { Camera { view: pb, beyond: None, back: 0.0, walls: [walls_of(next), None], island: None } } else { Camera { view: pa, beyond: Some((zb, pb)), back: 0.0, walls: [walls_of(first), walls_of(next)], island: None } }
     }
 
-    /// The frame at `travel` metres, with each world's clock.
+    /// The game's swing for each world as the crossing draws it: a world the crossing turns to
+    /// look down the path keeps the game's height, horizon and zoom, but looks down it.
+    fn game_poses(&self, swung: [Option<&SwingPose>; 2]) -> [Option<SwingPose>; 2] {
+        let turned = [self.crossing.swing_out > 0.0, self.crossing.swing_in > 0.0];
+        let ahead = |p: &SwingPose| SwingPose { camera: crate::scene::Camera { yaw: 0.0, side: 0.0, ..p.camera.clone() }, turning: Turning::default(), ..p.clone() };
+        [0, 1].map(|k| swung[k].map(|p| if turned[k] { ahead(p) } else { p.clone() }))
+    }
+
+    /// The frame at `travel` metres, with each world's clock. A game's swing under way is
+    /// `opts.swing` for the first world and `opts.swing_beyond[0]` for the next (each from its
+    /// own camera); the crossing's own swings out and in take its place while they last.
     pub fn frame(&self, r: &mut WorldRenderer, a: Place, b: Place, travel: f32, time_a: f32, time_b: f32, opts: &RenderOptions) -> Image {
         let (zb, sa, sb) = self.at(travel);
         match self.phase(a.scene, b.scene, travel) {
-            Phase::Out(p) => return a.alone(r, sa, time_a, &RenderOptions { swing: Some(p), ..opts.clone() }),
-            Phase::In(Some(p)) => return b.alone(r, sb, time_b, &RenderOptions { swing: Some(p), ..opts.clone() }),
-            Phase::In(None) => return b.alone(r, sb, time_b, opts),
+            Phase::Out(p) => return a.alone(r, sa, time_a, opts, Some(&p)),
+            Phase::In(Some(p)) => return b.alone(r, sb, time_b, opts, Some(&p)),
+            Phase::In(None) => return b.alone(r, sb, time_b, opts, opts.swing_beyond[0].as_ref()),
             Phase::Cross => {}
         }
         // Crossing, both looking down the path (when either scene looks from an angle).
         let (a2, b2);
         let a = if self.crossing.swing_out > 0.0 { a2 = crate::scene::transition::looking_ahead(a.scene); Place { scene: &a2, ..a } } else { a };
         let b = if self.crossing.swing_in > 0.0 { b2 = crate::scene::transition::looking_ahead(b.scene); Place { scene: &b2, ..b } } else { b };
+        let [ga, gb] = self.game_poses([opts.swing.as_ref(), opts.swing_beyond[0].as_ref()]);
+        let (ga, gb) = (ga.as_ref(), gb.as_ref());
+        let crossing_opts = RenderOptions { swing: ga.cloned(), swing_beyond: [gb.cloned(), None], ..opts.clone() };
+        let opts = &crossing_opts;
         let (emerge, settle) = self.fades(travel);
-        if emerge <= 0.0 { return a.alone(r, sa, time_a, opts); }
-        if settle >= 1.0 { return b.alone(r, sb, time_b, opts); }
+        if emerge <= 0.0 { return a.alone(r, sa, time_a, opts, ga); }
+        if settle >= 1.0 { return b.alone(r, sb, time_b, opts, gb); }
         let worlds = [a.world(sa, time_a), b.world(sb, time_b)];
         let layout = Layout::Cross { crossing: &self.crossing, zb };
         if !(opts.pick || opts.depth || opts.stats) {
-            return mixed_frame(r, opts, emerge, settle, |r, o| a.alone(r, sa, time_a, o), |r, o| r.render_layout(&worlds, layout, o), |r, o| b.alone(r, sb, time_b, o));
+            return mixed_frame(r, opts, emerge, settle, |r, o| a.alone(r, sa, time_a, o, ga), |r, o| r.render_layout(&worlds, layout, o), |r, o| b.alone(r, sb, time_b, o, gb));
         }
         let mixed;
         let opts = if emerge < 1.0 || settle > 0.0 { mixed = r.unpipelined(opts); &mixed } else { opts };
         let mut img = r.render_layout(&worlds, layout, opts);
         if emerge < 1.0 {
-            let mut alone = a.alone(r, sa, time_a, opts);
+            let mut alone = a.alone(r, sa, time_a, opts, ga);
             mix_images(&mut alone, &img, emerge);
             img.rgba = alone.rgba;
         }
-        if settle > 0.0 { mix_images(&mut img, &b.alone(r, sb, time_b, opts), settle); }
+        if settle > 0.0 { mix_images(&mut img, &b.alone(r, sb, time_b, opts, gb), settle); }
         img
     }
 }
@@ -314,12 +355,21 @@ impl ForkWalk {
     /// as the frame draws it while the camera turns onto it, and the island between the branches
     /// beside it (`island_x`).
     pub fn camera(&self, scenes: [&Scene; 3], travel: f32, width: u32, height: u32) -> Camera {
+        self.camera_swung(scenes, travel, (width, height), &[None, None, None])
+    }
+
+    /// `camera` while a game swings the walk's camera: `swung` is each world's camera partway
+    /// through that swing (the first world's, the left branch's, the right's; None: its own),
+    /// as `frame` takes them in `RenderOptions::swing` and `swing_beyond`.
+    pub fn camera_swung(&self, scenes: [&Scene; 3], travel: f32, size: (u32, u32), swung: &[Option<SwingPose>; 3]) -> Camera {
+        let (width, height) = size;
         let (zj, sa, sb, steer) = self.at(travel);
         let taken = self.branch(travel).map(|(b, _)| b);
         let settled = smooth(self.length() - 1.0, self.length(), travel) >= 1.0;
-        if let (true, Some(b)) = (settled, taken) { return Camera::plain(scenes[b.realm()], sb[b.realm() - 1], width, height); }
+        if let (true, Some(b)) = (settled, taken) { return Camera::alone(scenes[b.realm()], swung[b.realm()].as_ref(), sb[b.realm() - 1], width, height); }
+        if self.emerge(travel) <= 0.0 { return Camera::alone(scenes[0], swung[0].as_ref(), sa, width, height); }
         let mut near = Camera::plain(scenes[0], sa, width, height);
-        if self.emerge(travel) <= 0.0 { return near; }
+        near.view = Camera::view_among(scenes[0], swung[0].as_ref(), sa, width, height);
         let next = taken.unwrap_or(self.plan.default_branch).realm();
         let turned = if taken.is_some() { steer.clamp(0.0, 1.0) } else { 0.0 };
         let there = Camera::plain(scenes[next], sb[next - 1], width, height).view;
@@ -331,38 +381,42 @@ impl ForkWalk {
         Camera { beyond: Some((zj, beyond)), walls: [near.walls[0], walls_of(scenes[next])], island: Some((zj, -base[next])), ..near }
     }
 
+    /// The frame at `travel` metres, with each world's clock. A game's swing under way is
+    /// `opts.swing` for the first world and `opts.swing_beyond` for the left and right branches
+    /// (each from its own camera).
     pub fn frame(&self, r: &mut WorldRenderer, a: Place, left: Place, right: Place, travel: f32, times: [f32; 3], opts: &RenderOptions) -> Image {
         let (zj, sa, sb, steer) = self.at(travel);
         let emerge = self.emerge(travel);
         let len = self.length();
         let settle = smooth(len - 1.0, len, travel);
         let taken = self.branch(travel).map(|(b, _)| b);
-        if emerge <= 0.0 { return a.alone(r, sa, times[0], opts); }
+        let swung = [opts.swing.as_ref(), opts.swing_beyond[0].as_ref(), opts.swing_beyond[1].as_ref()];
+        if emerge <= 0.0 { return a.alone(r, sa, times[0], opts, swung[0]); }
         if let (true, Some(b)) = (settle >= 1.0, taken) {
             let (p, d, t) = match b { Branch::Left => (left, sb[0], times[1]), Branch::Right => (right, sb[1], times[2]) };
-            return p.alone(r, d, t, opts);
+            return p.alone(r, d, t, opts, swung[b.realm()]);
         }
         let worlds = [a.world(sa, times[0]), left.world(sb[0], times[1]), right.world(sb[1], times[2])];
         let layout = Layout::Fork { fork: &self.plan, zb: zj, chosen: taken, steer, barred: &self.barred };
         if !(opts.pick || opts.depth || opts.stats) {
             let settle = if taken.is_some() { settle } else { 0.0 };
             let branch = |r: &mut WorldRenderer, o: &RenderOptions| match taken {
-                Some(Branch::Left) => left.alone(r, sb[0], times[1], o),
-                _ => right.alone(r, sb[1], times[2], o),
+                Some(Branch::Left) => left.alone(r, sb[0], times[1], o, swung[1]),
+                _ => right.alone(r, sb[1], times[2], o, swung[2]),
             };
-            return mixed_frame(r, opts, emerge, settle, |r, o| a.alone(r, sa, times[0], o), |r, o| r.render_layout(&worlds, layout, o), branch);
+            return mixed_frame(r, opts, emerge, settle, |r, o| a.alone(r, sa, times[0], o, swung[0]), |r, o| r.render_layout(&worlds, layout, o), branch);
         }
         let mixed;
         let opts = if emerge < 1.0 || (settle > 0.0 && taken.is_some()) { mixed = r.unpipelined(opts); &mixed } else { opts };
         let mut img = r.render_layout(&worlds, layout, opts);
         if emerge < 1.0 {
-            let mut alone = a.alone(r, sa, times[0], opts);
+            let mut alone = a.alone(r, sa, times[0], opts, swung[0]);
             mix_images(&mut alone, &img, emerge);
             img.rgba = alone.rgba;
         }
         if let (true, Some(b)) = (settle > 0.0, taken) {
             let (p, d, t) = match b { Branch::Left => (left, sb[0], times[1]), Branch::Right => (right, sb[1], times[2]) };
-            mix_images(&mut img, &p.alone(r, d, t, opts), settle);
+            mix_images(&mut img, &p.alone(r, d, t, opts, swung[b.realm()]), settle);
         }
         img
     }

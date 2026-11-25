@@ -476,14 +476,9 @@ fn shear_mix(r: u32, d: f32) -> f32 {
     if mw(o + 26u) == 0.0 { return 0.0; }
     return rnd(mw(o + 28u) * max(d - mw(o + 27u), 0.0));
 }
-// view::Bend::cam_xz of world r.
+// view::Bend::cam_xz of world r: unturned, since every world turns alike.
 fn cam_xz_of(r: u32, x: f32, d: f32) -> vec2<f32> {
-    let o = r * MIX_STRIDE;
-    let cx = rnd(rnd(x + bend_of(r, d)) + shear_mix(r, d));
-    if mw(o + 29u) == 0.0 { return vec2<f32>(cx, d); }
-    let px = cx - mw(o + 30u);
-    let yc = mw(o + 31u); let ys = mw(o + 32u);
-    return vec2<f32>(rnd(rnd(yc * px) - rnd(ys * d)), rnd(rnd(ys * px) + rnd(yc * d)));
+    return vec2<f32>(rnd(rnd(x + bend_of(r, d)) + shear_mix(r, d)), d);
 }
 // Bend::flat_xz: cam_xz_of with the world's bend and winding taken off.
 fn flat_xz_of(r: u32, x: f32, d: f32) -> vec2<f32> {
