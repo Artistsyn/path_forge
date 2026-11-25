@@ -666,8 +666,8 @@ impl Runtime {
         if style.seconds <= 0.0 { style.seconds = 2.5; }
         let to = Look::from_view(&self.home, &scene::SwingView { yaw: to.yaw.clamp(-90.0, 90.0), back: 0.0, ..to });
         // (Any intro still playing ends here: the swing takes the camera on from where it is.)
-        let m = &self.scene.camera.moves;
-        self.played = self.played.max(m.fly_in.max(0.0).max(m.swing_in.length()));
+        let moves = &self.scene.camera.moves;
+        self.played = self.played.max(moves.fly_in.max(0.0).max(moves.swing_in.length()));
         self.swinging = Some(Swinging { style, from, to, t: 0.0 });
         Ok(())
     }
